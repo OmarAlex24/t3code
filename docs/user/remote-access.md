@@ -10,6 +10,17 @@ Add environment**, choose **Sandbox**, and enter an API key for Boat, Daytona, o
 creates the machine, installs T3 Code, exposes it on a public HTTPS URL, and pairs it. The new
 environment reconnects like any other remote environment.
 
+The sandbox gets none of this machine's logins unless you ask. **Use this machine's Claude setup**
+appears when Claude here talks to a custom endpoint, and points Claude in the sandbox at the same
+one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
+the sandbox gets its own key on the hub, which T3 Code removes when you delete the sandbox;
+otherwise this machine's Claude token is copied, and it stays valid after the sandbox is gone.
+**Sign GitHub in with this machine's token** lets `gh` and `git` in the sandbox reach every
+repository that token can. T3 Code also installs git, the GitHub CLI, and Claude Code when the
+provider's image lacks them. Once the sandbox is ready, the dialog lists what was set up; sign Codex
+in from the sandbox's **Settings → Providers**. To work on a repository, clone it with
+[**Add Project**](./source-control.md#start-clone-or-publish-a-project) and save it on the sandbox.
+
 For Vercel, create an access token at vercel.com/account/settings/tokens; T3 Code uses your only
 team and a `t3-sandboxes` project unless you fill in **Team** or **Project** (a change applies to
 new sandboxes; existing ones stay where they were created), and a sandbox on the

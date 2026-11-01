@@ -7,7 +7,21 @@ import { render } from "../../../test/render";
 
 const mocks = vi.hoisted(() => ({
   limits: null as SandboxProviderLimits | null,
-  createSandbox: vi.fn(async () => AsyncResult.success({})),
+  createSandbox: vi.fn(async () =>
+    AsyncResult.success({
+      provider: "boat",
+      sandboxId: "sb-1",
+      environmentId: "22222222-2222-4222-8222-222222222222",
+      label: "Boat sandbox",
+      httpBaseUrl: "https://sb-1.example.test",
+      pairingCode: "PAIR",
+      setup: {
+        claude: "ready",
+        github: "failed",
+        warnings: ["The GitHub CLI could not be installed on the sandbox."],
+      },
+    }),
+  ),
 }));
 
 vi.mock(import("../../state/use-atom-command"), async (original) => ({
@@ -90,6 +104,7 @@ vi.mock(import("~/state/query"), async (original) => ({
                 },
               },
             ],
+            host: { claude: { baseUrl: "https://hub.example.test", key: "hub" }, github: true },
           }
         : atom === "limits"
           ? { limits: mocks.limits }
@@ -139,6 +154,7 @@ describe("SandboxEnvironmentFields", () => {
     await using _screen = await render(fields());
 
     await userEvent.click(page.getByRole("button", { name: /^Vercel/u }));
+    await userEvent.click(page.getByRole("button", { name: "Advanced" }));
     await userEvent.fill(page.getByRole("textbox", { name: "Team (optional)" }), "acme");
     await userEvent.click(page.getByRole("button", { name: "Create Vercel sandbox" }));
     expect(mocks.createSandbox).toHaveBeenCalledWith(
@@ -162,5 +178,45 @@ describe("SandboxEnvironmentFields", () => {
     await expect.element(page.getByText("Your trial has ended.", { exact: false })).toBeVisible();
     await expect.element(page.getByRole("link", { name: "Open billing" })).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Create Boat sandbox" })).toBeDisabled();
+  });
+
+  it("sends only the agent access the user opted into, then shows what the sandbox got", async () => {
+    setup({ canStart: true });
+    const onDone = vi.fn();
+    await using _screen = await render(
+      <SandboxEnvironmentFields
+        environmentId={EnvironmentId.make("11111111-1111-4111-8111-111111111111")}
+        error={null}
+        onErrorChange={() => {}}
+        onDone={onDone}
+      />,
+    );
+
+    await userEvent.click(page.getByText("Use this machine's Claude setup"));
+    await userEvent.fill(
+      page.getByRole("textbox", { name: "Claude endpoint" }),
+      "https://alt.test",
+    );
+    await userEvent.click(page.getByRole("button", { name: "Create Boat sandbox" }));
+    expect(mocks.createSandbox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          agentAccess: { claude: { baseUrl: "https://alt.test" } },
+        }),
+      }),
+    );
+    expect(mocks.createSandbox).not.toHaveBeenCalledWith(
+      expect.objectContaining({ input: expect.objectContaining({ passGithubToken: true }) }),
+    );
+
+    // The dialog stays open on the checklist until the user is done with it.
+    await expect.element(page.getByText("Claude uses this machine's setup")).toBeVisible();
+    await expect.element(page.getByText(/Run gh auth login/u)).toBeVisible();
+    await expect
+      .element(page.getByText("The GitHub CLI could not be installed on the sandbox."))
+      .toBeVisible();
+    expect(onDone).not.toHaveBeenCalled();
+    await userEvent.click(page.getByRole("button", { name: "Done" }));
+    expect(onDone).toHaveBeenCalledOnce();
   });
 });
