@@ -59,3 +59,69 @@ gh auth setup-git --hostname github.com`;
 
 // Run before a template save, with the Claude scrub: a copy must not inherit the GitHub login.
 export const GITHUB_LOGIN_SCRUB = `rm -f "\${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml"`;
+
+const SANDBOX_TOOLS = ["git", "gh", "claude"] as const;
+export type SandboxTool = (typeof SANDBOX_TOOLS)[number];
+
+const MISSING_PREFIX = "T3_TOOLS_MISSING:";
+
+// Installs only what the image lacks, so it is a no-op where everything ships (Boat). Always exits 0:
+// a tool that will not install must not cost a working sandbox, so what is still missing is printed
+// for the provisioner to report.
+export const ENSURE_TOOLS_SCRIPT = `export PATH="$HOME/.local/bin:$PATH"
+mkdir -p "$HOME/.local/bin"
+missing() {
+  for tool in ${SANDBOX_TOOLS.join(" ")}; do
+    command -v "$tool" >/dev/null 2>&1 || printf '%s ' "$tool"
+  done
+}
+as_root() {
+  if [ "$(id -u)" = 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"
+  else
+    return 1
+  fi
+}
+if ! command -v git >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git >/dev/null 2>&1 || true
+  elif command -v dnf >/dev/null 2>&1; then
+    as_root dnf install -y -q git >/dev/null 2>&1 || true
+  fi
+fi
+if ! command -v gh >/dev/null 2>&1; then
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) arch="" ;;
+  esac
+  version="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest 2>/dev/null | sed 's#.*/tag/v##')"
+  if [ -n "$arch" ] && [ -n "$version" ]; then
+    unpacked="$(mktemp -d)"
+    if curl -fsSL "https://github.com/cli/cli/releases/download/v\${version}/gh_\${version}_linux_\${arch}.tar.gz" 2>/dev/null | tar -xz -C "$unpacked" 2>/dev/null; then
+      cp "$unpacked/gh_\${version}_linux_\${arch}/bin/gh" "$HOME/.local/bin/gh" 2>/dev/null && chmod 755 "$HOME/.local/bin/gh"
+    fi
+    rm -rf "$unpacked"
+  fi
+fi
+if ! command -v claude >/dev/null 2>&1; then
+  if command -v bash >/dev/null 2>&1; then
+    curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash >/dev/null 2>&1 || true
+  fi
+  if ! command -v claude >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
+  fi
+fi
+echo "${MISSING_PREFIX} $(missing)"
+exit 0`;
+
+/** The tools still missing after `ENSURE_TOOLS_SCRIPT`, or null when it did not report. */
+export const parseMissingTools = (stdout: string): ReadonlyArray<SandboxTool> | null => {
+  const line = stdout.split("\n").find((candidate) => candidate.startsWith(MISSING_PREFIX));
+  if (line === undefined) return null;
+  const reported = new Set(line.slice(MISSING_PREFIX.length).trim().split(/\s+/u));
+  return SANDBOX_TOOLS.filter((tool) => reported.has(tool));
+};

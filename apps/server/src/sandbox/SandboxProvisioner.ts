@@ -53,6 +53,9 @@ import * as SandboxHostAccess from "./SandboxHostAccess.ts";
 import {
   CLAUDE_SETTINGS_SCRUB,
   claudeSettingsScript,
+  ENSURE_TOOLS_SCRIPT,
+  parseMissingTools,
+  type SandboxTool,
   GITHUB_LOGIN_SCRUB,
   githubLoginScript,
 } from "./sandboxSetup.ts";
@@ -185,6 +188,12 @@ const labelSlug = (label: string) =>
     .replace(/^-+/u, "")
     .slice(0, 32)
     .replace(/-+$/u, "") || "sandbox";
+
+const TOOL_LABELS: Record<SandboxTool, string> = {
+  git: "git",
+  gh: "The GitHub CLI",
+  claude: "Claude Code",
+};
 
 interface HubKey {
   readonly sourceId: string;
@@ -646,11 +655,28 @@ const make = Effect.gen(function* () {
 
     yield* stopOnFailure(run(installCommand, 600));
 
-    // Agent setup runs before T3 starts, so T3's first provider check already sees it. A step that
-    // fails leaves a working sandbox and a warning; its command carried a secret, so neither the
-    // request nor the output is kept.
+    // Tools and agent setup run before T3 starts, so T3's first provider check already sees them.
+    // A step that fails leaves a working sandbox and a warning; a command that carried a secret
+    // keeps neither its request nor its output.
     const warnings: Array<string> = [];
-    const claudeState: SandboxSetupState =
+    const missingTools = yield* stopOnFailure(
+      run(ENSURE_TOOLS_SCRIPT, 300).pipe(
+        Effect.map((result) => parseMissingTools(result.stdout)),
+        Effect.orElseSucceed(() => null),
+      ),
+    );
+    if (missingTools === null) {
+      warnings.push(
+        "T3 Code could not check the sandbox for git, the GitHub CLI, and Claude Code.",
+      );
+    } else {
+      for (const tool of missingTools) {
+        warnings.push(`${TOOL_LABELS[tool]} could not be installed on the sandbox.`);
+      }
+    }
+    const missing = (tool: SandboxTool) => missingTools?.includes(tool) === true;
+
+    const claudeWritten: SandboxSetupState =
       claude === undefined
         ? "skipped"
         : yield* stopOnFailure(
@@ -673,22 +699,28 @@ const make = Effect.gen(function* () {
             ),
           );
 
+    // The settings still go in without Claude Code, so installing it by hand later just works.
+    const claudeState: SandboxSetupState =
+      claudeWritten === "ready" && missing("claude") ? "failed" : claudeWritten;
+
     const githubState: SandboxSetupState =
       githubToken === undefined
         ? "skipped"
-        : yield* stopOnFailure(
-            run(githubLoginScript(Redacted.value(githubToken)), 60).pipe(
-              Effect.as<SandboxSetupState>("ready"),
-              Effect.catch(() =>
-                Effect.sync((): SandboxSetupState => {
-                  warnings.push(
-                    "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
-                  );
-                  return "failed";
-                }),
+        : missing("gh")
+          ? "failed"
+          : yield* stopOnFailure(
+              run(githubLoginScript(Redacted.value(githubToken)), 60).pipe(
+                Effect.as<SandboxSetupState>("ready"),
+                Effect.catch(() =>
+                  Effect.sync((): SandboxSetupState => {
+                    warnings.push(
+                      "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
+                    );
+                    return "failed";
+                  }),
+                ),
               ),
-            ),
-          );
+            );
 
     yield* stopOnFailure(run(startCommand, 180));
 

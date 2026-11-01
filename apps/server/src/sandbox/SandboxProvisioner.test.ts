@@ -2368,11 +2368,15 @@ describe("SandboxProvisioner", () => {
             Response.json(
               commandCall === 1
                 ? { exitCode: 0, stdout: "t3 is running", stderr: "" }
-                : {
-                    exitCode: 0,
-                    stdout: "Pairing URL: http://127.0.0.1:3773/pair#token=abc\nToken: pair_abc\n",
-                    stderr: "",
-                  },
+                : commandCall === 2
+                  ? // Boat's image ships every tool, so nothing is installed or missing.
+                    { exitCode: 0, stdout: "T3_TOOLS_MISSING: \n", stderr: "" }
+                  : {
+                      exitCode: 0,
+                      stdout:
+                        "Pairing URL: http://127.0.0.1:3773/pair#token=abc\nToken: pair_abc\n",
+                      stderr: "",
+                    },
             ),
           ),
         );
@@ -2409,11 +2413,12 @@ describe("SandboxProvisioner", () => {
         true,
       );
       // Limits that cannot be read never block a start; the provider stays the authority. T3 is
-      // installed, then started, and the environment's identity is checked before a pairing code
-      // is minted on it.
+      // installed, the tools are checked, T3 starts, and the environment's identity is checked
+      // before a pairing code is minted on it.
       expect(requests).toEqual([
         "GET https://boat.dev/api/v1/limits",
         "POST https://boat.dev/api/v1/sandboxes",
+        `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
         `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
         `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
         "GET https://boat.example/t3/.well-known/t3/environment",
@@ -2679,7 +2684,11 @@ describe("sandbox agent access", () => {
   // the options are read on every request, so a test can change them between creates.
   const agentClient = (
     requests: Array<{ method: string; url: string; body: unknown; auth?: string | undefined }>,
-    options: { failCommand?: string; hubStatus?: number } = {},
+    options: {
+      failCommand?: string | undefined;
+      hubStatus?: number;
+      missingTools?: string;
+    } = {},
   ) => {
     const commands: Array<string> = [];
     const client = recording(requests, (request) => {
@@ -2707,7 +2716,11 @@ describe("sandbox agent access", () => {
         const failed = options.failCommand !== undefined && command.includes(options.failCommand);
         return Response.json({
           exitCode: failed ? 1 : 0,
-          stdout: command.includes("t3 pair") ? "Token: pair_agent\n" : "",
+          stdout: command.includes("t3 pair")
+            ? "Token: pair_agent\n"
+            : command.includes("T3_TOOLS_MISSING")
+              ? `T3_TOOLS_MISSING: ${options.missingTools ?? ""}\n`
+              : "",
           // A failing step's output is the most likely place for a secret to leak from.
           stderr: failed ? command : "",
         });
@@ -2798,7 +2811,7 @@ describe("sandbox agent access", () => {
     "copies this machine's Claude token without a hub and signs GitHub in on request",
     () => {
       const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
-      const options: { failCommand?: string } = {};
+      const options: { failCommand?: string | undefined; missingTools?: string } = {};
       const { client, commands } = agentClient(requests, options);
       const githubToken = (all: ReadonlyArray<string>) =>
         all
@@ -2837,6 +2850,29 @@ describe("sandbox agent access", () => {
         expect(failed.setup.warnings).toEqual([
           "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
         ]);
+
+        // Tools that would not install are reported, and nothing that needs them is attempted.
+        options.failCommand = undefined;
+        options.missingTools = "gh claude ";
+        commands.length = 0;
+        const withoutTools = yield* provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          agentAccess: { claude: { baseUrl: "https://api.example.test" } },
+          passGithubToken: true,
+        });
+        expect(withoutTools.setup).toEqual({
+          claude: "failed",
+          github: "failed",
+          warnings: [
+            "The GitHub CLI could not be installed on the sandbox.",
+            "Claude Code could not be installed on the sandbox.",
+          ],
+        });
+        expect(commands.some((command) => command.includes("gh auth login"))).toBe(false);
+        const step = (marker: string) => commands.findIndex((command) => command.includes(marker));
+        expect(step("T3_TOOLS_MISSING")).toBeLessThan(step("T3_CLAUDE_ENV"));
+        expect(step("T3_CLAUDE_ENV")).toBeLessThan(step("nohup"));
       }).pipe(
         Effect.provide(provisionerLayer({}, recordRepository, { host })),
         Effect.provideService(HttpClient.HttpClient, client),

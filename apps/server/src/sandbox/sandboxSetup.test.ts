@@ -6,7 +6,12 @@ import * as Path from "effect/Path";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { describe, expect } from "vite-plus/test";
 
-import { CLAUDE_SETTINGS_SCRUB, claudeSettingsScript } from "./sandboxSetup.ts";
+import {
+  CLAUDE_SETTINGS_SCRUB,
+  claudeSettingsScript,
+  ENSURE_TOOLS_SCRIPT,
+  parseMissingTools,
+} from "./sandboxSetup.ts";
 
 // The scripts run in a throwaway HOME with this machine's sh and node, as they would in a sandbox.
 const runIn = (home: string, script: string) =>
@@ -79,6 +84,38 @@ describe("claudeSettingsScript", () => {
           env: endpoint("t3-sandbox-test-0"),
         });
         expect((yield* fs.stat(file)).mode & 0o777).toBe(0o600);
+      }),
+    ),
+  );
+});
+
+describe("ENSURE_TOOLS_SCRIPT", () => {
+  it.live("does nothing on an image that ships every tool", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const bin = `${home}/bin`;
+        yield* fs.makeDirectory(bin);
+        for (const tool of ["git", "gh", "claude"]) {
+          yield* fs.writeFileString(`${bin}/${tool}`, "#!/bin/sh\n");
+          yield* fs.chmod(`${bin}/${tool}`, 0o755);
+        }
+        // Any download would go through curl, which leaves a mark here.
+        yield* fs.writeFileString(`${bin}/curl`, `#!/bin/sh\ntouch "${home}/downloaded"\n`);
+        yield* fs.chmod(`${bin}/curl`, 0o755);
+        const output = yield* ChildProcessSpawner.ChildProcessSpawner.pipe(
+          Effect.flatMap((spawner) =>
+            spawner.string(
+              ChildProcess.make("/bin/sh", ["-c", ENSURE_TOOLS_SCRIPT], {
+                cwd: home,
+                env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home },
+                stdin: "ignore",
+              }),
+            ),
+          ),
+        );
+        expect(parseMissingTools(output)).toEqual([]);
+        expect(yield* fs.exists(`${home}/downloaded`)).toBe(false);
       }),
     ),
   );
