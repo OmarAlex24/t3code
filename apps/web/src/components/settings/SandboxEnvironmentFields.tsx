@@ -610,6 +610,13 @@ export function SandboxEnvironmentFields({
                     ? "Adds a key for this sandbox on your CLIProxyAPI hub. Deleting the sandbox removes the key."
                     : "Copies this machine's Claude token to the sandbox. Deleting the sandbox does not revoke it."}
                 </OptIn>
+                {/* Judged by the server for its own endpoint only; an edited URL is checked live. */}
+                {host.claude.privateNetwork && claudeEndpoint === host.claude.baseUrl ? (
+                  <p className="flex items-start gap-1.5 ps-6.5 text-2xs leading-relaxed text-warning-foreground">
+                    <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
+                    Resolves to a private address; a cloud sandbox probably can't reach it.
+                  </p>
+                ) : null}
                 {useClaude ? (
                   <label className="block ps-6.5">
                     <FieldLabel>Claude endpoint</FieldLabel>

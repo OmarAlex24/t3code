@@ -134,6 +134,12 @@ server except into the sandbox.
   hub source id and a server-secret name, never the key. A failed revoke on delete is a warning
   that names the key prefix; it never blocks the delete, because the machine is already gone.
   Without a hub, the server's token is copied and cannot be revoked by T3.
+- **Reachable here is not reachable there.** A Claude endpoint on a tailnet or LAN address
+  works from the provisioning server and times out from a cloud machine. The provisioner curls
+  the endpoint from the sandbox after writing the settings; no HTTP answer at all marks Claude as
+  failed with a warning, and the hub key is kept, since fixing the network makes it work. The form
+  warns earlier when the server's own endpoint resolves only to private addresses, judged by
+  address rather than name, because a `*.ts.net` Funnel host is public.
 - **Templates do not inherit access.** The template scrub also removes the Claude endpoint and the
   `gh` login, and a successful save revokes the source's hub key along with deleting the source.
 - **Missing tools are installed, never required.** git, the GitHub CLI, and Claude Code are

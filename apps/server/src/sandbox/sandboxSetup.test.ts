@@ -9,7 +9,9 @@ import { describe, expect } from "vite-plus/test";
 import {
   CLAUDE_SETTINGS_SCRUB,
   claudeSettingsScript,
+  endpointReachScript,
   ENSURE_TOOLS_SCRIPT,
+  parseEndpointReach,
   parseMissingTools,
 } from "./sandboxSetup.ts";
 
@@ -116,6 +118,22 @@ describe("ENSURE_TOOLS_SCRIPT", () => {
         );
         expect(parseMissingTools(output)).toEqual([]);
         expect(yield* fs.exists(`${home}/downloaded`)).toBe(false);
+      }),
+    ),
+  );
+});
+
+describe("endpointReachScript", () => {
+  it.live("reports an endpoint nothing answers on as unreachable", () =>
+    withHome((home) =>
+      // Port 9 (discard) refuses at once, the way a tailnet address fails from a cloud machine.
+      Effect.gen(function* () {
+        const output = yield* runIn(
+          home,
+          endpointReachScript("http://127.0.0.1:9/'$(touch pwned)"),
+        );
+        expect(parseEndpointReach(output)).toBe("unreachable");
+        expect(yield* (yield* FileSystem.FileSystem).exists(`${home}/pwned`)).toBe(false);
       }),
     ),
   );

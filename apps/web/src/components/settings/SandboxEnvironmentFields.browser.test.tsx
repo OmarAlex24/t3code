@@ -104,7 +104,10 @@ vi.mock(import("~/state/query"), async (original) => ({
                 },
               },
             ],
-            host: { claude: { baseUrl: "https://hub.example.test", key: "hub" }, github: true },
+            host: {
+              claude: { baseUrl: "https://hub.example.test", key: "hub", privateNetwork: true },
+              github: true,
+            },
           }
         : atom === "limits"
           ? { limits: mocks.limits }
@@ -193,10 +196,14 @@ describe("SandboxEnvironmentFields", () => {
     );
 
     await userEvent.click(page.getByText("Use this machine's Claude setup"));
+    const privateWarning = page.getByText(/Resolves to a private address/u);
+    await expect.element(privateWarning).toBeVisible();
     await userEvent.fill(
       page.getByRole("textbox", { name: "Claude endpoint" }),
       "https://alt.test",
     );
+    // The server only judged its own endpoint, so an edited one drops the warning.
+    await expect.element(privateWarning).not.toBeInTheDocument();
     await userEvent.click(page.getByRole("button", { name: "Create Boat sandbox" }));
     expect(mocks.createSandbox).toHaveBeenCalledWith(
       expect.objectContaining({

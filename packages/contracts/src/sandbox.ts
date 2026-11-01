@@ -62,6 +62,8 @@ export const SandboxHostAccess = Schema.Struct({
       baseUrl: TrimmedString,
       /** `hub`: a new key is added on the CLIProxyAPI hub; `copy`: this machine's token is copied. */
       key: Schema.Literals(["hub", "copy"]),
+      /** The base URL resolves only to private addresses, so a cloud sandbox likely can't reach it. */
+      privateNetwork: Schema.Boolean,
     }),
   ),
   /** This server has a GitHub token for github.com it could forward. */

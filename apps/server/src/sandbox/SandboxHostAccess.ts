@@ -1,6 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off - Effect has no DNS lookup.
+import * as NodeDnsPromises from "node:dns/promises";
+
 import { ClaudeSettings, defaultInstanceIdForDriver, ProviderDriverKind } from "@t3tools/contracts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import { isPrivateNetworkHost, normalizeHostname } from "@t3tools/shared/hostClassification";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -26,8 +31,23 @@ export class SandboxHostAccess extends Context.Service<
     readonly claude: Effect.Effect<SandboxHostClaude>;
     /** github.com's token as this server resolves it for its own GitHub calls. */
     readonly githubToken: Effect.Effect<Option.Option<Redacted.Redacted<string>>>;
+    /** The endpoint resolves only to private addresses, so a cloud sandbox likely cannot reach it. */
+    readonly endpointIsPrivate: (baseUrl: string) => Effect.Effect<boolean>;
   }
 >()("t3/sandbox/SandboxHostAccess") {}
+
+/**
+ * True when every address is loopback, RFC 1918, link-local, shared CGNAT (Tailscale's
+ * 100.64.0.0/10), or IPv6 ULA or link-local. Names are not judged: a `*.ts.net` Funnel host is
+ * public. No addresses means the lookup failed, which says nothing about reachability.
+ */
+export const resolvesOnlyToPrivateNetwork = (addresses: ReadonlyArray<string>): boolean =>
+  addresses.length > 0 && addresses.every((address) => isPrivateNetworkHost(address));
+
+const hostnameOf = (baseUrl: string) => {
+  const url = URL.parse(baseUrl);
+  return url === null ? null : normalizeHostname(url.hostname);
+};
 
 const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
 const CLAUDE_INSTANCE = defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent"));
@@ -73,7 +93,23 @@ const make = Effect.gen(function* () {
       ? Effect.succeed(Option.none<Redacted.Redacted<string>>())
       : credentialToken("github.com");
 
-  return SandboxHostAccess.of({ claude, githubToken });
+  const endpointIsPrivate = Effect.fn("SandboxHostAccess.endpointIsPrivate")(function* (
+    baseUrl: string,
+  ) {
+    const hostname = hostnameOf(baseUrl);
+    if (hostname === null) return false;
+    // An IP literal resolves to itself.
+    const addresses = yield* Effect.tryPromise(() =>
+      NodeDnsPromises.lookup(hostname, { all: true, verbatim: true }),
+    ).pipe(
+      Effect.timeout(Duration.seconds(3)),
+      Effect.map((entries) => entries.map((entry) => entry.address)),
+      Effect.orElseSucceed((): ReadonlyArray<string> => []),
+    );
+    return resolvesOnlyToPrivateNetwork(addresses);
+  });
+
+  return SandboxHostAccess.of({ claude, githubToken, endpointIsPrivate });
 });
 
 export const layer = Layer.effect(SandboxHostAccess, make);
@@ -88,5 +124,12 @@ export const layerTest = (
       githubToken: Effect.succeed(
         Option.map(Option.fromUndefinedOr(host.githubToken), Redacted.make),
       ),
+      // Tests never resolve DNS, so only an IP literal can be private.
+      endpointIsPrivate: Effect.fn("SandboxHostAccess.endpointIsPrivate")(function* (
+        baseUrl: string,
+      ) {
+        const hostname = hostnameOf(baseUrl);
+        return hostname !== null && resolvesOnlyToPrivateNetwork([hostname]);
+      }),
     }),
   );

@@ -53,7 +53,9 @@ import * as SandboxHostAccess from "./SandboxHostAccess.ts";
 import {
   CLAUDE_SETTINGS_SCRUB,
   claudeSettingsScript,
+  endpointReachScript,
   ENSURE_TOOLS_SCRIPT,
+  parseEndpointReach,
   parseMissingTools,
   type SandboxTool,
   GITHUB_LOGIN_SCRUB,
@@ -193,6 +195,13 @@ const TOOL_LABELS: Record<SandboxTool, string> = {
   git: "git",
   gh: "The GitHub CLI",
   claude: "Claude Code",
+};
+
+const unreachableEndpointWarning = (baseUrl: string, isPrivate: boolean) => {
+  const host = URL.parse(baseUrl)?.host ?? baseUrl;
+  return isPrivate
+    ? `The sandbox cannot reach ${host}. It is only reachable from your private network or tailnet; expose it publicly (for example with Tailscale Funnel or Cloudflare Tunnel) or use another endpoint.`
+    : `The sandbox cannot reach ${host}. Check that it accepts connections from the internet, or use another endpoint.`;
 };
 
 interface HubKey {
@@ -379,11 +388,17 @@ const make = Effect.gen(function* () {
     const claude = yield* hostAccess.claude;
     const hub = hubSource(yield* settings.getSettings.pipe(Effect.orDie));
     const github = Option.isSome(yield* hostAccess.githubToken);
-    const facts: SandboxHostAccessFacts =
-      claude.baseUrl === undefined || (hub === undefined && claude.authToken === undefined)
-        ? { github }
-        : { claude: { baseUrl: claude.baseUrl, key: hub === undefined ? "copy" : "hub" }, github };
-    return facts;
+    if (claude.baseUrl === undefined || (hub === undefined && claude.authToken === undefined)) {
+      return { github } satisfies SandboxHostAccessFacts;
+    }
+    return {
+      claude: {
+        baseUrl: claude.baseUrl,
+        key: hub === undefined ? "copy" : "hub",
+        privateNetwork: yield* hostAccess.endpointIsPrivate(claude.baseUrl),
+      },
+      github,
+    } satisfies SandboxHostAccessFacts;
   });
 
   const providers = Effect.gen(function* () {
@@ -700,8 +715,31 @@ const make = Effect.gen(function* () {
           );
 
     // The settings still go in without Claude Code, so installing it by hand later just works.
-    const claudeState: SandboxSetupState =
+    const claudeInstalled: SandboxSetupState =
       claudeWritten === "ready" && missing("claude") ? "failed" : claudeWritten;
+
+    // A private endpoint (a tailnet or LAN address) passes every check on this machine and then
+    // times out in the sandbox. The hub key stays: fixing the network makes it work as is.
+    const claudeState: SandboxSetupState =
+      claude === undefined || claudeInstalled !== "ready"
+        ? claudeInstalled
+        : yield* stopOnFailure(
+            run(endpointReachScript(claude.baseUrl), 30).pipe(
+              Effect.map((result) => parseEndpointReach(result.stdout)),
+              Effect.orElseSucceed(() => null),
+            ),
+          ).pipe(
+            Effect.flatMap((reach) =>
+              reach !== "unreachable"
+                ? Effect.succeed<SandboxSetupState>("ready")
+                : hostAccess.endpointIsPrivate(claude.baseUrl).pipe(
+                    Effect.map((isPrivate): SandboxSetupState => {
+                      warnings.push(unreachableEndpointWarning(claude.baseUrl, isPrivate));
+                      return "failed";
+                    }),
+                  ),
+            ),
+          );
 
     const githubState: SandboxSetupState =
       githubToken === undefined

@@ -125,3 +125,23 @@ export const parseMissingTools = (stdout: string): ReadonlyArray<SandboxTool> | 
   const reported = new Set(line.slice(MISSING_PREFIX.length).trim().split(/\s+/u));
   return SANDBOX_TOOLS.filter((tool) => reported.has(tool));
 };
+
+const ENDPOINT_STATUS_PREFIX = "T3_ENDPOINT_STATUS:";
+
+// Any HTTP answer means the sandbox can reach the endpoint; curl prints 000 when it cannot connect.
+export const endpointReachScript = (
+  baseUrl: string,
+) => `url="$(printf '%s' '${base64(baseUrl)}' | base64 -d)"
+printf '${ENDPOINT_STATUS_PREFIX}%s\\n' "$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+exit 0`;
+
+/** Whether the sandbox reached the endpoint, or null when it could not tell (no curl, no report). */
+export const parseEndpointReach = (stdout: string): "reachable" | "unreachable" | null => {
+  const status = stdout
+    .split("\n")
+    .find((line) => line.startsWith(ENDPOINT_STATUS_PREFIX))
+    ?.slice(ENDPOINT_STATUS_PREFIX.length)
+    .trim();
+  if (status === undefined || !/^\d{3}$/u.test(status)) return null;
+  return status === "000" ? "unreachable" : "reachable";
+};

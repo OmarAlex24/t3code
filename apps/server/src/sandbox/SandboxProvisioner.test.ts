@@ -2688,6 +2688,7 @@ describe("sandbox agent access", () => {
       failCommand?: string | undefined;
       hubStatus?: number;
       missingTools?: string;
+      endpointStatus?: string;
     } = {},
   ) => {
     const commands: Array<string> = [];
@@ -2720,7 +2721,9 @@ describe("sandbox agent access", () => {
             ? "Token: pair_agent\n"
             : command.includes("T3_TOOLS_MISSING")
               ? `T3_TOOLS_MISSING: ${options.missingTools ?? ""}\n`
-              : "",
+              : command.includes("T3_ENDPOINT_STATUS")
+                ? `T3_ENDPOINT_STATUS:${options.endpointStatus ?? "200"}\n`
+                : "",
           // A failing step's output is the most likely place for a secret to leak from.
           stderr: failed ? command : "",
         });
@@ -2747,7 +2750,7 @@ describe("sandbox agent access", () => {
       const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
       // Clients learn only the base URL and where the key comes from, never a key.
       expect((yield* provisioner.providers).host).toEqual({
-        claude: { baseUrl: "https://api.example.test", key: "hub" },
+        claude: { baseUrl: "https://api.example.test", key: "hub", privateNetwork: false },
         github: true,
       });
 
@@ -2821,7 +2824,7 @@ describe("sandbox agent access", () => {
       return Effect.gen(function* () {
         const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
         expect((yield* provisioner.providers).host).toEqual({
-          claude: { baseUrl: "https://api.example.test", key: "copy" },
+          claude: { baseUrl: "https://api.example.test", key: "copy", privateNetwork: false },
           github: true,
         });
         const created = yield* provisioner.create({
@@ -2879,6 +2882,68 @@ describe("sandbox agent access", () => {
       );
     },
   );
+
+  it.effect("warns when the sandbox cannot reach Claude's endpoint and keeps its hub key", () => {
+    const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+    const options: { endpointStatus?: string } = { endpointStatus: "000" };
+    const { client, commands } = agentClient(requests, options);
+    const repository = memoryRepository();
+    const tailnetHost = { ...host, claude: { ...host.claude, baseUrl: "https://100.92.23.53" } };
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // The form warns before anything is created when the endpoint is only on a private network.
+      expect((yield* provisioner.providers).host.claude?.privateNetwork).toBe(true);
+
+      const create = (baseUrl: string) =>
+        provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          label: "Web Stack",
+          agentAccess: { claude: { baseUrl } },
+        });
+      const unreachable = yield* create("https://100.92.23.53");
+      expect(unreachable.setup).toEqual({
+        claude: "failed",
+        github: "skipped",
+        warnings: [
+          "The sandbox cannot reach 100.92.23.53. It is only reachable from your private network or tailnet; expose it publicly (for example with Tailscale Funnel or Cloudflare Tunnel) or use another endpoint.",
+        ],
+      });
+      // The check runs after the settings are written and before T3 starts.
+      const step = (marker: string) => commands.findIndex((command) => command.includes(marker));
+      expect(step("T3_CLAUDE_ENV")).toBeLessThan(step("T3_ENDPOINT_STATUS"));
+      expect(step("T3_ENDPOINT_STATUS")).toBeLessThan(step("nohup"));
+      // The sandbox works, and fixing the network makes its key work as is.
+      expect(requests.some((request) => request.method === "DELETE")).toBe(false);
+      expect(repository.records.get(testEnvironmentId)?.claudeHubKey).toBeDefined();
+
+      yield* provisioner.delete({
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        environmentId: testEnvironmentId,
+      });
+      const publicHost = yield* create("https://claude.example.test");
+      expect(publicHost.setup.warnings).toEqual([
+        "The sandbox cannot reach claude.example.test. Check that it accepts connections from the internet, or use another endpoint.",
+      ]);
+
+      // Any HTTP answer, even a refusal, means the endpoint is reachable.
+      yield* provisioner.delete({
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        environmentId: testEnvironmentId,
+      });
+      options.endpointStatus = "401";
+      expect((yield* create("https://claude.example.test")).setup).toEqual({
+        claude: "ready",
+        github: "skipped",
+        warnings: [],
+      });
+    }).pipe(
+      Effect.provide(provisionerLayer(hubSettings, repository.layer, { host: tailnetHost })),
+      Effect.provideService(HttpClient.HttpClient, client),
+    );
+  });
 
   it.effect("revokes the hub key and keeps every secret out of what a failure reports", () => {
     const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];

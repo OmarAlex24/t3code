@@ -14,7 +14,10 @@ The sandbox gets none of this machine's logins unless you ask. **Use this machin
 appears when Claude here talks to a custom endpoint, and points Claude in the sandbox at the same
 one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
 the sandbox gets its own key on the hub, which T3 Code removes when you delete the sandbox;
-otherwise this machine's Claude token is copied, and it stays valid after the sandbox is gone.
+otherwise this machine's Claude token is copied, and it stays valid after the sandbox is gone. The
+sandbox must be able to reach that endpoint over the internet: one that only answers on your
+tailnet or local network works here but not in a cloud sandbox, so expose it publicly (for
+example with Tailscale Funnel or Cloudflare Tunnel) first. The dialog warns when it can tell.
 **Sign GitHub in with this machine's token** lets `gh` and `git` in the sandbox reach every
 repository that token can. T3 Code also installs git, the GitHub CLI, and Claude Code when the
 provider's image lacks them. Once the sandbox is ready, the dialog lists what was set up; sign Codex
