@@ -4,14 +4,19 @@ import {
   CircleAlertIcon,
   CircleDashedIcon,
   ExternalLinkIcon,
+  LayersIcon,
   PlusIcon,
 } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { canCreateProjectInEnvironment } from "@t3tools/client-runtime/operations/projects";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   AuthSettingsWriteScope,
   defaultInstanceIdForDriver,
   ProviderDriverKind,
+  repositoryGroupingKeyOf,
   type EnvironmentId,
   type ProviderInstanceId,
   type SandboxCreateResult,
@@ -41,7 +46,10 @@ import {
   useSandboxStartCheck,
 } from "./SandboxStartLimits";
 import { useSandboxTemplates } from "./SandboxTemplates";
+import { openAddProjectToMachine } from "../AddProjectToMachineDialog";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useProjects } from "~/state/entities";
+import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
 import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
@@ -149,13 +157,126 @@ function ChecklistRow({
   );
 }
 
+const MAX_PROJECT_CHOICES = 4;
+
+// One row per repository, from the machine it is most likely set up on: this app's own machine
+// first, then the most recently changed. Only projects with a remote can be cloned onto the sandbox.
+const sandboxProjectChoices = (
+  projects: ReadonlyArray<EnvironmentProject>,
+  sandboxEnvironmentId: EnvironmentId,
+  primaryEnvironmentId: EnvironmentId | null,
+) => {
+  const onSandbox = new Set<string>();
+  const byRepository = new Map<string, EnvironmentProject>();
+  const rank = (project: EnvironmentProject) =>
+    project.environmentId === primaryEnvironmentId ? 1 : 0;
+  for (const project of projects) {
+    const identity = project.repositoryIdentity;
+    if (project.isScratch || !identity?.locator.remoteUrl) continue;
+    const key = repositoryGroupingKeyOf(identity);
+    if (project.environmentId === sandboxEnvironmentId) {
+      onSandbox.add(key);
+      continue;
+    }
+    const current = byRepository.get(key);
+    if (
+      current === undefined ||
+      rank(project) > rank(current) ||
+      (rank(project) === rank(current) && project.updatedAt > current.updatedAt)
+    ) {
+      byRepository.set(key, project);
+    }
+  }
+  return [...byRepository.entries()]
+    .toSorted(([, a], [, b]) => rank(b) - rank(a) || (a.updatedAt < b.updatedAt ? 1 : -1))
+    .slice(0, MAX_PROJECT_CHOICES)
+    .map(([key, project]) => ({ project, added: onSandbox.has(key) }));
+};
+
+function SandboxProjectStep({
+  sandboxEnvironmentId,
+  onLeave,
+}: {
+  sandboxEnvironmentId: EnvironmentId;
+  onLeave: () => void;
+}) {
+  const choices = sandboxProjectChoices(
+    useProjects(),
+    sandboxEnvironmentId,
+    usePrimaryEnvironmentId(),
+  );
+  const { environments } = useEnvironments();
+  const sandbox = environments.find(
+    (environment) => environment.environmentId === sandboxEnvironmentId,
+  );
+  // The add dialog only offers machines it can clone onto, and would pick another one otherwise.
+  const sandboxReady =
+    sandbox !== undefined &&
+    sandbox.serverConfig !== null &&
+    canCreateProjectInEnvironment(sandbox.connection.phase);
+  const anyAdded = choices.some((choice) => choice.added);
+  return (
+    <li className="py-1.5">
+      <div className="flex min-h-8 items-center gap-2.5 text-sm">
+        {anyAdded ? (
+          <CheckIcon aria-hidden className="size-4 shrink-0 text-success" />
+        ) : (
+          <CircleDashedIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+        )}
+        <span className="min-w-0 flex-1">
+          {choices.length === 0
+            ? "Add your project from the composer's machine picker"
+            : "Add your project"}
+        </span>
+      </div>
+      {choices.length === 0 ? null : (
+        <ul className="ms-6.5 space-y-0.5">
+          {choices.map(({ project, added }) => (
+            <li
+              key={`${project.environmentId}:${project.id}`}
+              className="flex min-h-7 items-center gap-2"
+            >
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                {project.title}
+              </span>
+              {added ? (
+                <span className="text-2xs text-muted-foreground">Added</span>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={!sandboxReady}
+                  onClick={() => {
+                    // The add dialog opens a thread on the sandbox, which leaves this checklist.
+                    onLeave();
+                    openAddProjectToMachine({
+                      projectRef: scopeProjectRef(project.environmentId, project.id),
+                      targetEnvironmentId: sandboxEnvironmentId,
+                    });
+                  }}
+                >
+                  Add
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
 function SandboxSetupChecklist({
   sandbox,
+  canSaveTemplates,
   onSetUpProvider,
+  onShowSandboxes,
   onDone,
 }: {
   sandbox: SandboxCreateResult;
+  canSaveTemplates: boolean;
   onSetUpProvider: (instanceId: ProviderInstanceId) => void;
+  onShowSandboxes: () => void;
   onDone: () => void;
 }) {
   const { setup } = sandbox;
@@ -195,6 +316,22 @@ function SandboxSetupChecklist({
               ? "GitHub is not connected. Run gh auth login in the sandbox's terminal."
               : "GitHub is not connected"}
         </ChecklistRow>
+        <SandboxProjectStep sandboxEnvironmentId={sandbox.environmentId} onLeave={onDone} />
+        {canSaveTemplates ? (
+          <li className="flex items-start gap-2.5 py-1.5 text-sm">
+            <LayersIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 space-y-0.5">
+              <span className="block">Save it as a template</span>
+              <span className="block text-2xs leading-relaxed text-muted-foreground">
+                Once the project and its dependencies are set up, use Save as template… on this
+                sandbox. New sandboxes then start ready.
+              </span>
+            </span>
+            <Button variant="outline" size="xs" onClick={onShowSandboxes}>
+              Show
+            </Button>
+          </li>
+        ) : null}
       </ul>
       {setup.warnings.length === 0 ? null : (
         <Alert variant="warning">
@@ -386,7 +523,15 @@ export function SandboxEnvironmentFields({
     return (
       <SandboxSetupChecklist
         sandbox={created}
+        canSaveTemplates={
+          providers.find((candidate) => candidate.kind === created.provider)?.capabilities
+            .templates === true
+        }
         onDone={onDone}
+        onShowSandboxes={() => {
+          onDone();
+          void navigate({ to: "/settings/connections", hash: "sandboxes" });
+        }}
         onSetUpProvider={(instanceId) => {
           onDone();
           void navigate({
@@ -558,7 +703,17 @@ export function SandboxEnvironmentFields({
             </label>
           </div>
 
-          {templates.templates.length === 0 ? null : (
+          {templates.templates.length === 0 ? (
+            provider.configured &&
+            provider.capabilities.templates &&
+            !templates.isPending &&
+            templates.error === null ? (
+              <p className="text-2xs leading-relaxed text-muted-foreground">
+                No templates yet. Set up a sandbox with your project, then save it as a template so
+                the next ones start ready.
+              </p>
+            ) : null
+          ) : (
             <div className="space-y-1.5">
               <label className="block">
                 <FieldLabel>Start from</FieldLabel>

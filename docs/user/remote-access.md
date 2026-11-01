@@ -21,8 +21,7 @@ example with Tailscale Funnel or Cloudflare Tunnel) first. The dialog warns when
 **Sign GitHub in with this machine's token** lets `gh` and `git` in the sandbox reach every
 repository that token can. T3 Code also installs git, the GitHub CLI, and Claude Code when the
 provider's image lacks them. Once the sandbox is ready, the dialog lists what was set up; sign Codex
-in from the sandbox's **Settings → Providers**. To work on a repository, clone it with
-[**Add Project**](./source-control.md#start-clone-or-publish-a-project) and save it on the sandbox.
+in from the sandbox's **Settings → Providers**.
 
 For Vercel, create an access token at vercel.com/account/settings/tokens; T3 Code uses your only
 team and a `t3-sandboxes` project unless you fill in **Team** or **Project** (a change applies to
@@ -40,10 +39,14 @@ That list follows the provider: a sandbox you stop or delete in the provider's d
 stopped or deleted within a minute, and Boat's monthly cost appears next to each sandbox. Boat keeps
 a stopped sandbox's disk for 14 days; after that it shows as expired and can only be deleted.
 
-Once a sandbox has your tools and repositories, **Save as template…** in the same list turns it into
-a starting point: choose the template under **Start from** when you add the next sandbox. Saving
+Set up one sandbox by hand, then let the rest start ready. The checklist after creating a sandbox
+offers your projects from your other machines; **Add** clones one onto the sandbox, along with the
+`.env` files you pick. Install its dependencies there, then use **Save as template…** on the sandbox
+in the same list, and choose the template under **Start from** when you add the next sandbox. Saving
 resets T3 Code on the sandbox and deletes it once the template is ready, so each copy connects as a
-new environment; its files live on in the template.
+new environment. Its files live on in the template, `.env` files included, so leave out secrets you
+do not want in every copy; T3 Code removes only its own identity and the Claude and GitHub logins it
+set up.
 
 ## T3 Connect
 
