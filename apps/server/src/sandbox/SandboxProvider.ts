@@ -29,6 +29,8 @@ export interface SandboxProviderDriver {
   readonly info: Omit<SandboxProviderInfo, "configured">;
   readonly defaultSize: string;
   readonly serverPort: number;
+  /** Extra environment for `t3 serve` in the sandbox, for what the provider's routing needs. */
+  readonly serveEnvironment?: Readonly<Record<string, string>>;
   readonly create: (input: {
     readonly config: SandboxProviderConfig;
     readonly name: string;
