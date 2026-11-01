@@ -63,7 +63,7 @@ const provisionerLayer = (
   settings: Parameters<typeof ServerSettings.layerTest>[0] = {},
   repository: Layer.Layer<SandboxRecords.SandboxRecordRepository> = recordRepository,
   options: {
-    readonly host?: SandboxHostAccess.SandboxHostClaude;
+    readonly host?: Parameters<typeof SandboxHostAccess.layerTest>[0];
     readonly secrets?: Layer.Layer<ServerSecretStore.ServerSecretStore>;
   } = {},
 ) =>
@@ -2403,7 +2403,7 @@ describe("SandboxProvisioner", () => {
         label: "My sandbox",
         httpBaseUrl: "https://boat.example/t3",
         pairingCode: "pair_abc",
-        setup: { claude: "skipped", warnings: [] },
+        setup: { claude: "skipped", github: "skipped", warnings: [] },
       });
       expect(providers.providers.find((provider) => provider.kind === "boat")?.configured).toBe(
         true,
@@ -2670,8 +2670,8 @@ describe("sandbox agent access", () => {
     },
   } as const;
   const host = {
-    baseUrl: "https://api.example.test",
-    authToken: Redacted.make("host-claude-token"),
+    claude: { baseUrl: "https://api.example.test", authToken: Redacted.make("host-claude-token") },
+    githubToken: "ghp_host_token",
   };
   const HUB_KEY = /^t3-sandbox-web-stack-[0-9a-f]{16}$/u;
 
@@ -2735,6 +2735,7 @@ describe("sandbox agent access", () => {
       // Clients learn only the base URL and where the key comes from, never a key.
       expect((yield* provisioner.providers).host).toEqual({
         claude: { baseUrl: "https://api.example.test", key: "hub" },
+        github: true,
       });
 
       const created = yield* provisioner.create({
@@ -2743,7 +2744,7 @@ describe("sandbox agent access", () => {
         label: "Web Stack!",
         agentAccess: { claude: { baseUrl: "https://claude.example.test" } },
       });
-      expect(created.setup).toEqual({ claude: "ready", warnings: [] });
+      expect(created.setup).toEqual({ claude: "ready", github: "skipped", warnings: [] });
 
       // The key is added before the machine exists, so a refusing hub costs nothing.
       const mint = requests.findIndex((request) => request.method === "PATCH");
@@ -2793,29 +2794,55 @@ describe("sandbox agent access", () => {
     );
   });
 
-  it.effect("copies this machine's token only when there is no hub", () => {
-    const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
-    const { client, commands } = agentClient(requests);
-    return Effect.gen(function* () {
-      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
-      expect((yield* provisioner.providers).host).toEqual({
-        claude: { baseUrl: "https://api.example.test", key: "copy" },
-      });
-      yield* provisioner.create({
-        provider: "boat",
-        apiKey: "boat_test",
-        agentAccess: { claude: { baseUrl: "https://api.example.test" } },
-      });
-      expect(requests.some((request) => request.url.startsWith("https://hub.test/"))).toBe(false);
-      expect(claudeEnvOf(commands)).toEqual({
-        ANTHROPIC_BASE_URL: "https://api.example.test",
-        ANTHROPIC_AUTH_TOKEN: "host-claude-token",
-      });
-    }).pipe(
-      Effect.provide(provisionerLayer({}, recordRepository, { host })),
-      Effect.provideService(HttpClient.HttpClient, client),
-    );
-  });
+  it.effect(
+    "copies this machine's Claude token without a hub and signs GitHub in on request",
+    () => {
+      const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+      const options: { failCommand?: string } = {};
+      const { client, commands } = agentClient(requests, options);
+      const githubToken = (all: ReadonlyArray<string>) =>
+        all
+          .filter((command) => command.includes("gh auth login"))
+          .map((command) => /([A-Za-z0-9+/=]{8,})\W*\| base64 -d/u.exec(command)?.[1])
+          .map((encoded) => (encoded === undefined ? undefined : atob(encoded)));
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        expect((yield* provisioner.providers).host).toEqual({
+          claude: { baseUrl: "https://api.example.test", key: "copy" },
+          github: true,
+        });
+        const created = yield* provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          agentAccess: { claude: { baseUrl: "https://api.example.test" } },
+          passGithubToken: true,
+        });
+        expect(created.setup).toEqual({ claude: "ready", github: "ready", warnings: [] });
+        expect(requests.some((request) => request.url.startsWith("https://hub.test/"))).toBe(false);
+        expect(claudeEnvOf(commands)).toEqual({
+          ANTHROPIC_BASE_URL: "https://api.example.test",
+          ANTHROPIC_AUTH_TOKEN: "host-claude-token",
+        });
+        expect(githubToken(commands)).toEqual(["ghp_host_token"]);
+        expect(commands.some((command) => command.includes("ghp_host_token"))).toBe(false);
+
+        // A login that fails leaves a working sandbox, and the warning carries none of its output.
+        options.failCommand = "gh auth login";
+        const failed = yield* provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          passGithubToken: true,
+        });
+        expect(failed.setup.github).toBe("failed");
+        expect(failed.setup.warnings).toEqual([
+          "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
+        ]);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, recordRepository, { host })),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+    },
+  );
 
   it.effect("revokes the hub key and keeps every secret out of what a failure reports", () => {
     const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];

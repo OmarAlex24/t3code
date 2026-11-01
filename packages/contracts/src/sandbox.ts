@@ -64,6 +64,8 @@ export const SandboxHostAccess = Schema.Struct({
       key: Schema.Literals(["hub", "copy"]),
     }),
   ),
+  /** This server has a GitHub token for github.com it could forward. */
+  github: Schema.Boolean,
 });
 export type SandboxHostAccess = typeof SandboxHostAccess.Type;
 
@@ -173,6 +175,8 @@ export const SandboxCreateInput = Schema.Struct({
       claude: Schema.optional(Schema.Struct({ baseUrl: TrimmedString })),
     }),
   ),
+  /** Signs `gh` and git in the sandbox in with this server's GitHub token. */
+  passGithubToken: Schema.optional(Schema.Boolean),
 });
 export type SandboxCreateInput = typeof SandboxCreateInput.Type;
 
@@ -192,6 +196,7 @@ export const SandboxCreateResult = Schema.Struct({
   /** What the sandbox got beyond T3 Code, for the checklist shown after it is created. */
   setup: Schema.Struct({
     claude: SandboxSetupState,
+    github: SandboxSetupState,
     /** Steps that did not finish but left a working sandbox. Never carries command output. */
     warnings: Schema.Array(Schema.String),
   }),

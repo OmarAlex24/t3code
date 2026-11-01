@@ -47,3 +47,15 @@ if (settings && settings.env && typeof settings.env === "object") {
 }
 ' "$dir/settings.json" >/dev/null 2>&1 || true
 fi`;
+
+export const githubLoginScript = (token: string) => `set -eu
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v gh >/dev/null 2>&1; then
+  echo "The GitHub CLI is not installed." >&2
+  exit 3
+fi
+printf '%s' '${base64(token)}' | base64 -d | gh auth login --hostname github.com --git-protocol https --with-token
+gh auth setup-git --hostname github.com`;
+
+// Run before a template save, with the Claude scrub: a copy must not inherit the GitHub login.
+export const GITHUB_LOGIN_SCRUB = `rm -f "\${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml"`;

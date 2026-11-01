@@ -4,12 +4,14 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import { readClaudeSettingsEndpoint } from "../provider/Drivers/ClaudeSkills.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SourceControlDrivers from "../sourceControl/builtInDrivers.ts";
 
 export interface SandboxHostClaude {
   /** The endpoint this server's own Claude talks to, from Claude's settings or its env. */
@@ -22,6 +24,8 @@ export class SandboxHostAccess extends Context.Service<
   SandboxHostAccess,
   {
     readonly claude: Effect.Effect<SandboxHostClaude>;
+    /** github.com's token as this server resolves it for its own GitHub calls. */
+    readonly githubToken: Effect.Effect<Option.Option<Redacted.Redacted<string>>>;
   }
 >()("t3/sandbox/SandboxHostAccess") {}
 
@@ -37,6 +41,7 @@ const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const drivers = yield* SourceControlDrivers.SourceControlDrivers;
 
   // Resolved the way the default Claude instance resolves its endpoint (ClaudeProvider), so a
   // sandbox gets exactly what `claude` on this machine uses.
@@ -61,10 +66,27 @@ const make = Effect.gen(function* () {
     Effect.provideService(Path.Path, path),
   );
 
-  return SandboxHostAccess.of({ claude });
+  const credentialToken = drivers.find(({ driver }) => driver.kind === "github")?.instance
+    .credentialToken;
+  const githubToken =
+    credentialToken === undefined
+      ? Effect.succeed(Option.none<Redacted.Redacted<string>>())
+      : credentialToken("github.com");
+
+  return SandboxHostAccess.of({ claude, githubToken });
 });
 
 export const layer = Layer.effect(SandboxHostAccess, make);
 
-export const layerTest = (claude: SandboxHostClaude = {}) =>
-  Layer.succeed(SandboxHostAccess, SandboxHostAccess.of({ claude: Effect.succeed(claude) }));
+export const layerTest = (
+  host: { readonly claude?: SandboxHostClaude; readonly githubToken?: string } = {},
+) =>
+  Layer.succeed(
+    SandboxHostAccess,
+    SandboxHostAccess.of({
+      claude: Effect.succeed(host.claude ?? {}),
+      githubToken: Effect.succeed(
+        Option.map(Option.fromUndefinedOr(host.githubToken), Redacted.make),
+      ),
+    }),
+  );

@@ -6,11 +6,14 @@ import {
 } from "@t3tools/source-control-core/server/driver";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import type * as Redacted from "effect/Redacted";
 
 import { definition } from "../shared/definition.ts";
 
 import * as GitHubAppAccess from "./GitHubAppAccess.ts";
 import * as GitHubAppSignIn from "./GitHubAppSignIn.ts";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubMediaFetch from "./gitHubMediaFetch.ts";
 import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
 import * as GitHubPullRequestProvider from "./GitHubPullRequestProvider.ts";
@@ -72,6 +75,16 @@ export const makeIsRepositoryStarred = Effect.gen(function* () {
   );
 });
 
+// Settings token, then GH_TOKEN/GITHUB_TOKEN, then `gh auth token`: what every GitHub call here uses.
+const makeCredentialToken = Effect.gen(function* () {
+  const credentials = yield* GitHubCredentials.GitHubCredentials;
+  return (host: string) =>
+    credentials.get(host).pipe(
+      Effect.map((credential) => Option.some(credential.token)),
+      Effect.orElseSucceed(() => Option.none<Redacted.Redacted<string>>()),
+    );
+});
+
 const makeInstance = Effect.all({
   sourceControl: GitHubSourceControlProvider.make,
   discovery: GitHubSourceControlProvider.makeDiscovery,
@@ -79,6 +92,7 @@ const makeInstance = Effect.all({
   fetchMedia: GitHubMediaFetch.make,
   signIn: makeSignIn,
   isRepositoryStarred: makeIsRepositoryStarred,
+  credentialToken: makeCredentialToken,
 });
 
 export const driver = defineSourceControlDriver({

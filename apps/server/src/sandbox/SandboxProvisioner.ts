@@ -50,7 +50,12 @@ import * as SandboxRecords from "../persistence/SandboxRecords.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { makeCliproxyApi } from "../usage/cliproxyApi.ts";
 import * as SandboxHostAccess from "./SandboxHostAccess.ts";
-import { CLAUDE_SETTINGS_SCRUB, claudeSettingsScript } from "./sandboxSetup.ts";
+import {
+  CLAUDE_SETTINGS_SCRUB,
+  claudeSettingsScript,
+  GITHUB_LOGIN_SCRUB,
+  githubLoginScript,
+} from "./sandboxSetup.ts";
 import {
   requestJson,
   shellQuote,
@@ -169,6 +174,7 @@ while answering; do
 done
 rm -rf "$HOME/.t3/userdata" "$HOME/.t3/environment-label" "$HOME/.t3/usage-host-id"
 ${CLAUDE_SETTINGS_SCRUB}
+${GITHUB_LOGIN_SCRUB}
 rm -f "$HOME/.t3/sandbox-server.log" "$HOME/.t3/sandbox-server.pid"`;
 
 // Lowercase words joined by dashes, so a hub key says which sandbox it belongs to.
@@ -363,10 +369,11 @@ const make = Effect.gen(function* () {
   const hostAccessFacts = Effect.gen(function* () {
     const claude = yield* hostAccess.claude;
     const hub = hubSource(yield* settings.getSettings.pipe(Effect.orDie));
+    const github = Option.isSome(yield* hostAccess.githubToken);
     const facts: SandboxHostAccessFacts =
       claude.baseUrl === undefined || (hub === undefined && claude.authToken === undefined)
-        ? {}
-        : { claude: { baseUrl: claude.baseUrl, key: hub === undefined ? "copy" : "hub" } };
+        ? { github }
+        : { claude: { baseUrl: claude.baseUrl, key: hub === undefined ? "copy" : "hub" }, github };
     return facts;
   });
 
@@ -528,6 +535,11 @@ const make = Effect.gen(function* () {
     // Built before the machine exists, so a bad driver definition cannot strand a billed sandbox.
     const installCommand = installScript(label);
     const startCommand = startScript(driver.serveEnvironment);
+    const githubToken =
+      input.passGithubToken === true ? yield* hostAccess.githubToken : Option.none();
+    if (input.passGithubToken === true && Option.isNone(githubToken)) {
+      return yield* configError(input.provider, "This server has no GitHub token to share.");
+    }
     // Minted before anything bills, so a hub that refuses costs nothing; revoked on any failure.
     const claude = yield* resolveClaudeAccess(input, label);
 
@@ -542,6 +554,7 @@ const make = Effect.gen(function* () {
       installCommand,
       startCommand,
       claude,
+      githubToken: Option.getOrUndefined(githubToken),
     }).pipe(
       Effect.onExit((exit) =>
         Exit.isSuccess(exit) || claude?.hubKey === undefined
@@ -562,6 +575,7 @@ const make = Effect.gen(function* () {
     installCommand,
     startCommand,
     claude,
+    githubToken,
   }: {
     readonly input: SandboxCreateInput;
     readonly driver: SandboxProviderDriver;
@@ -579,6 +593,7 @@ const make = Effect.gen(function* () {
           readonly hubKey: HubKey | undefined;
         }
       | undefined;
+    readonly githubToken: Redacted.Redacted<string> | undefined;
   }) {
     const idempotencyKey = yield* crypto.randomUUIDv4().pipe(
       Effect.mapError(
@@ -651,6 +666,23 @@ const make = Effect.gen(function* () {
                 Effect.sync((): SandboxSetupState => {
                   warnings.push(
                     "Claude's settings could not be written on the sandbox. Set up Claude in its Providers settings.",
+                  );
+                  return "failed";
+                }),
+              ),
+            ),
+          );
+
+    const githubState: SandboxSetupState =
+      githubToken === undefined
+        ? "skipped"
+        : yield* stopOnFailure(
+            run(githubLoginScript(Redacted.value(githubToken)), 60).pipe(
+              Effect.as<SandboxSetupState>("ready"),
+              Effect.catch(() =>
+                Effect.sync((): SandboxSetupState => {
+                  warnings.push(
+                    "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
                   );
                   return "failed";
                 }),
@@ -745,7 +777,7 @@ const make = Effect.gen(function* () {
       label,
       httpBaseUrl,
       pairingCode,
-      setup: { claude: claudeState, warnings },
+      setup: { claude: claudeState, github: githubState, warnings },
     } satisfies SandboxCreateResult;
   });
 
