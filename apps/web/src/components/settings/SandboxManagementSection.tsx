@@ -307,6 +307,16 @@ function SandboxRow({
       }
       return;
     }
+    // A delete always succeeds once the machine is gone; cleanup it could not finish is a warning.
+    const warnings =
+      action === "delete" && result.value !== undefined && "warnings" in result.value
+        ? result.value.warnings
+        : [];
+    for (const warning of warnings) {
+      toastManager.add(
+        stackedThreadToast({ type: "warning", title: "Sandbox deleted", description: warning }),
+      );
+    }
     onChanged();
   };
 

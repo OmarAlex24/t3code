@@ -161,12 +161,8 @@ export const makeCliproxyApi = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
   const crypto = yield* Crypto.Crypto;
 
-  const management = Effect.fn("CliproxyApi.management")(function* (
-    config: UsageLimitSourceConfig,
-    path: string,
-    body?: unknown,
-  ) {
-    const url = yield* Effect.try({
+  const managementUrl = (config: UsageLimitSourceConfig, path: string) =>
+    Effect.try({
       try: () =>
         new URL(
           `v0/management/${path}`,
@@ -174,20 +170,64 @@ export const makeCliproxyApi = Effect.gen(function* () {
         ).toString(),
       catch: () => new UsageLimitSourceError({ detail: "The hub URL is not valid." }),
     });
-    const request = (
-      body === undefined ? HttpClientRequest.get(url) : HttpClientRequest.post(url)
-    ).pipe(HttpClientRequest.setHeader("Authorization", `Bearer ${config.managementKey}`));
-    const response = yield* client
-      .execute(body === undefined ? request : request.pipe(HttpClientRequest.bodyJsonUnsafe(body)))
+
+  const send = (config: UsageLimitSourceConfig, request: HttpClientRequest.HttpClientRequest) =>
+    client
+      .execute(
+        request.pipe(
+          HttpClientRequest.setHeader("Authorization", `Bearer ${config.managementKey}`),
+        ),
+      )
       .pipe(
         Effect.flatMap(HttpClientResponse.filterStatusOk),
-        Effect.flatMap((response) => response.json),
         Effect.timeout("15 seconds"),
         Effect.mapError(
           (error) => new UsageLimitSourceError({ detail: describeManagementFailure(error) }),
         ),
       );
-    return response;
+
+  const management = Effect.fn("CliproxyApi.management")(function* (
+    config: UsageLimitSourceConfig,
+    path: string,
+    body?: unknown,
+  ) {
+    const url = yield* managementUrl(config, path);
+    const response = yield* send(
+      config,
+      body === undefined
+        ? HttpClientRequest.get(url)
+        : HttpClientRequest.post(url).pipe(HttpClientRequest.bodyJsonUnsafe(body)),
+    );
+    return yield* response.json.pipe(
+      Effect.timeout("15 seconds"),
+      Effect.mapError(
+        (error) => new UsageLimitSourceError({ detail: describeManagementFailure(error) }),
+      ),
+    );
+  });
+
+  // PATCH appends `new` when `old` is not in the list, under the hub's lock. PUT would replace the
+  // whole list, dropping every other client's key.
+  const addApiKey = Effect.fn("CliproxyApi.addApiKey")(function* (
+    config: UsageLimitSourceConfig,
+    key: string,
+  ) {
+    const url = yield* managementUrl(config, "api-keys");
+    yield* send(
+      config,
+      HttpClientRequest.patch(url).pipe(HttpClientRequest.bodyJsonUnsafe({ old: key, new: key })),
+    );
+  });
+
+  const removeApiKey = Effect.fn("CliproxyApi.removeApiKey")(function* (
+    config: UsageLimitSourceConfig,
+    key: string,
+  ) {
+    const url = yield* managementUrl(config, "api-keys");
+    yield* send(
+      config,
+      HttpClientRequest.delete(url).pipe(HttpClientRequest.setUrlParams({ value: key })),
+    );
   });
 
   const authFiles = Effect.fn("CliproxyApi.authFiles")(function* (config: UsageLimitSourceConfig) {
@@ -423,5 +463,5 @@ export const makeCliproxyApi = Effect.gen(function* () {
       ),
     );
   });
-  return { readAccounts, consume };
+  return { readAccounts, consume, addApiKey, removeApiKey };
 });

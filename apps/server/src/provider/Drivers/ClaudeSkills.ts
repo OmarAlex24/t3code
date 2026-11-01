@@ -428,24 +428,35 @@ const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(funct
   return path.join(home, ".claude");
 });
 
-const SettingsBaseUrl = fromLenientJson(
+const SettingsEndpoint = fromLenientJson(
   Schema.Struct({
-    env: Schema.optional(Schema.Struct({ ANTHROPIC_BASE_URL: Schema.optional(Schema.String) })),
+    env: Schema.optional(
+      Schema.Struct({
+        ANTHROPIC_BASE_URL: Schema.optional(Schema.String),
+        ANTHROPIC_AUTH_TOKEN: Schema.optional(Schema.String),
+      }),
+    ),
   }),
 );
-const decodeSettingsBaseUrl = Schema.decodeUnknownEffect(SettingsBaseUrl);
+const decodeSettingsEndpoint = Schema.decodeUnknownEffect(SettingsEndpoint);
 
-/** ANTHROPIC_BASE_URL from Claude's settings `env`, which Claude Code applies over the process env. */
-export const readClaudeSettingsBaseUrl = Effect.fn("readClaudeSettingsBaseUrl")(function* (
+export interface ClaudeSettingsEndpoint {
+  readonly ANTHROPIC_BASE_URL?: string;
+  readonly ANTHROPIC_AUTH_TOKEN?: string;
+}
+
+/** The endpoint variables in Claude's settings `env`, which Claude Code applies over the process env. */
+export const readClaudeSettingsEndpoint = Effect.fn("readClaudeSettingsEndpoint")(function* (
   config: Pick<ClaudeSettings, "homePath">,
   cwd: string | undefined,
   environment: NodeJS.ProcessEnv,
-): Effect.fn.Return<string | undefined, never, FileSystem.FileSystem | Path.Path> {
+): Effect.fn.Return<ClaudeSettingsEndpoint, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const platform = yield* HostProcess.Platform;
   const configDirPath = yield* resolveClaudeConfigDirPath(config, environment, cwd);
   let baseUrl: string | undefined;
+  let authToken: string | undefined;
   for (const settingsPath of claudeSettingsPaths(
     path,
     configDirPath,
@@ -457,12 +468,25 @@ export const readClaudeSettingsBaseUrl = Effect.fn("readClaudeSettingsBaseUrl")(
       .readFileString(settingsPath)
       .pipe(Effect.orElseSucceed(() => undefined));
     if (contents === undefined) continue;
-    const parsed = yield* decodeSettingsBaseUrl(contents).pipe(
+    const parsed = yield* decodeSettingsEndpoint(contents).pipe(
       Effect.orElseSucceed(() => undefined),
     );
     baseUrl = parsed?.env?.ANTHROPIC_BASE_URL ?? baseUrl;
+    authToken = parsed?.env?.ANTHROPIC_AUTH_TOKEN ?? authToken;
   }
-  return baseUrl;
+  return {
+    ...(baseUrl === undefined ? {} : { ANTHROPIC_BASE_URL: baseUrl }),
+    ...(authToken === undefined ? {} : { ANTHROPIC_AUTH_TOKEN: authToken }),
+  } satisfies ClaudeSettingsEndpoint;
+});
+
+/** ANTHROPIC_BASE_URL from Claude's settings `env`, which Claude Code applies over the process env. */
+export const readClaudeSettingsBaseUrl = Effect.fn("readClaudeSettingsBaseUrl")(function* (
+  config: Pick<ClaudeSettings, "homePath">,
+  cwd: string | undefined,
+  environment: NodeJS.ProcessEnv,
+) {
+  return (yield* readClaudeSettingsEndpoint(config, cwd, environment)).ANTHROPIC_BASE_URL;
 });
 
 // Claude's --add-dir is repeatable and variadic; parseCliArgs keeps only one value.
