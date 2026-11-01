@@ -27,8 +27,8 @@ new sandboxes; existing ones stay where they were created), and a sandbox on the
 Hobby plan stops after 45 minutes, so resume it from the Sandboxes list to keep working.
 
 The key is saved on the T3 Code server that provisions the sandbox, not on the client. Creating a
-sandbox bills the provider account that owns the key. Stop and resume sandboxes from **Settings →
-Environments → Sandboxes**. A sandbox stops eight hours after it was created; resuming does not
+sandbox bills the provider account that owns the key. Stop, resume, and delete sandboxes from
+**Settings → Environments → Sandboxes**; deleting removes the machine and its disk at the provider. A sandbox stops eight hours after it was created; resuming does not
 reset that. Use **Extend** there to add time before it runs out, up to the lifetime limit in the
 same section (24 hours by default). Once it is reached the sandbox cannot be resumed. Daytona deletes
 a sandbox, files included, a day after it stops for good, so copy out anything you need before then.

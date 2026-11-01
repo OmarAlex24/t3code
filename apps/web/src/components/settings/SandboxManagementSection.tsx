@@ -238,13 +238,9 @@ function SandboxRow({
   const canStopResume = provider?.capabilities.stopResume ?? true;
   const canStop = canStopResume && (sandbox.state === "running" || sandbox.state === "error");
   const canResume = canStopResume && sandbox.state === "stopped" && !pastDeadline;
-  // Offered whenever stop or resume cannot move the sandbox forward, so no state is a dead end.
-  const canDelete =
-    sandbox.state === "error" ||
-    sandbox.state === "expired" ||
-    sandbox.state === "deleted" ||
-    (sandbox.state === "stopped" && !canResume) ||
-    (sandbox.state === "running" && !canStop);
+  // Delete is always offered; it stays an icon beside Stop or Resume so it never reads as the
+  // main action, and becomes the labeled action once neither can move the sandbox forward.
+  const deleteIsSecondary = canStop || canResume;
   // Only a stopped sandbox can spend a start, so only it reads the provider's limits.
   const startCheck = useSandboxStartCheck({
     environmentId,
@@ -419,7 +415,24 @@ function SandboxRow({
               Save as template…
             </Button>
           ) : null}
-          {canDelete && !confirmingDelete ? (
+          {confirmingDelete ? null : deleteIsSecondary ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="icon-xs"
+                    variant="ghost-destructive"
+                    aria-label="Delete sandbox"
+                    disabled={pending}
+                    onClick={() => setConfirmingDelete(true)}
+                  />
+                }
+              >
+                <Trash2Icon className="size-3.5" />
+              </TooltipTrigger>
+              <TooltipPopup side="top">Delete sandbox</TooltipPopup>
+            </Tooltip>
+          ) : (
             <Button
               size="xs"
               variant="destructive-outline"
@@ -432,7 +445,7 @@ function SandboxRow({
               {pending ? <Spinner className="size-3" /> : <Trash2Icon className="size-3" />}
               Delete
             </Button>
-          ) : null}
+          )}
         </div>
       </div>
       {startCheck.blocked === null ? null : (
