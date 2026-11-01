@@ -17,7 +17,23 @@ import * as ServerSettings from "../serverSettings.ts";
 import { shellQuote, type SandboxProviderDriver } from "./SandboxProvider.ts";
 import { SANDBOX_PROVIDER_DRIVERS } from "./providers/index.ts";
 
-const installScript = (label: string) => `set -eu
+const SERVE_ENVIRONMENT_NAME = /^[A-Z_][A-Z0-9_]*$/u;
+
+const serveEnvironmentPrefix = (environment: Readonly<Record<string, string>> | undefined) => {
+  const entries = Object.entries(environment ?? {});
+  if (entries.length === 0) return "";
+  for (const [name] of entries) {
+    if (!SERVE_ENVIRONMENT_NAME.test(name)) {
+      throw new Error(`Invalid sandbox serve environment variable name '${name}'.`);
+    }
+  }
+  return `env ${entries.map(([name, value]) => `${name}=${shellQuote(value)}`).join(" ")} `;
+};
+
+const installScript = (
+  label: string,
+  serveEnvironment?: Readonly<Record<string, string>>,
+) => `set -eu
 export PATH="$HOME/.local/bin:$PATH"
 # The label file is read by \`t3 serve\` itself, so it works on providers without sudo, systemd,
 # or a writable /etc/machine-info. The hostname is only a convenience for the machine's UI.
@@ -40,7 +56,7 @@ if ! command -v t3 >/dev/null 2>&1; then
   exit 1
 fi
 if ! curl -fsS http://127.0.0.1:3773/.well-known/t3/environment >/dev/null 2>&1; then
-  nohup t3 serve --host 0.0.0.0 --port 3773 >"$HOME/.t3/sandbox-server.log" 2>&1 &
+  nohup ${serveEnvironmentPrefix(serveEnvironment)}t3 serve --host 0.0.0.0 --port 3773 >"$HOME/.t3/sandbox-server.log" 2>&1 &
 fi
 i=0
 while [ "$i" -lt 90 ]; do
@@ -153,6 +169,8 @@ const make = Effect.gen(function* () {
     const config = { apiKey };
     const label = input.label?.trim() || `${driver.info.label} sandbox`;
     const size = input.size?.trim() || driver.defaultSize;
+    // Built before the machine exists, so a bad driver definition cannot strand a billed sandbox.
+    const installCommand = installScript(label, driver.serveEnvironment);
 
     const sandbox = yield* onHttp(
       driver.create({
@@ -195,7 +213,7 @@ const make = Effect.gen(function* () {
       driver.execute({
         config,
         sandboxId: sandbox.id,
-        command: installScript(label),
+        command: installCommand,
         timeoutSeconds: 600,
       }),
     );

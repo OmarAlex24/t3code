@@ -100,6 +100,9 @@ export const daytonaDriver: SandboxProviderDriver = {
   info,
   defaultSize: "daytona-medium",
   serverPort: 3773,
+  // Daytona's preview proxy answers CORS itself: it echoes the caller's origin with credentials.
+  // If `t3 serve` also sends `*`, the response carries two values and browsers reject it.
+  serveEnvironment: { T3CODE_PROXY_HANDLES_CORS: "true" },
   create: (input) =>
     requestJson({
       provider: "daytona",

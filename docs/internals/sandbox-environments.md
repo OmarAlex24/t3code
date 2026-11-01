@@ -19,6 +19,10 @@ Drivers must keep two invariants:
 - **Reachability.** The exposed origin must serve the T3 server without a provider-specific header
   or cookie, because the browser client only knows how to send T3's bearer credential. Providers
   that gate URLs with their own token use the provider's public or ungated mode.
+  If the provider's proxy answers CORS itself, the driver sets
+  `serveEnvironment: { T3CODE_PROXY_HANDLES_CORS: "true" }` so `t3 serve` adds no CORS headers.
+  Daytona's preview proxy echoes the caller's origin, and with the server's `*` the response
+  carries two `Access-Control-Allow-Origin` values, which browsers reject.
 - **Cleanup.** `SandboxProvisioner` destroys the machine when any step after `create` fails or is
   interrupted (including exposing the port), so a provisioned machine never bills without an
   environment pointing at it. Drivers must make `destroy` safe on a machine that never started,
