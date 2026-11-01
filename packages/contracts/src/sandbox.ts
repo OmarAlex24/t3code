@@ -142,8 +142,6 @@ export const SandboxCreateInput = Schema.Struct({
   label: Schema.optional(TrimmedString),
   /** One of the provider's machine size ids. Defaults to the provider's default size. */
   size: Schema.optional(TrimmedString),
-  /** Cloned into the sandbox before the environment is connected. */
-  repositoryUrl: Schema.optional(TrimmedString),
   /** Provider environment whose credentials the sandbox receives. Omit for no credentials. */
   environment: Schema.optional(TrimmedString),
   /** Required with `environment`: the user confirmed that this environment passes credentials. */

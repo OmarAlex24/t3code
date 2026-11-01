@@ -98,7 +98,6 @@ export function SandboxEnvironmentFields({
   const [settingsDraft, setSettingsDraft] = useState<Readonly<Record<string, string>>>({});
   const [label, setLabel] = useState("");
   const [size, setSize] = useState("");
-  const [repositoryUrl, setRepositoryUrl] = useState("");
   const [credentialEnvironment, setCredentialEnvironment] = useState("");
   const [templateName, setTemplateName] = useState("");
   const [allowCredentials, setAllowCredentials] = useState(false);
@@ -175,7 +174,6 @@ export function SandboxEnvironmentFields({
           : selectedSize === ""
             ? {}
             : { size: selectedSize }),
-        ...(repositoryUrl.trim() === "" ? {} : { repositoryUrl: repositoryUrl.trim() }),
         ...(credentialEnvironment === ""
           ? {}
           : { environment: credentialEnvironment, allowCredentials: true }),
@@ -222,7 +220,6 @@ export function SandboxEnvironmentFields({
 
     setApiKey("");
     setLabel("");
-    setRepositoryUrl("");
     onDone();
     toastManager.add({
       type: "success",
@@ -404,19 +401,6 @@ export function SandboxEnvironmentFields({
                 value={label}
                 onChange={(event) => setLabel(event.target.value)}
                 placeholder={`${provider.label} sandbox`}
-                disabled={isProvisioning}
-                spellCheck={false}
-              />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-foreground">
-                Repository to clone{" "}
-                <span className="font-normal text-muted-foreground">(optional)</span>
-              </span>
-              <Input
-                value={repositoryUrl}
-                onChange={(event) => setRepositoryUrl(event.target.value)}
-                placeholder="https://github.com/owner/repo"
                 disabled={isProvisioning}
                 spellCheck={false}
               />

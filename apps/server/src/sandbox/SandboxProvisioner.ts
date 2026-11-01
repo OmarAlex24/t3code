@@ -167,13 +167,6 @@ const PAIR_SCRIPT = `set -eu
 export PATH="$HOME/.local/bin:$PATH"
 t3 pair --ttl 30m`;
 
-const cloneScript = (repositoryUrl: string) => `set -eu
-mkdir -p "$HOME/workspace"
-cd "$HOME/workspace"
-if [ ! -d .git ]; then
-  git clone --depth 1 ${shellQuote(repositoryUrl)} .
-fi`;
-
 const parsePairingToken = (output: string): string | null => {
   const match = /^\s*Token:\s*(\S+)\s*$/mu.exec(output);
   return match?.[1] ?? null;
@@ -473,17 +466,6 @@ const make = Effect.gen(function* () {
           })
         : Effect.succeed(sandbox.publicUrl),
     );
-
-    if (input.repositoryUrl !== undefined && input.repositoryUrl.trim() !== "") {
-      yield* stopOnFailure(
-        driver.execute({
-          config: sandboxConfig,
-          sandboxId: sandbox.id,
-          command: cloneScript(input.repositoryUrl.trim()),
-          timeoutSeconds: 300,
-        }),
-      );
-    }
 
     yield* stopOnFailure(
       driver.execute({
