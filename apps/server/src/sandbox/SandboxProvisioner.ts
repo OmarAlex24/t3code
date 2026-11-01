@@ -50,16 +50,36 @@ import {
 } from "./SandboxProvider.ts";
 import { SANDBOX_PROVIDER_DRIVERS } from "./providers/index.ts";
 
+const SERVE_ENVIRONMENT_NAME = /^[A-Z_][A-Z0-9_]*$/u;
+
+const serveEnvironmentPrefix = (environment: Readonly<Record<string, string>> | undefined) => {
+  const entries = Object.entries(environment ?? {});
+  if (entries.length === 0) return "";
+  for (const [name] of entries) {
+    if (!SERVE_ENVIRONMENT_NAME.test(name)) {
+      throw new Error(`Invalid sandbox serve environment variable name '${name}'.`);
+    }
+  }
+  return `env ${entries.map(([name, value]) => `${name}=${shellQuote(value)}`).join(" ")} `;
+};
+
 // Starts `t3 serve` only when nothing answers on its port, then waits for it. Shared by install and
-// resume because providers without systemd do not bring the server back after a stop.
-const SERVE_SCRIPT = `if ! curl -fsS http://127.0.0.1:3773/.well-known/t3/environment >/dev/null 2>&1; then
-  if command -v systemctl >/dev/null 2>&1 && t3 service install >/dev/null 2>&1; then
+// resume because providers without systemd do not bring the server back after a stop. The service
+// unit cannot carry a serve environment, so a driver that sets one always runs under nohup.
+const serveScript = (serveEnvironment: Readonly<Record<string, string>> | undefined) => {
+  const nohup = `nohup ${serveEnvironmentPrefix(serveEnvironment)}t3 serve --host 0.0.0.0 --port 3773 >"$HOME/.t3/sandbox-server.log" 2>&1 &
+    echo "$!" >"$HOME/.t3/sandbox-server.pid"`;
+  const start =
+    Object.keys(serveEnvironment ?? {}).length > 0
+      ? `  ${nohup}`
+      : `  if command -v systemctl >/dev/null 2>&1 && t3 service install >/dev/null 2>&1; then
     sudo -n loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
     t3 service restart >/dev/null 2>&1 || true
   else
-    nohup t3 serve --host 0.0.0.0 --port 3773 >"$HOME/.t3/sandbox-server.log" 2>&1 &
-    echo "$!" >"$HOME/.t3/sandbox-server.pid"
-  fi
+    ${nohup}
+  fi`;
+  return `if ! curl -fsS http://127.0.0.1:3773/.well-known/t3/environment >/dev/null 2>&1; then
+${start}
 fi
 i=0
 while [ "$i" -lt 90 ]; do
@@ -71,8 +91,12 @@ while [ "$i" -lt 90 ]; do
 done
 tail -50 "$HOME/.t3/sandbox-server.log" >&2 || true
 exit 1`;
+};
 
-const installScript = (label: string) => `set -eu
+const installScript = (
+  label: string,
+  serveEnvironment?: Readonly<Record<string, string>>,
+) => `set -eu
 export PATH="$HOME/.local/bin:$PATH"
 # The label file is read by \`t3 serve\` itself, so it works on providers without sudo, systemd,
 # or a writable /etc/machine-info. The hostname is only a convenience for the machine's UI.
@@ -94,15 +118,15 @@ if ! command -v t3 >/dev/null 2>&1; then
   echo "The t3 CLI did not install." >&2
   exit 1
 fi
-${SERVE_SCRIPT}`;
+${serveScript(serveEnvironment)}`;
 
-const RESUME_SCRIPT = `set -eu
+const resumeScript = (serveEnvironment?: Readonly<Record<string, string>>) => `set -eu
 export PATH="$HOME/.local/bin:$PATH"
 if ! command -v t3 >/dev/null 2>&1; then
   echo "The t3 CLI is missing." >&2
   exit 1
 fi
-${SERVE_SCRIPT}`;
+${serveScript(serveEnvironment)}`;
 
 // A template copies the disk, and T3's userdata holds the environment id, auth sessions, and secrets:
 // a sandbox started from it would answer as the source with the source's valid bearer sessions.
@@ -400,6 +424,8 @@ const make = Effect.gen(function* () {
     const limits = yield* preflightStart(driver, config, size);
     // The record keeps the clamped lifetime, so its deadline matches what the provider enforces.
     const ttlMinutes = Math.min(input.ttlMinutes ?? 480, limits?.maxTtlMinutes ?? Infinity);
+    // Built before the machine exists, so a bad driver definition cannot strand a billed sandbox.
+    const installCommand = installScript(label, driver.serveEnvironment);
 
     const idempotencyKey = yield* crypto.randomUUIDv4().pipe(
       Effect.mapError(
@@ -463,7 +489,7 @@ const make = Effect.gen(function* () {
       driver.execute({
         config: sandboxConfig,
         sandboxId: sandbox.id,
-        command: installScript(label),
+        command: installCommand,
         timeoutSeconds: 600,
       }),
     );
@@ -684,7 +710,7 @@ const make = Effect.gen(function* () {
       driver.execute({
         config,
         sandboxId: record.sandboxId,
-        command: RESUME_SCRIPT,
+        command: resumeScript(driver.serveEnvironment),
         timeoutSeconds: 180,
       }),
     ).pipe(
