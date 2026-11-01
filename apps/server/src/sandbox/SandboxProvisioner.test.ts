@@ -2491,6 +2491,55 @@ describe("SandboxProvisioner", () => {
     );
   });
 
+  it.effect("starts t3 serve with the driver's serve environment only for Daytona", () => {
+    const commands: Array<{ provider: string; command: string }> = [];
+    const bodyOf = (request: HttpClientRequest.HttpClientRequest) =>
+      request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
+    const client = HttpClient.make((request) => {
+      const reply = (value: unknown) =>
+        Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(value)));
+      if (request.url.endsWith("/.well-known/t3/environment")) return reply(descriptor);
+      if (request.url.startsWith("https://boat.dev/")) {
+        if (request.url.endsWith("/limits")) return reply(boatLimitsFixture());
+        if (request.url.endsWith("/sandboxes")) return Effect.succeed(boatResponse(request));
+        commands.push({ provider: "boat", command: JSON.parse(bodyOf(request)).command });
+        return reply({ exitCode: 0, stdout: "Token: pair_boat\n", stderr: "" });
+      }
+      if (request.url.endsWith("/toolbox-proxy-url")) {
+        return reply({ url: "https://toolbox.example/toolbox" });
+      }
+      if (request.url.endsWith("/ports/3773/preview-url")) {
+        return reply({ url: "https://3773-sandbox_1.proxy.daytona.works" });
+      }
+      if (request.url.endsWith("/process/execute")) {
+        commands.push({ provider: "daytona", command: JSON.parse(bodyOf(request)).command });
+        return reply({ exitCode: 0, result: "Token: pair_daytona\n" });
+      }
+      return reply({ id: "sandbox_1", name: "Daytona sandbox", state: "started" });
+    });
+
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      yield* provisioner.create({ provider: "daytona", apiKey: "dtn_test" });
+      yield* provisioner.create({ provider: "boat", apiKey: "boat_test" });
+
+      const installOf = (provider: string) =>
+        commands.find((entry) => entry.provider === provider && entry.command.includes("t3 serve"))
+          ?.command ?? "";
+      const serveLine = (provider: string) =>
+        installOf(provider)
+          .split("\n")
+          .find((line) => line.trimStart().startsWith("nohup "));
+      // Daytona's preview proxy answers CORS, so the server must not add a second origin header,
+      // and the service unit cannot carry that variable.
+      expect(serveLine("daytona")).toContain("env T3CODE_PROXY_HANDLES_CORS='true' t3 serve");
+      expect(installOf("daytona")).not.toContain("t3 service install");
+      // Boat's hosted port does not touch CORS, so its server keeps answering it.
+      expect(serveLine("boat")).toContain("nohup t3 serve");
+      expect(serveLine("boat")).not.toContain("T3CODE_PROXY_HANDLES_CORS");
+    }).pipe(Effect.provide(testLayer), Effect.provideService(HttpClient.HttpClient, client));
+  });
+
   it.effect("deletes the sandbox when the public port cannot be exposed", () => {
     const requests: Array<string> = [];
     const client = HttpClient.make((request) => {
