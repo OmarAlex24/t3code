@@ -93,6 +93,12 @@ export class ServerConfig extends Context.Service<
     readonly devUrl: URL | undefined;
     readonly devAuthToken?: Redacted.Redacted<string> | undefined;
     readonly devAllowedOrigins: ReadonlyArray<string>;
+    /**
+     * A reverse proxy in front of this server answers CORS itself (Daytona preview URLs echo the
+     * caller's origin). The server then sends no CORS headers, because a second
+     * `Access-Control-Allow-Origin` value makes browsers reject every response.
+     */
+    readonly proxyHandlesCors?: boolean | undefined;
     readonly noBrowser: boolean;
     readonly startupPresentation: StartupPresentation;
     readonly desktopBootstrapToken: string | undefined;

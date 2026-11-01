@@ -147,6 +147,7 @@ const EnvServerConfig = Config.all({
         .filter((entry) => entry.length > 0),
     ),
   ),
+  proxyHandlesCors: Config.Boolean("T3CODE_PROXY_HANDLES_CORS").pipe(Config.withDefault(false)),
   noBrowser: Config.Boolean("T3CODE_NO_BROWSER").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -510,6 +511,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     devUrl,
     ...(devAuthToken === undefined ? {} : { devAuthToken }),
     devAllowedOrigins: env.devAllowedOrigins,
+    ...(env.proxyHandlesCors ? { proxyHandlesCors: true } : {}),
     noBrowser,
     startupPresentation,
     desktopBootstrapToken,
