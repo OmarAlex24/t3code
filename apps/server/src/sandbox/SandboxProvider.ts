@@ -14,6 +14,7 @@ import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as Effect from "effect/Effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as Layer from "effect/Layer";
+import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 
 import { makeHttp1Dispatcher } from "../outboundHttp.ts";
@@ -200,11 +201,13 @@ const parseErrorBody = (body: string) => {
   const nested = isRecord(parsed.error) ? parsed.error : {};
   const details = isRecord(nested.details) ? nested.details : {};
   const code = [parsed.code, nested.code].find((value) => typeof value === "string");
+  const message = [details.message, parsed.message].find((value) => typeof value === "string");
   const window = [parsed.window, details.window].find(
     (value): value is string => value === "minute" || value === "hour" || value === "day",
   );
   return {
     code: typeof code === "string" ? code : undefined,
+    message: typeof message === "string" ? message : undefined,
     window,
     retryAfterSeconds: [
       parsed.retryAfterSeconds,
@@ -310,24 +313,58 @@ const withDeadline =
       }),
     );
 
-// Untraced: `requestJson` and `requestText` own the span for the request.
-const executeChecked = Effect.fnUntraced(function* (input: {
+interface FailedAttempt {
+  readonly error: SandboxProviderError;
+  /** The provider's own code and message, read only to decide whether to send the request again. */
+  readonly providerCode?: string | undefined;
+  readonly providerMessage?: string | undefined;
+}
+
+const MAX_RETRIES = 3;
+// A longer wait is the user's to see, through the error's `retryAfterSeconds`.
+const MAX_RETRY_WAIT_SECONDS = 20;
+// Boat refuses these before anything runs: https://docs.boat.dev/api/v1.md#commands-files-and-processes
+const NOT_RUN_CODES = new Set(["sandbox_starting", "idempotency_in_progress"]);
+
+const repeatable = (request: HttpClientRequest.HttpClientRequest) =>
+  request.method === "GET" ||
+  request.method === "HEAD" ||
+  request.method === "PUT" ||
+  request.method === "DELETE" ||
+  request.headers["idempotency-key"] !== undefined;
+
+const shouldRetry = (request: HttpClientRequest.HttpClientRequest, failure: FailedAttempt) => {
+  const { status, code } = failure.error;
+  // Any other `sandbox_direct_failed` on a command means it possibly ran.
+  if (
+    failure.providerCode === "sandbox_direct_failed" &&
+    failure.providerMessage === "sandbox_restoring"
+  ) {
+    return true;
+  }
+  if (failure.providerCode !== undefined && NOT_RUN_CODES.has(failure.providerCode)) return true;
+  if (status === 429) return failure.error.retryAfterSeconds !== undefined;
+  // A 5xx T3 has a code for is a refusal the user can act on, such as no free machines.
+  const transient = status === undefined || (status >= 500 && code === "unknown");
+  return transient && repeatable(request);
+};
+
+const executeOnce = Effect.fnUntraced(function* (input: {
   readonly provider: SandboxProviderKind;
   readonly stage: SandboxStage;
   readonly request: HttpClientRequest.HttpClientRequest;
 }) {
   const client = yield* HttpClient.HttpClient;
   const response = yield* client.execute(input.request).pipe(
-    Effect.mapError(
-      (cause) =>
-        new SandboxProviderError({
-          provider: input.provider,
-          stage: input.stage,
-          // The transport message is bounded and does not include the request headers or body.
-          detail: "The sandbox provider could not be reached.",
-          cause,
-        }),
-    ),
+    Effect.mapError((cause): FailedAttempt => ({
+      error: new SandboxProviderError({
+        provider: input.provider,
+        stage: input.stage,
+        // The transport message is bounded and does not include the request headers or body.
+        detail: "The sandbox provider could not be reached.",
+        cause,
+      }),
+    })),
   );
   if (response.status < 200 || response.status >= 300) {
     // Provider bodies can echo request values, so the reason stays structured and the body only
@@ -347,24 +384,53 @@ const executeChecked = Effect.fnUntraced(function* (input: {
               ? "billing_required"
               : "unknown");
     const retryAfterSeconds = parsed.retryAfterSeconds ?? retryAfterHeader(response.headers);
-    return yield* new SandboxProviderError({
-      provider: input.provider,
-      stage: input.stage,
-      status: response.status,
-      code,
-      ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
-      detail: describeProviderFailure({
+    return yield* Effect.fail<FailedAttempt>({
+      error: new SandboxProviderError({
         provider: input.provider,
-        code,
+        stage: input.stage,
         status: response.status,
-        window: parsed.window,
-        retryAfterSeconds,
+        code,
+        ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+        detail: describeProviderFailure({
+          provider: input.provider,
+          code,
+          status: response.status,
+          window: parsed.window,
+          retryAfterSeconds,
+        }),
+        cause: new Error(body.slice(0, 2000)),
       }),
-      cause: new Error(body.slice(0, 2000)),
+      providerCode: parsed.code,
+      providerMessage: parsed.message,
     });
   }
   return response;
 });
+
+// Untraced: `requestJson` and `requestText` own the span for the request. Retries stay inside the
+// caller's deadline, and only what the provider documents as safe to send again is sent again.
+const executeChecked = (
+  input: Parameters<typeof executeOnce>[0],
+  attempt = 0,
+): Effect.Effect<
+  HttpClientResponse.HttpClientResponse,
+  SandboxProviderError,
+  HttpClient.HttpClient
+> =>
+  executeOnce(input).pipe(
+    Effect.catch((failure) =>
+      Effect.gen(function* () {
+        if (attempt >= MAX_RETRIES || !shouldRetry(input.request, failure)) {
+          return yield* failure.error;
+        }
+        const wait =
+          failure.error.retryAfterSeconds ?? 2 ** attempt * (yield* Random.nextBetween(0.5, 1));
+        if (wait > MAX_RETRY_WAIT_SECONDS) return yield* failure.error;
+        yield* Effect.sleep(`${Math.round(wait * 1000)} millis`);
+        return yield* executeChecked(input, attempt + 1);
+      }),
+    ),
+  );
 
 export const requestJson = Effect.fn("SandboxProvider.requestJson")(function* <
   S extends Schema.Top,

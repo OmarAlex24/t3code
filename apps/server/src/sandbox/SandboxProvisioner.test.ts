@@ -18,6 +18,7 @@ import * as TestClock from "effect/testing/TestClock";
 import {
   FetchHttpClient,
   HttpClient,
+  HttpClientError,
   HttpClientRequest,
   HttpClientResponse,
   UrlParams,
@@ -1579,6 +1580,153 @@ describe("sandbox provider requests", () => {
       );
     }),
   );
+
+  it.effect("sends a request again only where the provider says that is safe", () =>
+    Effect.gen(function* () {
+      const restoring = {
+        ok: false,
+        code: "sandbox_direct_failed",
+        message: "sandbox_restoring",
+        error: {
+          code: "sandbox_direct_failed",
+          details: { retryable: true, message: "sandbox_restoring" },
+        },
+      };
+      const cases = [
+        // Boat mounts a resumed or forked sandbox's files first; a command refused then never ran.
+        { provider: "boat", method: "POST", status: 502, body: restoring, sent: 2 },
+        {
+          provider: "boat",
+          method: "POST",
+          status: 409,
+          body: { code: "sandbox_starting" },
+          sent: 2,
+        },
+        // Any other machine failure means the command possibly ran.
+        {
+          provider: "boat",
+          method: "POST",
+          status: 502,
+          body: { code: "sandbox_direct_failed", message: "process_lost" },
+          sent: 1,
+        },
+        {
+          provider: "boat",
+          method: "PUT",
+          status: 502,
+          body: { code: "sandbox_direct_failed" },
+          sent: 2,
+        },
+        // A create with an idempotency key returns the same sandbox when sent again.
+        {
+          provider: "boat",
+          method: "POST",
+          key: true,
+          status: 409,
+          body: { code: "idempotency_in_progress" },
+          sent: 2,
+        },
+        { provider: "boat", method: "POST", key: true, unreachable: true, sent: 2 },
+        { provider: "boat", method: "POST", unreachable: true, sent: 1 },
+        { provider: "vercel", method: "GET", unreachable: true, sent: 2 },
+        { provider: "daytona", method: "GET", status: 503, body: {}, sent: 2 },
+        { provider: "daytona", method: "DELETE", status: 500, body: {}, sent: 2 },
+        { provider: "daytona", method: "POST", status: 502, body: {}, sent: 1 },
+        // A refusal the user can act on is reported, not waited out.
+        {
+          provider: "boat",
+          method: "GET",
+          status: 503,
+          body: { code: "no_ready_machine" },
+          sent: 1,
+        },
+        // A rate limit ran nothing, so any request waits for it, but only a short wait.
+        {
+          provider: "daytona",
+          method: "POST",
+          status: 429,
+          headers: { "Retry-After-Sandbox-Create": "5" },
+          body: {},
+          sent: 2,
+        },
+        {
+          provider: "daytona",
+          method: "POST",
+          status: 429,
+          headers: { "Retry-After-Sandbox-Create": "45" },
+          body: {},
+          sent: 1,
+        },
+        { provider: "boat", method: "POST", status: 429, body: { code: "limit_reached" }, sent: 1 },
+        { provider: "daytona", method: "GET", status: 503, body: {}, failures: 9, sent: 4 },
+      ] as const;
+      for (const testCase of cases) {
+        let sent = 0;
+        const client = HttpClient.make((request) => {
+          sent++;
+          if (sent > ("failures" in testCase ? testCase.failures : 1)) {
+            return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({})));
+          }
+          if ("unreachable" in testCase) {
+            return Effect.fail(
+              new HttpClientError.HttpClientError({
+                reason: new HttpClientError.TransportError({ request }),
+              }),
+            );
+          }
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              Response.json(testCase.body, {
+                status: testCase.status,
+                headers: "headers" in testCase ? testCase.headers : {},
+              }),
+            ),
+          );
+        });
+        const base = HttpClientRequest.make(testCase.method)("https://provider.example/sandboxes");
+        const fiber = yield* requestJson({
+          provider: testCase.provider,
+          stage: "install",
+          schema: Schema.Struct({}),
+          request:
+            "key" in testCase
+              ? HttpClientRequest.setHeaders(base, { "Idempotency-Key": "attempt-1" })
+              : base,
+        }).pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.forkChild);
+        yield* TestClock.adjust("60 seconds");
+        const exit = yield* Fiber.await(fiber);
+        expect(sent, JSON.stringify(testCase)).toBe(testCase.sent);
+        expect(Exit.isSuccess(exit), JSON.stringify(testCase)).toBe(
+          testCase.sent > ("failures" in testCase ? testCase.failures : 1),
+        );
+      }
+
+      // The provider's own wait is honored before the request goes again.
+      let sent = 0;
+      const limited = HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            ++sent === 1
+              ? Response.json({}, { status: 429, headers: { "Retry-After-Sandbox-Create": "5" } })
+              : Response.json({}),
+          ),
+        ),
+      );
+      const waiting = yield* requestJson({
+        provider: "daytona",
+        stage: "create",
+        schema: Schema.Struct({}),
+        request: HttpClientRequest.post("https://provider.example/sandbox"),
+      }).pipe(Effect.provideService(HttpClient.HttpClient, limited), Effect.forkChild);
+      yield* TestClock.adjust("4 seconds");
+      expect(sent).toBe(1);
+      yield* TestClock.adjust("1 second");
+      yield* Fiber.join(waiting);
+      expect(sent).toBe(2);
+    }),
+  );
 });
 
 describe("SandboxProvisioner lifecycle", () => {
@@ -1605,7 +1753,7 @@ describe("SandboxProvisioner lifecycle", () => {
           HttpClientResponse.fromWeb(
             request,
             options.limits === undefined
-              ? Response.json({ ok: false, code: "internal_error" }, { status: 500 })
+              ? Response.json({ ok: false, code: "unauthorized" }, { status: 401 })
               : Response.json(options.limits),
           ),
         );
@@ -2197,7 +2345,7 @@ describe("SandboxProvisioner lifecycle", () => {
       return respond(request, { ok: true });
     });
     return Effect.gen(function* () {
-      yield* SandboxProvisioner.SandboxProvisioner.pipe(
+      const swept = yield* SandboxProvisioner.SandboxProvisioner.pipe(
         Effect.flatMap((provisioner) =>
           provisioner.sweep.pipe(
             Effect.andThen(
@@ -2216,7 +2364,11 @@ describe("SandboxProvisioner lifecycle", () => {
           ),
         ),
         Effect.provideService(HttpClient.HttpClient, client),
+        Effect.forkChild,
       );
+      // The unreachable provider's status read is sent again before the sweep gives up on it.
+      yield* TestClock.adjust("1 minute");
+      yield* Fiber.join(swept);
 
       const stateOf = (record: SandboxRecord) =>
         repository.records.get(record.environmentId)?.state;
@@ -2244,7 +2396,8 @@ describe("SandboxProvisioner lifecycle", () => {
       expect(requests.filter((request) => request.includes("include=cost"))).toEqual([
         "GET https://boat.dev/api/v1/sandboxes?include=cost&label=t3.code%2Frole%3Denvironment&limit=200",
       ]);
-      expect(requests.filter((request) => /\/sandboxes\/bx_/.test(request))).toHaveLength(6);
+      // One status read per record, and three more for the one that kept failing.
+      expect(requests.filter((request) => /\/sandboxes\/bx_/.test(request))).toHaveLength(9);
     });
   });
   const runningRecord: SandboxRecord = {
@@ -2281,7 +2434,7 @@ describe("SandboxProvisioner lifecycle", () => {
       requests.push(`${request.method} ${request.url}`);
       if (request.url.endsWith("/limits")) {
         const limits = options.limits?.();
-        return limits === undefined ? json(request, { ok: false }, 500) : json(request, limits);
+        return limits === undefined ? json(request, { ok: false }, 401) : json(request, limits);
       }
       if (request.url.endsWith("/commands")) {
         const command =
@@ -2523,7 +2676,7 @@ describe("SandboxProvisioner", () => {
       requests.push(`${request.method} ${request.url}`);
       if (request.url.endsWith("/limits")) {
         return Effect.succeed(
-          HttpClientResponse.fromWeb(request, Response.json({ ok: false }, { status: 503 })),
+          HttpClientResponse.fromWeb(request, Response.json({ ok: false }, { status: 401 })),
         );
       }
       if (request.method === "POST" && request.url.endsWith("/sandboxes")) {
@@ -2917,7 +3070,7 @@ describe("sandbox agent access", () => {
       if (request.method === "GET" && request.url.endsWith(`/sandboxes/${boatSandboxId}`)) {
         return Response.json({ sandbox: { id: boatSandboxId, state: "ready", error: null } });
       }
-      if (request.url.endsWith("/limits")) return Response.json({}, { status: 503 });
+      if (request.url.endsWith("/limits")) return Response.json({}, { status: 401 });
       if (request.url.endsWith("/.well-known/t3/environment")) return Response.json(descriptor);
       if (request.method === "POST" && request.url.endsWith("/sandboxes")) {
         return Response.json({
