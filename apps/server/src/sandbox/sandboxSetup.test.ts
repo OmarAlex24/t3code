@@ -13,6 +13,9 @@ import {
   ENSURE_TOOLS_SCRIPT,
   parseEndpointReach,
   parseMissingTools,
+  parseTailscaleReport,
+  tailscaleScript,
+  tailscaleScrub,
 } from "./sandboxSetup.ts";
 
 // The scripts run in a throwaway HOME with this machine's sh and node, as they would in a sandbox.
@@ -136,5 +139,109 @@ describe("endpointReachScript", () => {
         expect(yield* (yield* FileSystem.FileSystem).exists(`${home}/pwned`)).toBe(false);
       }),
     ),
+  );
+});
+
+// Stand-ins for sudo and Tailscale's binaries, so the scripts run without root. The daemon never
+// gets a TUN device, which is what a container gives tailscaled.
+const TAILSCALE_STUBS = {
+  sudo: `#!/bin/sh
+[ "$1" = -n ] && shift
+exec "$@"`,
+  tailscaled: `#!/bin/sh
+echo "$*" >"$T3_STUB/tailscaled.args"
+echo start >>"$T3_STUB/starts"`,
+  tailscale: `#!/bin/sh
+echo "$*" >>"$T3_STUB/tailscale.argv"
+for arg in "$@"; do
+  case "$arg" in
+    status)
+      [ -f "$T3_STUB/tailscaled.args" ] || exit 1
+      if [ -f "$T3_STUB/up" ]; then state=Running; id=nTESTCNTRL; else state=NeedsLogin; id=; fi
+      printf '{\\n  "TUN": false,\\n  "BackendState": "%s",\\n  "Self": {\\n    "ID": "%s",\\n    "NodeID": 7\\n  }\\n}\\n' "$state" "$id"
+      exit 0 ;;
+    up) up=1 ;;
+    logout) rm -f "$T3_STUB/up"; exit 0 ;;
+    --auth-key=file:*) key="\${arg#--auth-key=file:}" ;;
+  esac
+done
+if [ -n "$up" ]; then
+  cat "$key" >"$T3_STUB/key.seen"
+  find "$key" -perm 600 >"$T3_STUB/key.mode"
+  touch "$T3_STUB/up"
+fi`,
+};
+
+const withTailscaleStubs = <A, E, R>(
+  test: (run: (script: string) => Effect.Effect<string>, stub: string) => Effect.Effect<A, E, R>,
+) =>
+  withHome((home) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const bin = `${home}/bin`;
+      const stub = `${home}/stub`;
+      yield* fs.makeDirectory(bin);
+      yield* fs.makeDirectory(stub);
+      for (const [name, body] of Object.entries(TAILSCALE_STUBS)) {
+        yield* fs.writeFileString(`${bin}/${name}`, `${body}\n`);
+        yield* fs.chmod(`${bin}/${name}`, 0o755);
+      }
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const run = (script: string) =>
+        spawner
+          .string(
+            ChildProcess.make("sh", ["-c", script], {
+              cwd: home,
+              env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, T3_STUB: stub },
+              stdin: "ignore",
+            }),
+          )
+          .pipe(Effect.orDie);
+      return yield* test(run, stub);
+    }),
+  );
+
+describe("tailscaleScript", () => {
+  it.live(
+    "falls back to userspace, joins with the key as a 0600 file, and the scrub logs out",
+    () =>
+      withTailscaleStubs((run, stub) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const root = `${stub}/root`;
+          const authKey = "tskey-auth-'$(touch pwned)\"";
+          const joined = parseTailscaleReport(
+            yield* run(tailscaleScript({ authKey, hostname: "t3-sandbox-web", root })),
+          );
+          expect(joined).toEqual({
+            daemon: "nohup",
+            mode: "userspace",
+            state: "Running",
+            nodeId: "nTESTCNTRL",
+          });
+          expect(yield* fs.readFileString(`${stub}/tailscaled.args`)).toBe(
+            `--state=${root}/var/lib/tailscale/tailscaled.state --socket=${root}/run/tailscale/tailscaled.sock --tun=userspace-networking --outbound-http-proxy-listen=localhost:1055\n`,
+          );
+          // The key is data in a private file: never an argument, never shell.
+          expect(yield* fs.readFileString(`${stub}/key.seen`)).toBe(authKey);
+          expect((yield* fs.readFileString(`${stub}/key.mode`)).trim()).not.toBe("");
+          const argv = yield* fs.readFileString(`${stub}/tailscale.argv`);
+          expect(argv).not.toContain("tskey-auth");
+          expect(argv).toContain("--hostname=t3-sandbox-web --accept-dns=false");
+          expect(yield* fs.exists(`${stub}/pwned`)).toBe(false);
+
+          // A daemon that still answers in the recorded mode is left running.
+          const starts = yield* fs.readFileString(`${stub}/starts`);
+          const resumed = parseTailscaleReport(
+            yield* run(tailscaleScript({ hostname: "t3-sandbox-web", root })),
+          );
+          expect(resumed).toMatchObject({ mode: "userspace", state: "Running" });
+          expect(yield* fs.readFileString(`${stub}/starts`)).toBe(starts);
+
+          yield* run(`set -eu\n${tailscaleScrub(root)}`);
+          expect(yield* fs.readFileString(`${stub}/tailscale.argv`)).toContain("logout");
+          expect(yield* fs.exists(`${root}/var/lib/tailscale`)).toBe(false);
+        }),
+      ),
   );
 });

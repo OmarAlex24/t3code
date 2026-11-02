@@ -1,6 +1,8 @@
 // Scripts that set up what a sandbox gets beyond T3 Code. Secrets reach them only as base64 inside
 // single quotes, so no value is ever parsed by the shell, and none of them print what they write.
 
+import { shellQuote } from "./SandboxProvider.ts";
+
 const base64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
 
 // Merges into Claude's own settings `env`, which `claude` and T3's Claude provider both read, and
@@ -8,6 +10,9 @@ const base64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
 export const claudeSettingsScript = (env: {
   readonly ANTHROPIC_BASE_URL: string;
   readonly ANTHROPIC_AUTH_TOKEN: string;
+  readonly HTTPS_PROXY?: string;
+  readonly HTTP_PROXY?: string;
+  readonly NO_PROXY?: string;
 }) => `set -eu
 umask 077
 export PATH="$HOME/.local/bin:$PATH"
@@ -33,7 +38,18 @@ fs.renameSync(file + ".t3-tmp", file);
 ' "$dir/settings.json"
 chmod 600 "$dir/settings.json"`;
 
-// Run before a template save: a copy must not inherit the source's Claude token.
+/** Where tailscaled's HTTP proxy listens when the sandbox cannot create a TUN device. */
+export const TAILSCALE_PROXY_URL = "http://localhost:1055";
+
+/** What Claude needs to reach a tailnet endpoint through tailscaled's userspace proxy. */
+export const tailscaleProxyEnv = {
+  HTTPS_PROXY: TAILSCALE_PROXY_URL,
+  HTTP_PROXY: TAILSCALE_PROXY_URL,
+  NO_PROXY: "localhost,127.0.0.1,::1",
+} as const;
+
+// Run before a template save: a copy must not inherit the source's Claude token, or the proxy that
+// only works while this sandbox's tailscaled runs. A proxy the user set to something else stays.
 export const CLAUDE_SETTINGS_SCRUB = `dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 if [ -f "$dir/settings.json" ] && command -v node >/dev/null 2>&1; then
   node -e '
@@ -43,6 +59,9 @@ const settings = JSON.parse(fs.readFileSync(file, "utf8"));
 if (settings && settings.env && typeof settings.env === "object") {
   delete settings.env.ANTHROPIC_AUTH_TOKEN;
   delete settings.env.ANTHROPIC_BASE_URL;
+  for (const [name, value] of Object.entries(${JSON.stringify(tailscaleProxyEnv)})) {
+    if (settings.env[name] === value) delete settings.env[name];
+  }
   fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\\n", { mode: 0o600 });
 }
 ' "$dir/settings.json" >/dev/null 2>&1 || true
@@ -129,10 +148,12 @@ export const parseMissingTools = (stdout: string): ReadonlyArray<SandboxTool> | 
 const ENDPOINT_STATUS_PREFIX = "T3_ENDPOINT_STATUS:";
 
 // Any HTTP answer means the sandbox can reach the endpoint; curl prints 000 when it cannot connect.
+// Through tailscaled's userspace proxy when that is how Claude reaches it.
 export const endpointReachScript = (
   baseUrl: string,
+  proxy?: string,
 ) => `url="$(printf '%s' '${base64(baseUrl)}' | base64 -d)"
-printf '${ENDPOINT_STATUS_PREFIX}%s\\n' "$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+printf '${ENDPOINT_STATUS_PREFIX}%s\\n' "$(curl -s -m 10 ${proxy === undefined ? "" : `--proxy '${proxy}' `}-o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
 exit 0`;
 
 /** Whether the sandbox reached the endpoint, or null when it could not tell (no curl, no report). */
@@ -144,4 +165,206 @@ export const parseEndpointReach = (stdout: string): "reachable" | "unreachable" 
     .trim();
   if (status === undefined || !/^\d{3}$/u.test(status)) return null;
   return status === "000" ? "unreachable" : "reachable";
+};
+
+const TAILSCALE_PREFIX = "T3_TAILSCALE_";
+
+const AS_ROOT = `as_root() {
+  if [ "$(id -u)" = 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"
+  else
+    return 1
+  fi
+}`;
+
+// `root` prefixes every system path, so tests can run the scripts without root.
+const tailscalePaths = (root: string) => ({
+  run: `${root}/run/tailscale`,
+  socket: `${root}/run/tailscale/tailscaled.sock`,
+  pidFile: `${root}/run/tailscale/t3-tailscaled.pid`,
+  state: `${root}/var/lib/tailscale`,
+  defaults: `${root}/etc/default/tailscaled`,
+  logDir: `${root}/var/log`,
+  log: `${root}/var/log/t3-tailscaled.log`,
+});
+
+// Stops a tailscaled T3 started under nohup, by the PID it recorded and only if that is tailscaled.
+const stopNohupTailscaled = (paths: ReturnType<typeof tailscalePaths>) => `{
+  pid="$(as_root cat ${paths.pidFile} 2>/dev/null || true)"
+  if [ -n "$pid" ] && tr '\\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q tailscaled; then
+    as_root kill "$pid" >/dev/null 2>&1 || true
+  fi
+  as_root rm -f ${paths.pidFile} >/dev/null 2>&1 || true
+}`;
+
+// Installs Tailscale when missing, starts tailscaled (systemd where it is PID 1, else nohup), and
+// joins with the key passed as a 0600 file, never an argument. Kernel TUN first; without one,
+// userspace with a local HTTP proxy for Claude. Exits 0 and reports `T3_TAILSCALE_*` lines.
+export const tailscaleScript = (options: {
+  readonly authKey?: string;
+  readonly hostname: string;
+  readonly root?: string;
+}) => {
+  const paths = tailscalePaths(options.root ?? "");
+  const join =
+    options.authKey === undefined
+      ? ""
+      : `key_file="$(mktemp)"
+chmod 600 "$key_file"
+trap 'rm -f "$key_file"' EXIT
+printf '%s' '${base64(options.authKey)}' | base64 -d >"$key_file"
+ts up --auth-key="file:$key_file" --hostname=${shellQuote(options.hostname)} --accept-dns=false --reset --timeout=60s >/dev/null 2>&1 || true
+rm -f "$key_file"
+`;
+  return `export PATH="$HOME/.local/bin:$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+${AS_ROOT}
+report() { printf '${TAILSCALE_PREFIX}%s: %s\\n' "$1" "$2"; }
+if ! as_root true; then
+  report ERROR root
+  exit 0
+fi
+if ! command -v tailscaled >/dev/null 2>&1; then
+  mkdir -p "$HOME/.t3"
+  installer="$(mktemp)"
+  if curl -fsSL -o "$installer" https://tailscale.com/install.sh >/dev/null 2>&1; then
+    as_root sh "$installer" >"$HOME/.t3/tailscale-install.log" 2>&1 || true
+  fi
+  rm -f "$installer"
+fi
+if ! command -v tailscaled >/dev/null 2>&1 || ! command -v tailscale >/dev/null 2>&1; then
+  report ERROR install
+  exit 0
+fi
+ts() { as_root tailscale --socket=${paths.socket} "$@"; }
+status_json() { ts status --json --peers=false 2>/dev/null; }
+backend() {
+  status_json | sed -n 's/^ *"BackendState": *"\\([^"]*\\)".*/\\1/p' | head -n 1
+}
+answering() { [ -n "$(backend)" ]; }
+# tailscaled says whether it got a TUN device, whatever it was started with.
+has_tun() { status_json | grep -q '"TUN": *true'; }
+wait_answering() {
+  i=0
+  while [ "$i" -lt 15 ]; do
+    if answering; then return 0; fi
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+uses_systemd() {
+  [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && systemctl cat tailscaled >/dev/null 2>&1
+}
+start() {
+  flags=""
+  if [ "$1" = userspace ]; then
+    flags="--tun=userspace-networking --outbound-http-proxy-listen=localhost:1055"
+  fi
+  if uses_systemd; then
+    printf 'PORT="41641"\\nFLAGS="%s"\\n' "$flags" | as_root tee ${paths.defaults} >/dev/null
+    as_root systemctl enable tailscaled >/dev/null 2>&1 || true
+    as_root systemctl restart tailscaled >/dev/null 2>&1 || true
+  else
+    ${stopNohupTailscaled(paths).replaceAll("\n", "\n    ")}
+    as_root mkdir -p ${paths.state} ${paths.run} ${paths.logDir}
+    as_root sh -c "nohup tailscaled --state=${paths.state}/tailscaled.state --socket=${paths.socket} $flags >${paths.log} 2>&1 &
+echo \\$! >${paths.pidFile}"
+  fi
+  wait_answering
+}
+stop() {
+  if uses_systemd; then
+    as_root systemctl stop tailscaled >/dev/null 2>&1 || true
+  else
+    ${stopNohupTailscaled(paths).replaceAll("\n", "\n    ")}
+  fi
+}
+recorded="$(as_root cat ${paths.state}/t3-mode 2>/dev/null || true)"
+mode=""
+if answering; then
+  if has_tun; then
+    mode=kernel
+  elif [ "$recorded" = userspace ]; then
+    mode=userspace
+  fi
+fi
+if [ -z "$mode" ]; then
+  if [ -c /dev/net/tun ] && start kernel && has_tun; then
+    mode=kernel
+  else
+    stop
+    if start userspace; then mode=userspace; fi
+  fi
+  if [ -n "$mode" ]; then
+    as_root mkdir -p ${paths.state}
+    printf '%s\\n' "$mode" | as_root tee ${paths.state}/t3-mode >/dev/null
+  fi
+fi
+if [ -z "$mode" ]; then
+  report ERROR start
+  exit 0
+fi
+if uses_systemd && systemctl is-active --quiet tailscaled; then
+  report DAEMON systemd
+else
+  report DAEMON nohup
+fi
+report MODE "$mode"
+${join}report STATE "$(backend)"
+report NODE "$(status_json | sed -n 's/^ *"ID": *"\\([^"]*\\)".*/\\1/p' | head -n 1)"
+exit 0`;
+};
+
+export interface TailscaleReport {
+  /** Why nothing could be checked: no root, no install, or a daemon that would not start. */
+  readonly error?: "root" | "install" | "start";
+  readonly mode?: "kernel" | "userspace";
+  readonly daemon?: "systemd" | "nohup";
+  /** tailscaled's BackendState: `Running` once joined, `NeedsLogin` without a key. */
+  readonly state?: string;
+  /** The node's stable id, which the Tailscale API accepts as the device id. */
+  readonly nodeId?: string;
+}
+
+/** What `tailscaleScript` reported, or null when it printed nothing T3 recognizes. */
+export const parseTailscaleReport = (stdout: string): TailscaleReport | null => {
+  const values = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    const match = /^T3_TAILSCALE_([A-Z]+): ?(.*)$/u.exec(line.trim());
+    if (match !== null) values.set(match[1]!, match[2]!.trim());
+  }
+  if (values.size === 0) return null;
+  const pick = <T extends string>(key: string, allowed: ReadonlyArray<T>) => {
+    const value = values.get(key);
+    return allowed.find((candidate) => candidate === value);
+  };
+  const error = pick("ERROR", ["root", "install", "start"] as const);
+  const mode = pick("MODE", ["kernel", "userspace"] as const);
+  const daemon = pick("DAEMON", ["systemd", "nohup"] as const);
+  const state = values.get("STATE") || undefined;
+  const nodeId = values.get("NODE") || undefined;
+  return {
+    ...(error === undefined ? {} : { error }),
+    ...(mode === undefined ? {} : { mode }),
+    ...(daemon === undefined ? {} : { daemon }),
+    ...(state === undefined ? {} : { state }),
+    ...(nodeId === undefined ? {} : { nodeId }),
+  };
+};
+
+// Run before a template save, with the other scrubs: logging out removes the node at once, and the
+// state goes so a copy starts without one. The binary stays, so a copy that joins skips the install.
+export const tailscaleScrub = (root = "") => {
+  const paths = tailscalePaths(root);
+  return `${AS_ROOT}
+if command -v tailscale >/dev/null 2>&1; then
+  as_root tailscale --socket=${paths.socket} logout >/dev/null 2>&1 || true
+  if command -v systemctl >/dev/null 2>&1; then
+    as_root systemctl disable --now tailscaled >/dev/null 2>&1 || true
+  fi
+  ${stopNohupTailscaled(paths).replaceAll("\n", "\n  ")}
+  as_root rm -rf ${paths.state} >/dev/null 2>&1 || true
+fi`;
 };
