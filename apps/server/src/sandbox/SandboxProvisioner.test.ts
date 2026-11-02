@@ -495,7 +495,7 @@ describe("celestoDriver", () => {
     });
   const commandOf = (request: Sent) => (request.body as { command: string }).command;
 
-  it.effect("creates a persistent-home sandbox, replaying a lost create with its key", () => {
+  it.effect("creates a sandbox by named size, replaying a lost create with its key", () => {
     const requests: Array<Sent> = [];
     let polls = 0;
     const client = celestoRecording(requests, (request) => {
@@ -509,7 +509,7 @@ describe("celestoDriver", () => {
         .create({
           config: celestoConfig,
           name: "Celesto sandbox",
-          size: "celesto-standard",
+          size: "celesto-micro",
           ttlMinutes: 480,
           idempotencyKey: "attempt-1",
         })
@@ -529,15 +529,34 @@ describe("celestoDriver", () => {
         authorization: "Bearer celesto_test",
         key: "attempt-1",
         client: "sdk",
-        body: {
-          template_id: "coding-agent",
-          // Celesto accepts only the CPU and memory pairs of its named sizes.
-          vcpus: 2,
-          ram_mb: 4096,
-          // Only the external volume keeps /home/ohm, and T3 with it, across a spot move.
-          external_volume_enabled: true,
-        },
       });
+      // Celesto refuses CPU and memory overrides, and the template's own default is Standard, not
+      // Micro. Its coding-agent machines cannot take an external volume.
+      expect(requests[0]!.body).toEqual({ template_id: "coding-agent", size_id: "micro" });
+    });
+  });
+
+  it.effect("waits to delete a computer Celesto is still creating", () => {
+    const requests: Array<Sent> = [];
+    let deletes = 0;
+    const client = celestoRecording(requests, () =>
+      ++deletes === 1
+        ? Response.json(
+            { detail: "A computer operation is already in progress", status_code: 409 },
+            { status: 409 },
+          )
+        : Response.json({ id: "cmp_1", status: "deleting" }),
+    );
+    return Effect.gen(function* () {
+      const destroy = yield* celestoDriver
+        .destroy({ config: celestoConfig, sandboxId: "cmp_1" })
+        .pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.forkChild);
+      yield* TestClock.adjust("2 seconds");
+      yield* Fiber.join(destroy);
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        "DELETE https://api.celesto.ai/v1/computers/cmp_1",
+        "DELETE https://api.celesto.ai/v1/computers/cmp_1",
+      ]);
     });
   });
 
@@ -2067,6 +2086,12 @@ describe("provider limits", () => {
           provider: "celesto",
           status: 403,
           body: { detail: { error_code: "trial_micro_only" } },
+          code: "size_unavailable",
+        },
+        {
+          provider: "celesto",
+          status: 422,
+          body: { detail: { error_code: "resource_overrides_unavailable" } },
           code: "size_unavailable",
         },
         {

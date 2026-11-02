@@ -3,6 +3,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Random from "effect/Random";
+import * as Schedule from "effect/Schedule";
 import { HttpClientRequest } from "effect/http";
 import * as Schema from "effect/Schema";
 
@@ -73,14 +74,14 @@ const CELESTO_STATUS: Record<string, SandboxProviderStatus> = {
   deleted: "deleted",
 };
 
-// CPU and memory of each named size; Celesto rejects any other pair.
-const SIZES: Record<string, { readonly vcpus: number; readonly ramMb: number }> = {
-  "celesto-micro": { vcpus: 1, ramMb: 2048 },
-  "celesto-small": { vcpus: 1, ramMb: 4096 },
-  "celesto-standard": { vcpus: 2, ramMb: 4096 },
-  "celesto-memory": { vcpus: 2, ramMb: 8192 },
-  "celesto-large": { vcpus: 4, ramMb: 16384 },
-  "celesto-xl": { vcpus: 8, ramMb: 32768 },
+// Celesto's `size_id` for each size; it refuses CPU and memory overrides.
+const SIZES: Record<string, string> = {
+  "celesto-micro": "micro",
+  "celesto-small": "small",
+  "celesto-standard": "standard",
+  "celesto-memory": "memory",
+  "celesto-large": "large",
+  "celesto-xl": "xl",
 };
 
 const info = {
@@ -327,7 +328,6 @@ export const celestoDriver: SandboxProviderDriver = {
   defaultSize: "celesto-micro",
   serverPort: SERVER_PORT,
   create: Effect.fn("Celesto.create")(function* (input) {
-    const size = SIZES[input.size] ?? SIZES["celesto-micro"]!;
     const send = requestJson({
       provider: "celesto",
       stage: "create",
@@ -337,13 +337,8 @@ export const celestoDriver: SandboxProviderDriver = {
           authorize(HttpClientRequest.post(`${CELESTO_API_BASE}/computers`), input.config.apiKey),
           { "Idempotency-Key": input.idempotencyKey, "X-Celesto-Client": "sdk" },
         ),
-        {
-          template_id: "coding-agent",
-          vcpus: size.vcpus,
-          ram_mb: size.ramMb,
-          // Only this volume keeps /home/ohm, where T3 lives, when Celesto moves a spot machine.
-          external_volume_enabled: true,
-        },
+        // Without a size the template's default is Standard, not Micro.
+        { template_id: "coding-agent", size_id: SIZES[input.size] ?? "micro" },
       ),
     });
     // Celesto takes no name or label, so only the same key finds what a lost create made.
@@ -454,5 +449,13 @@ export const celestoDriver: SandboxProviderDriver = {
         HttpClientRequest.delete(computerUrl(input.sandboxId)),
         input.config.apiKey,
       ),
-    }).pipe(Effect.asVoid),
+    }).pipe(
+      // Celesto answers 409 while another operation, such as the create, is still running.
+      Effect.retry({
+        while: (error) => error.status === 409,
+        schedule: Schedule.spaced(POLL_INTERVAL),
+        times: POLL_ATTEMPTS - 1,
+      }),
+      Effect.asVoid,
+    ),
 };

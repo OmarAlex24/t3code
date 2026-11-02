@@ -192,6 +192,7 @@ const PROVIDER_ERROR_CODES: Record<string, SandboxProviderErrorCode> = {
   payment_failed: "billing_required",
   payment_pending: "billing_required",
   trial_micro_only: "size_unavailable",
+  resource_overrides_unavailable: "size_unavailable",
   promotional_size_not_allowed: "size_unavailable",
 };
 

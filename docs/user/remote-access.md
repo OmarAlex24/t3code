@@ -40,7 +40,10 @@ key needs all three computer permissions (see, create and run, delete). Celesto 
 sandbox on its own, so the lifetime limit below is the only thing that stops one, and a sandbox
 keeps billing while this T3 Code server is off. The free trial runs Micro only and keeps one
 sandbox, stopped ones included, so delete it before you create another. Celesto keeps a stopped
-sandbox's disk for 30 days. Celesto sandboxes cannot be saved as templates and show no cost.
+sandbox's disk for 30 days. Celesto can also move a running sandbox to another machine on its own,
+and does not promise to keep the sandbox's files when it does, so push work you want to keep. If a
+sandbox stops answering after such a move, delete it and create a new one. Celesto sandboxes cannot
+be saved as templates and show no cost.
 
 The key is saved on the T3 Code server that provisions the sandbox, not on the client. Creating a
 sandbox bills the provider account that owns the key. Stop, resume, and delete sandboxes from
