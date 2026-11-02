@@ -191,6 +191,28 @@ const recording = (
     return Effect.succeed(HttpClientResponse.fromWeb(request, respond(request)));
   });
 
+// Answers like `recording`, except that `lost` requests never get an answer through.
+const losing = (
+  requests: Array<{ readonly method: string; readonly url: string; readonly body: unknown }>,
+  lost: (request: HttpClientRequest.HttpClientRequest) => boolean,
+  respond: (request: HttpClientRequest.HttpClientRequest) => Response,
+) => {
+  const answering = recording(requests, respond);
+  return HttpClient.make((request) =>
+    lost(request)
+      ? answering.execute(request).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new HttpClientError.HttpClientError({
+                reason: new HttpClientError.TransportError({ request }),
+              }),
+            ),
+          ),
+        )
+      : answering.execute(request),
+  );
+};
+
 const vercelConfig = { apiKey: "vcp_test", settings: {} };
 const vercelTeam = (plan: string) => ({ id: "team_1", slug: "acme", billing: { plan } });
 // Shaped like live `GET /v2/sandboxes/{name}` responses, with invented ids.
@@ -410,6 +432,35 @@ describe("boatDriver", () => {
       });
     },
   );
+
+  it.effect("sends a create again with its key when the answer never came", () => {
+    const requests: Array<{ method: string; url: string; key: string | undefined; body: string }> =
+      [];
+    const client = HttpClient.make((request) => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        key: request.headers["idempotency-key"],
+        body: request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "",
+      });
+      return requests.length === 1 ? Effect.never : Effect.succeed(boatResponse(request));
+    });
+    return Effect.gen(function* () {
+      const create = yield* boatDriver
+        .create({
+          config: { apiKey: "boat_test", settings: {} },
+          name: "Boat sandbox",
+          size: "default",
+          idempotencyKey: "attempt-1",
+        })
+        .pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.forkChild);
+      yield* TestClock.adjust("300 seconds");
+      // Boat returns the sandbox the lost request made instead of starting a second one.
+      expect(yield* Fiber.join(create)).toMatchObject({ id: boatSandboxId });
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual({ ...requests[0], key: "attempt-1" });
+    });
+  });
 });
 
 describe("daytonaDriver", () => {
@@ -555,6 +606,32 @@ describe("daytonaDriver", () => {
       }
     }),
   );
+
+  it.effect("deletes a sandbox whose create answer was lost", () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const client = losing(
+      requests,
+      (request) => request.method === "POST",
+      () => Response.json({ id: "sandbox_lost", name: "box-0f1e2d3c", state: "creating" }),
+    );
+    return Effect.gen(function* () {
+      const error = yield* daytonaDriver
+        .create({
+          config: { apiKey: "dtn_test", settings: {} },
+          name: "Box",
+          size: "daytona-small",
+          idempotencyKey: "0f1e2d3c-aaaa-bbbb",
+        })
+        .pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.flip);
+      expect(error).toMatchObject({ stage: "create" });
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        "POST https://app.daytona.io/api/sandbox",
+        "DELETE https://app.daytona.io/api/sandbox/box-0f1e2d3c",
+      ]);
+      // Daytona has no idempotency key, so each attempt gets its own name.
+      expect(requests[0]?.body).toMatchObject({ name: "box-0f1e2d3c" });
+    });
+  });
 });
 
 describe("vercelDriver", () => {
@@ -857,6 +934,33 @@ describe("vercelDriver", () => {
       }).pipe(Effect.provideService(HttpClient.HttpClient, client));
     },
   );
+
+  it.effect("deletes a sandbox whose create answer was lost", () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const client = losing(
+      requests,
+      (request) => request.method === "POST" && request.url.endsWith("/v4/sandboxes"),
+      (request) =>
+        new URL(request.url).pathname === "/v2/teams"
+          ? Response.json({ teams: [] })
+          : Response.json(vercelSandbox({ name: "box-0f1e2d3c" })),
+    );
+    return Effect.gen(function* () {
+      const error = yield* vercelDriver
+        .create({
+          config: vercelConfig,
+          name: "Box",
+          size: "vercel-2",
+          idempotencyKey: "0f1e2d3c-aaaa-bbbb",
+        })
+        .pipe(Effect.flip);
+      expect(error).toMatchObject({ stage: "create" });
+      expect(requests.slice(-2).map((request) => `${request.method} ${request.url}`)).toEqual([
+        "POST https://api.vercel.com/v4/sandboxes",
+        "DELETE https://api.vercel.com/v2/sandboxes/box-0f1e2d3c?projectId=t3-sandboxes&deleteOrphanSnapshots=true",
+      ]);
+    }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+  });
 });
 
 describe("sandbox templates", () => {

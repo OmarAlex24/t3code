@@ -6,10 +6,12 @@ import { HttpClientRequest } from "effect/http";
 import * as Schema from "effect/Schema";
 
 import {
+  attemptSandboxName,
   authorize,
   commandRequestSeconds,
   type CreatedSandbox,
   jsonBody,
+  mayHaveCreated,
   requestJson,
   requestText,
   type SandboxProviderConfig,
@@ -356,17 +358,6 @@ const toTemplate = (sandbox: typeof VercelNamedSandbox.Type): SandboxTemplate =>
   };
 };
 
-// Names must be unique per project and URL-safe; the attempt id keeps two equal labels apart.
-const sandboxName = (label: string, idempotencyKey: string) => {
-  const slug =
-    label
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/gu, "-")
-      .replace(/^-+|-+$/gu, "")
-      .slice(0, 48) || "sandbox";
-  return `${slug}-${idempotencyKey.replace(/[^a-zA-Z0-9]/gu, "").slice(0, 8)}`;
-};
-
 export const vercelDriver: SandboxProviderDriver = {
   info,
   defaultSize: "vercel-2",
@@ -384,7 +375,7 @@ export const vercelDriver: SandboxProviderDriver = {
     }
     yield* ensureProject(input.config, scope);
     const body = {
-      name: sandboxName(input.name, input.idempotencyKey),
+      name: attemptSandboxName(input.name, input.idempotencyKey),
       ports: [SERVER_PORT],
       // The session stops at the plan's cap even when T3's lifetime is longer; resume starts another.
       timeout: Math.min(input.ttlMinutes ?? 480, scope.sessionMaxMinutes) * 60_000,
@@ -417,7 +408,15 @@ export const vercelDriver: SandboxProviderDriver = {
               ),
               body,
             ),
-    });
+    }).pipe(
+      // Names are unique per project, so the attempt's name finds what a lost create made.
+      Effect.catchIf(mayHaveCreated, (error) =>
+        deleteSandbox(input.config, scope, body.name, "delete").pipe(
+          Effect.ignore,
+          Effect.andThen(Effect.fail(error)),
+        ),
+      ),
+    );
     const url = created.routes?.find((route) => route.port === SERVER_PORT)?.url;
     return {
       id: created.sandbox.name,

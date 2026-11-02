@@ -5,10 +5,12 @@ import { HttpClientRequest } from "effect/http";
 import * as Schema from "effect/Schema";
 
 import {
+  attemptSandboxName,
   authorize,
   commandRequestSeconds,
   type CreatedSandbox,
   jsonBody,
+  mayHaveCreated,
   requestJson,
   type SandboxProviderDriver,
   type SandboxProviderStatus,
@@ -267,15 +269,16 @@ export const daytonaDriver: SandboxProviderDriver = {
   // Daytona's preview proxy answers CORS itself: it echoes the caller's origin with credentials.
   // If `t3 serve` also sends `*`, the response carries two values and browsers reject it.
   serveEnvironment: { T3CODE_PROXY_HANDLES_CORS: "true" },
-  create: (input) =>
-    requestJson({
+  create: Effect.fn("Daytona.create")(function* (input) {
+    const name = attemptSandboxName(input.name, input.idempotencyKey);
+    return yield* requestJson({
       provider: "daytona",
       stage: "create",
       schema: DaytonaSandbox,
       request: jsonBody(
         authorize(HttpClientRequest.post(`${DAYTONA_API_BASE}/sandbox`), input.config.apiKey),
         {
-          name: input.name,
+          name,
           snapshot:
             input.template === undefined ? input.size : templateSnapshotName(input.template),
           public: true,
@@ -290,6 +293,13 @@ export const daytonaDriver: SandboxProviderDriver = {
         },
       ),
     }).pipe(
+      // Names are unique per organization and reach a new sandbox at once, where Daytona's label
+      // search is eventually consistent, so the attempt's name finds what a lost create made.
+      Effect.catchIf(mayHaveCreated, (error) =>
+        daytonaDriver
+          .destroy({ config: input.config, sandboxId: name })
+          .pipe(Effect.ignore, Effect.andThen(Effect.fail(error))),
+      ),
       Effect.flatMap((sandbox) =>
         // Daytona is created with auto-stop and auto-delete disabled, so a machine that never
         // finishes starting would bill forever if the provisioner never learned its id.
@@ -303,11 +313,9 @@ export const daytonaDriver: SandboxProviderDriver = {
           ),
         ),
       ),
-      Effect.map((sandbox): CreatedSandbox => ({
-        id: sandbox.id,
-        name: sandbox.name ?? input.name,
-      })),
-    ),
+      Effect.map((sandbox): CreatedSandbox => ({ id: sandbox.id, name: input.name })),
+    );
+  }),
   limits: Effect.fn("Daytona.limits")(
     function* (input) {
       const key = yield* requestJson({

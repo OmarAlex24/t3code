@@ -432,6 +432,24 @@ const executeChecked = (
     ),
   );
 
+/** A create that failed this way may still have made the machine: no answer, or a 5xx T3 has no code for. */
+export const mayHaveCreated = (error: SandboxProviderError) =>
+  error.status === undefined || (error.status >= 500 && error.code === "unknown");
+
+/**
+ * A provider name unique to one create attempt, so a create whose answer was lost can be found by
+ * name: URL-safe, from the label, with the attempt id keeping two equal labels apart.
+ */
+export const attemptSandboxName = (label: string, idempotencyKey: string) => {
+  const slug =
+    label
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/gu, "-")
+      .replace(/^-+|-+$/gu, "")
+      .slice(0, 48) || "sandbox";
+  return `${slug}-${idempotencyKey.replace(/[^a-zA-Z0-9]/gu, "").slice(0, 8)}`;
+};
+
 export const requestJson = Effect.fn("SandboxProvider.requestJson")(function* <
   S extends Schema.Top,
 >(input: {

@@ -13,6 +13,7 @@ import {
   commandRequestSeconds,
   type CreatedSandbox,
   jsonBody,
+  mayHaveCreated,
   requestJson,
   type SandboxProviderDriver,
   type SandboxProviderStatus,
@@ -342,7 +343,7 @@ export const boatDriver: SandboxProviderDriver = {
   defaultSize: "default",
   serverPort: 3773,
   create: Effect.fn("Boat.create")(function* (input) {
-    const created = yield* requestJson({
+    const send = requestJson({
       provider: "boat",
       stage: "create",
       schema: BoatSandbox,
@@ -370,6 +371,8 @@ export const boatDriver: SandboxProviderDriver = {
         },
       ),
     });
+    // The same key and body return the sandbox a create whose answer was lost made.
+    const created = yield* send.pipe(Effect.catchIf(mayHaveCreated, () => send));
     // A sandbox started from a saved snapshot does not relay the hosted port to loopback until
     // the port is hosted again, so the provisioner exposes it once the machine runs.
     const url =

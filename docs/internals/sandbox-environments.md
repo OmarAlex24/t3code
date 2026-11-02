@@ -26,9 +26,13 @@ Drivers must keep two invariants:
   carries two `Access-Control-Allow-Origin` values, which browsers reject.
 - **Cleanup.** `SandboxProvisioner` destroys the machine when any step after `create` fails or is
   interrupted (including exposing the port), so a provisioned machine never bills without an
-  environment pointing at it. Drivers must make `destroy` safe on a machine that never started,
-  and a driver that creates a machine before its own start polling must clean up that path itself,
-  because the provisioner never receives the id.
+  environment pointing at it. Drivers must make `destroy` safe on a machine that never started.
+  The provisioner never receives an id the driver did not return, so the driver cleans up two
+  paths itself: a machine it creates before its own start polling, and a create whose answer was
+  lost (`mayHaveCreated`). Boat replays the create with the same `Idempotency-Key`; Daytona and
+  Vercel name each attempt uniquely (`attemptSandboxName`) and delete that name. The sweep does not
+  delete provider sandboxes without a record: records are written only once provisioning ends,
+  and nothing on a sandbox tells this T3 server apart from another one sharing the account.
 
 ## Adding a provider
 
