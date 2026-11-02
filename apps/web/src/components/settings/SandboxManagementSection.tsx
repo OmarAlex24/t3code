@@ -473,7 +473,7 @@ function SandboxRow({
 
   const subtitle = [
     provider?.label ?? sandbox.provider,
-    sandbox.size,
+    provider?.sizes.find((size) => size.id === sandbox.size)?.label ?? sandbox.size,
     ...(sandbox.template === undefined ? [] : [`from ${sandbox.template}`]),
     ...(attention === undefined ? [stateLabel(sandbox)] : []),
     ...(sandbox.costDollars === undefined ? [] : [formatCost(sandbox.costDollars)]),
