@@ -150,6 +150,7 @@ const TAILSCALE_STUBS = {
 exec "$@"`,
   tailscaled: `#!/bin/sh
 echo "$*" >"$T3_STUB/tailscaled.args"
+echo "$TS_ASSUME_NETWORK_UP_FOR_TEST" >"$T3_STUB/tailscaled.assume-up"
 echo start >>"$T3_STUB/starts"`,
   tailscale: `#!/bin/sh
 echo "$*" >>"$T3_STUB/tailscale.argv"
@@ -222,6 +223,8 @@ describe("tailscaleScript", () => {
           expect(yield* fs.readFileString(`${stub}/tailscaled.args`)).toBe(
             `--state=${root}/var/lib/tailscale/tailscaled.state --socket=${root}/run/tailscale/tailscaled.sock --tun=userspace-networking --outbound-http-proxy-listen=localhost:1055\n`,
           );
+          // Vercel's eth0 has only link-local addresses; without this tailscaled pauses as offline.
+          expect(yield* fs.readFileString(`${stub}/tailscaled.assume-up`)).toBe("1\n");
           // The key is data in a private file: never an argument, never shell.
           expect(yield* fs.readFileString(`${stub}/key.seen`)).toBe(authKey);
           expect((yield* fs.readFileString(`${stub}/key.mode`)).trim()).not.toBe("");

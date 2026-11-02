@@ -269,7 +269,8 @@ start() {
   else
     ${stopNohupTailscaled(paths).replaceAll("\n", "\n    ")}
     as_root mkdir -p ${paths.state} ${paths.run} ${paths.logDir}
-    as_root sh -c "nohup tailscaled --state=${paths.state}/tailscaled.state --socket=${paths.socket} $flags >${paths.log} 2>&1 &
+    # Vercel's eth0 has only link-local addresses, which tailscaled reads as offline and pauses.
+    as_root sh -c "nohup env TS_ASSUME_NETWORK_UP_FOR_TEST=1 tailscaled --state=${paths.state}/tailscaled.state --socket=${paths.socket} $flags >${paths.log} 2>&1 &
 echo \\$! >${paths.pidFile}"
   fi
   wait_answering
