@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 
 import {
   authorize,
+  commandRequestSeconds,
   type CreatedSandbox,
   jsonBody,
   requestJson,
@@ -355,6 +356,7 @@ export const daytonaDriver: SandboxProviderDriver = {
   ),
   execute: Effect.fn("Daytona.execute")(function* (input) {
     const baseUrl = yield* toolboxBaseUrl(input.config.apiKey, input.sandboxId);
+    const seconds = Math.min(Math.max(input.timeoutSeconds, 1), 600);
     const result = yield* requestJson({
       provider: "daytona",
       stage: "install",
@@ -364,9 +366,10 @@ export const daytonaDriver: SandboxProviderDriver = {
         {
           command: input.command,
           ...(input.secrets === undefined ? {} : { envs: input.secrets }),
-          timeout: Math.min(Math.max(input.timeoutSeconds, 1), 600),
+          timeout: seconds,
         },
       ),
+      timeoutSeconds: commandRequestSeconds(seconds),
     });
     const exitCode = result.exitCode ?? 0;
     if (exitCode !== 0) {

@@ -10,9 +10,13 @@ import {
   type SandboxTemplate,
   type SandboxTemplateAllowance,
 } from "@t3tools/contracts";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as Effect from "effect/Effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+
+import { makeHttp1Dispatcher } from "../outboundHttp.ts";
 
 export interface SandboxProviderConfig {
   readonly apiKey: string;
@@ -262,6 +266,50 @@ const describeProviderFailure = (input: {
   }
 };
 
+/**
+ * The provisioner's client. Boat and Daytona answer a command only when it ends, up to ten minutes
+ * later, past fetch's 300 s header timeout. This one sets no header or body timeout, so every
+ * request through `requestJson` and `requestText` carries its own deadline instead.
+ */
+export const layerHttpClient = NodeHttpClient.layerUndiciNoDispatcher.pipe(
+  Layer.provide(
+    Layer.effect(NodeHttpClient.Dispatcher)(
+      Effect.acquireRelease(Effect.sync(makeHttp1Dispatcher), (dispatcher) =>
+        Effect.promise(() => dispatcher.destroy()),
+      ),
+    ),
+  ),
+);
+
+// Other calls keep the 300 s fetch gave them; a command gets its own run time plus a margin.
+const DEFAULT_REQUEST_SECONDS = 300;
+const COMMAND_MARGIN_SECONDS = 60;
+
+/** The deadline for a request that runs a command for up to `timeoutSeconds`. */
+export const commandRequestSeconds = (timeoutSeconds: number) =>
+  timeoutSeconds + COMMAND_MARGIN_SECONDS;
+
+const withDeadline =
+  (input: {
+    readonly provider: SandboxProviderKind;
+    readonly stage: SandboxStage;
+    readonly timeoutSeconds?: number | undefined;
+  }) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.timeoutOrElse({
+        duration: `${input.timeoutSeconds ?? DEFAULT_REQUEST_SECONDS} seconds`,
+        orElse: () =>
+          Effect.fail(
+            new SandboxProviderError({
+              provider: input.provider,
+              stage: input.stage,
+              detail: "The sandbox provider did not answer in time.",
+            }),
+          ),
+      }),
+    );
+
 // Untraced: `requestJson` and `requestText` own the span for the request.
 const executeChecked = Effect.fnUntraced(function* (input: {
   readonly provider: SandboxProviderKind;
@@ -325,21 +373,27 @@ export const requestJson = Effect.fn("SandboxProvider.requestJson")(function* <
   readonly stage: SandboxStage;
   readonly request: HttpClientRequest.HttpClientRequest;
   readonly schema: S;
+  /** Covers the response body too; defaults to `DEFAULT_REQUEST_SECONDS`. */
+  readonly timeoutSeconds?: number | undefined;
 }): Effect.fn.Return<
   S["Type"],
   SandboxProviderError,
   HttpClient.HttpClient | S["DecodingServices"]
 > {
-  const response = yield* executeChecked(input);
-  return yield* HttpClientResponse.schemaBodyJson(input.schema)(response).pipe(
-    Effect.mapError(
-      () =>
-        new SandboxProviderError({
-          provider: input.provider,
-          stage: input.stage,
-          detail: "Unexpected response from the sandbox provider.",
-        }),
+  return yield* executeChecked(input).pipe(
+    Effect.flatMap((response) =>
+      HttpClientResponse.schemaBodyJson(input.schema)(response).pipe(
+        Effect.mapError(
+          () =>
+            new SandboxProviderError({
+              provider: input.provider,
+              stage: input.stage,
+              detail: "Unexpected response from the sandbox provider.",
+            }),
+        ),
+      ),
     ),
+    withDeadline(input),
   );
 });
 
@@ -348,18 +402,23 @@ export const requestText = Effect.fn("SandboxProvider.requestText")(function* (i
   readonly provider: SandboxProviderKind;
   readonly stage: SandboxStage;
   readonly request: HttpClientRequest.HttpClientRequest;
+  readonly timeoutSeconds?: number | undefined;
 }) {
-  const response = yield* executeChecked(input);
-  return yield* response.text.pipe(
-    Effect.mapError(
-      (cause) =>
-        new SandboxProviderError({
-          provider: input.provider,
-          stage: input.stage,
-          detail: "The sandbox provider's response could not be read.",
-          cause,
-        }),
+  return yield* executeChecked(input).pipe(
+    Effect.flatMap((response) =>
+      response.text.pipe(
+        Effect.mapError(
+          (cause) =>
+            new SandboxProviderError({
+              provider: input.provider,
+              stage: input.stage,
+              detail: "The sandbox provider's response could not be read.",
+              cause,
+            }),
+        ),
+      ),
     ),
+    withDeadline(input),
   );
 });
 

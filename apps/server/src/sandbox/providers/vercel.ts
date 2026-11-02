@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 
 import {
   authorize,
+  commandRequestSeconds,
   type CreatedSandbox,
   jsonBody,
   requestJson,
@@ -431,6 +432,7 @@ export const vercelDriver: SandboxProviderDriver = {
   execute: Effect.fn("Vercel.execute")(function* (input) {
     const scope = yield* resolveScope(input.config);
     const current = yield* runningSession(input.config, scope, input.sandboxId, "install");
+    const seconds = Math.min(Math.max(input.timeoutSeconds, 1), 600);
     const stream = yield* requestText({
       provider: "vercel",
       stage: "install",
@@ -448,9 +450,10 @@ export const vercelDriver: SandboxProviderDriver = {
           ...(input.secrets === undefined ? {} : { env: input.secrets }),
           wait: true,
           logs: true,
-          timeout: Math.min(Math.max(input.timeoutSeconds, 1), 600) * 1000,
+          timeout: seconds * 1000,
         },
       ),
+      timeoutSeconds: commandRequestSeconds(seconds),
     });
     const result = parseCommandStream(stream);
     if (result.exitCode !== 0) {

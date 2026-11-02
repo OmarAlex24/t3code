@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 
 import {
   authorize,
+  commandRequestSeconds,
   type CreatedSandbox,
   jsonBody,
   requestJson,
@@ -301,19 +302,18 @@ const info = {
 const sandboxUrl = (sandboxId: string, path: string) =>
   `${BOAT_API_BASE}/sandboxes/${encodeURIComponent(sandboxId)}/${path}`;
 
-const runCommand = (apiKey: string, sandboxId: string, command: string, timeoutSeconds: number) =>
-  requestJson({
+const runCommand = (apiKey: string, sandboxId: string, command: string, timeoutSeconds: number) => {
+  const seconds = Math.min(Math.max(timeoutSeconds, 1), 600);
+  return requestJson({
     provider: "boat",
     stage: "install",
     schema: BoatCommand,
     request: jsonBody(
       authorize(HttpClientRequest.post(sandboxUrl(sandboxId, "commands")), apiKey),
-      {
-        // An `exit` in Boat's login shell runs ~/.bash_logout (clear_console), which fails it.
-        command: `sh -c ${shellQuote(command)}`,
-        timeoutSeconds: Math.min(Math.max(timeoutSeconds, 1), 600),
-      },
+      // An `exit` in Boat's login shell runs ~/.bash_logout (clear_console), which fails it.
+      { command: `sh -c ${shellQuote(command)}`, timeoutSeconds: seconds },
     ),
+    timeoutSeconds: commandRequestSeconds(seconds),
   }).pipe(
     Effect.filterOrFail(
       (result) => result.exitCode === 0,
@@ -335,6 +335,7 @@ const runCommand = (apiKey: string, sandboxId: string, command: string, timeoutS
     ),
     Effect.map((result) => ({ ...result, exitCode: result.exitCode ?? 0 })),
   );
+};
 
 export const boatDriver: SandboxProviderDriver = {
   info,

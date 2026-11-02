@@ -43,10 +43,12 @@ entry, its kind in contracts, and its logo; nothing else branches on the provide
    preview-URL call, or from [`vercel.ts`](../../apps/server/src/sandbox/providers/vercel.ts) when
    it names sandboxes and runs them in sessions. Reuse `requestJson` (or `requestText` for bodies
    that are not one JSON document, such as an ND-JSON command stream), `jsonBody`, and `authorize`
-   from `SandboxProvider.ts` so status handling and error mapping stay consistent. `requestJson` turns
-   provider error bodies into a stable `code` (rate limited, concurrency full, billing required,
-   size unavailable, …) with a bounded message; add the provider's own error codes to its table
-   instead of writing messages in the driver, because clients react to `code`.
+   from `SandboxProvider.ts` so status handling and error mapping stay consistent. Their client has
+   no transport timeout, because a synchronous command answers only when it ends; each call is cut
+   at 300 s instead, so one that runs a command passes `commandRequestSeconds` of its run time.
+   `requestJson` turns provider error bodies into a stable `code` (rate limited, concurrency full,
+   billing required, size unavailable, …) with a bounded message; add the provider's own error
+   codes to its table instead of writing messages in the driver, because clients react to `code`.
 2. **Fill in `info`.** `kind`, `label`, `detail`, `apiKeyLabel`, `apiKeyPlaceholder`, `docsUrl`,
    and `sizes`. The settings UI, the API-key field, and the machine picker are generated from it.
    An account setting the provider needs besides the key (Vercel's team and project) is a

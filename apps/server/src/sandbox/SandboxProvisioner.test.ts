@@ -1,15 +1,28 @@
+// @effect-diagnostics nodeBuiltinImport:off - a real HTTP server holds a response the way a provider's exec does.
+import * as NodeHttp from "node:http";
+import type * as NodeNet from "node:net";
+
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { it } from "@effect/vitest";
 import { EnvironmentId, SandboxProviderError } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import { HttpClient, HttpClientRequest, HttpClientResponse, UrlParams } from "effect/http";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientRequest,
+  HttpClientResponse,
+  UrlParams,
+} from "effect/http";
+import * as Undici from "undici";
 import { describe, expect } from "vite-plus/test";
 
 import * as SandboxProvisioner from "./SandboxProvisioner.ts";
@@ -18,7 +31,7 @@ import * as SandboxRecords from "../persistence/SandboxRecords.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SandboxHostAccess from "./SandboxHostAccess.ts";
 import type { SandboxRecord } from "@t3tools/contracts";
-import { requestJson } from "./SandboxProvider.ts";
+import { layerHttpClient, requestJson } from "./SandboxProvider.ts";
 import { boatDriver } from "./providers/boat.ts";
 import { daytonaDriver } from "./providers/daytona.ts";
 import { vercelDriver } from "./providers/vercel.ts";
@@ -1483,6 +1496,87 @@ describe("provider limits", () => {
         );
         expect(error.message).not.toContain("boat_live_secret");
       }
+    }),
+  );
+});
+
+describe("sandbox provider requests", () => {
+  // Boat and Daytona answer a command only when it ends, which can be ten minutes after the request.
+  it.live("keeps a command's request open past the header timeout of the server's fetch", () =>
+    Effect.gen(function* () {
+      const received = yield* Deferred.make<void>();
+      const held: Array<NodeHttp.ServerResponse> = [];
+      const server = NodeHttp.createServer((request, response) => {
+        held.push(response);
+        if (request.url === "/held") Deferred.doneUnsafe(received, Exit.void);
+      });
+      yield* Effect.acquireRelease(
+        Effect.callback<void>((resume) => {
+          server.listen(0, "127.0.0.1", () => resume(Effect.void));
+        }),
+        () =>
+          Effect.sync(() => server.closeAllConnections()).pipe(
+            Effect.andThen(Effect.sync(() => server.close())),
+          ),
+      );
+      const origin = `http://127.0.0.1:${(server.address() as NodeNet.AddressInfo).port}`;
+      // The global dispatcher's 300 s header timeout, in miniature.
+      const previous = Undici.getGlobalDispatcher();
+      yield* Effect.acquireRelease(
+        Effect.sync(() => Undici.setGlobalDispatcher(new Undici.Agent({ headersTimeout: 1 }))),
+        () => Effect.sync(() => Undici.setGlobalDispatcher(previous)),
+      );
+
+      const command = yield* requestJson({
+        provider: "boat",
+        stage: "install",
+        schema: Schema.Struct({ exitCode: Schema.Number }),
+        request: HttpClientRequest.post(`${origin}/held`),
+        timeoutSeconds: 660,
+      }).pipe(Effect.provide(layerHttpClient), Effect.forkChild);
+      yield* Deferred.await(received);
+
+      const capped = yield* HttpClient.get(`${origin}/capped`).pipe(
+        Effect.provide(FetchHttpClient.layer),
+        Effect.flip,
+      );
+      expect(capped.cause).toMatchObject({ cause: { code: "UND_ERR_HEADERS_TIMEOUT" } });
+
+      held[0]!.writeHead(200, { "content-type": "application/json" }).end('{"exitCode":0}');
+      expect(yield* Fiber.join(command)).toEqual({ exitCode: 0 });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("gives up on a provider that never answers once the command's own time is over", () =>
+    Effect.gen(function* () {
+      const silent = HttpClient.make(() => Effect.never);
+      const command = yield* boatDriver
+        .execute({
+          config: { apiKey: "boat_test", settings: {} },
+          sandboxId: boatSandboxId,
+          command: "sleep 1000",
+          timeoutSeconds: 600,
+        })
+        .pipe(Effect.provideService(HttpClient.HttpClient, silent), Effect.flip, Effect.forkChild);
+      yield* TestClock.adjust("600 seconds");
+      expect(command.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust("60 seconds");
+      const error = yield* Fiber.join(command);
+      expect(error).toMatchObject({
+        provider: "boat",
+        stage: "install",
+        detail: "The sandbox provider did not answer in time.",
+      });
+
+      // Every other call is bounded by the five minutes Node's fetch used to give it.
+      const status = yield* boatDriver.status!({
+        config: { apiKey: "boat_test", settings: {} },
+        sandboxId: boatSandboxId,
+      }).pipe(Effect.provideService(HttpClient.HttpClient, silent), Effect.flip, Effect.forkChild);
+      yield* TestClock.adjust("300 seconds");
+      expect((yield* Fiber.join(status)).detail).toBe(
+        "The sandbox provider did not answer in time.",
+      );
     }),
   );
 });
