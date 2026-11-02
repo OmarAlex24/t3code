@@ -445,6 +445,7 @@ export const vercelDriver: SandboxProviderDriver = {
         {
           command: "sh",
           args: ["-c", input.command],
+          ...(input.secrets === undefined ? {} : { env: input.secrets }),
           wait: true,
           logs: true,
           timeout: Math.min(Math.max(input.timeoutSeconds, 1), 600) * 1000,

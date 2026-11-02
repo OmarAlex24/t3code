@@ -82,6 +82,11 @@ export interface SandboxProviderDriver {
     readonly sandboxId: string;
     readonly command: string;
     readonly timeoutSeconds: number;
+    /**
+     * Environment for the command that must never be part of its text: providers keep and list
+     * command text (Boat for 90 days), so this reaches the sandbox through another channel.
+     */
+    readonly secrets?: Readonly<Record<string, string>> | undefined;
   }) => Effect.Effect<SandboxExecResult, SandboxProviderError, HttpClient.HttpClient>;
   readonly exposePort: (input: {
     readonly config: SandboxProviderConfig;

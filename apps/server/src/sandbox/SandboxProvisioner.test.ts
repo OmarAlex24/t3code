@@ -339,6 +339,63 @@ describe("boatDriver", () => {
       });
     },
   );
+
+  it.effect(
+    "hands secrets over in a private file, since Boat keeps every command's text for 90 days",
+    () => {
+      const requests: Array<{ method: string; url: string; body: unknown }> = [];
+      let failCommand = false;
+      const client = recording(requests, (request) =>
+        request.method === "POST" && failCommand && requests.length > 2
+          ? Response.json({ ok: false, code: "sandbox_direct_failed" }, { status: 502 })
+          : Response.json({ ok: true, exitCode: 0, stdout: "", stderr: "", path: "", size: 0 }),
+      );
+      const secret = "hub-key-'$(touch pwned)\"";
+      const run = boatDriver
+        .execute({
+          config: { apiKey: "boat_test", settings: {} },
+          sandboxId: boatSandboxId,
+          command: "printf '%s' \"$T3_TEST_SECRET\" >out",
+          timeoutSeconds: 60,
+          secrets: { T3_TEST_SECRET: secret },
+        })
+        .pipe(Effect.provideService(HttpClient.HttpClient, client));
+      return Effect.gen(function* () {
+        yield* run;
+        const calls = requests.map((request) => `${request.method} ${request.url}`);
+        const commands = requests
+          .filter((request) => request.url.endsWith("/commands"))
+          .map((request) => (request.body as { command: string }).command);
+        expect(calls).toEqual([
+          `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
+          `PUT https://boat.dev/api/v1/sandboxes/${boatSandboxId}/files`,
+          `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
+        ]);
+        for (const command of commands) expect(command).not.toContain("hub-key");
+        const file = requests[1]!.body as { path: string; content: string };
+        const dir = file.path.replace(/\/env$/u, "");
+        expect(dir).toMatch(/^\/tmp\/t3-secrets-[0-9a-z]+$/u);
+        // The file is created empty and private before its content is written.
+        expect(commands[0]).toContain(`umask 077`);
+        expect(commands[0]).toContain(`mkdir ${dir}`);
+        expect(file.content).toBe(`export T3_TEST_SECRET='hub-key-'\\''$(touch pwned)"'\n`);
+        // The command reads the file and removes it before it runs.
+        expect(commands[1]).toContain(`. ${file.path}\n`);
+        expect(commands[1]).toContain(`rm -rf ${dir}\n`);
+
+        // A command that never ran leaves no file behind.
+        requests.length = 0;
+        failCommand = true;
+        yield* run.pipe(Effect.flip);
+        expect(requests.at(-1)).toMatchObject({
+          method: "DELETE",
+          url: expect.stringMatching(
+            /\/files\?path=%2Ftmp%2Ft3-secrets-[0-9a-z]+&recursive=true$/u,
+          ),
+        });
+      });
+    },
+  );
 });
 
 describe("daytonaDriver", () => {
@@ -407,6 +464,7 @@ describe("daytonaDriver", () => {
           sandboxId: created.id,
           command: "t3 pair",
           timeoutSeconds: 30,
+          secrets: { T3_TEST_SECRET: "daytona-env-secret" },
         })
         .pipe(Effect.provideService(HttpClient.HttpClient, client));
       const preview = yield* daytonaDriver
@@ -434,9 +492,14 @@ describe("daytonaDriver", () => {
         method: "POST",
         url: "https://app.daytona.io/api/sandbox/sandbox_1/ttl/1620",
       });
-      expect(requests.map((request) => request.url)).toContain(
-        "https://toolbox.example/toolbox/sandbox_1/process/execute",
-      );
+      // `/process/execute` keeps no command history, and its env is not part of the command.
+      const execute = requests.find((request) => request.url.endsWith("/process/execute"));
+      expect(execute?.url).toBe("https://toolbox.example/toolbox/sandbox_1/process/execute");
+      expect(JSON.parse(execute!.body)).toEqual({
+        command: "t3 pair",
+        envs: { T3_TEST_SECRET: "daytona-env-secret" },
+        timeout: 30,
+      });
     }),
   );
 
@@ -647,6 +710,7 @@ describe("vercelDriver", () => {
           sandboxId: "box-attempt1",
           command: "t3 pair",
           timeoutSeconds: 60,
+          secrets: { T3_TEST_SECRET: "vercel-env-secret" },
         });
         const ok = yield* run;
         expect(ok).toEqual({
@@ -657,7 +721,15 @@ describe("vercelDriver", () => {
         expect(requests.at(-1)).toMatchObject({
           method: "POST",
           url: "https://api.vercel.com/v2/sandboxes/sessions/sbx_resumed/cmd",
-          body: { command: "sh", args: ["-c", "t3 pair"], wait: true, logs: true, timeout: 60_000 },
+          body: {
+            command: "sh",
+            args: ["-c", "t3 pair"],
+            // Vercel lists a session's commands with their args, but not their env.
+            env: { T3_TEST_SECRET: "vercel-env-secret" },
+            wait: true,
+            logs: true,
+            timeout: 60_000,
+          },
         });
 
         exitCode = 3;
@@ -2697,12 +2769,13 @@ describe("sandbox agent access", () => {
       tag: "tag:t3-sandbox",
     },
   } as const;
-  // The auth key travels only base64-encoded inside the join script.
-  const joinKeyOf = (commands: ReadonlyArray<string>) =>
-    commands
-      .filter((command) => command.includes('--auth-key="file:'))
-      .map((command) => /([A-Za-z0-9+/=]{16,})\W*\| base64 -d >"\$key_file"/u.exec(command)?.[1])
-      .map((encoded) => (encoded === undefined ? undefined : atob(encoded)));
+  // Boat keeps every command's text, so a secret must not be in it, not even base64-encoded.
+  const revealsSecret = (commands: ReadonlyArray<string>, secret: string) =>
+    commands.some((command) =>
+      [command, ...(command.match(/[A-Za-z0-9+/=]{12,}/gu) ?? [])]
+        .map((run) => (run === command ? run : Buffer.from(run, "base64").toString("utf8")))
+        .some((candidate) => candidate.includes(secret)),
+    );
 
   // A Boat account plus a CLIProxyAPI hub. `failCommand` fails the steps whose script contains it;
   // the options are read on every request, so a test can change them between creates.
@@ -2721,7 +2794,16 @@ describe("sandbox agent access", () => {
     } = {},
   ) => {
     const commands: Array<string> = [];
+    const files = new Map<string, string>();
     const client = recording(requests, (request) => {
+      if (request.method === "PUT" && request.url.endsWith("/files")) {
+        const file = decodeBody((request.body as { body: Uint8Array }).body) as {
+          path: string;
+          content: string;
+        };
+        files.set(file.path, file.content);
+        return Response.json({ ok: true, path: file.path });
+      }
       if (request.url.startsWith("https://hub.test/")) {
         return Response.json({ status: "ok" }, { status: options.hubStatus ?? 200 });
       }
@@ -2783,20 +2865,34 @@ describe("sandbox agent access", () => {
       }
       return Response.json({});
     });
-    return { client, commands };
+    // The secrets each command whose text contains `marker` read from the file it sources.
+    const secretsOf = (marker: string) =>
+      commands
+        .filter((command) => command.includes(marker))
+        .map((command) => {
+          const path = /\. (\/tmp\/\S+)/u.exec(command)?.[1];
+          const content = path === undefined ? "" : (files.get(path) ?? "");
+          return Object.fromEntries(
+            [...content.matchAll(/^export ([A-Z0-9_]+)='((?:[^']|'\\'')*)'$/gmu)].map((match) => [
+              match[1]!,
+              match[2]!.replaceAll("'\\''", "'"),
+            ]),
+          );
+        });
+    return { client, commands, secretsOf };
   };
-  const claudeEnvOf = (commands: ReadonlyArray<string>) => {
-    const encoded = commands
-      .map((command) => /T3_CLAUDE_ENV=\W*([A-Za-z0-9+/=]{20,})/u.exec(command)?.[1])
-      .find((value) => value !== undefined);
-    return encoded === undefined
-      ? undefined
-      : JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  const claudeEnvOf = (secretsOf: (marker: string) => ReadonlyArray<Record<string, string>>) => {
+    const value = secretsOf("T3_CLAUDE_ENV").find(
+      (secrets) => secrets.T3_CLAUDE_ENV,
+    )?.T3_CLAUDE_ENV;
+    return value === undefined ? undefined : JSON.parse(value);
   };
+  const joinKeyOf = (secretsOf: (marker: string) => ReadonlyArray<Record<string, string>>) =>
+    secretsOf('--auth-key="file:').map((secrets) => secrets.T3_TAILSCALE_AUTH_KEY);
 
   it.effect("gives a sandbox its own hub key for Claude and revokes it when deleted", () => {
     const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
-    const { client, commands } = agentClient(requests);
+    const { client, commands, secretsOf } = agentClient(requests);
     const repository = memoryRepository();
     const secrets = memorySecrets();
     return Effect.gen(function* () {
@@ -2834,12 +2930,12 @@ describe("sandbox agent access", () => {
         authorization: "Bearer mgmt-secret",
       });
 
-      // Settings are written before T3 starts, and the key only travels base64-encoded.
-      expect(claudeEnvOf(commands)).toEqual({
+      // Settings are written before T3 starts, and the key never travels in a command.
+      expect(claudeEnvOf(secretsOf)).toEqual({
         ANTHROPIC_BASE_URL: "https://claude.example.test",
         ANTHROPIC_AUTH_TOKEN: key,
       });
-      expect(commands.some((command) => command.includes(key))).toBe(false);
+      expect(revealsSecret(commands, key)).toBe(false);
       const settingsStep = commands.findIndex((command) => command.includes("T3_CLAUDE_ENV"));
       expect(settingsStep).toBeLessThan(commands.findIndex((command) => command.includes("nohup")));
 
@@ -2874,12 +2970,7 @@ describe("sandbox agent access", () => {
     () => {
       const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
       const options: { failCommand?: string | undefined; missingTools?: string } = {};
-      const { client, commands } = agentClient(requests, options);
-      const githubToken = (all: ReadonlyArray<string>) =>
-        all
-          .filter((command) => command.includes("gh auth login"))
-          .map((command) => /([A-Za-z0-9+/=]{8,})\W*\| base64 -d/u.exec(command)?.[1])
-          .map((encoded) => (encoded === undefined ? undefined : atob(encoded)));
+      const { client, commands, secretsOf } = agentClient(requests, options);
       return Effect.gen(function* () {
         const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
         expect((yield* provisioner.providers).host).toEqual({
@@ -2900,12 +2991,13 @@ describe("sandbox agent access", () => {
           warnings: [],
         });
         expect(requests.some((request) => request.url.startsWith("https://hub.test/"))).toBe(false);
-        expect(claudeEnvOf(commands)).toEqual({
+        expect(claudeEnvOf(secretsOf)).toEqual({
           ANTHROPIC_BASE_URL: "https://api.example.test",
           ANTHROPIC_AUTH_TOKEN: "host-claude-token",
         });
-        expect(githubToken(commands)).toEqual(["ghp_host_token"]);
-        expect(commands.some((command) => command.includes("ghp_host_token"))).toBe(false);
+        expect(secretsOf("gh auth login")).toEqual([{ T3_GITHUB_TOKEN: "ghp_host_token" }]);
+        expect(revealsSecret(commands, "host-claude-token")).toBe(false);
+        expect(revealsSecret(commands, "ghp_host_token")).toBe(false);
 
         // A login that fails leaves a working sandbox, and the warning carries none of its output.
         options.failCommand = "gh auth login";
@@ -3130,7 +3222,7 @@ describe("sandbox agent access", () => {
     "joins the tailnet with a single-use ephemeral key and removes the device when deleted",
     () => {
       const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
-      const { client, commands } = agentClient(requests, { tailnetMode: "userspace" });
+      const { client, commands, secretsOf } = agentClient(requests, { tailnetMode: "userspace" });
       const repository = memoryRepository();
       const tailnetHost = { ...host, claude: { ...host.claude, baseUrl: "https://100.92.23.53" } };
       return Effect.gen(function* () {
@@ -3190,10 +3282,10 @@ describe("sandbox agent access", () => {
           },
         });
 
-        // The key reaches the sandbox only encoded, and the join comes before Claude's settings.
-        expect(joinKeyOf(commands)).toEqual([TS_AUTH_KEY]);
+        // The key never travels in a command, and the join comes before Claude's settings.
+        expect(joinKeyOf(secretsOf)).toEqual([TS_AUTH_KEY]);
         for (const secret of [TS_AUTH_KEY, TS_CLIENT_SECRET, TS_ACCESS_TOKEN]) {
-          expect(commands.some((command) => command.includes(secret))).toBe(false);
+          expect(revealsSecret(commands, secret)).toBe(false);
         }
         expect(commands.find((command) => command.includes('--auth-key="file:'))).toMatch(
           /--hostname=\W*t3-sandbox-web-stack\W/u,
@@ -3201,7 +3293,7 @@ describe("sandbox agent access", () => {
         const step = (marker: string) => commands.findIndex((command) => command.includes(marker));
         expect(step('--auth-key="file:')).toBeLessThan(step("T3_CLAUDE_ENV"));
         // A userspace tailnet is reached through tailscaled's proxy, by Claude and by the check.
-        expect(claudeEnvOf(commands)).toMatchObject({
+        expect(claudeEnvOf(secretsOf)).toMatchObject({
           ANTHROPIC_BASE_URL: "https://100.92.23.53",
           HTTPS_PROXY: "http://localhost:1055",
           HTTP_PROXY: "http://localhost:1055",
@@ -3294,7 +3386,7 @@ describe("sandbox agent access", () => {
       const options: { tailnetIdleState?: string; tailnetNode?: string } = {
         tailnetNode: "nNEWCNTRL",
       };
-      const { client, commands } = agentClient(requests, options);
+      const { client, commands, secretsOf } = agentClient(requests, options);
       const stopped: SandboxRecord = {
         environmentId: testEnvironmentId,
         provider: "boat",
@@ -3318,7 +3410,8 @@ describe("sandbox agent access", () => {
         expect(repository.records.get(testEnvironmentId)?.tailscale).toEqual({
           deviceId: "nNEWCNTRL",
         });
-        expect(joinKeyOf(commands)).toEqual([TS_AUTH_KEY]);
+        expect(joinKeyOf(secretsOf)).toEqual([TS_AUTH_KEY]);
+        expect(revealsSecret(commands, TS_AUTH_KEY)).toBe(false);
         expect(requests.map((request) => `${request.method} ${request.url}`)).toContain(
           "DELETE https://api.tailscale.com/api/v2/device/nOLDCNTRL",
         );
@@ -3336,7 +3429,7 @@ describe("sandbox agent access", () => {
         expect(
           requests.some((request) => request.url.startsWith("https://api.tailscale.com/")),
         ).toBe(false);
-        expect(joinKeyOf(commands)).toEqual([]);
+        expect(joinKeyOf(secretsOf)).toEqual([]);
       }).pipe(
         Effect.provide(
           provisionerLayer(

@@ -122,10 +122,14 @@ server except into the sandbox.
   GitHub each run as their own `execute` before the start step, and a failure in any of them
   except install is a warning on the create result, not a failed create: the user still gets a
   working sandbox and a checklist of what is missing.
-- **Secrets never reach a shell parser or an error.** Scripts in
-  [`sandboxSetup.ts`](../../apps/server/src/sandbox/sandboxSetup.ts) embed values as base64 inside
-  single quotes and decode them in the sandbox. Provider errors can echo the command they ran, so
-  a step that carries a secret maps its failure to a fixed message instead of the driver's detail.
+- **Secrets never reach command text, a shell parser, or an error.** Providers keep what they ran:
+  Boat stores every command and its output for 90 days, and Vercel lists a session's command args.
+  So scripts in [`sandboxSetup.ts`](../../apps/server/src/sandbox/sandboxSetup.ts) read secrets
+  from environment variables that `execute` takes as `secrets`, and print nothing secret. Daytona
+  and Vercel pass them as the command's env, which neither lists; Boat has no per-command env, so
+  its driver writes them to a 0600 file through its files API, and the command sources and deletes
+  it first. Provider errors can echo the command they ran, so a step that carries a secret maps its
+  failure to a fixed message instead of the driver's detail.
 - **A hub key belongs to one sandbox.** When the server's Claude endpoint is a CLIProxyAPI hub with
   a management key, the provisioner adds a fresh `t3-sandbox-<label>-<hex>` key through the hub's
   management API instead of copying the server's own key, so deleting the sandbox can revoke

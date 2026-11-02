@@ -4,6 +4,7 @@ import {
   type SandboxTemplate,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Random from "effect/Random";
 import { HttpClientRequest } from "effect/http";
 import * as Schema from "effect/Schema";
 
@@ -297,6 +298,44 @@ const info = {
   ],
 } satisfies SandboxProviderDriver["info"];
 
+const sandboxUrl = (sandboxId: string, path: string) =>
+  `${BOAT_API_BASE}/sandboxes/${encodeURIComponent(sandboxId)}/${path}`;
+
+const runCommand = (apiKey: string, sandboxId: string, command: string, timeoutSeconds: number) =>
+  requestJson({
+    provider: "boat",
+    stage: "install",
+    schema: BoatCommand,
+    request: jsonBody(
+      authorize(HttpClientRequest.post(sandboxUrl(sandboxId, "commands")), apiKey),
+      {
+        // An `exit` in Boat's login shell runs ~/.bash_logout (clear_console), which fails it.
+        command: `sh -c ${shellQuote(command)}`,
+        timeoutSeconds: Math.min(Math.max(timeoutSeconds, 1), 600),
+      },
+    ),
+  }).pipe(
+    Effect.filterOrFail(
+      (result) => result.exitCode === 0,
+      (result) =>
+        new SandboxProviderError({
+          provider: "boat",
+          stage: "install",
+          // Only the exit status is an attribute. The raw output can contain secrets, so it is
+          // kept in the cause for diagnostics and never shown to the client or logged.
+          detail: `The command exited with ${result.exitCode ?? "an unknown status"}.`,
+          cause: new Error(
+            [result.stderr, result.stdout]
+              .map((part) => part.trim())
+              .filter((part) => part !== "")
+              .join("\n")
+              .slice(-4000),
+          ),
+        }),
+    ),
+    Effect.map((result) => ({ ...result, exitCode: result.exitCode ?? 0 })),
+  );
+
 export const boatDriver: SandboxProviderDriver = {
   info,
   defaultSize: "default",
@@ -361,45 +400,53 @@ export const boatDriver: SandboxProviderDriver = {
     });
     return listed.environments;
   }),
-  execute: (input) =>
-    requestJson({
+  execute: Effect.fn("Boat.execute")(function* (input) {
+    const { apiKey } = input.config;
+    if (input.secrets === undefined) {
+      return yield* runCommand(apiKey, input.sandboxId, input.command, input.timeoutSeconds);
+    }
+    // Boat has no per-command env, and keeps every command's text, so secrets go in a private file.
+    // `mkdir` without -p fails on a name someone else took, and the name needs no quoting.
+    const dir = `/tmp/t3-secrets-${(yield* Random.nextIntBetween(0, Number.MAX_SAFE_INTEGER)).toString(36)}`;
+    const file = `${dir}/env`;
+    yield* runCommand(apiKey, input.sandboxId, `umask 077\nmkdir ${dir}\n: >${file}`, 30);
+    return yield* requestJson({
       provider: "boat",
       stage: "install",
-      schema: BoatCommand,
+      schema: Schema.Unknown,
       request: jsonBody(
-        authorize(
-          HttpClientRequest.post(
-            `${BOAT_API_BASE}/sandboxes/${encodeURIComponent(input.sandboxId)}/commands`,
-          ),
-          input.config.apiKey,
-        ),
+        authorize(HttpClientRequest.put(sandboxUrl(input.sandboxId, "files")), apiKey),
         {
-          // An `exit` in Boat's login shell runs ~/.bash_logout (clear_console), which fails it.
-          command: `sh -c ${shellQuote(input.command)}`,
-          timeoutSeconds: Math.min(Math.max(input.timeoutSeconds, 1), 600),
+          path: file,
+          content: Object.entries(input.secrets)
+            .map(([name, value]) => `export ${name}=${shellQuote(value)}\n`)
+            .join(""),
         },
       ),
     }).pipe(
-      Effect.filterOrFail(
-        (result) => result.exitCode === 0,
-        (result) =>
-          new SandboxProviderError({
-            provider: "boat",
-            stage: "install",
-            // Only the exit status is an attribute. The raw output can contain secrets, so it is
-            // kept in the cause for diagnostics and never shown to the client or logged.
-            detail: `The command exited with ${result.exitCode ?? "an unknown status"}.`,
-            cause: new Error(
-              [result.stderr, result.stdout]
-                .map((part) => part.trim())
-                .filter((part) => part !== "")
-                .join("\n")
-                .slice(-4000),
-            ),
-          }),
+      Effect.andThen(
+        runCommand(
+          apiKey,
+          input.sandboxId,
+          `. ${file}\nrm -rf ${dir}\n${input.command}`,
+          input.timeoutSeconds,
+        ),
       ),
-      Effect.map((result) => ({ ...result, exitCode: result.exitCode ?? 0 })),
-    ),
+      Effect.onError(() =>
+        requestJson({
+          provider: "boat",
+          stage: "install",
+          schema: Schema.Unknown,
+          request: authorize(
+            HttpClientRequest.delete(sandboxUrl(input.sandboxId, "files")).pipe(
+              HttpClientRequest.setUrlParams({ path: dir, recursive: "true" }),
+            ),
+            apiKey,
+          ),
+        }).pipe(Effect.ignore),
+      ),
+    );
+  }),
   // Boat refuses to host a port on a machine that is not running.
   exposePort: (input) =>
     waitUntilRunning(input.config.apiKey, input.sandboxId, "expose").pipe(

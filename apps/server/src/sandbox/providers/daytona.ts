@@ -363,6 +363,7 @@ export const daytonaDriver: SandboxProviderDriver = {
         authorize(HttpClientRequest.post(`${baseUrl}/process/execute`), input.config.apiKey),
         {
           command: input.command,
+          ...(input.secrets === undefined ? {} : { envs: input.secrets }),
           timeout: Math.min(Math.max(input.timeoutSeconds, 1), 600),
         },
       ),
