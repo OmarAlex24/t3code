@@ -2096,6 +2096,12 @@ describe("provider limits", () => {
         },
         {
           provider: "celesto",
+          status: 422,
+          body: { detail: { error_code: "invalid_sandbox_size", message: "Unknown sandbox size" } },
+          code: "size_unavailable",
+        },
+        {
+          provider: "celesto",
           status: 402,
           body: { detail: { error_code: "trial_credit_depleted" } },
           code: "billing_required",
