@@ -138,6 +138,16 @@ const waitUntilRunning = Effect.fn("Celesto.waitUntilRunning")(function* (
   });
 });
 
+// Celesto answers 409 while another operation, such as a create or a stop, is still running.
+const afterBusy = <A, R>(effect: Effect.Effect<A, SandboxProviderError, R>) =>
+  effect.pipe(
+    Effect.retry({
+      while: (error) => error.status === 409,
+      schedule: Schedule.spaced(POLL_INTERVAL),
+      times: POLL_ATTEMPTS - 1,
+    }),
+  );
+
 const exec = (config: SandboxProviderConfig, sandboxId: string, command: string, seconds: number) =>
   requestJson({
     provider: "celesto",
@@ -417,7 +427,7 @@ export const celestoDriver: SandboxProviderDriver = {
         HttpClientRequest.post(computerUrl(input.sandboxId, "/start")),
         input.config.apiKey,
       ),
-    });
+    }).pipe(afterBusy);
     yield* waitUntilRunning(input.config.apiKey, input.sandboxId);
     return { publicUrl: yield* exposePort(input.config.apiKey, input.sandboxId, SERVER_PORT) };
   }),
@@ -449,13 +459,5 @@ export const celestoDriver: SandboxProviderDriver = {
         HttpClientRequest.delete(computerUrl(input.sandboxId)),
         input.config.apiKey,
       ),
-    }).pipe(
-      // Celesto answers 409 while another operation, such as the create, is still running.
-      Effect.retry({
-        while: (error) => error.status === 409,
-        schedule: Schedule.spaced(POLL_INTERVAL),
-        times: POLL_ATTEMPTS - 1,
-      }),
-      Effect.asVoid,
-    ),
+    }).pipe(afterBusy, Effect.asVoid),
 };

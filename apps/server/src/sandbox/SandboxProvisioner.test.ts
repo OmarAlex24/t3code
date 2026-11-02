@@ -536,26 +536,44 @@ describe("celestoDriver", () => {
     });
   });
 
-  it.effect("waits to delete a computer Celesto is still creating", () => {
+  it.effect("waits out an operation still in progress before deleting or starting", () => {
     const requests: Array<Sent> = [];
-    let deletes = 0;
-    const client = celestoRecording(requests, () =>
-      ++deletes === 1
-        ? Response.json(
-            { detail: "A computer operation is already in progress", status_code: 409 },
-            { status: 409 },
-          )
-        : Response.json({ id: "cmp_1", status: "deleting" }),
-    );
+    const refused = new Set<string>();
+    const client = celestoRecording(requests, (request) => {
+      // A create or a stop that has not finished yet; a start or delete after it goes through.
+      if (request.method !== "GET" && !refused.has(request.url)) {
+        refused.add(request.url);
+        return Response.json(
+          { detail: "A computer operation is already in progress", status_code: 409 },
+          { status: 409 },
+        );
+      }
+      if (request.url.endsWith("/published-ports")) {
+        return Response.json([
+          { port: 3773, status: "published", url: "https://p-abc.celesto.dev" },
+        ]);
+      }
+      return Response.json({ id: "cmp_1", status: "running" });
+    });
     return Effect.gen(function* () {
       const destroy = yield* celestoDriver
         .destroy({ config: celestoConfig, sandboxId: "cmp_1" })
         .pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.forkChild);
       yield* TestClock.adjust("2 seconds");
       yield* Fiber.join(destroy);
+      const resume = yield* celestoDriver.resume!({
+        config: celestoConfig,
+        sandboxId: "cmp_1",
+      }).pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.forkChild);
+      yield* TestClock.adjust("2 seconds");
+      expect(yield* Fiber.join(resume)).toEqual({ publicUrl: "https://p-abc.celesto.dev" });
       expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
         "DELETE https://api.celesto.ai/v1/computers/cmp_1",
         "DELETE https://api.celesto.ai/v1/computers/cmp_1",
+        "POST https://api.celesto.ai/v1/computers/cmp_1/start",
+        "POST https://api.celesto.ai/v1/computers/cmp_1/start",
+        "GET https://api.celesto.ai/v1/computers/cmp_1",
+        "GET https://api.celesto.ai/v1/computers/cmp_1/published-ports",
       ]);
     });
   });
