@@ -180,6 +180,25 @@ const PROVIDER_ERROR_CODES: Record<string, SandboxProviderErrorCode> = {
   trial_saved_snapshots_not_allowed: "templates_unavailable",
   save_in_progress: "template_saving",
   snapshot_not_found: "not_found",
+  // Celesto: https://celesto.ai/docs/cloud/errors
+  concurrency_limit_reached: "concurrency_full",
+  trial_retained_sandbox_limit_reached: "concurrency_full",
+  trial_expired: "billing_required",
+  trial_credit_depleted: "billing_required",
+  prepaid_credit_depleted: "billing_required",
+  trial_not_started: "billing_required",
+  usage_subscription_required: "billing_required",
+  prepaid_credit_required: "billing_required",
+  payment_failed: "billing_required",
+  payment_pending: "billing_required",
+  trial_micro_only: "size_unavailable",
+  promotional_size_not_allowed: "size_unavailable",
+};
+
+// Where the stable code's own wording would send the user the wrong way.
+const PROVIDER_ERROR_DETAILS: Record<string, string> = {
+  trial_retained_sandbox_limit_reached:
+    "The Celesto trial keeps one sandbox, stopped ones included. Delete it or add credit first.",
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -200,7 +219,11 @@ const parseErrorBody = (body: string) => {
   if (!isRecord(parsed)) return {};
   const nested = isRecord(parsed.error) ? parsed.error : {};
   const details = isRecord(nested.details) ? nested.details : {};
-  const code = [parsed.code, nested.code].find((value) => typeof value === "string");
+  // Celesto nests its code as `{"detail": {"error_code": …}}`; older errors carry a string there.
+  const celesto = isRecord(parsed.detail) ? parsed.detail : {};
+  const code = [parsed.code, nested.code, celesto.error_code].find(
+    (value) => typeof value === "string",
+  );
   const message = [details.message, parsed.message].find((value) => typeof value === "string");
   const window = [parsed.window, details.window].find(
     (value): value is string => value === "minute" || value === "hour" || value === "day",
@@ -343,7 +366,9 @@ const shouldRetry = (request: HttpClientRequest.HttpClientRequest, failure: Fail
     return true;
   }
   if (failure.providerCode !== undefined && NOT_RUN_CODES.has(failure.providerCode)) return true;
-  if (status === 429) return failure.error.retryAfterSeconds !== undefined;
+  // Only a request-rate limit frees up by waiting; a full plan answers 429 too.
+  if (status === 429)
+    return code === "rate_limited" && failure.error.retryAfterSeconds !== undefined;
   // A 5xx T3 has a code for is a refusal the user can act on, such as no free machines.
   const transient = status === undefined || (status >= 500 && code === "unknown");
   return transient && repeatable(request);
@@ -391,13 +416,15 @@ const executeOnce = Effect.fnUntraced(function* (input: {
         status: response.status,
         code,
         ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
-        detail: describeProviderFailure({
-          provider: input.provider,
-          code,
-          status: response.status,
-          window: parsed.window,
-          retryAfterSeconds,
-        }),
+        detail:
+          (parsed.code === undefined ? undefined : PROVIDER_ERROR_DETAILS[parsed.code]) ??
+          describeProviderFailure({
+            provider: input.provider,
+            code,
+            status: response.status,
+            window: parsed.window,
+            retryAfterSeconds,
+          }),
         cause: new Error(body.slice(0, 2000)),
       }),
       providerCode: parsed.code,

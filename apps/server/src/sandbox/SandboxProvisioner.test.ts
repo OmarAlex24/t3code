@@ -34,6 +34,7 @@ import * as SandboxHostAccess from "./SandboxHostAccess.ts";
 import type { SandboxRecord } from "@t3tools/contracts";
 import { layerHttpClient, requestJson } from "./SandboxProvider.ts";
 import { boatDriver } from "./providers/boat.ts";
+import { celestoDriver } from "./providers/celesto.ts";
 import { daytonaDriver } from "./providers/daytona.ts";
 import { upstashDriver } from "./providers/upstash.ts";
 import { vercelDriver } from "./providers/vercel.ts";
@@ -460,6 +461,276 @@ describe("boatDriver", () => {
       expect(yield* Fiber.join(create)).toMatchObject({ id: boatSandboxId });
       expect(requests).toHaveLength(2);
       expect(requests[1]).toEqual({ ...requests[0], key: "attempt-1" });
+    });
+  });
+});
+
+describe("celestoDriver", () => {
+  const celestoConfig = { apiKey: "celesto_test", settings: {} };
+  type Sent = {
+    method: string;
+    url: string;
+    body: unknown;
+    authorization: string | undefined;
+    key: string | undefined;
+    client: string | undefined;
+  };
+  const celestoRecording = (
+    requests: Array<Sent>,
+    respond: (request: HttpClientRequest.HttpClientRequest) => Response | null,
+  ) =>
+    HttpClient.make((request) => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        body: request.body._tag === "Uint8Array" ? decodeBody(request.body.body) : undefined,
+        authorization: request.headers.authorization,
+        key: request.headers["idempotency-key"],
+        client: request.headers["x-celesto-client"],
+      });
+      const response = respond(request);
+      return response === null
+        ? Effect.never
+        : Effect.succeed(HttpClientResponse.fromWeb(request, response));
+    });
+  const commandOf = (request: Sent) => (request.body as { command: string }).command;
+
+  it.effect("creates a persistent-home sandbox, replaying a lost create with its key", () => {
+    const requests: Array<Sent> = [];
+    let polls = 0;
+    const client = celestoRecording(requests, (request) => {
+      if (request.method === "POST") {
+        return requests.length === 1 ? null : Response.json({ id: "cmp_1", status: "creating" });
+      }
+      return Response.json({ id: "cmp_1", status: ++polls < 2 ? "creating" : "running" });
+    });
+    return Effect.gen(function* () {
+      const create = yield* celestoDriver
+        .create({
+          config: celestoConfig,
+          name: "Celesto sandbox",
+          size: "celesto-standard",
+          ttlMinutes: 480,
+          idempotencyKey: "attempt-1",
+        })
+        .pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.forkChild);
+      yield* TestClock.adjust("300 seconds");
+      yield* TestClock.adjust("2 seconds");
+      expect(yield* Fiber.join(create)).toEqual({ id: "cmp_1", name: "Celesto sandbox" });
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        "POST https://api.celesto.ai/v1/computers",
+        "POST https://api.celesto.ai/v1/computers",
+        "GET https://api.celesto.ai/v1/computers/cmp_1",
+        "GET https://api.celesto.ai/v1/computers/cmp_1",
+      ]);
+      // Celesto takes no name or label, so the same key is the only way back to a lost create.
+      expect(requests[1]).toEqual(requests[0]);
+      expect(requests[0]).toMatchObject({
+        authorization: "Bearer celesto_test",
+        key: "attempt-1",
+        client: "sdk",
+        body: {
+          template_id: "coding-agent",
+          // Celesto accepts only the CPU and memory pairs of its named sizes.
+          vcpus: 2,
+          ram_mb: 4096,
+          // Only the external volume keeps /home/ohm, and T3 with it, across a spot move.
+          external_volume_enabled: true,
+        },
+      });
+    });
+  });
+
+  it.effect("publishes the T3 port and waits until its route has a URL", () => {
+    const requests: Array<Sent> = [];
+    let lists = 0;
+    const client = celestoRecording(requests, (request) => {
+      if (request.method === "POST") {
+        return Response.json({ computer_id: "cmp_1", port: 3773, status: "publishing" });
+      }
+      lists++;
+      return Response.json(
+        lists === 1
+          ? []
+          : lists === 2
+            ? [{ computer_id: "cmp_1", port: 3773, status: "publishing", url: null }]
+            : [
+                {
+                  computer_id: "cmp_1",
+                  port: 3773,
+                  status: "published",
+                  url: "https://p-abc.celesto.ai",
+                },
+              ],
+      );
+    });
+    return Effect.gen(function* () {
+      const expose = yield* celestoDriver
+        .exposePort({ config: celestoConfig, sandboxId: "cmp_1", port: 3773 })
+        .pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.forkChild);
+      yield* TestClock.adjust("2 seconds");
+      expect(yield* Fiber.join(expose)).toBe("https://p-abc.celesto.ai");
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        "GET https://api.celesto.ai/v1/computers/cmp_1/published-ports",
+        "POST https://api.celesto.ai/v1/computers/cmp_1/published-ports",
+        "GET https://api.celesto.ai/v1/computers/cmp_1/published-ports",
+        "GET https://api.celesto.ai/v1/computers/cmp_1/published-ports",
+      ]);
+      expect(requests[1]!.body).toEqual({ port: 3773 });
+    });
+  });
+
+  it.effect("maps Celesto's computer states to the states T3 records", () =>
+    Effect.gen(function* () {
+      const cases = [
+        { state: "running", expected: "running" },
+        ...["creating", "starting", "restoring"].map((state) => ({ state, expected: "starting" })),
+        { state: "stopping", expected: "stopped" },
+        { state: "stopped", expected: "stopped" },
+        { state: "stopped", disk_delete_at: "2026-12-01T00:00:00Z", expected: "stopped" },
+        // Celesto deletes a stopped disk after 30 days.
+        { state: "stopped", disk_delete_at: "1970-01-01T00:00:00Z", expected: "expired" },
+        { state: "error", expected: "error" },
+        { state: "lost", expected: "error" },
+        { state: "deleting", expected: "deleted" },
+        { state: "deleted", expected: "deleted" },
+        { status: 404, expected: "deleted" },
+        { state: "restorable", expected: null },
+      ] as const;
+      for (const testCase of cases) {
+        const client = HttpClient.make((request) =>
+          Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              "status" in testCase
+                ? Response.json({ detail: "Computer not found" }, { status: testCase.status })
+                : Response.json({ id: "cmp_1", status: testCase.state, ...testCase }),
+            ),
+          ),
+        );
+        const status = yield* celestoDriver.status!({
+          config: celestoConfig,
+          sandboxId: "cmp_1",
+        }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+        expect(status, JSON.stringify(testCase)).toBe(testCase.expected);
+      }
+    }),
+  );
+
+  it.effect("runs a long command detached past Celesto's 300 s cap, with secrets in a file", () => {
+    const requests: Array<Sent> = [];
+    let exitCode = "0";
+    let pollFailed = false;
+    const client = celestoRecording(requests, () => {
+      const command = commandOf(requests.at(-1)!);
+      if (command.includes("/rc 2>/dev/null")) {
+        if (!pollFailed) {
+          pollFailed = true;
+          return Response.json({ detail: "host busy" }, { status: 502 });
+        }
+        return Response.json({ exit_code: 0, stdout: `${exitCode}\n`, stderr: "" });
+      }
+      if (command.includes("tail -c")) {
+        return Response.json({ exit_code: 0, stdout: "T3_TOOLS_MISSING: \n", stderr: "warn" });
+      }
+      return Response.json({ exit_code: 0, stdout: "", stderr: "" });
+    });
+    const secret = "hub-key-'$(touch pwned)\"";
+    const run = celestoDriver
+      .execute({
+        config: celestoConfig,
+        sandboxId: "cmp_1",
+        command: "printf '%s' \"$T3_TEST_SECRET\" >out",
+        timeoutSeconds: 600,
+        secrets: { T3_TEST_SECRET: secret },
+      })
+      .pipe(Effect.provideService(HttpClient.HttpClient, client));
+    return Effect.gen(function* () {
+      const fiber = yield* run.pipe(Effect.forkChild);
+      yield* TestClock.adjust("5 seconds");
+      const result = yield* Fiber.join(fiber);
+      expect(result.stdout).toBe("T3_TOOLS_MISSING: \n");
+
+      const commands = requests.map(commandOf);
+      expect(requests.every((request) => request.url.endsWith("/computers/cmp_1/exec"))).toBe(true);
+      // Every step stays inside Celesto's limits, whatever the caller asked for.
+      for (const request of requests) {
+        const body = request.body as { command: string; timeout: number };
+        expect(body.timeout).toBeLessThanOrEqual(300);
+        expect(body.command.length).toBeLessThanOrEqual(10_000);
+      }
+      // The secret travels once, base64-encoded, in the step that writes the private file.
+      const encodedSecret = Buffer.from(
+        `export T3_TEST_SECRET='hub-key-'\\''$(touch pwned)"'\n`,
+      ).toString("base64");
+      expect(commands[0]).toContain("umask 077");
+      expect(commands[0]).toContain(encodedSecret);
+      for (const command of commands) expect(command).not.toContain("hub-key");
+      for (const command of commands.slice(1)) expect(command).not.toContain(encodedSecret);
+      // The script runs under `setsid` and the caller's own time, and reports through a file.
+      const start = commands.find((command) => command.includes("setsid -f"));
+      expect(start).toContain("timeout -k 10 600 sh");
+      expect(commands.filter((command) => command.includes("/rc 2>/dev/null"))).toHaveLength(2);
+      expect(commands.at(-1)).toMatch(/rm -rf \/tmp\/t3-job-[0-9a-z]+/u);
+
+      // A failed script keeps its output in the cause and removes the secrets file.
+      requests.length = 0;
+      exitCode = "3";
+      const failed = yield* run.pipe(Effect.flip, Effect.forkChild);
+      yield* TestClock.adjust("5 seconds");
+      const error = yield* Fiber.join(failed);
+      expect(error.detail).toBe("The command exited with 3.");
+      expect(String(error.cause)).toContain("warn");
+      expect(commandOf(requests.at(-1)!)).toMatch(/rm -rf \/tmp\/t3-secrets-[0-9a-z]+/u);
+    });
+  });
+
+  it.effect("runs a short command in one exec and reads trial limits", () => {
+    const requests: Array<Sent> = [];
+    const client = celestoRecording(requests, (request) =>
+      request.url.endsWith("/usage-overview")
+        ? Response.json({ state: "trial", running_count: 0, running_limit: 1, retained_count: 0 })
+        : Response.json({ exit_code: 0, stdout: "Token: pair_xyz\n", stderr: "" }),
+    );
+    return Effect.gen(function* () {
+      const executed = yield* celestoDriver
+        .execute({
+          config: celestoConfig,
+          sandboxId: "cmp_1",
+          command: "t3 pair",
+          timeoutSeconds: 60,
+        })
+        .pipe(Effect.provideService(HttpClient.HttpClient, client));
+      expect(executed.stdout).toContain("Token: pair_xyz");
+      expect(requests[0]!.body).toEqual({ command: "sh -c 't3 pair'", timeout: 60 });
+
+      const limits = yield* celestoDriver.limits!({ config: celestoConfig }).pipe(
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+      expect(limits).toMatchObject({
+        canStart: true,
+        concurrency: { active: 0, max: 1 },
+        plan: "Trial",
+      });
+      expect(limits?.sizes?.filter((size) => size.available).map((size) => size.id)).toEqual([
+        "celesto-micro",
+      ]);
+      const refused = HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json(
+              { detail: { error_code: "api_key_endpoint_not_allowed" } },
+              { status: 403 },
+            ),
+          ),
+        ),
+      );
+      expect(
+        yield* celestoDriver.limits!({ config: celestoConfig }).pipe(
+          Effect.provideService(HttpClient.HttpClient, refused),
+        ),
+      ).toBeNull();
     });
   });
 });
@@ -1778,6 +2049,47 @@ describe("provider limits", () => {
           retryAfterSeconds: 45,
         },
         {
+          provider: "celesto",
+          status: 429,
+          body: { detail: { error_code: "trial_retained_sandbox_limit_reached" } },
+          code: "concurrency_full",
+          // Stopped sandboxes count on the trial, and waiting never frees the slot.
+          detail:
+            "The Celesto trial keeps one sandbox, stopped ones included. Delete it or add credit first.",
+        },
+        {
+          provider: "celesto",
+          status: 429,
+          body: { detail: { error_code: "concurrency_limit_reached", running_limit: 10 } },
+          code: "concurrency_full",
+        },
+        {
+          provider: "celesto",
+          status: 403,
+          body: { detail: { error_code: "trial_micro_only" } },
+          code: "size_unavailable",
+        },
+        {
+          provider: "celesto",
+          status: 402,
+          body: { detail: { error_code: "trial_credit_depleted" } },
+          code: "billing_required",
+        },
+        {
+          provider: "celesto",
+          status: 403,
+          body: {
+            detail: { error_code: "api_key_scope_required", required_scope: "computers:admin" },
+          },
+          code: "api_key_rejected",
+        },
+        {
+          provider: "celesto",
+          status: 401,
+          body: { detail: "Invalid API key" },
+          code: "api_key_rejected",
+        },
+        {
           provider: "daytona",
           status: 500,
           body: "not json",
@@ -1975,6 +2287,15 @@ describe("sandbox provider requests", () => {
           sent: 1,
         },
         { provider: "boat", method: "POST", status: 429, body: { code: "limit_reached" }, sent: 1 },
+        // A full plan is not a rate limit, even with a wait attached.
+        {
+          provider: "celesto",
+          method: "POST",
+          status: 429,
+          headers: { "Retry-After": "5" },
+          body: { detail: { error_code: "concurrency_limit_reached" } },
+          sent: 1,
+        },
         { provider: "daytona", method: "GET", status: 503, body: {}, failures: 9, sent: 4 },
       ] as const;
       for (const testCase of cases) {
