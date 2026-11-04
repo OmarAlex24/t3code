@@ -130,10 +130,10 @@ describe("command permissions", () => {
     ),
   );
 
-  // Sandbox writes keep a billable machine alive longer or change what the account keeps.
+  // Sandbox writes start billable machines or change what the account keeps.
   it.effect.each([
     WS_METHODS.serverRunStorageCleanup,
-    WS_METHODS.sandboxesExtend,
+    WS_METHODS.sandboxesLaunch,
     WS_METHODS.sandboxesSaveTemplate,
     WS_METHODS.sandboxesDeleteTemplate,
   ])("requires the destination settings grant for %s", (method) =>
