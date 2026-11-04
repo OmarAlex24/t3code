@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientRequest, HttpClientResponse, UrlParams } from "effect/http";
@@ -14,6 +15,8 @@ import { describe, expect } from "vite-plus/test";
 import * as SandboxProvisioner from "./SandboxProvisioner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SandboxRecords from "../persistence/SandboxRecords.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SandboxHostAccess from "./SandboxHostAccess.ts";
 import type { SandboxRecord } from "@t3tools/contracts";
 import { requestJson } from "./SandboxProvider.ts";
 import { boatDriver } from "./providers/boat.ts";
@@ -41,13 +44,34 @@ const recordRepository = Layer.succeed(
   }),
 );
 
+const memorySecrets = () => {
+  const values = new Map<string, Uint8Array>();
+  const layer = Layer.succeed(
+    ServerSecretStore.ServerSecretStore,
+    ServerSecretStore.ServerSecretStore.of({
+      get: (name) => Effect.sync(() => Option.fromUndefinedOr(values.get(name))),
+      set: (name, value) => Effect.sync(() => void values.set(name, value)),
+      create: (name, value) => Effect.sync(() => void values.set(name, value)),
+      getOrCreateRandom: (name) => Effect.sync(() => values.get(name) ?? new Uint8Array(32)),
+      remove: (name) => Effect.sync(() => void values.delete(name)),
+    }),
+  );
+  return { layer, values };
+};
+
 const provisionerLayer = (
   settings: Parameters<typeof ServerSettings.layerTest>[0] = {},
   repository: Layer.Layer<SandboxRecords.SandboxRecordRepository> = recordRepository,
+  options: {
+    readonly host?: Parameters<typeof SandboxHostAccess.layerTest>[0];
+    readonly secrets?: Layer.Layer<ServerSecretStore.ServerSecretStore>;
+  } = {},
 ) =>
   SandboxProvisioner.layer.pipe(
     Layer.provideMerge(ServerSettings.layerTest(settings)),
     Layer.provide(repository),
+    Layer.provide(SandboxHostAccess.layerTest(options.host)),
+    Layer.provide(options.secrets ?? memorySecrets().layer),
     Layer.provide(NodeCrypto.layer),
   );
 
@@ -2344,11 +2368,15 @@ describe("SandboxProvisioner", () => {
             Response.json(
               commandCall === 1
                 ? { exitCode: 0, stdout: "t3 is running", stderr: "" }
-                : {
-                    exitCode: 0,
-                    stdout: "Pairing URL: http://127.0.0.1:3773/pair#token=abc\nToken: pair_abc\n",
-                    stderr: "",
-                  },
+                : commandCall === 2
+                  ? // Boat's image ships every tool, so nothing is installed or missing.
+                    { exitCode: 0, stdout: "T3_TOOLS_MISSING: \n", stderr: "" }
+                  : {
+                      exitCode: 0,
+                      stdout:
+                        "Pairing URL: http://127.0.0.1:3773/pair#token=abc\nToken: pair_abc\n",
+                      stderr: "",
+                    },
             ),
           ),
         );
@@ -2379,15 +2407,19 @@ describe("SandboxProvisioner", () => {
         label: "My sandbox",
         httpBaseUrl: "https://boat.example/t3",
         pairingCode: "pair_abc",
+        setup: { claude: "skipped", github: "skipped", warnings: [] },
       });
       expect(providers.providers.find((provider) => provider.kind === "boat")?.configured).toBe(
         true,
       );
-      // Limits that cannot be read never block a start; the provider stays the authority. The
-      // environment's identity is checked before a pairing code is minted on it.
+      // Limits that cannot be read never block a start; the provider stays the authority. T3 is
+      // installed, the tools are checked, T3 starts, and the environment's identity is checked
+      // before a pairing code is minted on it.
       expect(requests).toEqual([
         "GET https://boat.dev/api/v1/limits",
         "POST https://boat.dev/api/v1/sandboxes",
+        `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
+        `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
         `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
         "GET https://boat.example/t3/.well-known/t3/environment",
         `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/commands`,
@@ -2523,17 +2555,17 @@ describe("SandboxProvisioner", () => {
       yield* provisioner.create({ provider: "daytona", apiKey: "dtn_test" });
       yield* provisioner.create({ provider: "boat", apiKey: "boat_test" });
 
-      const installOf = (provider: string) =>
-        commands.find((entry) => entry.provider === provider && entry.command.includes("t3 serve"))
+      const startOf = (provider: string) =>
+        commands.find((entry) => entry.provider === provider && entry.command.includes("nohup "))
           ?.command ?? "";
       const serveLine = (provider: string) =>
-        installOf(provider)
+        startOf(provider)
           .split("\n")
           .find((line) => line.trimStart().startsWith("nohup "));
       // Daytona's preview proxy answers CORS, so the server must not add a second origin header,
       // and the service unit cannot carry that variable.
       expect(serveLine("daytona")).toContain("env T3CODE_PROXY_HANDLES_CORS='true' t3 serve");
-      expect(installOf("daytona")).not.toContain("t3 service install");
+      expect(startOf("daytona")).not.toContain("t3 service install");
       // Boat's hosted port does not touch CORS, so its server keeps answering it.
       expect(serveLine("boat")).toContain("nohup t3 serve");
       expect(serveLine("boat")).not.toContain("T3CODE_PROXY_HANDLES_CORS");
@@ -2628,5 +2660,402 @@ describe("SandboxProvisioner", () => {
       // Boat refuses to delete without this confirmation header.
       expect(deleteHeaders).toEqual([boatSandboxId]);
     });
+  });
+});
+
+describe("sandbox agent access", () => {
+  const hubSettings = {
+    usageLimitSources: {
+      hub: {
+        kind: "cliproxy",
+        url: "https://hub.test",
+        managementKey: "mgmt-secret",
+        enabled: true,
+      },
+    },
+  } as const;
+  const host = {
+    claude: { baseUrl: "https://api.example.test", authToken: Redacted.make("host-claude-token") },
+    githubToken: "ghp_host_token",
+  };
+  const HUB_KEY = /^t3-sandbox-web-stack-[0-9a-f]{16}$/u;
+
+  // A Boat account plus a CLIProxyAPI hub. `failCommand` fails the steps whose script contains it;
+  // the options are read on every request, so a test can change them between creates.
+  const agentClient = (
+    requests: Array<{ method: string; url: string; body: unknown; auth?: string | undefined }>,
+    options: {
+      failCommand?: string | undefined;
+      hubStatus?: number;
+      missingTools?: string;
+      endpointStatus?: string;
+    } = {},
+  ) => {
+    const commands: Array<string> = [];
+    const client = recording(requests, (request) => {
+      if (request.url.startsWith("https://hub.test/")) {
+        return Response.json({ status: "ok" }, { status: options.hubStatus ?? 200 });
+      }
+      if (request.url.endsWith("/limits")) return Response.json({}, { status: 503 });
+      if (request.url.endsWith("/.well-known/t3/environment")) return Response.json(descriptor);
+      if (request.method === "POST" && request.url.endsWith("/sandboxes")) {
+        return Response.json({
+          ok: true,
+          sandbox: { id: boatSandboxId, name: "Web Stack" },
+          hostedPorts: [{ port: 3773, url: "https://boat.example/t3" }],
+        });
+      }
+      if (request.url.endsWith("/commands")) {
+        const command = String(
+          (
+            JSON.parse(new TextDecoder().decode((request.body as { body: Uint8Array }).body)) as {
+              command: string;
+            }
+          ).command,
+        );
+        commands.push(command);
+        const failed = options.failCommand !== undefined && command.includes(options.failCommand);
+        return Response.json({
+          exitCode: failed ? 1 : 0,
+          stdout: command.includes("t3 pair")
+            ? "Token: pair_agent\n"
+            : command.includes("T3_TOOLS_MISSING")
+              ? `T3_TOOLS_MISSING: ${options.missingTools ?? ""}\n`
+              : command.includes("T3_ENDPOINT_STATUS")
+                ? `T3_ENDPOINT_STATUS:${options.endpointStatus ?? "200"}\n`
+                : "",
+          // A failing step's output is the most likely place for a secret to leak from.
+          stderr: failed ? command : "",
+        });
+      }
+      return Response.json({});
+    });
+    return { client, commands };
+  };
+  const claudeEnvOf = (commands: ReadonlyArray<string>) => {
+    const encoded = commands
+      .map((command) => /T3_CLAUDE_ENV=\W*([A-Za-z0-9+/=]{20,})/u.exec(command)?.[1])
+      .find((value) => value !== undefined);
+    return encoded === undefined
+      ? undefined
+      : JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  };
+
+  it.effect("gives a sandbox its own hub key for Claude and revokes it when deleted", () => {
+    const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+    const { client, commands } = agentClient(requests);
+    const repository = memoryRepository();
+    const secrets = memorySecrets();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // Clients learn only the base URL and where the key comes from, never a key.
+      expect((yield* provisioner.providers).host).toEqual({
+        claude: { baseUrl: "https://api.example.test", key: "hub", privateNetwork: false },
+        github: true,
+      });
+
+      const created = yield* provisioner.create({
+        provider: "boat",
+        apiKey: "boat_test",
+        label: "Web Stack!",
+        agentAccess: { claude: { baseUrl: "https://claude.example.test" } },
+      });
+      expect(created.setup).toEqual({ claude: "ready", github: "skipped", warnings: [] });
+
+      // The key is added before the machine exists, so a refusing hub costs nothing.
+      const mint = requests.findIndex((request) => request.method === "PATCH");
+      const sandboxCreate = requests.findIndex((request) => request.url.endsWith("/sandboxes"));
+      expect(mint).toBeGreaterThanOrEqual(0);
+      expect(mint).toBeLessThan(sandboxCreate);
+      const key = (requests[mint]!.body as { new: string }).new;
+      expect(key).toMatch(HUB_KEY);
+      expect(requests[mint]).toMatchObject({
+        url: "https://hub.test/v0/management/api-keys",
+        body: { old: key, new: key },
+        authorization: "Bearer mgmt-secret",
+      });
+
+      // Settings are written before T3 starts, and the key only travels base64-encoded.
+      expect(claudeEnvOf(commands)).toEqual({
+        ANTHROPIC_BASE_URL: "https://claude.example.test",
+        ANTHROPIC_AUTH_TOKEN: key,
+      });
+      expect(commands.some((command) => command.includes(key))).toBe(false);
+      const settingsStep = commands.findIndex((command) => command.includes("T3_CLAUDE_ENV"));
+      expect(settingsStep).toBeLessThan(commands.findIndex((command) => command.includes("nohup")));
+
+      // The record says where the key lives; the key itself is a server secret.
+      const record = repository.records.get(testEnvironmentId)!;
+      expect(record.claudeHubKey).toEqual({ sourceId: "hub", secret: expect.any(String) });
+      expect(JSON.stringify(record)).not.toContain(key);
+      expect(new TextDecoder().decode(secrets.values.get(record.claudeHubKey!.secret))).toBe(key);
+
+      requests.length = 0;
+      const deleted = yield* provisioner.delete({
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        environmentId: testEnvironmentId,
+      });
+      expect(deleted).toEqual({ warnings: [] });
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        `DELETE https://hub.test/v0/management/api-keys?value=${key}`,
+      ]);
+      expect(secrets.values.size).toBe(0);
+    }).pipe(
+      Effect.provide(
+        provisionerLayer(hubSettings, repository.layer, { host, secrets: secrets.layer }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, client),
+    );
+  });
+
+  it.effect(
+    "copies this machine's Claude token without a hub and signs GitHub in on request",
+    () => {
+      const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+      const options: { failCommand?: string | undefined; missingTools?: string } = {};
+      const { client, commands } = agentClient(requests, options);
+      const githubToken = (all: ReadonlyArray<string>) =>
+        all
+          .filter((command) => command.includes("gh auth login"))
+          .map((command) => /([A-Za-z0-9+/=]{8,})\W*\| base64 -d/u.exec(command)?.[1])
+          .map((encoded) => (encoded === undefined ? undefined : atob(encoded)));
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        expect((yield* provisioner.providers).host).toEqual({
+          claude: { baseUrl: "https://api.example.test", key: "copy", privateNetwork: false },
+          github: true,
+        });
+        const created = yield* provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          agentAccess: { claude: { baseUrl: "https://api.example.test" } },
+          passGithubToken: true,
+        });
+        expect(created.setup).toEqual({ claude: "ready", github: "ready", warnings: [] });
+        expect(requests.some((request) => request.url.startsWith("https://hub.test/"))).toBe(false);
+        expect(claudeEnvOf(commands)).toEqual({
+          ANTHROPIC_BASE_URL: "https://api.example.test",
+          ANTHROPIC_AUTH_TOKEN: "host-claude-token",
+        });
+        expect(githubToken(commands)).toEqual(["ghp_host_token"]);
+        expect(commands.some((command) => command.includes("ghp_host_token"))).toBe(false);
+
+        // A login that fails leaves a working sandbox, and the warning carries none of its output.
+        options.failCommand = "gh auth login";
+        const failed = yield* provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          passGithubToken: true,
+        });
+        expect(failed.setup.github).toBe("failed");
+        expect(failed.setup.warnings).toEqual([
+          "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
+        ]);
+
+        // Tools that would not install are reported, and nothing that needs them is attempted.
+        options.failCommand = undefined;
+        options.missingTools = "gh claude ";
+        commands.length = 0;
+        const withoutTools = yield* provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          agentAccess: { claude: { baseUrl: "https://api.example.test" } },
+          passGithubToken: true,
+        });
+        expect(withoutTools.setup).toEqual({
+          claude: "failed",
+          github: "failed",
+          warnings: [
+            "The GitHub CLI could not be installed on the sandbox.",
+            "Claude Code could not be installed on the sandbox.",
+          ],
+        });
+        expect(commands.some((command) => command.includes("gh auth login"))).toBe(false);
+        const step = (marker: string) => commands.findIndex((command) => command.includes(marker));
+        expect(step("T3_TOOLS_MISSING")).toBeLessThan(step("T3_CLAUDE_ENV"));
+        expect(step("T3_CLAUDE_ENV")).toBeLessThan(step("nohup"));
+      }).pipe(
+        Effect.provide(provisionerLayer({}, recordRepository, { host })),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+    },
+  );
+
+  it.effect("warns when the sandbox cannot reach Claude's endpoint and keeps its hub key", () => {
+    const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+    const options: { endpointStatus?: string } = { endpointStatus: "000" };
+    const { client, commands } = agentClient(requests, options);
+    const repository = memoryRepository();
+    const tailnetHost = { ...host, claude: { ...host.claude, baseUrl: "https://100.92.23.53" } };
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // The form warns before anything is created when the endpoint is only on a private network.
+      expect((yield* provisioner.providers).host.claude?.privateNetwork).toBe(true);
+
+      const create = (baseUrl: string) =>
+        provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          label: "Web Stack",
+          agentAccess: { claude: { baseUrl } },
+        });
+      const unreachable = yield* create("https://100.92.23.53");
+      expect(unreachable.setup).toEqual({
+        claude: "failed",
+        github: "skipped",
+        warnings: [
+          "The sandbox cannot reach 100.92.23.53. It is only reachable from your private network or tailnet; expose it publicly (for example with Tailscale Funnel or Cloudflare Tunnel) or use another endpoint.",
+        ],
+      });
+      // The check runs after the settings are written and before T3 starts.
+      const step = (marker: string) => commands.findIndex((command) => command.includes(marker));
+      expect(step("T3_CLAUDE_ENV")).toBeLessThan(step("T3_ENDPOINT_STATUS"));
+      expect(step("T3_ENDPOINT_STATUS")).toBeLessThan(step("nohup"));
+      // The sandbox works, and fixing the network makes its key work as is.
+      expect(requests.some((request) => request.method === "DELETE")).toBe(false);
+      expect(repository.records.get(testEnvironmentId)?.claudeHubKey).toBeDefined();
+
+      yield* provisioner.delete({
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        environmentId: testEnvironmentId,
+      });
+      const publicHost = yield* create("https://claude.example.test");
+      expect(publicHost.setup.warnings).toEqual([
+        "The sandbox cannot reach claude.example.test. Check that it accepts connections from the internet, or use another endpoint.",
+      ]);
+
+      // Any HTTP answer, even a refusal, means the endpoint is reachable.
+      yield* provisioner.delete({
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        environmentId: testEnvironmentId,
+      });
+      options.endpointStatus = "401";
+      expect((yield* create("https://claude.example.test")).setup).toEqual({
+        claude: "ready",
+        github: "skipped",
+        warnings: [],
+      });
+    }).pipe(
+      Effect.provide(provisionerLayer(hubSettings, repository.layer, { host: tailnetHost })),
+      Effect.provideService(HttpClient.HttpClient, client),
+    );
+  });
+
+  it.effect("revokes the hub key and keeps every secret out of what a failure reports", () => {
+    const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+    const options: { failCommand?: string; hubStatus?: number } = {
+      failCommand: "T3_CLAUDE_ENV",
+    };
+    const { client } = agentClient(requests, options);
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // A Claude settings write that fails leaves a working sandbox and a warning.
+      const created = yield* provisioner.create({
+        provider: "boat",
+        apiKey: "boat_test",
+        label: "Web Stack",
+        agentAccess: { claude: { baseUrl: "https://claude.example.test" } },
+      });
+      expect(created.setup.claude).toBe("failed");
+      expect(created.setup.warnings).toHaveLength(1);
+      const firstKey = (
+        requests.find((request) => request.method === "PATCH")!.body as {
+          new: string;
+        }
+      ).new;
+      expect(created.setup.warnings.join(" ")).not.toContain(firstKey);
+
+      // T3 failing to start after the key was added deletes the machine and revokes the key.
+      requests.length = 0;
+      options.failCommand = "nohup";
+      const error = yield* Effect.flip(
+        provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          label: "Web Stack",
+          agentAccess: { claude: { baseUrl: "https://claude.example.test" } },
+        }),
+      );
+      const key = (
+        requests.find((request) => request.method === "PATCH")!.body as {
+          new: string;
+        }
+      ).new;
+      expect(key).toMatch(HUB_KEY);
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual(
+        expect.arrayContaining([
+          `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+          `DELETE https://hub.test/v0/management/api-keys?value=${key}`,
+        ]),
+      );
+      expect(error.detail).not.toContain(key);
+      expect(error.detail).not.toContain("mgmt-secret");
+      expect(error.message).not.toContain(key);
+
+      // A hub that refuses the key fails the create before any machine is billed.
+      requests.length = 0;
+      options.hubStatus = 403;
+      const refused = yield* Effect.flip(
+        provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          agentAccess: { claude: { baseUrl: "https://claude.example.test" } },
+        }),
+      );
+      expect(refused.detail).toBe(
+        "Could not add a key for this sandbox on the CLIProxyAPI hub. The hub answered with HTTP 403.",
+      );
+      expect(requests.some((request) => request.url.endsWith("/sandboxes"))).toBe(false);
+    }).pipe(
+      Effect.provide(provisionerLayer(hubSettings, recordRepository, { host })),
+      Effect.provideService(HttpClient.HttpClient, client),
+    );
+  });
+
+  it.effect("deletes a sandbox whose hub key cannot be revoked and says so", () => {
+    const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+    const secrets = memorySecrets();
+    secrets.values.set("sandbox-hub-key-1", new TextEncoder().encode("t3-sandbox-web-stack-0"));
+    const record: SandboxRecord = {
+      environmentId: testEnvironmentId,
+      provider: "boat",
+      sandboxId: boatSandboxId,
+      label: "Web Stack",
+      size: "default",
+      // Deleted outside T3: the provider is skipped, but its key is still on the hub.
+      state: "deleted",
+      createdAt: "2026-11-01T00:00:00.000Z",
+      updatedAt: "2026-11-01T00:00:00.000Z",
+      httpBaseUrl: "https://boat.example/t3",
+      hardDeadlineAt: null,
+      ttlMinutes: 480,
+      claudeHubKey: { sourceId: "hub", secret: "sandbox-hub-key-1" },
+    };
+    const repository = memoryRepository([record]);
+    const { client } = agentClient(requests, { hubStatus: 500 });
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const deleted = yield* provisioner.delete({
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        environmentId: testEnvironmentId,
+      });
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        "DELETE https://hub.test/v0/management/api-keys?value=t3-sandbox-web-stack-0",
+      ]);
+      expect(repository.records.size).toBe(0);
+      expect(deleted.warnings).toEqual([
+        "The key T3 Code added for Web Stack on the CLIProxyAPI hub could not be revoked. Remove the key starting with t3-sandbox-web-stack- from the hub.",
+      ]);
+    }).pipe(
+      Effect.provide(
+        provisionerLayer(hubSettings, repository.layer, { host, secrets: secrets.layer }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, client),
+    );
   });
 });
