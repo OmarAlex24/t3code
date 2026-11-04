@@ -2,6 +2,7 @@ import {
   assessSandboxStart,
   DEFAULT_SANDBOX_TAILSCALE_TAG,
   ExecutionEnvironmentDescriptor,
+  WS_METHODS,
   type EnvironmentId,
   type SandboxCreateInput,
   type SandboxCreateResult,
@@ -71,6 +72,7 @@ import {
 } from "./sandboxSetup.ts";
 import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
 import {
+  layerHttpClient,
   requestJson,
   shellQuote,
   type SandboxProviderConfig,
@@ -1628,6 +1630,13 @@ const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(SandboxProvisioner, make);
 
+/** The provisioner with the host access, provider HTTP client and record store only it uses. */
+export const layerRuntime = layer.pipe(
+  Layer.provide(SandboxHostAccess.layer),
+  Layer.provide(layerHttpClient),
+  Layer.provide(SandboxRecords.layer),
+);
+
 export const layerSweep = Layer.effectDiscard(
   Effect.gen(function* () {
     const provisioner = yield* SandboxProvisioner;
@@ -1639,3 +1648,25 @@ export const layerSweep = Layer.effectDiscard(
     );
   }),
 );
+
+/** The sandbox WebSocket RPC handlers, each a call to one provisioner method. */
+export const rpcHandlers = Effect.gen(function* () {
+  const sandboxes = yield* SandboxProvisioner;
+  return {
+    [WS_METHODS.sandboxesProviders]: () => sandboxes.providers,
+    [WS_METHODS.sandboxesEnvironments]: (input: SandboxCredentialEnvironmentsInput) =>
+      sandboxes.environments(input),
+    [WS_METHODS.sandboxesLimits]: (input: SandboxLimitsInput) => sandboxes.limits(input),
+    [WS_METHODS.sandboxesCreate]: (input: SandboxCreateInput) => sandboxes.create(input),
+    [WS_METHODS.sandboxesDelete]: (input: SandboxDeleteInput) => sandboxes.delete(input),
+    [WS_METHODS.sandboxesList]: () => sandboxes.list,
+    [WS_METHODS.sandboxesStop]: (input: SandboxLifecycleInput) => sandboxes.stop(input),
+    [WS_METHODS.sandboxesResume]: (input: SandboxLifecycleInput) => sandboxes.resume(input),
+    [WS_METHODS.sandboxesExtend]: (input: SandboxExtendInput) => sandboxes.extend(input),
+    [WS_METHODS.sandboxesTemplates]: (input: SandboxTemplatesInput) => sandboxes.templates(input),
+    [WS_METHODS.sandboxesSaveTemplate]: (input: SandboxSaveTemplateInput) =>
+      sandboxes.saveTemplate(input),
+    [WS_METHODS.sandboxesDeleteTemplate]: (input: SandboxDeleteTemplateInput) =>
+      sandboxes.deleteTemplate(input),
+  };
+});
