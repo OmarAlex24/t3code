@@ -653,7 +653,7 @@ export function AddEnvironmentDialog({
                 ? renderConnectionModeCard({
                     mode: "sandbox",
                     title: "Sandbox",
-                    description: "Provision a cloud machine with a provider API key.",
+                    description: "Give each thread its own cloud machine, made from a config.",
                     icon: <BoxIcon aria-hidden className="size-4" />,
                   })
                 : null}
