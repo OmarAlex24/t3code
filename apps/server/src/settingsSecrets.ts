@@ -7,6 +7,7 @@ import {
   type ServerSettings,
   type SettingsSecretValue,
   SimlockDeviceHostConfig,
+  SandboxSettings,
   UsageLimitSourceConfig,
   isSecretReference,
   secretSettingsFields,
@@ -45,6 +46,7 @@ const providerSecretFields = new Map([
   ),
 ]);
 const usageLimitSecretFields = secretSettingsFields(UsageLimitSourceConfig);
+const sandboxSecretFields = secretSettingsFields(SandboxSettings);
 const easDeviceHostSecretFields = secretSettingsFields(EasDeviceHostConfig);
 const simlockDeviceHostSecretFields = secretSettingsFields(SimlockDeviceHostConfig);
 const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url");
@@ -230,10 +232,22 @@ function mapSecretFieldGroups(
       ) as SimlockDeviceHostConfig,
   );
 
+  const sandboxProviders = Object.fromEntries(
+    Object.entries(settings.sandboxProviders).map(([kind, fields]) => [
+      kind,
+      mapFields(
+        fields,
+        sandboxSecretFields,
+        (field) => `sandbox-provider-${encode(kind)}-${encode(field)}`,
+      ),
+    ]),
+  ) as ServerSettings["sandboxProviders"];
+
   return {
     ...settings,
     providerInstances,
     sourceControlHosts,
+    sandboxProviders,
     usageLimitSources,
     easDeviceHosts,
     simlockDeviceHosts,
