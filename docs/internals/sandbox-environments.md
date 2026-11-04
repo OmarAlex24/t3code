@@ -145,6 +145,15 @@ server except into the sandbox.
   command sources and deletes it first. Celesto has neither, so a separate short exec writes that
   file; its command history API lists no command text. Provider errors can echo the command they ran, so a step that carries a secret maps its
   failure to a fixed message instead of the driver's detail.
+- **A secret minted in the sandbox leaves it sealed.** Command output is kept as long as command
+  text, so the pairing token cannot come back as `t3 pair` prints it. The server makes an RSA key
+  pair for each pairing, and [`sandboxPairing.ts`](../../apps/server/src/sandbox/sandboxPairing.ts)
+  puts only the public key in the command, which seals the token (RSA-OAEP, SHA-256) with the
+  `openssl` CLI, or Node where an image has no `openssl`, and prints only that. A failed
+  `t3 pair` reports its exit status and a sealed stderr tail; an image with neither tool fails the
+  create rather than printing the token. The secrets channel is not used here, since Celesto's
+  carries values in exec text. Headless `t3 serve` also logs a token, URL, and QR code, so the
+  start step filters those lines out of the log tail it reports when the server does not answer.
 - **A hub key belongs to one sandbox.** When the server's Claude endpoint is a CLIProxyAPI hub with
   a management key, the provisioner adds a fresh `t3-sandbox-<label>-<hex>` key through the hub's
   management API instead of copying the server's own key, so deleting the sandbox can revoke
