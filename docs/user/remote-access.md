@@ -5,24 +5,100 @@ machine. That machine must stay running and reachable while you work.
 
 ## Sandbox environments
 
-A sandbox is a cloud machine that runs its own T3 Code server. Open **Settings → Environments →
-Add environment**, choose **Sandbox**, and enter an API key for Boat, Celesto, Daytona, Upstash, or Vercel. The server
-creates the machine, installs T3 Code, exposes it on a public HTTPS URL, and pairs it. The new
-environment reconnects like any other remote environment.
+A sandbox gives a thread its own cloud machine, with its own T3 Code server and a fresh clone of
+the project. Each thread you start on a sandbox gets a different machine, so threads never share
+files, processes, or ports.
 
-The sandbox gets none of this machine's logins unless you ask. **Use this machine's Claude setup**
-appears when Claude here talks to a custom endpoint, and points Claude in the sandbox at the same
-one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
-the sandbox gets its own key on the hub, which T3 Code removes when you delete the sandbox;
+### Add a sandbox config
+
+A config says how each thread's machine is made. Open **Settings → Environments → Add
+environment**, choose **Sandbox**, pick Boat, Celesto, Daytona, Upstash, or Vercel, and enter the
+provider's API key. Then choose a name, a machine size (or a template to start from), and what each
+sandbox gets from this machine. **Add sandbox config** saves it; no machine is made and nothing
+bills until a thread starts on it. Edit or delete configs in **Settings → Connections →
+Sandboxes**. Deleting a config leaves the sandboxes already made from it running until you delete
+them.
+
+The key is saved on the T3 Code server that keeps the configs (this machine, or the first server
+you paired on the hosted web app), not on the client. Each sandbox bills the provider account that
+owns the key.
+
+A sandbox gets none of this machine's logins unless the config asks. **Use this machine's Claude
+setup** appears when Claude here talks to a custom endpoint, and points Claude in each sandbox at
+the same one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
+each sandbox gets its own key on the hub, which T3 Code removes when you delete the sandbox;
 otherwise this machine's Claude token is copied, and it stays valid after the sandbox is gone. The
 sandbox must be able to reach that endpoint: one that only answers on your tailnet or local
 network works here but not in a cloud sandbox, so let the sandbox
 [join your tailnet](#private-endpoints-tailscale) or expose the endpoint publicly (for example with
-Tailscale Funnel or Cloudflare Tunnel). The dialog warns when it can tell.
-**Sign GitHub in with this machine's token** lets `gh` and `git` in the sandbox reach every
-repository that token can. T3 Code also installs git, the GitHub CLI, and Claude Code when the
-provider's image lacks them. Once the sandbox is ready, the dialog lists what was set up; sign Codex
-in from the sandbox's **Settings → Providers**.
+Tailscale Funnel or Cloudflare Tunnel). The form warns when it can tell.
+**Sign GitHub in with this machine's token** lets `gh` and `git` in each sandbox clone private
+repositories and push. Without it a sandbox can clone public repositories only. T3 Code also
+installs git, the GitHub CLI, and Claude Code when the provider's image lacks them; sign Codex in
+from the sandbox's **Settings → Providers**.
+
+**Projects** limits which projects can start a thread on the config; with none picked, any project
+with a github.com remote can. Under **Advanced**:
+
+- **Running limit** (8 hours by default) stops a sandbox that has run that long since its last
+  start. Its disk stays, so **Resume** brings it back with the thread's files.
+- **Idle stop** (30 minutes by default) is saved for a later release. For now only the running
+  limit stops sandboxes, along with the provider's own auto-stop.
+- **Files copied from this machine** chooses, per project, which git-ignored files go into the
+  clone. By default each sandbox gets the project's env files (`.env` files, `.envrc`,
+  `.dev.vars`). They are written into the clone with owner-only permissions and never appear in a
+  provider's command history.
+- **Reach it only through my tailnet** (with **Join my tailnet**) gives the sandbox no public URL.
+  This app then connects over your tailnet, so the machine running it has to be on your tailnet
+  too, and the hosted web app cannot reach it.
+
+### Start a thread on a sandbox
+
+In a new thread, open the machine picker under the composer and choose **Sandbox: <config>**. The
+picker offers configs for projects that have a github.com remote and exist on the server that keeps
+the configs. Write your message and send it: the message waits in the composer while a card shows
+the sandbox being made.
+
+1. **Check limits and access** reads the provider's limits, so a start it would refuse costs
+   nothing.
+2. **Create machine** creates and exposes it.
+3. **Install T3 Code and tools**: git, the GitHub CLI, and Claude Code where missing.
+4. **Set up credentials**: Claude, GitHub, and Tailscale, as the config asks.
+5. **Start T3 Code**.
+6. **Clone repository** from GitHub into `~/work/<repo>` and add it as a project there.
+7. **Copy env files**.
+8. **Connect and start thread** pairs this app with the sandbox and moves the thread onto it.
+
+Once connected, the thread starts on the sandbox with your message. A failure in steps 1 to 5
+deletes the machine, and **Start a new sandbox** tries again from scratch. A failed clone or
+connection keeps the machine, so **Retry** runs just that step again, and **Discard sandbox**
+deletes it. A setup step that fails, such as a GitHub sign-in, or an env file that could not be
+copied, shows as a warning and leaves a working sandbox. **Cancel** stops the launch at any point and
+deletes everything it made: the machine, its hub key, and its tailnet device.
+
+The thread's sandbox appears under its config in **Settings → Connections → Sandboxes**, not in the
+list of environments you paired.
+
+### Manage sandboxes
+
+**Settings → Connections → Sandboxes** groups sandboxes under the config they came from. Each row
+shows the thread (with **Open thread**), the project, the machine size, its state, how long it has
+been running against its running limit, and Boat's monthly cost. Stop, resume, and delete
+sandboxes there; deleting removes the machine and its disk at the provider and forgets the sandbox's
+connection in this app. Work you have not pushed is lost with it.
+
+That list follows the provider: a sandbox you stop or delete in the provider's dashboard shows up as
+stopped or deleted within a minute. A stopped sandbox shows how long its disk has been kept. Boat
+keeps a stopped sandbox's disk for 14 days and then shows it as expired; three days before that the
+row recommends deleting it. T3 Code never deletes a sandbox for you, except one whose launch was cut
+short when this server stopped, which it deletes once it is running again. A row also says when the
+thread it belonged to was deleted.
+
+**Not tracked by T3 Code** lists sandboxes that carry this server's tag but have no record, for
+example after a crash. They may still bill; delete the ones you do not need. Only Boat reports
+these.
+
+Each provider also stops sandboxes on its own, as a backstop for the running limit:
 
 For Vercel, create an access token at vercel.com/account/settings/tokens; T3 Code uses your only
 team and a `t3-sandboxes` project unless you fill in **Team** or **Project** (a change applies to
@@ -37,33 +113,26 @@ plan. Upstash sandboxes cannot be saved as templates and show no cost.
 
 Celesto is new. Create an API key in the Celesto console under **Settings → Security**; a scoped
 key needs all three computer permissions (see, create and run, delete). Celesto never stops a
-sandbox on its own, so the lifetime limit below is the only thing that stops one, and a sandbox
-keeps billing while this T3 Code server is off. The free trial runs Micro only and keeps one
-sandbox, stopped ones included, so delete it before you create another. Celesto keeps a stopped
+sandbox on its own, so the running limit is the only thing that stops one, and a sandbox keeps
+billing while this T3 Code server is off. The free trial runs Micro only and keeps one sandbox,
+stopped ones included, so delete it before you start another thread on it. Celesto keeps a stopped
 sandbox's disk for 30 days. Celesto can also move a running sandbox to another machine on its own,
 and does not promise to keep the sandbox's files when it does, so push work you want to keep. If a
-sandbox stops answering after such a move, delete it and create a new one. Celesto sandboxes cannot
-be saved as templates and show no cost.
+sandbox stops answering after such a move, delete it. Celesto sandboxes cannot be saved as templates
+and show no cost.
 
-The key is saved on the T3 Code server that provisions the sandbox, not on the client. Creating a
-sandbox bills the provider account that owns the key. Stop, resume, and delete sandboxes from
-**Settings → Environments → Sandboxes**; deleting removes the machine and its disk at the provider. A sandbox stops eight hours after it was created; resuming does not
-reset that. Use **Extend** there to add time before it runs out, up to the lifetime limit in the
-same section (24 hours by default). Once it is reached the sandbox cannot be resumed. Daytona deletes
-a sandbox, files included, a day after it stops for good, so copy out anything you need before then.
+Daytona deletes a sandbox, files included, a day after its running limit, so copy out anything you
+need before then.
 
-That list follows the provider: a sandbox you stop or delete in the provider's dashboard shows up as
-stopped or deleted within a minute, and Boat's monthly cost appears next to each sandbox. Boat keeps
-a stopped sandbox's disk for 14 days; after that it shows as expired and can only be deleted.
+### Templates
 
-Set up one sandbox by hand, then let the rest start ready. The checklist after creating a sandbox
-offers your projects from your other machines; **Add** clones one onto the sandbox, along with the
-`.env` files you pick. Install its dependencies there, then use **Save as template…** on the sandbox
-in the same list, and choose the template under **Start from** when you add the next sandbox. Saving
-resets T3 Code on the sandbox and deletes it once the template is ready, so each copy connects as a
-new environment. Its files live on in the template, `.env` files included, so leave out secrets you
-do not want in every copy; T3 Code removes only its own identity and the Claude, GitHub, and
-Tailscale logins it set up.
+A template starts each sandbox with your tools and dependencies already installed. Save one from a
+sandbox that belongs to no thread, with **Save as template…** in the Sandboxes list; a thread's
+sandbox cannot be saved, because saving deletes the source machine. Then choose the template under
+**Start from** in a config. Saving resets T3 Code on the source so each copy connects as a new
+environment. Its files live on in the template, `.env` files included, so leave out secrets you do
+not want in every copy; T3 Code removes only its own identity and the Claude, GitHub, and Tailscale
+logins it set up.
 
 ### Private endpoints (Tailscale)
 
@@ -92,7 +161,7 @@ when you resume it.
    **Auth Keys** (write) and **Devices → Core** (write), and select `tag:t3-sandbox` for both.
 3. In T3 Code, open **Settings → Connections → Sandboxes → Tailscale**, choose **Set up**, and paste
    the client ID and secret. The secret stays on this server; sandboxes never get it.
-4. When you add a sandbox, keep **Join my tailnet** checked. It is on by default when Claude's
+4. In a sandbox config, keep **Join my tailnet** checked. It is on by default when Claude's
    endpoint has a private address.
 
 Most sandboxes get a full Tailscale connection. One that cannot create a network device runs
