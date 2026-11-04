@@ -2,15 +2,21 @@
 
 A sandbox provider turns an API key into a T3 environment the same way a user would add one by
 hand: it creates a machine, starts `t3 serve` on port `3773`, exposes that port on a public HTTPS
-origin, and mints a pairing token. The client registers the returned origin and token as an
-ordinary bearer environment, so projects, providers, terminals, and reconnects use the existing
-remote path. Nothing downstream knows the machine is a sandbox.
+origin (or only on the tailnet), and mints a pairing token. The client registers the returned
+origin and token as an ordinary bearer environment, so projects, providers, terminals, and
+reconnects use the existing remote path. Nothing downstream knows the machine is a sandbox.
+
+Each thread on a sandbox gets its own machine. The server the user configures sandboxes on (the
+host) is only the control plane: it keeps the configs, provisions a machine per thread, streams
+the launch's stages, brokers the pairing, and stops, resumes, lists, and deletes the machines. The
+thread itself runs on the sandbox's own T3 server, as on any remote environment.
 
 ## The driver contract
 
 [`SandboxProviderDriver`](../../apps/server/src/sandbox/SandboxProvider.ts) is the whole extension
 point: `create`, `execute`, `exposePort`, `destroy`, the optional `stop`/`resume` pair, `limits`,
-`listEnvironments`, `status`, `usage`, and templates, and the presentation metadata in `info`. Clients learn which optional
+`listEnvironments`, `status`, `usage`, `uploadFile`, `listSandboxes`, and templates, and the
+presentation metadata in `info`. Clients learn which optional
 methods exist from the `capabilities` the provisioner derives; they never branch on provider kind.
 [`providers/index.ts`](../../apps/server/src/sandbox/providers/index.ts) is the registry; settings,
 RPC, provisioning, and the Add environment UI read the driver's `info`.
@@ -31,9 +37,14 @@ Drivers must keep two invariants:
   paths itself: a machine it creates before its own start polling, and a create whose answer was
   lost (`mayHaveCreated`). Boat and Celesto replay the create with the same `Idempotency-Key`;
   Daytona, Upstash, and Vercel name each attempt uniquely (`attemptSandboxName`) and delete that
-  name. The sweep does not
-  delete provider sandboxes without a record: records are written only once provisioning ends,
-  and nothing on a sandbox tells this T3 server apart from another one sharing the account.
+  name. The provisioner writes a record with `state: "provisioning"` as soon as `create`
+  returns, before any later step, so a crash mid-launch leaves a record that the next sweep
+  destroys (a provisioning record with no live launch fiber). A provider sandbox with no record at
+  all is only flagged, never deleted (see [Orphans](#orphans)).
+- **Tags.** `create` receives `tags: { host, instance }`, the host's environment id and the
+  record's instance id. A driver that can label sandboxes stores both, and `listSandboxes` returns
+  the sandboxes carrying this host's tag. Boat stores them as `t3.code/host` and `t3.code/instance`
+  labels; the other drivers do not tag yet, so they report no orphans.
 
 ## Adding a provider
 
@@ -77,9 +88,15 @@ entry, its kind in contracts, and its logo; nothing else branches on the provide
 4. **Register the driver.** Add the import and the array entry in
    `providers/index.ts`. Scopes, RPCs, settings, and the rest of the UI need no changes.
 5. **Decide the optional capabilities.**
-   - `stop`/`resume` only if the provider can stop and start the same machine. The record's hard
-     deadline still rules: a provider TTL that stops ends at the deadline, and one that deletes ends
-     after it (see [Lifecycle and hard limits](#lifecycle-and-hard-limits)).
+   - `stop`/`resume` only if the provider can stop and start the same machine. The record's
+     running limit still rules: a provider auto-stop must not be shorter than it, and one that
+     deletes must run after it (see [Lifecycle and hard limits](#lifecycle-and-hard-limits)).
+   - `uploadFile` only if the provider has a files API. The provisioner writes copied env files
+     through it so their contents never appear in a command; without it they go through
+     `execute`'s `secrets` like any other secret.
+   - `listSandboxes` only if the provider can list sandboxes by the label `create` set.
+   - `info.diskRetentionDays` only if the provider documents how long it keeps a stopped disk.
+     The Sandboxes list warns three days before it.
    - `listEnvironments` only if the provider has named credential environments. Return **flags
      only** (`passGithub`, `passSecrets`, …). Never map `envContents`, `secretFiles`, or any other
      value that carries a real secret into `SandboxCredentialEnvironment`.
@@ -114,11 +131,11 @@ entry, its kind in contracts, and its logo; nothing else branches on the provide
 Three details apply to every provider:
 
 - **The first successful create must be usable.** Publish port `3773` with a public, ungated
-  origin, and make sure the provider's own auto-stop or auto-delete is not shorter than T3's
-  eight-hour lifetime. Where the plan caps it lower, `info.detail` says so.
+  origin (unless `publishPort` is `false`), and make sure the provider's own auto-stop or
+  auto-delete is not shorter than the config's running limit. Where the plan caps it lower, `info.detail` says so.
 - **The sandbox id survives a resume.** Record the id that stays the same across stop and resume.
   Vercel starts a new session on every resume, so its driver records the sandbox name and reads
-  the current session before each command, stop, or extend, caching nothing between calls.
+  the current session before each command or stop, caching nothing between calls.
 - **The sandbox labels itself.** Provisioning writes `<baseDir>/environment-label` (default
   `~/.t3/environment-label`) before starting the server, so the environment picks up the requested
   name without sudo or a writable `/etc`.
@@ -188,36 +205,61 @@ server except into the sandbox.
   available, and the script always exits zero and reports what is still missing. Boat ships all
   three, so it is a no-op there; other images can lack `gh`.
 
+## Configs and per-thread launches
+
+A `SandboxEnvironmentConfig` (`sandbox_configs`, migration 081) holds what each machine is made
+from: provider, size or template, what it gets from the host (Claude, GitHub, tailnet), `access`,
+the projects allowed, per-project copied files, and the running limit. Saving one validates it and
+creates nothing.
+
+`sandboxes.launch` takes a config, a thread id, and the host's project, and refuses a project the
+config does not allow or one without a github.com remote. The launch runs in a fiber forked into
+the provisioner's own scope, so it outlives the RPC that started it, and reports a
+`SandboxSetupSnapshot` per change through
+[`sandboxLaunches.ts`](../../apps/server/src/sandbox/sandboxLaunches.ts), which clients read with
+`sandboxes.subscribeLaunch`. Stages run in a fixed order: `preflight`, `create`, `install`,
+`credentials`, `start`, `repo`, `env-files`, `pair`.
+
+- **Failure policy.** A failure up to `start` destroys the machine and ends the launch with
+  `recovery: "relaunch"`. A failure in `repo` or `pair` keeps the machine and waits on the
+  launch's retry queue with `recovery: "retry"`. `env-files` and the credential steps only warn.
+- **Cancel** interrupts the fiber at any stage; its `onExit` destroys the machine, revokes the hub
+  key, removes the key's secret, deletes the tailnet device, and removes the record.
+- **Clone.** The `repo` step runs `git clone` from the project's GitHub URL into `~/work/<repo>`
+  and adds it as a project on the sandbox's server, which prints the directory and project id.
+- **Copied files.** By default the git-ignored files `isDefaultCopiedFile` accepts (env files),
+  or the config's list for that project, read from the host's checkout and written into the clone
+  through `uploadFile` with mode 600.
+- **Pairing.** The host pairs with the sandbox (sealed, as below) and hands the client the origin
+  and pairing code through `sandboxes.pairLaunch`; the client registers the environment, waits
+  for the project to appear, retargets the composer draft onto it, sends, and calls
+  `sandboxes.completeLaunch`, which marks the record with the thread id.
+
 ## Lifecycle and hard limits
 
-Every provisioned machine gets a row in `sandbox_records` (see
-[`SandboxRecords.ts`](../../apps/server/src/persistence/SandboxRecords.ts)) keyed by the environment
-id returned by `/.well-known/t3/environment`. Environments stay the source of truth for connection
-details; the record only adds what the provider needs to act on the machine: provider, sandbox id,
-size, credential environment, and the deadline.
+Every machine gets a row in `sandbox_instances` (see
+[`SandboxRecords.ts`](../../apps/server/src/persistence/SandboxRecords.ts)) keyed by an instance id
+the provisioner picks before create, since the environment id is only known once T3 answers on
+the machine. Environments stay the source of truth for connection details; the record only adds
+what the provider needs to act on the machine (provider, sandbox id, size, credential environment)
+and the thread, config, and project it belongs to.
 
-`ttlMinutes` defaults to 480 and is the sandbox's lifetime, counted from creation, not a window
-that each resume refreshes: stopping and resuming never hand time back, or the limit would never
-bind. `hardDeadlineAt` is createdAt plus `ttlMinutes`. The only way to move it is Extend, which adds
-to both and is capped by the server's lifetime limit (`sandboxLifetimeCapMinutes`, 24 hours by
-default), so a sandbox still cannot run forever. Extend and resume refuse a sandbox already past its
-deadline, and the server sweeps records once a minute and calls the driver's `stop` when a deadline
-passes. A failed stop is logged and retried on the next sweep.
+`maxRunningMinutes` (480 by default, clamped to the provider's `maxTtlMinutes`) limits how long a
+sandbox runs since its last start (`runningSince`); a resume starts the count again. The sweep runs
+once a minute and calls the driver's `stop` on a sandbox past its limit; a failed stop is logged and
+retried on the next sweep. `idleStopMinutes` is stored for a later idle stop and does nothing yet.
+A stop sets `stoppedAt`, which the Sandboxes list shows as the disk's age against the provider's
+`diskRetentionDays`. Nothing deletes a stopped sandbox automatically.
 
-The provider's own TTL is only a backstop for when T3 is offline at the deadline, and it must never
-destroy what T3's stop would keep; a driver with `extend` moves it whenever the deadline moves.
-Boat's backstop is an auto-stop counted from create or resume, so extending a running Boat sandbox
-resets it to the time left, a stopped one gets it on resume, and a plan with a lower auto-stop
-maximum (trial: two hours) stops the machine early without moving T3's deadline. Daytona's TTL
-deletes the sandbox, disk included, even when stopped, so it is always set 24 hours past the
-deadline: a stopped Daytona sandbox keeps its disk for a day and is then gone. Vercel's is the
-session timeout, set on create and resume and moved with `extend-timeout`, but the plan caps one
-session (45 minutes on Hobby, a day on Pro), so a Hobby sandbox stops early and the sweep records
-it as stopped until the user resumes it. Its stopped disk is kept for 30 days. Upstash and Celesto
-have no lifetime of their own, so their `extend` moves nothing and the sweep's stop is the only
-deadline; a Celesto sandbox bills until T3 stops it. Upstash also
-pauses an idle box and wakes it on any visit to its URL, restarting T3 through the box's init
-command; the sweep records both, and a box woken past its deadline is paused again on the next sweep.
+The provider's own auto-stop is only a backstop for when T3 is offline, and it must never destroy
+what T3's stop would keep. Boat's auto-stop is set to the running limit on create and resume, and a
+plan with a lower maximum (trial: two hours) stops the machine early. Daytona's TTL deletes the
+sandbox, disk included, even when stopped, so it is set 24 hours past the running limit. Vercel's
+is the session timeout, capped by the plan (45 minutes on Hobby, a day on Pro), so a Hobby sandbox
+stops early and the sweep records it as stopped. Its stopped disk is kept for 30 days. Upstash and
+Celesto have no lifetime of their own, so the sweep's stop is the only limit; a Celesto sandbox
+bills until T3 stops it. Upstash also pauses an idle box and wakes it on any visit to its URL,
+restarting T3 through the box's init command; the sweep records both.
 
 The same sweep makes the record match the provider, because T3 usually runs where webhooks can't
 reach it. Each record gets at most one provider call per sweep, with a few in flight at a time. An
@@ -227,6 +269,16 @@ means T3 is not answering on it. The sweep writes only when the record has not c
 read, so a user's stop or resume during a slow provider call wins. `expired` and `deleted` records
 stay listed until the user deletes them; deleting a `deleted` record skips the provider.
 
+### Orphans
+
+The sweep also calls `listSandboxes` once per configured provider and reports every sandbox
+carrying this host's tag that no record or running launch accounts for. `sandboxes.list` returns
+them as `orphans`, and the Sandboxes list shows them under "Not tracked by T3 Code" with a delete
+button. They are never deleted automatically, since a record can be lost while the machine still
+holds work.
+
+Templates are saved only from a sandbox with no thread: saving deletes the source machine.
+
 `stop` and `resume` are optional on the driver. A provider without them still provisions and
 connects; the settings UI hides the controls and the RPC returns a configuration error instead of
 inventing a lifecycle the provider does not have.
@@ -234,5 +286,9 @@ inventing a lifecycle the provider does not have.
 ## Verification
 
 Driver tests use `HttpClient.make` to assert the provider requests and error mapping; the
-provisioner test asserts the install/pair sequence, the returned pairing code, and cleanup. A new
+provisioner test asserts the install/pair sequence, the returned pairing code, and cleanup. The
+per-thread suite in `SandboxProvisioner.test.ts` runs launches against a fake Boat: a full launch
+(tags, the env file through the files API, no secret in any command), a failed install, a failed
+clone with retry and cancel, a cancel mid-install, the refusals, and the sweep's orphan and
+abandoned-record handling. A new
 driver needs the same coverage for its create, execute, expose, and destroy paths.
