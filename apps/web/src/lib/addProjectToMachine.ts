@@ -18,16 +18,7 @@ import { environmentProjectClonesAtom, silenceProjectCloneToasts } from "../stat
 import { projectEnvironment } from "../state/projects";
 import { sourceControlEnvironment } from "../state/sourceControl";
 
-/** Matches the server's read cap: a larger file would arrive truncated. */
-export const COPYABLE_FILE_MAX_BYTES = 1024 * 1024;
-
-const DEFAULT_COPIED_FILE_NAME = /^(?:\.env(?:\..+)?|\.envrc|\.dev\.vars)$/;
-
-/** Env files are the ignored files people almost always want on a new machine. */
-export function isDefaultCopiedFile(path: string): boolean {
-  const name = path.split("/").at(-1) ?? path;
-  return DEFAULT_COPIED_FILE_NAME.test(name);
-}
+export { COPYABLE_FILE_MAX_BYTES, isDefaultCopiedFile } from "@t3tools/shared/copiedFiles";
 
 export interface AddProjectToMachineInput {
   readonly source: { readonly environmentId: EnvironmentId; readonly cwd: string };

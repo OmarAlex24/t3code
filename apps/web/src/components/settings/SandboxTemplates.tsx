@@ -108,7 +108,7 @@ export function SaveSandboxTemplateDialog({
     setSaving(true);
     const result = await saveTemplate({
       environmentId,
-      input: { environmentId: sandbox.environmentId, name },
+      input: { instanceId: sandbox.instanceId, name },
     });
     setSaving(false);
     if (result._tag === "Failure") {
@@ -135,7 +135,7 @@ export function SaveSandboxTemplateDialog({
     toastManager.add({
       type: "success",
       title: "Template saved",
-      description: `${name} is ready and ${sandbox.label} was deleted. Add a sandbox environment and start from ${name} to keep working.`,
+      description: `${name} is ready and ${sandbox.label} was deleted. Pick ${name} in a sandbox config so new threads start from it.`,
     });
   };
 
