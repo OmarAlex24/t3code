@@ -1,26 +1,15 @@
-import {
-  CheckIcon,
-  ChevronRightIcon,
-  CircleAlertIcon,
-  CircleDashedIcon,
-  ExternalLinkIcon,
-  LayersIcon,
-  PlusIcon,
-} from "lucide-react";
+import { CheckIcon, ChevronRightIcon, CircleAlertIcon, ExternalLinkIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useRef, useState, type ReactNode } from "react";
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { canCreateProjectInEnvironment } from "@t3tools/client-runtime/operations/projects";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   AuthSettingsWriteScope,
-  defaultInstanceIdForDriver,
-  ProviderDriverKind,
-  repositoryGroupingKeyOf,
+  DEFAULT_SANDBOX_IDLE_MINUTES,
+  DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
   type EnvironmentId,
-  type ProviderInstanceId,
-  type SandboxCreateResult,
+  type ProjectId,
   type SandboxCredentialEnvironment,
+  type SandboxEnvironmentConfig,
   type SandboxProviderInfo,
 } from "@t3tools/contracts";
 import {
@@ -33,35 +22,30 @@ import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Input } from "../ui/input";
+import {
+  NumberField,
+  NumberFieldDecrement,
+  NumberFieldGroup,
+  NumberFieldIncrement,
+  NumberFieldInput,
+} from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
-import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { SandboxProviderLogo } from "./SandboxProviderLogo";
-import {
-  describeSandboxFailure,
-  SandboxQuotaLine,
-  SandboxStartBlocked,
-  SandboxStartConfirmation,
-  useSandboxStartCheck,
-} from "./SandboxStartLimits";
+import { describeSandboxFailure } from "./SandboxStartLimits";
 import { useSandboxTemplates } from "./SandboxTemplates";
-import { openAddProjectToMachine } from "../AddProjectToMachineDialog";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useProjects } from "~/state/entities";
-import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
-import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
 import { readEnvironmentScope } from "~/state/session";
 
 const EMPTY_PROVIDERS: ReadonlyArray<SandboxProviderInfo> = [];
 const EMPTY_CREDENTIAL_ENVIRONMENTS: ReadonlyArray<SandboxCredentialEnvironment> = [];
 const NO_CREDENTIAL_ENVIRONMENT = "__none__";
 const FRESH_MACHINE = "__fresh__";
-const CODEX_INSTANCE = defaultInstanceIdForDriver(ProviderDriverKind.make("codex"));
-const CLAUDE_INSTANCE = defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent"));
 
 const describeCredentialEnvironment = (
   environment: SandboxCredentialEnvironment,
@@ -80,16 +64,6 @@ const describeCredentialEnvironment = (
   ].filter((value): value is string => value !== null);
   return passes.length === 0 ? "Passes no credentials." : `Passes ${passes.join(", ")}.`;
 };
-
-const formatFailure = (error: unknown): string =>
-  error instanceof Error
-    ? error.message
-    : typeof error === "string"
-      ? error
-      : "Failed to create sandbox.";
-
-// T3's default sandbox lifetime; a plan with a shorter auto-stop maximum is called out.
-const DEFAULT_TTL_MINUTES = 480;
 
 function FieldLabel({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
   return (
@@ -129,232 +103,71 @@ function OptIn({
   );
 }
 
-type ChecklistState = "done" | "todo" | "off";
-
-function ChecklistRow({
-  state,
-  children,
-  action,
+function MinutesField({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  disabled,
+  onChange,
 }: {
-  state: ChecklistState;
-  children: ReactNode;
-  action?: ReactNode;
+  label: string;
+  hint: string;
+  value: number;
+  min: number;
+  max: number;
+  disabled: boolean;
+  onChange: (minutes: number) => void;
 }) {
   return (
-    <li className="flex min-h-8 items-center gap-2.5 text-sm">
-      {state === "done" ? (
-        <CheckIcon aria-hidden className="size-4 shrink-0 text-success" />
-      ) : state === "todo" ? (
-        <CircleAlertIcon aria-hidden className="size-4 shrink-0 text-warning" />
-      ) : (
-        <CircleDashedIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-      )}
-      <span className="min-w-0 flex-1">{children}</span>
-      {action}
-    </li>
-  );
-}
-
-const MAX_PROJECT_CHOICES = 4;
-
-// One row per repository, from the machine it is most likely set up on: this app's own machine
-// first, then the most recently changed. Only projects with a remote can be cloned onto the sandbox.
-const sandboxProjectChoices = (
-  projects: ReadonlyArray<EnvironmentProject>,
-  sandboxEnvironmentId: EnvironmentId,
-  primaryEnvironmentId: EnvironmentId | null,
-) => {
-  const onSandbox = new Set<string>();
-  const byRepository = new Map<string, EnvironmentProject>();
-  const rank = (project: EnvironmentProject) =>
-    project.environmentId === primaryEnvironmentId ? 1 : 0;
-  for (const project of projects) {
-    const identity = project.repositoryIdentity;
-    if (project.isScratch || !identity?.locator.remoteUrl) continue;
-    const key = repositoryGroupingKeyOf(identity);
-    if (project.environmentId === sandboxEnvironmentId) {
-      onSandbox.add(key);
-      continue;
-    }
-    const current = byRepository.get(key);
-    if (
-      current === undefined ||
-      rank(project) > rank(current) ||
-      (rank(project) === rank(current) && project.updatedAt > current.updatedAt)
-    ) {
-      byRepository.set(key, project);
-    }
-  }
-  return [...byRepository.entries()]
-    .toSorted(([, a], [, b]) => rank(b) - rank(a) || (a.updatedAt < b.updatedAt ? 1 : -1))
-    .slice(0, MAX_PROJECT_CHOICES)
-    .map(([key, project]) => ({ project, added: onSandbox.has(key) }));
-};
-
-function SandboxProjectStep({
-  sandboxEnvironmentId,
-  onLeave,
-}: {
-  sandboxEnvironmentId: EnvironmentId;
-  onLeave: () => void;
-}) {
-  const choices = sandboxProjectChoices(
-    useProjects(),
-    sandboxEnvironmentId,
-    usePrimaryEnvironmentId(),
-  );
-  const { environments } = useEnvironments();
-  const sandbox = environments.find(
-    (environment) => environment.environmentId === sandboxEnvironmentId,
-  );
-  // The add dialog only offers machines it can clone onto, and would pick another one otherwise.
-  const sandboxReady =
-    sandbox !== undefined &&
-    sandbox.serverConfig !== null &&
-    canCreateProjectInEnvironment(sandbox.connection.phase);
-  const anyAdded = choices.some((choice) => choice.added);
-  return (
-    <li className="py-1.5">
-      <div className="flex min-h-8 items-center gap-2.5 text-sm">
-        {anyAdded ? (
-          <CheckIcon aria-hidden className="size-4 shrink-0 text-success" />
-        ) : (
-          <CircleDashedIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-        )}
-        <span className="min-w-0 flex-1">
-          {choices.length === 0
-            ? "Add your project from the composer's machine picker"
-            : "Add your project"}
-        </span>
-      </div>
-      {choices.length === 0 ? null : (
-        <ul className="ms-6.5 space-y-0.5">
-          {choices.map(({ project, added }) => (
-            <li
-              key={`${project.environmentId}:${project.id}`}
-              className="flex min-h-7 items-center gap-2"
-            >
-              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                {project.title}
-              </span>
-              {added ? (
-                <span className="text-2xs text-muted-foreground">Added</span>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="xs"
-                  disabled={!sandboxReady}
-                  onClick={() => {
-                    // The add dialog opens a thread on the sandbox, which leaves this checklist.
-                    onLeave();
-                    openAddProjectToMachine({
-                      projectRef: scopeProjectRef(project.environmentId, project.id),
-                      targetEnvironmentId: sandboxEnvironmentId,
-                    });
-                  }}
-                >
-                  Add
-                </Button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
-
-function SandboxSetupChecklist({
-  sandbox,
-  canSaveTemplates,
-  onSetUpProvider,
-  onShowSandboxes,
-  onDone,
-}: {
-  sandbox: SandboxCreateResult;
-  canSaveTemplates: boolean;
-  onSetUpProvider: (instanceId: ProviderInstanceId) => void;
-  onShowSandboxes: () => void;
-  onDone: () => void;
-}) {
-  const { setup } = sandbox;
-  const setUp = (label: string, instanceId: ProviderInstanceId) => (
-    <Button variant="outline" size="xs" onClick={() => onSetUpProvider(instanceId)}>
-      {label}
-    </Button>
-  );
-  return (
-    <div className="space-y-4">
-      <div className="space-y-1">
-        <p className="text-sm font-medium text-foreground">{sandbox.label} is running</p>
-        <p className="text-xs text-muted-foreground">
-          It is paired with this app and reconnects on startup.
-        </p>
-      </div>
-      <ul className="divide-y divide-border/60">
-        <ChecklistRow
-          state={setup.claude === "ready" ? "done" : setup.claude === "failed" ? "todo" : "off"}
-          action={setup.claude === "ready" ? null : setUp("Set up", CLAUDE_INSTANCE)}
+    <div className="space-y-1">
+      <FieldLabel>{label}</FieldLabel>
+      <div className="flex items-center gap-2">
+        <NumberField
+          value={value}
+          min={min}
+          max={max}
+          step={5}
+          size="sm"
+          className="w-32"
+          disabled={disabled}
+          onValueChange={(next) => {
+            if (next !== null) onChange(Math.min(max, Math.max(min, Math.round(next))));
+          }}
         >
-          {setup.claude === "ready"
-            ? "Claude uses this machine's setup"
-            : setup.claude === "failed"
-              ? "Claude needs setup"
-              : "Claude is not set up"}
-        </ChecklistRow>
-        <ChecklistRow state="off" action={setUp("Sign in", CODEX_INSTANCE)}>
-          Codex needs a sign-in
-        </ChecklistRow>
-        <ChecklistRow
-          state={setup.github === "ready" ? "done" : setup.github === "failed" ? "todo" : "off"}
-        >
-          {setup.github === "ready"
-            ? "GitHub is connected for gh and git"
-            : setup.github === "failed"
-              ? "GitHub is not connected. Run gh auth login in the sandbox's terminal."
-              : "GitHub is not connected"}
-        </ChecklistRow>
-        {setup.tailscale === "skipped" ? null : (
-          <ChecklistRow state={setup.tailscale === "ready" ? "done" : "todo"}>
-            {setup.tailscale === "ready" ? "On your tailnet" : "Not on your tailnet"}
-          </ChecklistRow>
-        )}
-        <SandboxProjectStep sandboxEnvironmentId={sandbox.environmentId} onLeave={onDone} />
-        {canSaveTemplates ? (
-          <li className="flex items-start gap-2.5 py-1.5 text-sm">
-            <LayersIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 flex-1 space-y-0.5">
-              <span className="block">Save it as a template</span>
-              <span className="block text-2xs leading-relaxed text-muted-foreground">
-                Once the project and its dependencies are set up, use Save as template… on this
-                sandbox. New sandboxes then start ready.
-              </span>
-            </span>
-            <Button variant="outline" size="xs" onClick={onShowSandboxes}>
-              Show
-            </Button>
-          </li>
-        ) : null}
-      </ul>
-      {setup.warnings.length === 0 ? null : (
-        <Alert variant="warning">
-          <AlertDescription>
-            <ul className="space-y-1">
-              {setup.warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
-              ))}
-            </ul>
-          </AlertDescription>
-        </Alert>
-      )}
-      <div className="flex justify-end">
-        <Button onClick={onDone}>Done</Button>
+          <NumberFieldGroup>
+            <NumberFieldDecrement aria-label={`Decrease ${label.toLowerCase()}`} />
+            <NumberFieldInput aria-label={`${label} in minutes`} />
+            <NumberFieldIncrement aria-label={`Increase ${label.toLowerCase()}`} />
+          </NumberFieldGroup>
+        </NumberField>
+        <span className="text-xs text-muted-foreground">minutes</span>
       </div>
+      <p className="text-2xs leading-relaxed text-muted-foreground">{hint}</p>
     </div>
   );
 }
 
-/** Keeps the Add environment dialog open while a sandbox is provisioning. */
+/** Projects on the host a sandbox can clone: they have a GitHub remote to clone from. */
+const sandboxLaunchableProjects = (
+  projects: ReadonlyArray<EnvironmentProject>,
+  hostEnvironmentId: EnvironmentId,
+) =>
+  projects.filter(
+    (project) =>
+      project.environmentId === hostEnvironmentId &&
+      project.isScratch !== true &&
+      /github\.com[/:]/u.test(project.repositoryIdentity?.locator.remoteUrl ?? ""),
+  );
+
+const parseFileList = (text: string) =>
+  text
+    .split(/[\n,]/u)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+
+/** Keeps the Add environment dialog open while a config is being saved. */
 export function useSandboxProvisioningLock() {
   const [isProvisioning, setIsProvisioning] = useState(false);
   // The dialog's close handler runs in the same tick as the completion callback, before React
@@ -367,46 +180,74 @@ export function useSandboxProvisioningLock() {
   return { isProvisioning, lockedRef, onProvisioningChange };
 }
 
+/**
+ * Creates or edits a sandbox config: what each thread's sandbox is made from. Saving makes no
+ * machine; a thread started on the config gets its own.
+ */
 export function SandboxEnvironmentFields({
   environmentId,
+  config,
   error,
   onErrorChange,
   onProvisioningChange,
   onDone,
 }: {
   readonly environmentId: EnvironmentId;
+  /** The config being edited; omit to add one. */
+  readonly config?: SandboxEnvironmentConfig;
   readonly error: string | null;
   readonly onErrorChange: (error: string | null) => void;
-  /** Lets the dialog lock its mode cards and refuse to close while a machine is being created. */
-  readonly onProvisioningChange?: (provisioning: boolean) => void;
+  /** Lets the dialog lock its mode cards and refuse to close while the config saves. */
+  readonly onProvisioningChange?: (saving: boolean) => void;
   readonly onDone: () => void;
 }) {
   const navigate = useNavigate();
   const providersQuery = useEnvironmentQuery(
     serverEnvironment.sandboxesProviders({ environmentId, input: undefined }),
   );
-  const createSandbox = useAtomCommand(serverEnvironment.sandboxesCreate, {
+  const saveConfig = useAtomCommand(serverEnvironment.sandboxesSaveConfig, {
     reportFailure: false,
   });
-  const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
-  const [selectedKind, setSelectedKind] = useState<string | null>(null);
+  const deleteConfig = useAtomCommand(serverEnvironment.sandboxesDeleteConfig, {
+    reportFailure: false,
+  });
+  const [selectedKind, setSelectedKind] = useState<string | null>(config?.provider ?? null);
   const [apiKey, setApiKey] = useState("");
   const [replacingKey, setReplacingKey] = useState(false);
   // Edits to the provider's settings fields; untouched fields show the saved value.
   const [settingsDraft, setSettingsDraft] = useState<Readonly<Record<string, string>>>({});
-  const [label, setLabel] = useState("");
-  const [size, setSize] = useState("");
-  const [credentialEnvironment, setCredentialEnvironment] = useState("");
-  const [templateName, setTemplateName] = useState("");
-  const [allowCredentials, setAllowCredentials] = useState(false);
-  const [useClaude, setUseClaude] = useState(false);
+  const [label, setLabel] = useState(config?.label ?? "");
+  const [size, setSize] = useState(config?.size ?? "");
+  const [credentialEnvironment, setCredentialEnvironment] = useState(
+    config?.credentialEnvironment ?? "",
+  );
+  const [templateName, setTemplateName] = useState(config?.template ?? "");
+  const [allowCredentials, setAllowCredentials] = useState(
+    config?.credentialEnvironment !== undefined,
+  );
+  const [useClaude, setUseClaude] = useState(config?.claude !== undefined);
   // Null until edited, so the field follows the server's current endpoint.
-  const [claudeBaseUrl, setClaudeBaseUrl] = useState<string | null>(null);
-  const [passGithub, setPassGithub] = useState(false);
+  const [claudeBaseUrl, setClaudeBaseUrl] = useState<string | null>(
+    config?.claude?.baseUrl ?? null,
+  );
+  const [passGithub, setPassGithub] = useState(config?.passGithubToken ?? false);
   // Null until toggled, so it follows whether the server's Claude endpoint is private.
-  const [joinTailnet, setJoinTailnet] = useState<boolean | null>(null);
-  const [isProvisioning, setIsProvisioning] = useState(false);
-  const [created, setCreated] = useState<SandboxCreateResult | null>(null);
+  const [joinTailnet, setJoinTailnet] = useState<boolean | null>(config?.joinTailnet ?? null);
+  const [tailnetOnly, setTailnetOnly] = useState(config?.access === "tailnet");
+  const [projectIds, setProjectIds] = useState<ReadonlyArray<ProjectId>>(config?.projectIds ?? []);
+  const [envFiles, setEnvFiles] = useState<Readonly<Record<string, string>>>(() =>
+    Object.fromEntries(
+      Object.entries(config?.envFiles ?? {}).map(([id, files]) => [id, files.join(", ")]),
+    ),
+  );
+  const [idleMinutes, setIdleMinutes] = useState(
+    config?.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES,
+  );
+  const [maxRunningMinutes, setMaxRunningMinutes] = useState(
+    config?.maxRunningMinutes ?? DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
+  );
+  const [isSaving, setIsSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const providers = providersQuery.data?.providers ?? EMPTY_PROVIDERS;
   const host = providersQuery.data?.host;
   const provider = providers.find((candidate) => candidate.kind === selectedKind) ?? providers[0];
@@ -415,7 +256,7 @@ export function SandboxEnvironmentFields({
   // A template keeps the machine size it was saved from.
   const selectedSize =
     template !== undefined
-      ? (template.size ?? "")
+      ? (template.size ?? provider?.defaultSize ?? "")
       : size === ""
         ? (provider?.defaultSize ?? "")
         : size;
@@ -426,10 +267,6 @@ export function SandboxEnvironmentFields({
           input: { provider: provider.kind },
         })
       : null,
-  );
-  const startCheck = useSandboxStartCheck({ environmentId, provider, size: selectedSize });
-  const sizeAvailability = new Map(
-    (startCheck.limits?.sizes ?? []).map((entry) => [entry.id, entry] as const),
   );
   const credentialEnvironments =
     environmentsQuery.data?.environments ?? EMPTY_CREDENTIAL_ENVIRONMENTS;
@@ -445,7 +282,7 @@ export function SandboxEnvironmentFields({
       selectedCredentialEnvironment.passSandboxCredentials);
   const canWriteSettings = readEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const claudeEndpoint = (claudeBaseUrl ?? host?.claude?.baseUrl ?? "").trim();
-  const sendsClaude = useClaude && host?.claude !== undefined;
+  const sendsClaude = useClaude && (host?.claude !== undefined || config?.claude !== undefined);
   // Read from settings, so a client saved in the Sandboxes section applies without a refetch.
   const tailscaleReady = useEnvironmentSettings(
     environmentId,
@@ -453,13 +290,14 @@ export function SandboxEnvironmentFields({
       settings.sandboxTailscale.clientId !== "" && settings.sandboxTailscale.clientSecret !== "",
   );
   const joinsTailnet = tailscaleReady && (joinTailnet ?? host?.claude?.privateNetwork === true);
+  const projects = sandboxLaunchableProjects(useProjects(), environmentId);
   const disabled =
-    isProvisioning ||
+    isSaving ||
     provider === undefined ||
     !canWriteSettings ||
-    startCheck.blocked !== null ||
     (passesCredentials && !allowCredentials) ||
-    (sendsClaude && claudeEndpoint === "");
+    (sendsClaude && claudeEndpoint === "") ||
+    (provider !== undefined && !provider.configured && apiKey.trim() === "");
 
   const settingsFields = provider?.settingsFields ?? [];
   const requiredSettingsFields = settingsFields.filter((field) => !field.optional);
@@ -467,16 +305,47 @@ export function SandboxEnvironmentFields({
   const settingValue = (id: string) => settingsDraft[id] ?? provider?.settings?.[id] ?? "";
   const showsKeyInput = provider !== undefined && (!provider.configured || replacingKey);
 
-  const handleCreate = async () => {
+  const setSaving = (saving: boolean) => {
+    setIsSaving(saving);
+    onProvisioningChange?.(saving);
+  };
+
+  const reportFailure = (
+    result: Parameters<typeof isAtomCommandInterrupted>[0] &
+      Parameters<typeof squashAtomCommandFailure>[0],
+    title: string,
+  ) => {
+    if (isAtomCommandInterrupted(result)) return;
+    onErrorChange(describeSandboxFailure(squashAtomCommandFailure(result), title).description);
+  };
+
+  const handleSave = async () => {
     if (provider === undefined) return;
-    startCheck.cancel();
-    setIsProvisioning(true);
-    onProvisioningChange?.(true);
+    setSaving(true);
     onErrorChange(null);
-    const result = await createSandbox({
+    const result = await saveConfig({
       environmentId,
       input: {
-        provider: provider.kind,
+        config: {
+          ...(config === undefined ? {} : { id: config.id }),
+          label: label.trim() || `${provider.label} sandbox`,
+          provider: provider.kind,
+          size: selectedSize,
+          ...(template === undefined ? {} : { template: template.name }),
+          ...(credentialEnvironment === "" ? {} : { credentialEnvironment }),
+          ...(sendsClaude ? { claude: { baseUrl: claudeEndpoint } } : {}),
+          passGithubToken: passGithub && host?.github === true,
+          joinTailnet: joinsTailnet,
+          access: joinsTailnet && tailnetOnly ? "tailnet" : "public",
+          projectIds,
+          envFiles: Object.fromEntries(
+            Object.entries(envFiles)
+              .map(([id, text]) => [id, parseFileList(text)] as const)
+              .filter(([, files]) => files.length > 0),
+          ),
+          idleMinutes,
+          maxRunningMinutes,
+        },
         ...(apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
         ...(settingsFields.length === 0
           ? {}
@@ -485,87 +354,29 @@ export function SandboxEnvironmentFields({
                 settingsFields.map((field) => [field.id, settingValue(field.id).trim()]),
               ),
             }),
-        ...(label.trim() === "" ? {} : { label: label.trim() }),
-        ...(template !== undefined
-          ? { template: template.name }
-          : selectedSize === ""
-            ? {}
-            : { size: selectedSize }),
-        ...(credentialEnvironment === ""
-          ? {}
-          : { environment: credentialEnvironment, allowCredentials: true }),
-        ...(sendsClaude ? { agentAccess: { claude: { baseUrl: claudeEndpoint } } } : {}),
-        ...(passGithub && host?.github === true ? { passGithubToken: true } : {}),
-        ...(joinsTailnet ? { joinTailnet: true } : {}),
       },
     });
-    // Any attempt can spend a start, so the quota line re-reads the provider either way.
-    startCheck.refresh();
+    setSaving(false);
     if (result._tag === "Failure") {
-      if (!isAtomCommandInterrupted(result)) {
-        const failure = describeSandboxFailure(
-          squashAtomCommandFailure(result),
-          "Could not create sandbox",
-        );
-        onErrorChange(failure.description);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: failure.title,
-            description: failure.description,
-          }),
-        );
-      }
-      setIsProvisioning(false);
-      onProvisioningChange?.(false);
+      reportFailure(result, "Could not save the sandbox config");
       return;
     }
-
-    const sandbox = result.value as SandboxCreateResult;
-    const connected = await connectPairing({
-      host: sandbox.httpBaseUrl,
-      pairingCode: sandbox.pairingCode,
-    });
-    setIsProvisioning(false);
-    onProvisioningChange?.(false);
-    if (connected._tag === "Failure") {
-      if (!isAtomCommandInterrupted(connected)) {
-        const message = formatFailure(squashAtomCommandFailure(connected));
-        onErrorChange(
-          `The sandbox is running, but pairing failed: ${message}. Add ${sandbox.httpBaseUrl} manually with pairing code ${sandbox.pairingCode}.`,
-        );
-      }
-      return;
-    }
-
     setApiKey("");
-    setLabel("");
-    setCreated(sandbox);
+    onDone();
   };
 
-  if (created !== null) {
-    return (
-      <SandboxSetupChecklist
-        sandbox={created}
-        canSaveTemplates={
-          providers.find((candidate) => candidate.kind === created.provider)?.capabilities
-            .templates === true
-        }
-        onDone={onDone}
-        onShowSandboxes={() => {
-          onDone();
-          void navigate({ to: "/settings/connections", hash: "sandboxes" });
-        }}
-        onSetUpProvider={(instanceId) => {
-          onDone();
-          void navigate({
-            to: "/settings/providers",
-            search: { environmentId: created.environmentId, instanceId },
-          });
-        }}
-      />
-    );
-  }
+  const handleDelete = async () => {
+    if (config === undefined) return;
+    setSaving(true);
+    onErrorChange(null);
+    const result = await deleteConfig({ environmentId, input: { configId: config.id } });
+    setSaving(false);
+    if (result._tag === "Failure") {
+      reportFailure(result, "Could not delete the sandbox config");
+      return;
+    }
+    onDone();
+  };
 
   const settingsFieldInputs = (fields: typeof settingsFields) =>
     fields.length === 0 ? null : (
@@ -586,13 +397,15 @@ export function SandboxEnvironmentFields({
                 setSettingsDraft({ ...settingsDraft, [field.id]: event.target.value })
               }
               placeholder={field.placeholder}
-              disabled={isProvisioning}
+              disabled={isSaving}
               spellCheck={false}
             />
           </label>
         ))}
       </div>
     );
+
+  const allowedProjects = projects.filter((project) => projectIds.includes(project.id));
 
   return (
     <div className="space-y-4">
@@ -609,7 +422,8 @@ export function SandboxEnvironmentFields({
             aria-label="Sandbox provider"
             className="w-full flex-wrap"
             value={[provider.kind]}
-            disabled={isProvisioning}
+            // A config's sandboxes stay with the provider they were made on.
+            disabled={isSaving || config !== undefined}
             onValueChange={(values) => {
               const next = values[0];
               if (next === undefined || next === provider.kind) return;
@@ -663,7 +477,7 @@ export function SandboxEnvironmentFields({
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
                 placeholder={provider.apiKeyPlaceholder}
-                disabled={isProvisioning}
+                disabled={isSaving}
                 spellCheck={false}
               />
             </label>
@@ -675,7 +489,7 @@ export function SandboxEnvironmentFields({
               <Button
                 variant="link"
                 size="xs"
-                disabled={isProvisioning}
+                disabled={isSaving}
                 onClick={() => setReplacingKey(true)}
               >
                 Replace
@@ -690,7 +504,7 @@ export function SandboxEnvironmentFields({
                 value={label}
                 onChange={(event) => setLabel(event.target.value)}
                 placeholder={`${provider.label} sandbox`}
-                disabled={isProvisioning}
+                disabled={isSaving}
                 spellCheck={false}
               />
             </label>
@@ -698,7 +512,7 @@ export function SandboxEnvironmentFields({
               <FieldLabel>Machine</FieldLabel>
               <Select
                 value={selectedSize}
-                disabled={isProvisioning || template !== undefined}
+                disabled={isSaving || template !== undefined}
                 onValueChange={(value) => {
                   if (value !== null) setSize(value);
                 }}
@@ -710,45 +524,28 @@ export function SandboxEnvironmentFields({
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup>
-                  {provider.sizes.map((candidate) => {
-                    const availability = sizeAvailability.get(candidate.id);
-                    const unavailable = availability !== undefined && !availability.available;
-                    return (
-                      <SelectItem key={candidate.id} value={candidate.id} disabled={unavailable}>
-                        {candidate.label}, {candidate.detail}
-                        {unavailable
-                          ? `. ${availability.reason ?? "Not available on this plan."}`
-                          : ""}
-                      </SelectItem>
-                    );
-                  })}
+                  {provider.sizes.map((candidate) => (
+                    <SelectItem key={candidate.id} value={candidate.id}>
+                      {candidate.label}, {candidate.detail}
+                    </SelectItem>
+                  ))}
                 </SelectPopup>
               </Select>
             </label>
           </div>
 
-          {templates.templates.length === 0 ? (
-            provider.configured &&
-            provider.capabilities.templates &&
-            !templates.isPending &&
-            templates.error === null ? (
-              <p className="text-2xs leading-relaxed text-muted-foreground">
-                No templates yet. Set up a sandbox with your project, then save it as a template so
-                the next ones start ready.
-              </p>
-            ) : null
-          ) : (
+          {templates.templates.length === 0 ? null : (
             <div className="space-y-1.5">
               <label className="block">
                 <FieldLabel>Start from</FieldLabel>
                 <Select
                   value={template?.name ?? FRESH_MACHINE}
-                  disabled={isProvisioning}
+                  disabled={isSaving}
                   onValueChange={(value) => {
                     if (value !== null) setTemplateName(value === FRESH_MACHINE ? "" : value);
                   }}
                 >
-                  <SelectTrigger aria-label="Start the sandbox from" size="default">
+                  <SelectTrigger aria-label="Start each sandbox from" size="default">
                     <SelectValue>{template?.name ?? "Fresh machine"}</SelectValue>
                   </SelectTrigger>
                   <SelectPopup>
@@ -763,8 +560,8 @@ export function SandboxEnvironmentFields({
               </label>
               {template === undefined ? null : (
                 <p className="text-2xs leading-relaxed text-muted-foreground">
-                  Starts with the template's tools, repositories, and files, at the size it was
-                  saved from. T3 Code sets up as a new environment.
+                  Each sandbox starts with the template's tools and files, at the size it was saved
+                  from.
                 </p>
               )}
             </div>
@@ -772,22 +569,18 @@ export function SandboxEnvironmentFields({
 
           {settingsFieldInputs(requiredSettingsFields)}
 
-          {startCheck.limits === null ? null : (
-            <SandboxQuotaLine limits={startCheck.limits} defaultTtlMinutes={DEFAULT_TTL_MINUTES} />
-          )}
-
           <div className="space-y-3">
             {host?.claude === undefined ? null : (
               <div className="space-y-2">
                 <OptIn
                   checked={useClaude}
-                  disabled={isProvisioning}
+                  disabled={isSaving}
                   onCheckedChange={setUseClaude}
                   title="Use this machine's Claude setup"
                 >
                   {host.claude.key === "hub"
-                    ? "Adds a key for this sandbox on your CLIProxyAPI hub. Deleting the sandbox removes the key."
-                    : "Copies this machine's Claude token to the sandbox. Deleting the sandbox does not revoke it."}
+                    ? "Adds a key for each sandbox on your CLIProxyAPI hub. Deleting the sandbox removes its key."
+                    : "Copies this machine's Claude token to each sandbox. Deleting a sandbox does not revoke it."}
                 </OptIn>
                 {/* Judged by the server for its own endpoint only; an edited URL is checked live. */}
                 {!host.claude.privateNetwork ||
@@ -802,7 +595,6 @@ export function SandboxEnvironmentFields({
                     <span className="min-w-0 flex-1">
                       Resolves to a private address; a cloud sandbox can't reach it
                       {tailscaleReady ? " unless it joins your tailnet." : "."}
-                      {/* The Sandboxes section that holds the setup row needs a saved provider key. */}
                       {tailscaleReady || !provider.configured ? null : (
                         <>
                           {" "}
@@ -831,7 +623,7 @@ export function SandboxEnvironmentFields({
                       type="url"
                       value={claudeBaseUrl ?? host.claude.baseUrl}
                       onChange={(event) => setClaudeBaseUrl(event.target.value)}
-                      disabled={isProvisioning}
+                      disabled={isSaving}
                       spellCheck={false}
                     />
                   </label>
@@ -839,26 +631,78 @@ export function SandboxEnvironmentFields({
               </div>
             )}
             {tailscaleReady ? (
-              <OptIn
-                checked={joinsTailnet}
-                disabled={isProvisioning}
-                onCheckedChange={setJoinTailnet}
-                title="Join my tailnet"
-              >
-                Joins as an ephemeral, tagged Tailscale device so the sandbox can reach private
-                endpoints. Deleting the sandbox removes the device.
-              </OptIn>
+              <div className="space-y-2">
+                <OptIn
+                  checked={joinsTailnet}
+                  disabled={isSaving}
+                  onCheckedChange={setJoinTailnet}
+                  title="Join my tailnet"
+                >
+                  Each sandbox joins as an ephemeral, tagged Tailscale device so it can reach
+                  private endpoints. Deleting the sandbox removes the device.
+                </OptIn>
+                {joinsTailnet ? (
+                  <div className="ps-6.5">
+                    <OptIn
+                      checked={tailnetOnly}
+                      disabled={isSaving}
+                      onCheckedChange={setTailnetOnly}
+                      title="Reach it only through my tailnet"
+                    >
+                      No public URL. This app connects over the tailnet, so the machine running it
+                      has to be on your tailnet too.
+                    </OptIn>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             <OptIn
               checked={passGithub && host?.github === true}
-              disabled={isProvisioning || host?.github !== true}
+              disabled={isSaving || host?.github !== true}
               onCheckedChange={setPassGithub}
               title="Sign GitHub in with this machine's token"
             >
               {host?.github === true
-                ? "The sandbox's gh and git can then reach every repository this token can."
-                : "This machine has no GitHub token to share."}
+                ? "Each sandbox can then clone private repositories and push with gh and git."
+                : "This machine has no GitHub token to share, so sandboxes can clone public repositories only."}
             </OptIn>
+          </div>
+
+          <div className="space-y-2">
+            <FieldLabel>Projects</FieldLabel>
+            {projects.length === 0 ? (
+              <p className="text-2xs leading-relaxed text-muted-foreground">
+                Any project with a GitHub remote can start a thread on this config.
+              </p>
+            ) : (
+              <>
+                <p className="text-2xs leading-relaxed text-muted-foreground">
+                  {projectIds.length === 0
+                    ? "Any project with a GitHub remote can start a thread here. Pick projects to limit it."
+                    : "Only these projects can start a thread here."}
+                </p>
+                <ul className="grid gap-1.5 sm:grid-cols-2">
+                  {projects.map((project) => (
+                    <li key={project.id}>
+                      <label className="flex cursor-pointer items-center gap-2 text-xs">
+                        <Checkbox
+                          checked={projectIds.includes(project.id)}
+                          disabled={isSaving}
+                          onCheckedChange={(checked) =>
+                            setProjectIds(
+                              checked === true
+                                ? [...projectIds, project.id]
+                                : projectIds.filter((id) => id !== project.id),
+                            )
+                          }
+                        />
+                        <span className="min-w-0 truncate">{project.title}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
           </div>
 
           <Collapsible>
@@ -870,6 +714,58 @@ export function SandboxEnvironmentFields({
               <div className="space-y-4 pt-3">
                 {settingsFieldInputs(optionalSettingsFields)}
 
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <MinutesField
+                    label="Running limit"
+                    hint="A sandbox that has run this long since its last start is stopped. Its disk stays until you delete it."
+                    value={maxRunningMinutes}
+                    min={10}
+                    max={43_200}
+                    disabled={isSaving}
+                    onChange={setMaxRunningMinutes}
+                  />
+                  <MinutesField
+                    label="Idle stop"
+                    hint="Saved for idle detection. For now only the running limit stops sandboxes."
+                    value={idleMinutes}
+                    min={5}
+                    max={1440}
+                    disabled={isSaving}
+                    onChange={setIdleMinutes}
+                  />
+                </div>
+
+                {allowedProjects.length === 0 ? (
+                  <p className="text-2xs leading-relaxed text-muted-foreground">
+                    Each sandbox gets a copy of the project's git-ignored env files on this machine
+                    (.env files, .envrc, .dev.vars). Pick projects above to choose other files.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    <FieldLabel>Files copied from this machine</FieldLabel>
+                    {allowedProjects.map((project) => (
+                      <label key={project.id} className="block">
+                        <span className="mb-1 block text-2xs text-muted-foreground">
+                          {project.title}
+                        </span>
+                        <Input
+                          value={envFiles[project.id] ?? ""}
+                          onChange={(event) =>
+                            setEnvFiles({ ...envFiles, [project.id]: event.target.value })
+                          }
+                          placeholder=".env files, .envrc, .dev.vars"
+                          disabled={isSaving}
+                          spellCheck={false}
+                        />
+                      </label>
+                    ))}
+                    <p className="text-2xs leading-relaxed text-muted-foreground">
+                      Paths relative to the project, separated by commas. Leave empty for the env
+                      files.
+                    </p>
+                  </div>
+                )}
+
                 {provider.capabilities.credentialEnvironments ? (
                   <div className="space-y-2">
                     <label className="block">
@@ -880,7 +776,7 @@ export function SandboxEnvironmentFields({
                             ? NO_CREDENTIAL_ENVIRONMENT
                             : credentialEnvironment
                         }
-                        disabled={isProvisioning || environmentsQuery.isPending}
+                        disabled={isSaving || environmentsQuery.isPending}
                         onValueChange={(value) => {
                           if (value === null) return;
                           setCredentialEnvironment(
@@ -912,18 +808,12 @@ export function SandboxEnvironmentFields({
                     </label>
                     <p className="text-2xs leading-relaxed text-muted-foreground">
                       {selectedCredentialEnvironment === undefined
-                        ? `No ${provider.label} secrets, GitHub token, or agent logins reach the sandbox.`
+                        ? `No ${provider.label} secrets, GitHub token, or agent logins reach the sandboxes.`
                         : describeCredentialEnvironment(
                             selectedCredentialEnvironment,
                             provider.label,
                           )}
                     </p>
-                    {environmentsQuery.error ? (
-                      <p className="text-2xs text-destructive">
-                        Could not list {provider.label} environments. The sandbox will start with no
-                        credentials.
-                      </p>
-                    ) : null}
                     {passesCredentials ? (
                       <Alert variant="error">
                         <AlertDescription>
@@ -931,13 +821,12 @@ export function SandboxEnvironmentFields({
                             <Checkbox
                               className="mt-0.5"
                               checked={allowCredentials}
-                              disabled={isProvisioning}
+                              disabled={isSaving}
                               onCheckedChange={(checked) => setAllowCredentials(checked === true)}
                             />
                             <span>
-                              I understand this sandbox will receive the credentials listed above.
-                              Prefer a {provider.label} environment that is safe for third parties
-                              or leaves out secrets.
+                              I understand every sandbox from this config will receive the
+                              credentials listed above.
                             </span>
                           </label>
                         </AlertDescription>
@@ -945,59 +834,61 @@ export function SandboxEnvironmentFields({
                     ) : null}
                   </div>
                 ) : null}
-
-                <p className="text-2xs leading-relaxed text-muted-foreground">
-                  {credentialEnvironment === ""
-                    ? `The sandbox starts without your ${provider.label} account's secrets, GitHub token, or agent logins, apart from what you share above.`
-                    : `The sandbox receives what this ${provider.label} environment passes, plus what you share above.`}{" "}
-                  The server creates the machine, installs T3 Code and any missing git, GitHub CLI,
-                  or Claude Code, and pairs it. This usually takes one to three minutes and bills
-                  the provider account that owns the key.
-                </p>
               </div>
             </CollapsiblePanel>
           </Collapsible>
 
+          <p className="text-2xs leading-relaxed text-muted-foreground">
+            Saving makes no machine. Each thread you start on this config gets its own sandbox,
+            billed to the {provider.label} account that owns the key.
+          </p>
+
           {!canWriteSettings ? (
             <Alert variant="error">
               <AlertDescription>
-                This connection cannot change settings on the environment that would provision the
-                sandbox.
+                This connection cannot change settings on the environment that keeps sandbox
+                configs.
               </AlertDescription>
             </Alert>
           ) : null}
-          {startCheck.blocked === null ? null : (
-            <SandboxStartBlocked
-              reason={startCheck.blocked.reason}
-              billingUrl={startCheck.limits?.billingUrl}
-            />
-          )}
           {error ? <p className="text-xs text-destructive">{error}</p> : null}
 
-          {startCheck.isConfirming && !isProvisioning ? (
-            <SandboxStartConfirmation
-              warnings={startCheck.assessment?.warnings ?? []}
-              confirmLabel="Create anyway"
-              onConfirm={() => void handleCreate()}
-              onCancel={startCheck.cancel}
-            />
-          ) : (
-            <Button
-              variant="outline"
-              className="w-full"
-              disabled={disabled}
-              onClick={() =>
-                startCheck.needsConfirmation ? startCheck.confirm() : void handleCreate()
-              }
-            >
-              {isProvisioning ? (
-                <Spinner className="size-3.5" />
-              ) : (
-                <PlusIcon className="size-3.5" />
-              )}
-              {isProvisioning ? "Provisioning sandbox…" : `Create ${provider.label} sandbox`}
-            </Button>
-          )}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {config === undefined ? null : confirmingDelete ? (
+              <>
+                <span className="me-auto text-xs text-muted-foreground">
+                  Sandboxes already made from it keep running until you delete them.
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)}>
+                  Keep
+                </Button>
+                <Button
+                  variant="destructive-outline"
+                  size="sm"
+                  disabled={isSaving}
+                  onClick={() => void handleDelete()}
+                >
+                  Delete config
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="me-auto"
+                disabled={isSaving}
+                onClick={() => setConfirmingDelete(true)}
+              >
+                Delete…
+              </Button>
+            )}
+            {confirmingDelete ? null : (
+              <Button disabled={disabled} onClick={() => void handleSave()}>
+                {isSaving ? <Spinner className="size-3.5" /> : null}
+                {config === undefined ? "Add sandbox config" : "Save changes"}
+              </Button>
+            )}
+          </div>
         </>
       )}
     </div>
