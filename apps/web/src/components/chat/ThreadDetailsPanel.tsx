@@ -67,6 +67,7 @@ interface ThreadDetailsPanelProps extends Pick<
   autoEnvironmentLabel?: string | undefined;
   onAutoEnvironment?: (() => void) | undefined;
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  pickedEnvironmentId?: EnvironmentId | null;
   onEnvModeChange: (mode: EnvMode) => void;
   envMode: EnvMode;
   activeThreadBranchOverride?: string | null;
@@ -175,6 +176,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                         layout="panel"
                         panelSection="workspace"
                         availableEnvironments={props.availableEnvironments}
+                        pickedEnvironmentId={props.pickedEnvironmentId ?? null}
                         {...(props.onEnvironmentChange
                           ? { onEnvironmentChange: props.onEnvironmentChange }
                           : {})}
