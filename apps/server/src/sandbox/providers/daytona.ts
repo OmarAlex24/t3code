@@ -428,22 +428,25 @@ export const daytonaDriver: SandboxProviderDriver = {
       ),
     }).pipe(
       Effect.flatMap((sandbox) => waitUntilStarted(input.config.apiKey, sandbox.id)),
+      // `/ttl/{minutes}` is re-anchored at the call and deletes even a stopped sandbox, so each start
+      // keeps the same day of grace past T3's running limit as create.
+      Effect.andThen(
+        input.ttlMinutes === undefined
+          ? Effect.void
+          : requestJson({
+              provider: "daytona",
+              stage: "start",
+              schema: Schema.Struct({ id: Schema.optionalKey(Schema.String) }),
+              request: authorize(
+                HttpClientRequest.post(
+                  `${DAYTONA_API_BASE}/sandbox/${encodeURIComponent(input.sandboxId)}/ttl/${input.ttlMinutes + DESTROY_GRACE_MINUTES}`,
+                ),
+                input.config.apiKey,
+              ),
+            }),
+      ),
       Effect.map(() => ({})),
     ),
-  // `/ttl/{minutes}` is re-anchored at the call and deletes even a stopped sandbox, so it keeps the
-  // same day of grace past T3's deadline as create.
-  extend: (input) =>
-    requestJson({
-      provider: "daytona",
-      stage: "config",
-      schema: Schema.Struct({ id: Schema.optionalKey(Schema.String) }),
-      request: authorize(
-        HttpClientRequest.post(
-          `${DAYTONA_API_BASE}/sandbox/${encodeURIComponent(input.sandboxId)}/ttl/${input.ttlMinutes + DESTROY_GRACE_MINUTES}`,
-        ),
-        input.config.apiKey,
-      ),
-    }).pipe(Effect.asVoid),
   saveTemplate: (input) => withSnapshotPermission(saveTemplate(input)),
   listTemplates: (input) =>
     withSnapshotPermission(
