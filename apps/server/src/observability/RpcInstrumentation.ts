@@ -5,6 +5,7 @@ import * as References from "effect/References";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
 
+import { SANDBOX_RPC_AGGREGATES } from "../sandbox/sandboxRpc.ts";
 import { rpcRequestDuration, rpcRequestsTotal, withMetrics } from "./Metrics.ts";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
@@ -139,18 +140,6 @@ const RPC_AGGREGATES = {
   [WS_METHODS.sourceControlCloneRepository]: "source-control",
   [WS_METHODS.sourceControlPublishRepository]: "source-control",
   [WS_METHODS.sourceControlSignInStart]: "source-control",
-  [WS_METHODS.sandboxesProviders]: "environments",
-  [WS_METHODS.sandboxesEnvironments]: "environments",
-  [WS_METHODS.sandboxesLimits]: "environments",
-  [WS_METHODS.sandboxesCreate]: "environments",
-  [WS_METHODS.sandboxesDelete]: "environments",
-  [WS_METHODS.sandboxesList]: "environments",
-  [WS_METHODS.sandboxesStop]: "environments",
-  [WS_METHODS.sandboxesResume]: "environments",
-  [WS_METHODS.sandboxesExtend]: "environments",
-  [WS_METHODS.sandboxesTemplates]: "environments",
-  [WS_METHODS.sandboxesSaveTemplate]: "environments",
-  [WS_METHODS.sandboxesDeleteTemplate]: "environments",
   [WS_METHODS.sourceControlSignInWait]: "source-control",
   [WS_METHODS.sourceControlSignInCancel]: "source-control",
   [WS_METHODS.sourceControlAppAccess]: "source-control",
@@ -234,6 +223,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.subscribeServerConfig]: "server",
   [WS_METHODS.subscribeServerLifecycle]: "server",
   [WS_METHODS.subscribeAuthAccess]: "auth",
+  ...SANDBOX_RPC_AGGREGATES,
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";
