@@ -261,8 +261,6 @@ export const upstashDriver: SandboxProviderDriver = {
     yield* waitUntilRunning(input.config.apiKey, input.sandboxId);
     return {};
   }),
-  // A box has no provider lifetime to move; T3's sweep pauses it at the deadline.
-  extend: () => Effect.void,
   status: (input) =>
     requestJson({
       provider: "upstash",

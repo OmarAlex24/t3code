@@ -492,8 +492,6 @@ openssl pkey -in ${dir}/key -pubout`,
     yield* waitUntilRunning(input.config.apiKey, input.sandboxId);
     return { publicUrl: yield* exposePort(input.config.apiKey, input.sandboxId, SERVER_PORT) };
   }),
-  // Celesto has no lifetime of its own to move; T3's sweep stops the sandbox at the deadline.
-  extend: () => Effect.void,
   status: Effect.fn("Celesto.status")(function* (input) {
     const computer = yield* getComputer(input.config.apiKey, input.sandboxId).pipe(
       Effect.catchIf(
