@@ -30,10 +30,18 @@ import {
   SandboxCreateInput,
   SandboxCreateResult,
   SandboxCredentialEnvironmentsInput,
+  SandboxLimitsInput,
+  SandboxLimitsResult,
   SandboxCredentialEnvironmentsResult,
   SandboxDeleteInput,
+  SandboxLifecycleInput,
+  SandboxListResult,
   SandboxProviderError,
   SandboxProvidersResult,
+  SandboxResumeResult,
+  SandboxExtendInput,
+  SandboxExtendResult,
+  SandboxStopResult,
 } from "./sandbox.ts";
 import {
   ChatGptReconnectProfileInput,
@@ -621,8 +629,13 @@ export const WS_METHODS = {
   sourceControlStar: "sourceControl.star",
   sandboxesProviders: "sandboxes.providers",
   sandboxesEnvironments: "sandboxes.environments",
+  sandboxesLimits: "sandboxes.limits",
   sandboxesCreate: "sandboxes.create",
   sandboxesDelete: "sandboxes.delete",
+  sandboxesList: "sandboxes.list",
+  sandboxesStop: "sandboxes.stop",
+  sandboxesResume: "sandboxes.resume",
+  sandboxesExtend: "sandboxes.extend",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -1351,6 +1364,36 @@ const WsSandboxesProvidersRpc = Rpc.make(WS_METHODS.sandboxesProviders, {
 const WsSandboxesEnvironmentsRpc = Rpc.make(WS_METHODS.sandboxesEnvironments, {
   payload: SandboxCredentialEnvironmentsInput,
   success: SandboxCredentialEnvironmentsResult,
+  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesLimitsRpc = Rpc.make(WS_METHODS.sandboxesLimits, {
+  payload: SandboxLimitsInput,
+  success: SandboxLimitsResult,
+  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesListRpc = Rpc.make(WS_METHODS.sandboxesList, {
+  payload: Schema.Void,
+  success: SandboxListResult,
+  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesStopRpc = Rpc.make(WS_METHODS.sandboxesStop, {
+  payload: SandboxLifecycleInput,
+  success: SandboxStopResult,
+  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesResumeRpc = Rpc.make(WS_METHODS.sandboxesResume, {
+  payload: SandboxLifecycleInput,
+  success: SandboxResumeResult,
+  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesExtendRpc = Rpc.make(WS_METHODS.sandboxesExtend, {
+  payload: SandboxExtendInput,
+  success: SandboxExtendResult,
   error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
 });
 
@@ -2258,8 +2301,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlStarRpc,
   WsSandboxesProvidersRpc,
   WsSandboxesEnvironmentsRpc,
+  WsSandboxesLimitsRpc,
   WsSandboxesCreateRpc,
   WsSandboxesDeleteRpc,
+  WsSandboxesListRpc,
+  WsSandboxesStopRpc,
+  WsSandboxesResumeRpc,
+  WsSandboxesExtendRpc,
   WsProjectCloneStartRpc,
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,

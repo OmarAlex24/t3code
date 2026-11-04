@@ -2831,8 +2831,13 @@ export const layerWsRpc = (
         [WS_METHODS.sourceControlStar]: (input) => sourceControlSignIn.star(input),
         [WS_METHODS.sandboxesProviders]: () => sandboxes.providers,
         [WS_METHODS.sandboxesEnvironments]: (input) => sandboxes.environments(input),
+        [WS_METHODS.sandboxesLimits]: (input) => sandboxes.limits(input),
         [WS_METHODS.sandboxesCreate]: (input) => sandboxes.create(input),
         [WS_METHODS.sandboxesDelete]: (input) => sandboxes.delete(input),
+        [WS_METHODS.sandboxesList]: () => sandboxes.list,
+        [WS_METHODS.sandboxesStop]: (input) => sandboxes.stop(input),
+        [WS_METHODS.sandboxesResume]: (input) => sandboxes.resume(input),
+        [WS_METHODS.sandboxesExtend]: (input) => sandboxes.extend(input),
         [WS_METHODS.projectCloneStart]: (input) =>
           projectCloneTracker.start(input, {
             createProject: (project) =>
