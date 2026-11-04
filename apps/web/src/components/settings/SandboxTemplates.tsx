@@ -190,8 +190,8 @@ export function SaveSandboxTemplateDialog({
                 </span>
                 <span>
                   Project files stay in the template too, including .env files copied with a
-                  project. T3 Code removes only its own identity and the Claude and GitHub logins it
-                  set up.
+                  project. T3 Code removes only its own identity and the Claude, GitHub, and
+                  Tailscale logins it set up.
                 </span>
                 {sandbox.credentialEnvironment === undefined ? null : (
                   <span>
