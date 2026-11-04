@@ -26,9 +26,13 @@ Drivers must keep two invariants:
   carries two `Access-Control-Allow-Origin` values, which browsers reject.
 - **Cleanup.** `SandboxProvisioner` destroys the machine when any step after `create` fails or is
   interrupted (including exposing the port), so a provisioned machine never bills without an
-  environment pointing at it. Drivers must make `destroy` safe on a machine that never started,
-  and a driver that creates a machine before its own start polling must clean up that path itself,
-  because the provisioner never receives the id.
+  environment pointing at it. Drivers must make `destroy` safe on a machine that never started.
+  The provisioner never receives an id the driver did not return, so the driver cleans up two
+  paths itself: a machine it creates before its own start polling, and a create whose answer was
+  lost (`mayHaveCreated`). Boat replays the create with the same `Idempotency-Key`; Daytona and
+  Vercel name each attempt uniquely (`attemptSandboxName`) and delete that name. The sweep does not
+  delete provider sandboxes without a record: records are written only once provisioning ends,
+  and nothing on a sandbox tells this T3 server apart from another one sharing the account.
 
 ## Adding a provider
 
@@ -43,10 +47,16 @@ entry, its kind in contracts, and its logo; nothing else branches on the provide
    preview-URL call, or from [`vercel.ts`](../../apps/server/src/sandbox/providers/vercel.ts) when
    it names sandboxes and runs them in sessions. Reuse `requestJson` (or `requestText` for bodies
    that are not one JSON document, such as an ND-JSON command stream), `jsonBody`, and `authorize`
-   from `SandboxProvider.ts` so status handling and error mapping stay consistent. `requestJson` turns
-   provider error bodies into a stable `code` (rate limited, concurrency full, billing required,
-   size unavailable, …) with a bounded message; add the provider's own error codes to its table
-   instead of writing messages in the driver, because clients react to `code`.
+   from `SandboxProvider.ts` so status handling and error mapping stay consistent. Their client has
+   no transport timeout, because a synchronous command answers only when it ends; each call is cut
+   at 300 s instead, so one that runs a command passes `commandRequestSeconds` of its run time.
+   `requestJson` turns provider error bodies into a stable `code` (rate limited, concurrency full,
+   billing required, size unavailable, …) with a bounded message; add the provider's own error
+   codes to its table instead of writing messages in the driver, because clients react to `code`.
+   It also sends a request again, within that deadline, when the provider documents the failure as
+   safe to repeat: a short rate-limit wait, or a 5xx or lost connection on a GET, PUT, DELETE, or a
+   create carrying `Idempotency-Key`. A command POST is never repeated unless the provider says it
+   did not run (Boat's `sandbox_restoring`), so add such codes to that table, not a loop in the driver.
 2. **Fill in `info`.** `kind`, `label`, `detail`, `apiKeyLabel`, `apiKeyPlaceholder`, `docsUrl`,
    and `sizes`. The settings UI, the API-key field, and the machine picker are generated from it.
    An account setting the provider needs besides the key (Vercel's team and project) is a
@@ -122,10 +132,14 @@ server except into the sandbox.
   GitHub each run as their own `execute` before the start step, and a failure in any of them
   except install is a warning on the create result, not a failed create: the user still gets a
   working sandbox and a checklist of what is missing.
-- **Secrets never reach a shell parser or an error.** Scripts in
-  [`sandboxSetup.ts`](../../apps/server/src/sandbox/sandboxSetup.ts) embed values as base64 inside
-  single quotes and decode them in the sandbox. Provider errors can echo the command they ran, so
-  a step that carries a secret maps its failure to a fixed message instead of the driver's detail.
+- **Secrets never reach command text, a shell parser, or an error.** Providers keep what they ran:
+  Boat stores every command and its output for 90 days, and Vercel lists a session's command args.
+  So scripts in [`sandboxSetup.ts`](../../apps/server/src/sandbox/sandboxSetup.ts) read secrets
+  from environment variables that `execute` takes as `secrets`, and print nothing secret. Daytona
+  and Vercel pass them as the command's env, which neither lists; Boat has no per-command env, so
+  its driver writes them to a 0600 file through its files API, and the command sources and deletes
+  it first. Provider errors can echo the command they ran, so a step that carries a secret maps its
+  failure to a fixed message instead of the driver's detail.
 - **A hub key belongs to one sandbox.** When the server's Claude endpoint is a CLIProxyAPI hub with
   a management key, the provisioner adds a fresh `t3-sandbox-<label>-<hex>` key through the hub's
   management API instead of copying the server's own key, so deleting the sandbox can revoke
