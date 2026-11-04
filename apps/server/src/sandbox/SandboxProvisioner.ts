@@ -2,6 +2,7 @@ import {
   assessSandboxStart,
   DEFAULT_SANDBOX_TAILSCALE_TAG,
   ExecutionEnvironmentDescriptor,
+  isSecretReference,
   WS_METHODS,
   type EnvironmentId,
   type SandboxCreateInput,
@@ -36,6 +37,7 @@ import {
   type SandboxProviderKind,
   type SandboxProvidersResult,
 } from "@t3tools/contracts";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
@@ -51,7 +53,8 @@ import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SandboxRecords from "../persistence/SandboxRecords.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
-import { makeCliproxyApi } from "../usage/cliproxyApi.ts";
+import { requireSettingsSecret } from "../secrets/settingsSecretValue.ts";
+import { type CliproxyHub, makeCliproxyApi } from "../usage/cliproxyApi.ts";
 import * as SandboxHostAccess from "./SandboxHostAccess.ts";
 import {
   CLAUDE_SETTINGS_SCRUB,
@@ -240,7 +243,7 @@ interface TailnetJoined {
 
 interface HubKey {
   readonly sourceId: string;
-  readonly source: UsageLimitSourceConfig;
+  readonly hub: CliproxyHub;
   readonly value: Redacted.Redacted<string>;
 }
 
@@ -336,6 +339,7 @@ const make = Effect.gen(function* () {
   const secureRandom = yield* SecureRandom.SecureRandom;
   const hostAccess = yield* SandboxHostAccess.SandboxHostAccess;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const secretResolver = yield* SecretResolver.SecretResolver;
   const hubApi = yield* makeCliproxyApi;
   const tailscaleApi = yield* makeTailscaleApi;
   const onHttp = Effect.provideService(HttpClient.HttpClient, httpClient);
@@ -416,19 +420,20 @@ const make = Effect.gen(function* () {
         ),
       );
 
-  // Only a literal management key is used; a hub whose key is a secret reference is skipped.
-  const cliproxyHub = (source: UsageLimitSourceConfig) => ({
-    url: source.url,
-    managementKey: settingsSecretLiteral(source.managementKey),
-  });
+  // A key named by a secret reference that cannot be read fails, so Claude never falls back to a
+  // copy of this machine's token.
+  const cliproxyHub = (source: UsageLimitSourceConfig) =>
+    requireSettingsSecret(secretResolver, source.managementKey).pipe(
+      Effect.map((managementKey): CliproxyHub => ({ url: source.url, managementKey })),
+    );
+
+  const hasManagementKey = (source: UsageLimitSourceConfig) =>
+    isSecretReference(source.managementKey) || settingsSecretLiteral(source.managementKey) !== "";
 
   // The first enabled CLIProxyAPI usage source with a management key is the hub new Claude keys go on.
   const hubSource = (value: ServerSettingsValue) =>
     Object.entries(value.usageLimitSources).find(
-      ([, source]) =>
-        source.enabled &&
-        source.kind === "cliproxy" &&
-        settingsSecretLiteral(source.managementKey) !== "",
+      ([, source]) => source.enabled && source.kind === "cliproxy" && hasManagementKey(source),
     );
 
   const tailscaleClient = (value: ServerSettingsValue): TailscaleOAuthClient | undefined => {
@@ -644,21 +649,18 @@ const make = Effect.gen(function* () {
     // A UUIDv4's version and variant digits are fixed, so they are left out.
     const random = `${hex.slice(0, 12)}${hex.slice(13, 16)}${hex.slice(17, 18)}`;
     const value = `t3-sandbox-${labelSlug(label)}-${random}`;
-    yield* hubApi
-      .addApiKey(cliproxyHub(source), value)
-      .pipe(
-        Effect.mapError((error) =>
-          configError(
-            provider,
-            `Could not add a key for this sandbox on the CLIProxyAPI hub. ${error.detail}`,
-          ),
-        ),
+    const failed = (detail: string) =>
+      configError(
+        provider,
+        `Could not add a key for this sandbox on the CLIProxyAPI hub. ${detail}`,
       );
-    return { sourceId, source, value: Redacted.make(value) } satisfies HubKey;
+    const hub = yield* cliproxyHub(source).pipe(Effect.mapError((error) => failed(error.message)));
+    yield* hubApi.addApiKey(hub, value).pipe(Effect.mapError((error) => failed(error.detail)));
+    return { sourceId, hub, value: Redacted.make(value) } satisfies HubKey;
   });
 
   const revokeHubKey = (key: HubKey) =>
-    hubApi.removeApiKey(cliproxyHub(key.source), Redacted.value(key.value)).pipe(
+    hubApi.removeApiKey(key.hub, Redacted.value(key.value)).pipe(
       Effect.tapError((error) =>
         Effect.logWarning("sandbox hub key revoke failed", {
           sourceId: key.sourceId,
@@ -1108,22 +1110,23 @@ const make = Effect.gen(function* () {
     const stored = yield* secrets.get(reference.secret).pipe(Effect.orElseSucceed(Option.none));
     const source = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
       ?.usageLimitSources[UsageLimitSourceId.make(reference.sourceId)];
-    if (
-      Option.isNone(stored) ||
-      source === undefined ||
-      settingsSecretLiteral(source.managementKey) === ""
-    ) {
+    const hub =
+      source === undefined || !hasManagementKey(source)
+        ? Option.none<CliproxyHub>()
+        : yield* cliproxyHub(source).pipe(Effect.option);
+    if (Option.isNone(stored) || Option.isNone(hub)) {
       yield* Effect.logWarning("sandbox hub key cannot be revoked", {
         environmentId: record.environmentId,
         sourceId: reference.sourceId,
         keyFound: Option.isSome(stored),
         sourceFound: source !== undefined,
+        managementKeyRead: Option.isSome(hub),
       });
       return warning;
     }
     const revoked = yield* revokeHubKey({
       sourceId: reference.sourceId,
-      source,
+      hub: hub.value,
       value: Redacted.make(new TextDecoder().decode(stored.value)),
     }).pipe(Effect.exit);
     yield* secrets.remove(reference.secret).pipe(Effect.ignore);
