@@ -54,6 +54,7 @@ import { freshSessionBannerItem } from "./chat/ComposerFreshSession";
 import { armFreshSession, disarmFreshSession, useFreshSessionArmed } from "./chat/freshSessionArms";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
 import { useWorktreeSetup } from "./chat/useWorktreeSetup";
+import { useSandboxLaunch } from "./chat/useSandboxLaunch";
 import { useChatShortcuts } from "./chat/useChatShortcuts";
 import { ChatBannerLane } from "./chat/ChatBannerLane";
 import * as Schema from "effect/Schema";
@@ -1223,11 +1224,29 @@ export default function ChatView(props: ChatViewProps) {
       activeProject,
       environmentById.get(activeProject.environmentId)?.serverConfig?.scratchWorkspaceRoot ?? null,
     );
-  const logicalProjectEnvironments = useLogicalProjectEnvironments(
+  const projectEnvironments = useLogicalProjectEnvironments(
     activeProject,
     activeProjectIsScratch && draftId !== null,
   );
+  const sandboxLaunch = useSandboxLaunch({
+    draftId,
+    threadId: draftId === null ? null : (activeThread?.id ?? null),
+    activeEnvironmentId: activeThread?.environmentId ?? null,
+    activeProject,
+    logicalProjectEnvironments: projectEnvironments,
+    envLocked: Boolean(activeThread && (activeMessageCount > 0 || activeRuntime !== null)),
+    onHandedOff: () => {
+      if (draftId !== null) setWorkLocallyResendDraftId(draftId);
+    },
+  });
+  const logicalProjectEnvironments = sandboxLaunch.logicalProjectEnvironments;
+  const pickerEnvironments =
+    sandboxLaunch.options.length === 0
+      ? logicalProjectEnvironments
+      : [...logicalProjectEnvironments, ...sandboxLaunch.options];
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
+  // Sandbox configs make the picker useful even for a project on one machine.
+  const canPickEnvironment = pickerEnvironments.length > 1;
   const canAutoBalanceEnvironments = hasMultipleEnvironments && !activeProjectIsScratch;
   const activeEnvironmentOption =
     logicalProjectEnvironments.find(
@@ -1235,7 +1254,7 @@ export default function ChatView(props: ChatViewProps) {
     ) ?? null;
   const showComposerEnvironmentIndicator = shouldShowEnvironmentIndicator({
     activeEnvironment: activeEnvironmentOption,
-    canPickEnvironment: hasMultipleEnvironments,
+    canPickEnvironment,
   });
 
   const pullRequestLinking = usePullRequestLinking(environmentId);
@@ -1312,7 +1331,7 @@ export default function ChatView(props: ChatViewProps) {
   // rule out a started thread: one whose machine is offline never loads its
   // messages, so it would otherwise be offered a machine picker that does nothing.
   const canChangeEnvironment =
-    hasMultipleEnvironments && !envLocked && draftId !== null && !draftThread?.promotedTo;
+    canPickEnvironment && !envLocked && draftId !== null && !draftThread?.promotedTo;
 
   const loadBalancingSettings = useClientSettings((settings) => ({
     loadBalancingEnabled: settings.loadBalancingEnabled,
@@ -1637,7 +1656,7 @@ export default function ChatView(props: ChatViewProps) {
     isWorking,
     draftHeroDockRequested,
     backgroundSubmissionPending,
-    hasWorktreeSetupCard: worktreeSetup !== null,
+    hasWorktreeSetupCard: worktreeSetup !== null || sandboxLaunch.card !== null,
   });
   const {
     transitionGroupRef: draftHeroTransitionGroupRef,
@@ -1852,6 +1871,12 @@ export default function ChatView(props: ChatViewProps) {
     activeProjectIsScratch,
     projectGroupingSettings,
     sendInFlightRef,
+  });
+  // A sandbox config is not a machine yet: picking one is remembered for the send.
+  const onPickEnvironmentStable = useStableCallback((nextEnvironmentId: EnvironmentId) => {
+    if (!sandboxLaunch.onEnvironmentChange(nextEnvironmentId)) {
+      onEnvironmentChangeStable(nextEnvironmentId);
+    }
   });
 
   const { focusComposer: focusComposerStable, scheduleComposerFocus: scheduleComposerFocusStable } =
@@ -2778,7 +2803,7 @@ export default function ChatView(props: ChatViewProps) {
           (env) => env.environmentId === currentId,
         );
         const next = logicalProjectEnvironments[(index + 1) % logicalProjectEnvironments.length];
-        if (next) onEnvironmentChangeStable(next.environmentId);
+        if (next) onPickEnvironmentStable(next.environmentId);
       },
       "thread.steerQueuedMessage": ({ event }) =>
         routeKind !== "draft" && queuedRunsControlRef.current?.steerNext(event.repeat) === true,
@@ -3014,7 +3039,10 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const onWorktreeSetupWorkLocallyStable = useStableCallback(onWorktreeSetupWorkLocally);
-  const onComposerSendStable = useStableCallback(onSend);
+  // A draft on a sandbox config launches its machine first; the message waits in the composer.
+  const onComposerSendStable = useStableCallback((...args: Parameters<typeof onSend>) =>
+    sandboxLaunch.interceptSend() ? Promise.resolve() : onSend(...args),
+  );
   const sendPreviewAnnotation = (
     annotation: PreviewAnnotationPayload,
     image: ComposerImageAttachment | null,
@@ -3145,12 +3173,16 @@ export default function ChatView(props: ChatViewProps) {
   // The end of the timeline holds the thread's present and next turns: what it is doing now,
   // its lifecycle status, guest messages awaiting you, then your queued messages.
   const timelineFooter =
+    sandboxLaunch.card === null &&
     pendingHandoff === null &&
     !hasThreadNow &&
     threadStatusLine === null &&
     pendingGuestMessageCount === 0 &&
     !hasQueuedTurns ? null : (
       <>
+        {sandboxLaunch.card === null ? null : (
+          <div className="chat-content-lane">{sandboxLaunch.card}</div>
+        )}
         {pendingHandoff === null ? null : (
           <div className="chat-content-lane">
             <HandoffRow
@@ -3819,7 +3851,7 @@ export default function ChatView(props: ChatViewProps) {
                                     ? { onCheckoutPullRequestRequest: openPullRequestDialogStable }
                                     : {})}
                                   {...(canChangeEnvironment
-                                    ? { onEnvironmentChange: onEnvironmentChangeStable }
+                                    ? { onEnvironmentChange: onPickEnvironmentStable }
                                     : {})}
                                   autoEnvironmentLabel={autoEnvironmentLabel}
                                   onAutoEnvironment={
@@ -3830,7 +3862,8 @@ export default function ChatView(props: ChatViewProps) {
                                       ? onAutoEnvironmentStable
                                       : undefined
                                   }
-                                  availableEnvironments={logicalProjectEnvironments}
+                                  availableEnvironments={pickerEnvironments}
+                                  pickedEnvironmentId={sandboxLaunch.pickedEnvironmentId}
                                   {...(isServerThread
                                     ? {}
                                     : {
@@ -3919,7 +3952,8 @@ export default function ChatView(props: ChatViewProps) {
                   workspaceMutationId={workspaceMutationId}
                   isGitRepo={isGitRepo}
                   envLocked={envLocked}
-                  availableEnvironments={logicalProjectEnvironments}
+                  availableEnvironments={pickerEnvironments}
+                  pickedEnvironmentId={sandboxLaunch.pickedEnvironmentId}
                   autoEnvironmentLabel={autoEnvironmentLabel}
                   onAutoEnvironment={
                     draftId &&
@@ -3930,7 +3964,7 @@ export default function ChatView(props: ChatViewProps) {
                       : undefined
                   }
                   {...(canChangeEnvironment
-                    ? { onEnvironmentChange: onEnvironmentChangeStable }
+                    ? { onEnvironmentChange: onPickEnvironmentStable }
                     : {})}
                   onEnvModeChange={onEnvModeChangeStable}
                   envMode={envMode}

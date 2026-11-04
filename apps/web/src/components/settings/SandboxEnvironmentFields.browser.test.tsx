@@ -1,37 +1,21 @@
 import { AsyncResult } from "effect/reactivity";
-import { EnvironmentId, type SandboxProviderLimits } from "@t3tools/contracts";
+import { EnvironmentId } from "@t3tools/contracts";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { render } from "../../../test/render";
 
 const mocks = vi.hoisted(() => ({
-  limits: null as SandboxProviderLimits | null,
   tailscaleClientId: "",
-  createSandbox: vi.fn(async () =>
-    AsyncResult.success({
-      provider: "boat",
-      sandboxId: "sb-1",
-      environmentId: "22222222-2222-4222-8222-222222222222",
-      label: "Boat sandbox",
-      httpBaseUrl: "https://sb-1.example.test",
-      pairingCode: "PAIR",
-      setup: {
-        claude: "ready",
-        github: "failed",
-        warnings: ["The GitHub CLI could not be installed on the sandbox."],
-      },
-    }),
+  saveConfig: vi.fn(async (request: { input: { config: Record<string, unknown> } }) =>
+    AsyncResult.success({ config: { id: "config-1", ...request.input.config } }),
   ),
+  deleteConfig: vi.fn(async () => AsyncResult.success(undefined)),
 }));
 
 vi.mock(import("../../state/use-atom-command"), async (original) => ({
   ...(await original()),
   useAtomCommand: ((command: unknown) => command) as never,
-}));
-vi.mock(import("~/connection/onboarding"), async (original) => ({
-  ...(await original()),
-  connectPairing: (async () => AsyncResult.success(undefined)) as never,
 }));
 vi.mock(import("~/hooks/useSettings"), async (original) => ({
   ...(await original()),
@@ -56,8 +40,8 @@ vi.mock(import("~/state/server"), async (original) => {
       ...actual.serverEnvironment,
       sandboxesProviders: (() => "providers") as never,
       sandboxesEnvironments: (() => "environments") as never,
-      sandboxesLimits: (() => "limits") as never,
-      sandboxesCreate: mocks.createSandbox as never,
+      sandboxesSaveConfig: mocks.saveConfig as never,
+      sandboxesDeleteConfig: mocks.deleteConfig as never,
     },
   };
 });
@@ -85,7 +69,6 @@ vi.mock(import("~/state/query"), async (original) => ({
                   limits: true,
                   stopResume: true,
                   credentialEnvironments: false,
-                  extend: true,
                   templates: false,
                 },
               },
@@ -116,7 +99,6 @@ vi.mock(import("~/state/query"), async (original) => ({
                   limits: false,
                   stopResume: true,
                   credentialEnvironments: false,
-                  extend: true,
                   templates: false,
                 },
               },
@@ -126,9 +108,7 @@ vi.mock(import("~/state/query"), async (original) => ({
               github: true,
             },
           }
-        : atom === "limits"
-          ? { limits: mocks.limits }
-          : null,
+        : null,
     isPending: false,
     error: null,
     refresh: () => {},
@@ -137,82 +117,69 @@ vi.mock(import("~/state/query"), async (original) => ({
 
 import { SandboxEnvironmentFields } from "./SandboxEnvironmentFields";
 
-function setup(limits: SandboxProviderLimits, options: { tailscale?: boolean } = {}) {
-  mocks.limits = limits;
+function setup(options: { tailscale?: boolean } = {}) {
   mocks.tailscaleClientId = options.tailscale === true ? "kCLIENT" : "";
-  mocks.createSandbox.mockClear();
+  mocks.saveConfig.mockClear();
+  mocks.deleteConfig.mockClear();
 }
 
-const fields = () => (
+const savedConfig = (request: number = 0) =>
+  (mocks.saveConfig.mock.calls[request]![0] as { input: { config: Record<string, unknown> } }).input
+    .config;
+
+const fields = (onDone: () => void = () => {}) => (
   <SandboxEnvironmentFields
     environmentId={EnvironmentId.make("11111111-1111-4111-8111-111111111111")}
     error={null}
     onErrorChange={() => {}}
-    onDone={() => {}}
+    onDone={onDone}
   />
 );
 
 describe("SandboxEnvironmentFields", () => {
-  it("asks once before a start the provider will charge for", async () => {
-    setup({
-      canStart: true,
-      startCost: "paid",
-      startDollars: 0.03,
-      starts: [{ window: "hour", limit: 60, used: 60, remaining: 0 }],
+  it("saves a config without making a machine, with the running limit it shows", async () => {
+    setup();
+    const onDone = vi.fn();
+    await using _screen = await render(fields(onDone));
+
+    await userEvent.fill(page.getByRole("textbox", { name: "Name" }), "Boat small");
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toEqual({
+      label: "Boat small",
+      provider: "boat",
+      size: "default",
+      passGithubToken: false,
+      joinTailnet: false,
+      access: "public",
+      projectIds: [],
+      envFiles: {},
+      idleMinutes: 30,
+      maxRunningMinutes: 480,
     });
-    await using _screen = await render(fields());
-
-    await userEvent.click(page.getByRole("button", { name: "Create Boat sandbox" }));
-    await expect.element(page.getByText("This start will be charged about $0.03.")).toBeVisible();
-    expect(mocks.createSandbox).not.toHaveBeenCalled();
-
-    await userEvent.click(page.getByRole("button", { name: "Create anyway" }));
-    expect(mocks.createSandbox).toHaveBeenCalledOnce();
+    expect(onDone).toHaveBeenCalledOnce();
   });
 
   it("sends the provider's settings fields, starting from the saved values", async () => {
-    setup({ canStart: true });
+    setup();
     await using _screen = await render(fields());
 
     await userEvent.click(page.getByRole("button", { name: /^Vercel/u }));
     await userEvent.click(page.getByRole("button", { name: "Advanced" }));
     await userEvent.fill(page.getByRole("textbox", { name: "Team (optional)" }), "acme");
-    await userEvent.click(page.getByRole("button", { name: "Create Vercel sandbox" }));
-    expect(mocks.createSandbox).toHaveBeenCalledWith(
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(mocks.saveConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         input: expect.objectContaining({
-          provider: "vercel",
-          size: "vercel-2",
+          config: expect.objectContaining({ provider: "vercel", size: "vercel-2" }),
           settings: { teamId: "acme", projectId: "saved-project" },
         }),
       }),
     );
   });
 
-  it("disables creating when the provider would refuse the start", async () => {
-    setup({
-      canStart: false,
-      blockedReason: "Your trial has ended.",
-      billingUrl: "https://boat.dev/dashboard?tab=billing",
-    });
+  it("saves only the agent access the user opted into", async () => {
+    setup();
     await using _screen = await render(fields());
-
-    await expect.element(page.getByText("Your trial has ended.", { exact: false })).toBeVisible();
-    await expect.element(page.getByRole("link", { name: "Open billing" })).toBeVisible();
-    await expect.element(page.getByRole("button", { name: "Create Boat sandbox" })).toBeDisabled();
-  });
-
-  it("sends only the agent access the user opted into, then shows what the sandbox got", async () => {
-    setup({ canStart: true });
-    const onDone = vi.fn();
-    await using _screen = await render(
-      <SandboxEnvironmentFields
-        environmentId={EnvironmentId.make("11111111-1111-4111-8111-111111111111")}
-        error={null}
-        onErrorChange={() => {}}
-        onDone={onDone}
-      />,
-    );
 
     await userEvent.click(page.getByText("Use this machine's Claude setup"));
     const privateWarning = page.getByText(/Resolves to a private address/u);
@@ -223,31 +190,15 @@ describe("SandboxEnvironmentFields", () => {
     );
     // The server only judged its own endpoint, so an edited one drops the warning.
     await expect.element(privateWarning).not.toBeInTheDocument();
-    await userEvent.click(page.getByRole("button", { name: "Create Boat sandbox" }));
-    expect(mocks.createSandbox).toHaveBeenCalledWith(
-      expect.objectContaining({
-        input: expect.objectContaining({
-          agentAccess: { claude: { baseUrl: "https://alt.test" } },
-        }),
-      }),
-    );
-    expect(mocks.createSandbox).not.toHaveBeenCalledWith(
-      expect.objectContaining({ input: expect.objectContaining({ passGithubToken: true }) }),
-    );
-
-    // The dialog stays open on the checklist until the user is done with it.
-    await expect.element(page.getByText("Claude uses this machine's setup")).toBeVisible();
-    await expect.element(page.getByText(/Run gh auth login/u)).toBeVisible();
-    await expect
-      .element(page.getByText("The GitHub CLI could not be installed on the sandbox."))
-      .toBeVisible();
-    expect(onDone).not.toHaveBeenCalled();
-    await userEvent.click(page.getByRole("button", { name: "Done" }));
-    expect(onDone).toHaveBeenCalledOnce();
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toMatchObject({
+      claude: { baseUrl: "https://alt.test" },
+      passGithubToken: false,
+    });
   });
 
-  it("joins the tailnet by default when Claude's endpoint is private and Tailscale is set up", async () => {
-    setup({ canStart: true }, { tailscale: true });
+  it("joins the tailnet by default when Claude's endpoint is private, and can stay off the internet", async () => {
+    setup({ tailscale: true });
     await using _screen = await render(fields());
 
     const join = page.getByRole("checkbox", { name: /Join my tailnet/u });
@@ -257,9 +208,47 @@ describe("SandboxEnvironmentFields", () => {
     await userEvent.click(page.getByText("Join my tailnet"));
     await expect.element(page.getByText(/unless it joins your tailnet/u)).toBeVisible();
     await userEvent.click(page.getByText("Join my tailnet"));
-    await userEvent.click(page.getByRole("button", { name: "Create Boat sandbox" }));
-    expect(mocks.createSandbox).toHaveBeenCalledWith(
-      expect.objectContaining({ input: expect.objectContaining({ joinTailnet: true }) }),
+    await userEvent.click(page.getByText("Reach it only through my tailnet"));
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toMatchObject({ joinTailnet: true, access: "tailnet" });
+  });
+
+  it("edits a saved config in place and deletes it after a confirmation", async () => {
+    setup();
+    const onDone = vi.fn();
+    await using _screen = await render(
+      <SandboxEnvironmentFields
+        environmentId={EnvironmentId.make("11111111-1111-4111-8111-111111111111")}
+        config={{
+          id: "config-1",
+          label: "Boat small",
+          provider: "boat",
+          size: "small",
+          passGithubToken: false,
+          joinTailnet: false,
+          access: "public",
+          projectIds: [],
+          envFiles: {},
+          idleMinutes: 30,
+          maxRunningMinutes: 240,
+          createdAt: "2026-11-01T00:00:00.000Z",
+          updatedAt: "2026-11-01T00:00:00.000Z",
+        }}
+        error={null}
+        onErrorChange={() => {}}
+        onDone={onDone}
+      />,
     );
+
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    expect(savedConfig()).toMatchObject({ id: "config-1", size: "small", maxRunningMinutes: 240 });
+
+    await userEvent.click(page.getByRole("button", { name: "Delete…" }));
+    expect(mocks.deleteConfig).not.toHaveBeenCalled();
+    await userEvent.click(page.getByRole("button", { name: "Delete config" }));
+    expect(mocks.deleteConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { configId: "config-1" } }),
+    );
+    expect(onDone).toHaveBeenCalledTimes(2);
   });
 });
