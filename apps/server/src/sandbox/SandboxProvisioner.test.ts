@@ -1,8 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off - a real HTTP server holds a response the way a provider's exec does.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import type * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
-import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as EffectNodeCrypto from "@effect/platform-node/NodeCrypto";
 import { it } from "@effect/vitest";
 import { EnvironmentId, SandboxProviderError, SecretProviderId } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
@@ -90,7 +95,7 @@ const provisionerLayer = (
     Layer.provide(SandboxHostAccess.layerTest(options.host)),
     Layer.provide(options.secrets ?? memorySecrets().layer),
     Layer.provide(secretResolver),
-    Layer.provide(NodeCrypto.layer),
+    Layer.provide(EffectNodeCrypto.layer),
   );
 
 // Reads only `hub#key`; every other reference is a secret its provider cannot read.
@@ -175,6 +180,59 @@ const boatResponse = (request: HttpClientRequest.HttpClientRequest) =>
       hostedPorts: [{ port: 3773, url: "https://boat.example/t3" }],
     }),
   );
+
+const bodyTextOf = (request: HttpClientRequest.HttpClientRequest) =>
+  request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
+
+// What the pair command prints once it has sealed `token` to the public key in its text (a
+// command, or the JSON body that carries one); any other command prints `otherwise`.
+const pairOr = (command: string, token: string, otherwise: string) => {
+  const key = /-----BEGIN PUBLIC KEY-----[\s\S]+?-----END PUBLIC KEY-----/u.exec(
+    command.replaceAll("\\n", "\n"),
+  )?.[0];
+  if (key === undefined) return otherwise;
+  const sealed = NodeCrypto.publicEncrypt(
+    { key, padding: NodeCrypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+    Buffer.from(token),
+  );
+  return `T3_PAIR_TOKEN: ${sealed.toString("base64")}\n`;
+};
+
+// Runs a provider's command with this machine's sh, as the sandbox would, against a `t3` that
+// prints what `t3 pair` prints.
+const runWithStubT3 = (command: string, token: string) => {
+  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pair-stub-"));
+  try {
+    const bin = NodePath.join(home, ".local", "bin");
+    NodeFS.mkdirSync(bin, { recursive: true });
+    const url = `https://boat.example/t3/pair#token=${token}`;
+    NodeFS.writeFileSync(
+      NodePath.join(bin, "t3"),
+      `#!/bin/sh
+[ "$1" = pair ] || exit 64
+cat <<'EOF'
+Pairing with My sandbox (https://boat.example/t3).
+
+█▀▀▀▀▀█ ▄▀▄ █▀▀▀▀▀█
+█ ███ █ ▀▄▀ █ ███ █
+
+Pairing URL: ${url}
+App link: t3code://pair?url=${encodeURIComponent(url)}
+Token: ${token}
+Expires: 2026-11-04T13:30:00.000Z
+EOF
+`,
+      { mode: 0o755 },
+    );
+    const result = NodeChildProcess.spawnSync("sh", ["-c", command], {
+      env: { PATH: process.env.PATH, HOME: home },
+      encoding: "utf8",
+    });
+    return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr };
+  } finally {
+    NodeFS.rmSync(home, { recursive: true, force: true });
+  }
+};
 
 // JSON for JSON bodies, the raw text for form posts such as Tailscale's OAuth token request.
 const decodeBody = (body: Uint8Array): unknown => {
@@ -2481,7 +2539,11 @@ describe("SandboxProvisioner lifecycle", () => {
             Response.json(
               requests.filter((entry) => entry.endsWith("/commands")).length === 1
                 ? { exitCode: 0, stdout: "", stderr: "" }
-                : { exitCode: 0, stdout: "Token: pair_lifecycle\n", stderr: "" },
+                : {
+                    exitCode: 0,
+                    stdout: pairOr(bodyTextOf(request), "pair_lifecycle", ""),
+                    stderr: "",
+                  },
             ),
           ),
         );
@@ -3315,7 +3377,11 @@ describe("SandboxProvisioner lifecycle", () => {
           return json({ url: "https://boat.example/t3" });
         }
         if (request.url.endsWith("/commands")) {
-          return json({ exitCode: 0, stdout: "Token: pair_tpl\n", stderr: "" });
+          return json({
+            exitCode: 0,
+            stdout: pairOr(bodyTextOf(request), "pair_tpl", ""),
+            stderr: "",
+          });
         }
         return json({ ok: true });
       });
@@ -3372,6 +3438,10 @@ describe("SandboxProvisioner", () => {
     let commandCall = 0;
     const requests: Array<string> = [];
     const idempotencyKeys: Array<string | undefined> = [];
+    const token = "7KQ2M9XRTW4H";
+    // Boat keeps every command's text and output for 90 days.
+    const keptByBoat: Array<string> = [];
+    const printed: Array<string> = [];
     const client = HttpClient.make((request) => {
       requests.push(`${request.method} ${request.url}`);
       if (request.url.endsWith("/limits")) {
@@ -3388,24 +3458,24 @@ describe("SandboxProvisioner", () => {
       }
       if (request.url.endsWith("/commands")) {
         commandCall += 1;
-        return Effect.succeed(
-          HttpClientResponse.fromWeb(
-            request,
-            Response.json(
-              commandCall === 1
-                ? { exitCode: 0, stdout: "t3 is running", stderr: "" }
-                : commandCall === 2
-                  ? // Boat's image ships every tool, so nothing is installed or missing.
-                    { exitCode: 0, stdout: "T3_TOOLS_MISSING: \n", stderr: "" }
-                  : {
-                      exitCode: 0,
-                      stdout:
-                        "Pairing URL: http://127.0.0.1:3773/pair#token=abc\nToken: pair_abc\n",
-                      stderr: "",
-                    },
-            ),
-          ),
-        );
+        const command =
+          request.body._tag === "Uint8Array"
+            ? (JSON.parse(new TextDecoder().decode(request.body.body)) as { command: string })
+                .command
+            : "";
+        // The pair step really runs, so what it prints is what Boat would keep.
+        const result =
+          commandCall === 1
+            ? { exitCode: 0, stdout: "t3 is running", stderr: "" }
+            : commandCall === 2
+              ? // Boat's image ships every tool, so nothing is installed or missing.
+                { exitCode: 0, stdout: "T3_TOOLS_MISSING: \n", stderr: "" }
+              : commandCall === 3
+                ? { exitCode: 0, stdout: "", stderr: "" }
+                : runWithStubT3(command, token);
+        keptByBoat.push(command, result.stdout, result.stderr);
+        printed.push(result.stdout, result.stderr);
+        return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(result)));
       }
       return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({})));
     });
@@ -3432,9 +3502,12 @@ describe("SandboxProvisioner", () => {
         environmentId: testEnvironmentId,
         label: "My sandbox",
         httpBaseUrl: "https://boat.example/t3",
-        pairingCode: "pair_abc",
+        pairingCode: token,
         setup: { claude: "skipped", github: "skipped", tailscale: "skipped", warnings: [] },
       });
+      // The token reaches this server and nothing the provider keeps, the QR code's URL included.
+      expect(keptByBoat.filter((text) => text.includes(token))).toEqual([]);
+      expect(printed.filter((text) => /Token:|Pairing URL:|█/u.test(text))).toEqual([]);
       expect(providers.providers.find((provider) => provider.kind === "boat")?.configured).toBe(
         true,
       );
@@ -3461,7 +3534,6 @@ describe("SandboxProvisioner", () => {
       body: unknown;
       authorization?: string | undefined;
     }> = [];
-    let commands = 0;
     const repository = memoryRepository();
     const client = recording(requests, (request) => {
       const url = new URL(request.url);
@@ -3474,9 +3546,8 @@ describe("SandboxProvisioner", () => {
       if (url.pathname === "/v2/teams") return Response.json({ teams: [vercelTeam("pro")] });
       if (url.pathname === "/.well-known/t3/environment") return Response.json(descriptor);
       if (url.pathname.endsWith("/cmd")) {
-        commands += 1;
         return ndjson([
-          ...(commands === 1 ? [] : [{ data: "Token: pair_vercel\n", stream: "stdout" }]),
+          { data: pairOr(bodyTextOf(request), "pair_vercel", ""), stream: "stdout" },
           vercelCommand(0),
         ]);
       }
@@ -3561,7 +3632,7 @@ describe("SandboxProvisioner", () => {
         if (request.url.endsWith("/limits")) return reply(boatLimitsFixture());
         if (request.url.endsWith("/sandboxes")) return Effect.succeed(boatResponse(request));
         commands.push({ provider: "boat", command: JSON.parse(bodyOf(request)).command });
-        return reply({ exitCode: 0, stdout: "Token: pair_boat\n", stderr: "" });
+        return reply({ exitCode: 0, stdout: pairOr(bodyOf(request), "pair_boat", ""), stderr: "" });
       }
       if (request.url.endsWith("/toolbox-proxy-url")) {
         return reply({ url: "https://toolbox.example/toolbox" });
@@ -3571,7 +3642,7 @@ describe("SandboxProvisioner", () => {
       }
       if (request.url.endsWith("/process/execute")) {
         commands.push({ provider: "daytona", command: JSON.parse(bodyOf(request)).command });
-        return reply({ exitCode: 0, result: "Token: pair_daytona\n" });
+        return reply({ exitCode: 0, result: pairOr(bodyOf(request), "pair_daytona", "") });
       }
       return reply({ id: "sandbox_1", name: "Daytona sandbox", state: "started" });
     });
@@ -3595,6 +3666,32 @@ describe("SandboxProvisioner", () => {
       // Boat's hosted port does not touch CORS, so its server keeps answering it.
       expect(serveLine("boat")).toContain("nohup t3 serve");
       expect(serveLine("boat")).not.toContain("T3CODE_PROXY_HANDLES_CORS");
+
+      // A server that never answers gets its log's tail reported, minus what headless serve
+      // prints to pair with it, since providers keep the output.
+      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-serve-stub-"));
+      try {
+        const bin = NodePath.join(home, ".local", "bin");
+        NodeFS.mkdirSync(bin, { recursive: true });
+        NodeFS.mkdirSync(NodePath.join(home, ".t3"));
+        const stubs = {
+          t3: `[ "$1" = serve ] || exit 1
+printf '%s\\n' 'listen EADDRINUSE 0.0.0.0:3773' 'Token: 7KQ2M9XRTW4H' 'Pairing URL: http://h/pair#token=7KQ2M9XRTW4H' 'App link: t3code://pair?url=x' '█▀▀▀▀▀█ ▄▀▄'`,
+          curl: "exit 7",
+          sleep: "exit 0",
+        };
+        for (const [name, body] of Object.entries(stubs)) {
+          NodeFS.writeFileSync(NodePath.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+        }
+        const started = NodeChildProcess.spawnSync("sh", ["-c", startOf("boat")], {
+          env: { PATH: `${bin}:${process.env.PATH}`, HOME: home },
+          encoding: "utf8",
+        });
+        expect(started.status).toBe(1);
+        expect(`${started.stdout}${started.stderr}`.trim()).toBe("listen EADDRINUSE 0.0.0.0:3773");
+      } finally {
+        NodeFS.rmSync(home, { recursive: true, force: true });
+      }
     }).pipe(Effect.provide(testLayer), Effect.provideService(HttpClient.HttpClient, client));
   });
 
@@ -3792,7 +3889,7 @@ describe("sandbox agent access", () => {
         return Response.json({
           exitCode: failed ? 1 : 0,
           stdout: command.includes("t3 pair")
-            ? "Token: pair_agent\n"
+            ? pairOr(command, "pair_agent", "")
             : command.includes("T3_TAILSCALE_")
               ? [
                   "T3_TAILSCALE_DAEMON: nohup",
