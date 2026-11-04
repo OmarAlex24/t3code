@@ -257,12 +257,12 @@ import * as OtlpEndpointCheck from "./observability/OtlpEndpointCheck.ts";
 import * as TextGenerators from "./textGeneration/TextGenerators.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
-import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
+import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
@@ -1568,7 +1568,6 @@ export const layerWsRpc = (
       const sourceControlRepositories =
         yield* SourceControlRepositoryService.SourceControlRepositoryService;
       const sourceControlSignIn = yield* SourceControlSignIn.SourceControlSignIn;
-      const sandboxes = yield* SandboxProvisioner.SandboxProvisioner;
       const withPullRequestViewer = pullRequests.withRoutingCredential;
       // The panel's reads for a pull request the user opened go out during a rate-limit pause.
       const openedPullRequestRead = Effect.provideService(SourceControlRateLimit.Interactive, true);
@@ -1947,6 +1946,7 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
+      const sandboxHandlers = yield* SandboxProvisioner.rpcHandlers;
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
@@ -2829,18 +2829,6 @@ export const layerWsRpc = (
         [WS_METHODS.sourceControlAppAccess]: (input) => sourceControlSignIn.access(input),
         [WS_METHODS.sourceControlStarred]: (input) => sourceControlSignIn.starred(input),
         [WS_METHODS.sourceControlStar]: (input) => sourceControlSignIn.star(input),
-        [WS_METHODS.sandboxesProviders]: () => sandboxes.providers,
-        [WS_METHODS.sandboxesEnvironments]: (input) => sandboxes.environments(input),
-        [WS_METHODS.sandboxesLimits]: (input) => sandboxes.limits(input),
-        [WS_METHODS.sandboxesCreate]: (input) => sandboxes.create(input),
-        [WS_METHODS.sandboxesDelete]: (input) => sandboxes.delete(input),
-        [WS_METHODS.sandboxesList]: () => sandboxes.list,
-        [WS_METHODS.sandboxesStop]: (input) => sandboxes.stop(input),
-        [WS_METHODS.sandboxesResume]: (input) => sandboxes.resume(input),
-        [WS_METHODS.sandboxesExtend]: (input) => sandboxes.extend(input),
-        [WS_METHODS.sandboxesTemplates]: (input) => sandboxes.templates(input),
-        [WS_METHODS.sandboxesSaveTemplate]: (input) => sandboxes.saveTemplate(input),
-        [WS_METHODS.sandboxesDeleteTemplate]: (input) => sandboxes.deleteTemplate(input),
         [WS_METHODS.projectCloneStart]: (input) =>
           projectCloneTracker.start(input, {
             createProject: (project) =>
@@ -3517,6 +3505,7 @@ export const layerWsRpc = (
               Stream.concat(Stream.make(latest), changes),
             ),
           ),
+        ...sandboxHandlers,
       });
       const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
       const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =
