@@ -4,7 +4,8 @@ import type * as NodeNet from "node:net";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { it } from "@effect/vitest";
-import { EnvironmentId, SandboxProviderError } from "@t3tools/contracts";
+import { EnvironmentId, SandboxProviderError, SecretProviderId } from "@t3tools/contracts";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -88,8 +89,20 @@ const provisionerLayer = (
     Layer.provide(repository),
     Layer.provide(SandboxHostAccess.layerTest(options.host)),
     Layer.provide(options.secrets ?? memorySecrets().layer),
+    Layer.provide(secretResolver),
     Layer.provide(NodeCrypto.layer),
   );
+
+// Reads only `hub#key`; every other reference is a secret its provider cannot read.
+const secretResolver = Layer.succeed(SecretResolver.SecretResolver, {
+  read: (references) =>
+    Effect.succeed(
+      references.map((reference) =>
+        reference.reference === "hub#key" ? "resolved-mgmt-key" : undefined,
+      ),
+    ),
+  invalidate: () => Effect.void,
+});
 
 const testLayer = provisionerLayer();
 
@@ -4109,6 +4122,133 @@ describe("sandbox agent access", () => {
       Effect.provideService(HttpClient.HttpClient, client),
     );
   });
+
+  const hubKeyFrom = (reference: string) =>
+    ({
+      usageLimitSources: {
+        hub: {
+          ...hubSettings.usageLimitSources.hub,
+          managementKey: { provider: SecretProviderId.make("homelab"), reference },
+        },
+      },
+    }) as const;
+
+  it.effect(
+    "mints and revokes a sandbox's hub key with a management key read from a secret",
+    () => {
+      const requests: Array<{
+        method: string;
+        url: string;
+        body: unknown;
+        authorization?: string;
+      }> = [];
+      const { client, secretsOf } = agentClient(requests);
+      const repository = memoryRepository();
+      const secrets = memorySecrets();
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        expect((yield* provisioner.providers).host?.claude?.key).toBe("hub");
+        yield* provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          label: "Web Stack",
+          agentAccess: { claude: { baseUrl: "https://claude.example.test" } },
+        });
+        const mint = requests.find((request) => request.method === "PATCH")!;
+        const key = (mint.body as { new: string }).new;
+        expect(mint.authorization).toBe("Bearer resolved-mgmt-key");
+        expect(claudeEnvOf(secretsOf)?.ANTHROPIC_AUTH_TOKEN).toBe(key);
+
+        requests.length = 0;
+        yield* provisioner.delete({
+          provider: "boat",
+          sandboxId: boatSandboxId,
+          environmentId: testEnvironmentId,
+        });
+        expect(
+          requests.find((request) => request.url.startsWith("https://hub.test/")),
+        ).toMatchObject({
+          method: "DELETE",
+          url: `https://hub.test/v0/management/api-keys?value=${key}`,
+          authorization: "Bearer resolved-mgmt-key",
+        });
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(hubKeyFrom("hub#key"), repository.layer, {
+            host,
+            secrets: secrets.layer,
+          }),
+        ),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+    },
+  );
+
+  it.effect(
+    "fails a create instead of copying this machine's token when the hub key is unreadable",
+    () => {
+      const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+      const { client, commands } = agentClient(requests);
+      const secrets = memorySecrets();
+      secrets.values.set("sandbox-hub-key-1", new TextEncoder().encode("t3-sandbox-web-stack-0"));
+      const repository = memoryRepository([
+        {
+          environmentId: testEnvironmentId,
+          provider: "boat",
+          sandboxId: boatSandboxId,
+          label: "Web Stack",
+          size: "default",
+          state: "deleted",
+          createdAt: "2026-11-01T00:00:00.000Z",
+          updatedAt: "2026-11-01T00:00:00.000Z",
+          httpBaseUrl: "https://boat.example/t3",
+          hardDeadlineAt: null,
+          ttlMinutes: 480,
+          claudeHubKey: { sourceId: "hub", secret: "sandbox-hub-key-1" },
+        },
+      ]);
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const error = yield* Effect.flip(
+          provisioner.create({
+            provider: "boat",
+            apiKey: "boat_test",
+            agentAccess: { claude: { baseUrl: "https://claude.example.test" } },
+          }),
+        );
+        expect(error.detail).toBe(
+          'Could not add a key for this sandbox on the CLIProxyAPI hub. Could not read the credential from the secret provider "homelab". Unlock or fix it in Settings, then try again.',
+        );
+        // Nothing is billed, and the host's Claude token goes nowhere.
+        expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+          "GET https://boat.dev/api/v1/limits",
+        ]);
+        expect(commands).toEqual([]);
+
+        requests.length = 0;
+
+        // A delete still goes through and names the key left on the hub.
+        const deleted = yield* provisioner.delete({
+          provider: "boat",
+          sandboxId: boatSandboxId,
+          environmentId: testEnvironmentId,
+        });
+        expect(requests).toEqual([]);
+        expect(repository.records.size).toBe(0);
+        expect(deleted.warnings).toEqual([
+          "The key T3 Code added for Web Stack on the CLIProxyAPI hub could not be revoked. Remove the key starting with t3-sandbox-web-stack- from the hub.",
+        ]);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(hubKeyFrom("missing#key"), repository.layer, {
+            host,
+            secrets: secrets.layer,
+          }),
+        ),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+    },
+  );
 
   it.effect("deletes a sandbox whose hub key cannot be revoked and says so", () => {
     const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
