@@ -1539,7 +1539,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
         ))}
         <CloudRemoteEnvironmentRows
           primaryEnvironmentId={primaryEnvironmentId}
-          savedEnvironments={savedEnvironments}
+          savedEnvironments={listedEnvironments}
         />
       </SettingsSection>
       <SandboxManagementSection />
