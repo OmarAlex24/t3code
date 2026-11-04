@@ -7,6 +7,7 @@ import { render } from "../../../test/render";
 
 const mocks = vi.hoisted(() => ({
   limits: null as SandboxProviderLimits | null,
+  tailscaleClientId: "",
   createSandbox: vi.fn(async () =>
     AsyncResult.success({
       provider: "boat",
@@ -31,6 +32,17 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
 vi.mock(import("~/connection/onboarding"), async (original) => ({
   ...(await original()),
   connectPairing: (async () => AsyncResult.success(undefined)) as never,
+}));
+vi.mock(import("~/hooks/useSettings"), async (original) => ({
+  ...(await original()),
+  useEnvironmentSettings: ((_environmentId: unknown, select: (settings: unknown) => unknown) =>
+    select({
+      sandboxTailscale: {
+        clientId: mocks.tailscaleClientId,
+        clientSecret: mocks.tailscaleClientId === "" ? "" : "••••••",
+        tag: "tag:t3-sandbox",
+      },
+    })) as never,
 }));
 vi.mock(import("~/state/session"), async (original) => ({
   ...(await original()),
@@ -120,8 +132,9 @@ vi.mock(import("~/state/query"), async (original) => ({
 
 import { SandboxEnvironmentFields } from "./SandboxEnvironmentFields";
 
-function setup(limits: SandboxProviderLimits) {
+function setup(limits: SandboxProviderLimits, options: { tailscale?: boolean } = {}) {
   mocks.limits = limits;
+  mocks.tailscaleClientId = options.tailscale === true ? "kCLIENT" : "";
   mocks.createSandbox.mockClear();
 }
 
@@ -225,5 +238,22 @@ describe("SandboxEnvironmentFields", () => {
     expect(onDone).not.toHaveBeenCalled();
     await userEvent.click(page.getByRole("button", { name: "Done" }));
     expect(onDone).toHaveBeenCalledOnce();
+  });
+
+  it("joins the tailnet by default when Claude's endpoint is private and Tailscale is set up", async () => {
+    setup({ canStart: true }, { tailscale: true });
+    await using _screen = await render(fields());
+
+    const join = page.getByRole("checkbox", { name: /Join my tailnet/u });
+    await expect.element(join).toBeChecked();
+    await expect.element(page.getByText(/reached through your tailnet/u)).toBeVisible();
+    // Opting out brings the warning back.
+    await userEvent.click(page.getByText("Join my tailnet"));
+    await expect.element(page.getByText(/unless it joins your tailnet/u)).toBeVisible();
+    await userEvent.click(page.getByText("Join my tailnet"));
+    await userEvent.click(page.getByRole("button", { name: "Create Boat sandbox" }));
+    expect(mocks.createSandbox).toHaveBeenCalledWith(
+      expect.objectContaining({ input: expect.objectContaining({ joinTailnet: true }) }),
+    );
   });
 });
