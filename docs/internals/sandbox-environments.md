@@ -152,7 +152,8 @@ server except into the sandbox.
   costs no provider start, and it is removed again if provisioning fails. The record keeps the
   hub source id and a server-secret name, never the key. A failed revoke on delete is a warning
   that names the key prefix; it never blocks the delete, because the machine is already gone.
-  Without a hub, the server's token is copied and cannot be revoked by T3.
+  Without a hub, the server's token is copied and cannot be revoked by T3; a hub whose management
+  key names a secret that cannot be read fails the create instead of falling back to that copy.
 - **Reachable here is not reachable there.** A Claude endpoint on a tailnet or LAN address
   works from the provisioning server and times out from a cloud machine. The provisioner curls
   the endpoint from the sandbox after writing the settings; no HTTP answer at all marks Claude as
