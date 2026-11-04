@@ -43,6 +43,7 @@ import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { usePeerLinkHosts } from "~/state/peerLinks";
+import { useSandboxThreadEnvironmentIds } from "~/state/sandboxes";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
@@ -270,8 +271,12 @@ function ConnectionsSettingsContent({
   const savedEnvironments = environments.filter(
     (environment) => environment.entry.target._tag !== "PrimaryConnectionTarget",
   );
+  const sandboxThreadEnvironmentIds = useSandboxThreadEnvironmentIds();
+  // A thread's own sandbox is listed under its config in the Sandboxes section.
   const listedEnvironments = savedEnvironments.filter(
-    (environment) => !isDesktopLocalConnectionTarget(environment.entry.target),
+    (environment) =>
+      !isDesktopLocalConnectionTarget(environment.entry.target) &&
+      !sandboxThreadEnvironmentIds.has(environment.environmentId),
   );
   const savedUpdateStates = useAtomValue(
     environmentUpdateStatesAtom(
