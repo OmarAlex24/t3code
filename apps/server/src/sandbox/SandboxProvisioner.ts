@@ -13,6 +13,7 @@ import {
   type SandboxHostAccess as SandboxHostAccessFacts,
   type SandboxSetupState,
   type ServerSettings as ServerSettingsValue,
+  settingsSecretLiteral,
   type UsageLimitSourceConfig,
   UsageLimitSourceId,
   type SandboxExtendInput,
@@ -35,7 +36,7 @@ import {
   type SandboxProvidersResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -330,7 +331,7 @@ const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const records = yield* SandboxRecords.SandboxRecordRepository;
   const httpClient = yield* HttpClient.HttpClient;
-  const crypto = yield* Crypto.Crypto;
+  const secureRandom = yield* SecureRandom.SecureRandom;
   const hostAccess = yield* SandboxHostAccess.SandboxHostAccess;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const hubApi = yield* makeCliproxyApi;
@@ -413,10 +414,19 @@ const make = Effect.gen(function* () {
         ),
       );
 
+  // Only a literal management key is used; a hub whose key is a secret reference is skipped.
+  const cliproxyHub = (source: UsageLimitSourceConfig) => ({
+    url: source.url,
+    managementKey: settingsSecretLiteral(source.managementKey),
+  });
+
   // The first enabled CLIProxyAPI usage source with a management key is the hub new Claude keys go on.
   const hubSource = (value: ServerSettingsValue) =>
     Object.entries(value.usageLimitSources).find(
-      ([, source]) => source.enabled && source.kind === "cliproxy" && source.managementKey !== "",
+      ([, source]) =>
+        source.enabled &&
+        source.kind === "cliproxy" &&
+        settingsSecretLiteral(source.managementKey) !== "",
     );
 
   const tailscaleClient = (value: ServerSettingsValue): TailscaleOAuthClient | undefined => {
@@ -628,16 +638,12 @@ const make = Effect.gen(function* () {
     label: string,
     [sourceId, source]: readonly [string, UsageLimitSourceConfig],
   ) {
-    const hex = (yield* crypto
-      .randomUUIDv4()
-      .pipe(
-        Effect.mapError(() => configError(provider, "Could not generate a key for the sandbox.")),
-      )).replaceAll("-", "");
+    const hex = (yield* secureRandom.uuidV4()).replaceAll("-", "");
     // A UUIDv4's version and variant digits are fixed, so they are left out.
     const random = `${hex.slice(0, 12)}${hex.slice(13, 16)}${hex.slice(17, 18)}`;
     const value = `t3-sandbox-${labelSlug(label)}-${random}`;
     yield* hubApi
-      .addApiKey(source, value)
+      .addApiKey(cliproxyHub(source), value)
       .pipe(
         Effect.mapError((error) =>
           configError(
@@ -650,7 +656,7 @@ const make = Effect.gen(function* () {
   });
 
   const revokeHubKey = (key: HubKey) =>
-    hubApi.removeApiKey(key.source, Redacted.value(key.value)).pipe(
+    hubApi.removeApiKey(cliproxyHub(key.source), Redacted.value(key.value)).pipe(
       Effect.tapError((error) =>
         Effect.logWarning("sandbox hub key revoke failed", {
           sourceId: key.sourceId,
@@ -824,17 +830,7 @@ const make = Effect.gen(function* () {
     readonly tailnet: TailnetJoin | undefined;
     readonly joinedDevice: { deviceId?: string };
   }) {
-    const idempotencyKey = yield* crypto.randomUUIDv4().pipe(
-      Effect.mapError(
-        (cause) =>
-          new SandboxProviderError({
-            provider: input.provider,
-            stage: "create",
-            detail: "Could not generate a request id for the provider.",
-            cause,
-          }),
-      ),
-    );
+    const idempotencyKey = yield* secureRandom.uuidV4();
     const sandbox = yield* onHttp(
       driver.create({
         config,
@@ -1093,7 +1089,7 @@ const make = Effect.gen(function* () {
   ) {
     const failed = () =>
       configError(provider, "Could not save the sandbox's hub key on this server.");
-    const secret = `sandbox-hub-key-${yield* crypto.randomUUIDv4().pipe(Effect.mapError(failed))}`;
+    const secret = `sandbox-hub-key-${yield* secureRandom.uuidV4()}`;
     yield* secrets
       .set(secret, new TextEncoder().encode(Redacted.value(key.value)))
       .pipe(Effect.mapError(failed));
@@ -1110,7 +1106,11 @@ const make = Effect.gen(function* () {
     const stored = yield* secrets.get(reference.secret).pipe(Effect.orElseSucceed(Option.none));
     const source = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
       ?.usageLimitSources[UsageLimitSourceId.make(reference.sourceId)];
-    if (Option.isNone(stored) || source === undefined || source.managementKey === "") {
+    if (
+      Option.isNone(stored) ||
+      source === undefined ||
+      settingsSecretLiteral(source.managementKey) === ""
+    ) {
       yield* Effect.logWarning("sandbox hub key cannot be revoked", {
         environmentId: record.environmentId,
         sourceId: reference.sourceId,
