@@ -51,8 +51,29 @@ export const SandboxProviderInfo = Schema.Struct({
 });
 export type SandboxProviderInfo = typeof SandboxProviderInfo.Type;
 
+/**
+ * What the provisioning server can share with a new sandbox from its own machine. Only facts:
+ * the base URL is the editable default, and no key or token ever leaves the server.
+ */
+export const SandboxHostAccess = Schema.Struct({
+  /** Present when this server's Claude talks to a custom endpoint a sandbox can reuse. */
+  claude: Schema.optionalKey(
+    Schema.Struct({
+      baseUrl: TrimmedString,
+      /** `hub`: a new key is added on the CLIProxyAPI hub; `copy`: this machine's token is copied. */
+      key: Schema.Literals(["hub", "copy"]),
+      /** The base URL resolves only to private addresses, so a cloud sandbox likely can't reach it. */
+      privateNetwork: Schema.Boolean,
+    }),
+  ),
+  /** This server has a GitHub token for github.com it could forward. */
+  github: Schema.Boolean,
+});
+export type SandboxHostAccess = typeof SandboxHostAccess.Type;
+
 export const SandboxProvidersResult = Schema.Struct({
   providers: Schema.Array(SandboxProviderInfo),
+  host: SandboxHostAccess,
 });
 export type SandboxProvidersResult = typeof SandboxProvidersResult.Type;
 
@@ -142,8 +163,6 @@ export const SandboxCreateInput = Schema.Struct({
   label: Schema.optional(TrimmedString),
   /** One of the provider's machine size ids. Defaults to the provider's default size. */
   size: Schema.optional(TrimmedString),
-  /** Cloned into the sandbox before the environment is connected. */
-  repositoryUrl: Schema.optional(TrimmedString),
   /** Provider environment whose credentials the sandbox receives. Omit for no credentials. */
   environment: Schema.optional(TrimmedString),
   /** Required with `environment`: the user confirmed that this environment passes credentials. */
@@ -152,8 +171,20 @@ export const SandboxCreateInput = Schema.Struct({
   ttlMinutes: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 43200 }))),
   /** A saved template to start from. The template decides the machine size. */
   template: Schema.optional(TrimmedString),
+  /** Sets up agents in the sandbox from this server's own setup. Omit for none. */
+  agentAccess: Schema.optional(
+    Schema.Struct({
+      claude: Schema.optional(Schema.Struct({ baseUrl: TrimmedString })),
+    }),
+  ),
+  /** Signs `gh` and git in the sandbox in with this server's GitHub token. */
+  passGithubToken: Schema.optional(Schema.Boolean),
 });
 export type SandboxCreateInput = typeof SandboxCreateInput.Type;
+
+/** `skipped` was not asked for; `failed` left the sandbox running without it. */
+export const SandboxSetupState = Schema.Literals(["ready", "failed", "skipped"]);
+export type SandboxSetupState = typeof SandboxSetupState.Type;
 
 export const SandboxCreateResult = Schema.Struct({
   provider: SandboxProviderKind,
@@ -164,6 +195,13 @@ export const SandboxCreateResult = Schema.Struct({
   httpBaseUrl: TrimmedString,
   /** One-time pairing code, consumed by the client that connects to the new environment. */
   pairingCode: TrimmedString,
+  /** What the sandbox got beyond T3 Code, for the checklist shown after it is created. */
+  setup: Schema.Struct({
+    claude: SandboxSetupState,
+    github: SandboxSetupState,
+    /** Steps that did not finish but left a working sandbox. Never carries command output. */
+    warnings: Schema.Array(Schema.String),
+  }),
 });
 export type SandboxCreateResult = typeof SandboxCreateResult.Type;
 
@@ -173,6 +211,12 @@ export const SandboxDeleteInput = Schema.Struct({
   environmentId: EnvironmentId,
 });
 export type SandboxDeleteInput = typeof SandboxDeleteInput.Type;
+
+export const SandboxDeleteResult = Schema.Struct({
+  /** Cleanup that failed after the sandbox was deleted, such as revoking its hub key. */
+  warnings: Schema.Array(Schema.String),
+});
+export type SandboxDeleteResult = typeof SandboxDeleteResult.Type;
 
 /**
  * `expired` is a stopped sandbox whose disk the provider no longer keeps; `deleted` is one the
@@ -205,6 +249,13 @@ export const SandboxRecord = Schema.Struct({
   credentialEnvironment: Schema.optionalKey(TrimmedString),
   /** The template the sandbox started from, for display. */
   template: Schema.optionalKey(TrimmedString),
+  /**
+   * The CLIProxyAPI key added for this sandbox, revoked when it is deleted. The key itself is a
+   * server secret named by `secret`; the record only says where it lives.
+   */
+  claudeHubKey: Schema.optionalKey(
+    Schema.Struct({ sourceId: TrimmedString, secret: TrimmedString }),
+  ),
   /** Provider settings the sandbox was created with; they win over the current ones for it. */
   providerSettings: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   /** Machine cost this calendar month at list price, when the provider reports it. */
