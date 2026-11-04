@@ -91,9 +91,6 @@ const formatFailure = (error: unknown): string =>
 // T3's default sandbox lifetime; a plan with a shorter auto-stop maximum is called out.
 const DEFAULT_TTL_MINUTES = 480;
 
-const providerDefaultSize = (provider: SandboxProviderInfo): string =>
-  provider.sizes[1]?.id ?? provider.sizes[0]?.id ?? "";
-
 function FieldLabel({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
   return (
     <span className="mb-1.5 flex items-center justify-between gap-2 text-xs font-medium text-foreground">
@@ -407,9 +404,7 @@ export function SandboxEnvironmentFields({
     template !== undefined
       ? (template.size ?? "")
       : size === ""
-        ? provider
-          ? providerDefaultSize(provider)
-          : ""
+        ? (provider?.defaultSize ?? "")
         : size;
   const environmentsQuery = useEnvironmentQuery(
     provider?.capabilities.credentialEnvironments
