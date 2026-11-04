@@ -157,7 +157,8 @@ describe("endpointReachScript", () => {
 });
 
 // Stand-ins for sudo and Tailscale's binaries, so the scripts run without root. The daemon never
-// gets a TUN device, which is what a container gives tailscaled.
+// gets a TUN device, which is what a container gives tailscaled. `up` returns before the node has
+// registered, as when its first register request hangs past the timeout and a retry succeeds.
 const TAILSCALE_STUBS = {
   sudo: `#!/bin/sh
 [ "$1" = -n ] && shift
@@ -172,7 +173,10 @@ for arg in "$@"; do
   case "$arg" in
     status)
       [ -f "$T3_STUB/tailscaled.args" ] || exit 1
-      if [ -f "$T3_STUB/up" ]; then state=Running; id=nTESTCNTRL; else state=NeedsLogin; id=; fi
+      pending="$(cat "$T3_STUB/pending" 2>/dev/null || echo 0)"
+      if [ "$pending" -gt 0 ]; then
+        echo $((pending - 1)) >"$T3_STUB/pending"; state=Starting; id=
+      elif [ -f "$T3_STUB/up" ]; then state=Running; id=nTESTCNTRL; else state=NeedsLogin; id=; fi
       printf '{\\n  "TUN": false,\\n  "BackendState": "%s",\\n  "Self": {\\n    "ID": "%s",\\n    "NodeID": 7\\n  }\\n}\\n' "$state" "$id"
       exit 0 ;;
     up) up=1 ;;
@@ -184,6 +188,7 @@ if [ -n "$up" ]; then
   cat "$key" >"$T3_STUB/key.seen"
   find "$key" -perm 600 >"$T3_STUB/key.mode"
   touch "$T3_STUB/up"
+  echo 2 >"$T3_STUB/pending"
 fi`,
 };
 
