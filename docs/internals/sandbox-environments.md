@@ -142,8 +142,13 @@ server except into the sandbox.
   from environment variables that `execute` takes as `secrets`, and print nothing secret. Daytona
   and Vercel pass them as the command's env, which neither lists; Boat and Upstash have no
   per-command env, so their drivers write them to a 0600 file through the files API, and the
-  command sources and deletes it first. Celesto has neither, so a separate short exec writes that
-  file; its command history API lists no command text. Provider errors can echo the command they ran, so a step that carries a secret maps its
+  command sources and deletes it first. Celesto's exec takes only command text and it has no files
+  API, so its sandbox makes an RSA key pair and returns the public half; the driver seals that file
+  to it (RSA-OAEP, SHA-256, one block per piece), and the sandbox decrypts it with `openssl` and
+  removes the private key before the command runs. Only the public key and ciphertext cross the
+  API, so keeping command text or output exposes nothing. What remains is Celesto as host: it can
+  read the VM, and a public key swapped in an exec answer would reach it, which is no more than it
+  already has. Provider errors can echo the command they ran, so a step that carries a secret maps its
   failure to a fixed message instead of the driver's detail.
 - **A secret minted in the sandbox leaves it sealed.** Command output is kept as long as command
   text, so the pairing token cannot come back as `t3 pair` prints it. The server makes an RSA key
@@ -151,8 +156,7 @@ server except into the sandbox.
   puts only the public key in the command, which seals the token (RSA-OAEP, SHA-256) with the
   `openssl` CLI, or Node where an image has no `openssl`, and prints only that. A failed
   `t3 pair` reports its exit status and a sealed stderr tail; an image with neither tool fails the
-  create rather than printing the token. The secrets channel is not used here, since Celesto's
-  carries values in exec text. Headless `t3 serve` also logs a token, URL, and QR code, so the
+  create rather than printing the token. Headless `t3 serve` also logs a token, URL, and QR code, so the
   start step filters those lines out of the log tail it reports when the server does not answer.
 - **A hub key belongs to one sandbox.** When the server's Claude endpoint is a CLIProxyAPI hub with
   a management key, the provisioner adds a fresh `t3-sandbox-<label>-<hex>` key through the hub's

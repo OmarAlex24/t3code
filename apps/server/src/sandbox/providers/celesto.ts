@@ -1,3 +1,6 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no RSA encryption.
+import * as NodeCrypto from "node:crypto";
+
 import { SandboxProviderError, type SandboxProviderLimits } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -21,6 +24,7 @@ import {
   type SandboxProviderStatus,
   shellQuote,
 } from "../SandboxProvider.ts";
+import { OAEP } from "../sandboxPairing.ts";
 
 const CELESTO_API_BASE = "https://api.celesto.ai/v1";
 const SERVER_PORT = 3773;
@@ -264,6 +268,37 @@ const run = (
     : runDetached(config, sandboxId, script, seconds);
 };
 
+const PUBLIC_KEY_PEM = /-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----/u;
+// The inverse of `sandboxPairing.ts`'s `openssl pkeyutl -encrypt`, and of Node's `OAEP`.
+const OPENSSL_OAEP =
+  "-pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256";
+
+/** Seals `content` to the RSA key in `stdout`, one OAEP block per piece; null for any other key. */
+const sealToSandbox = (stdout: string, content: string): ReadonlyArray<string> | null => {
+  const pem = PUBLIC_KEY_PEM.exec(stdout)?.[0];
+  if (pem === undefined) return null;
+  let key: NodeCrypto.KeyObject;
+  try {
+    key = NodeCrypto.createPublicKey(pem);
+  } catch {
+    return null;
+  }
+  const bits = key.asymmetricKeyDetails?.modulusLength ?? 0;
+  if (key.asymmetricKeyType !== "rsa" || bits < 2048) return null;
+  // OAEP with SHA-256 spends 66 bytes of each block.
+  const size = Math.floor(bits / 8) - 66;
+  const bytes = Buffer.from(content, "utf8");
+  const pieces: Array<string> = [];
+  for (let start = 0; start < bytes.length; start += size) {
+    pieces.push(
+      NodeCrypto.publicEncrypt({ key, ...OAEP }, bytes.subarray(start, start + size)).toString(
+        "base64",
+      ),
+    );
+  }
+  return pieces;
+};
+
 const publishedPorts = (apiKey: string, sandboxId: string) =>
   requestJson({
     provider: "celesto",
@@ -386,28 +421,54 @@ export const celestoDriver: SandboxProviderDriver = {
     if (input.secrets === undefined) {
       return yield* run(input.config, input.sandboxId, input.command, input.timeoutSeconds);
     }
-    // Exec takes no env and Celesto has no files API, so a separate short exec writes the secrets to
-    // a private file, keeping them out of the script and of any copy of it on disk.
+    // Exec takes only command text, which Celesto keeps, and Celesto has no files API. So the
+    // sandbox makes a key pair and returns only its public half, and the secrets file reaches the
+    // sandbox sealed to it; the private key never leaves the sandbox and is removed once used.
+    const { config, sandboxId } = input;
     const dir = yield* randomPath("t3-secrets");
-    const file = `${dir}/env`;
     const content = Object.entries(input.secrets)
       .map(([name, value]) => `export ${name}=${shellQuote(value)}\n`)
       .join("");
-    yield* step(
-      input.config,
-      input.sandboxId,
-      `umask 077\nmkdir ${dir}\nprintf '%s' '${Buffer.from(content, "utf8").toString("base64")}' | base64 -d >${file}`,
-    );
-    return yield* run(
-      input.config,
-      input.sandboxId,
-      `. ${file}\nrm -rf ${dir}\n${input.command}`,
-      input.timeoutSeconds,
-    ).pipe(
-      Effect.onError(() =>
-        step(input.config, input.sandboxId, `rm -rf ${dir}`).pipe(Effect.ignore),
-      ),
-    );
+    return yield* Effect.gen(function* () {
+      const key = yield* step(
+        config,
+        sandboxId,
+        `umask 077
+mkdir ${dir}
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out ${dir}/key 2>/dev/null
+openssl pkey -in ${dir}/key -pubout`,
+      );
+      const sealed = sealToSandbox(key.stdout, content);
+      if (sealed === null) {
+        return yield* new SandboxProviderError({
+          provider: "celesto",
+          stage: "install",
+          detail: "The sandbox did not return a usable key for its secrets.",
+        });
+      }
+      // Each piece lands in its own file, so a step sent again rewrites rather than appends.
+      const parts = sealed.map((_, index) => `${dir}/${index}`).join(" ");
+      const lines = [
+        ...sealed.map((piece, index) => `printf %s ${piece} | part ${index} || exit 1\n`),
+        `cat ${parts} >${dir}/env || exit 1\nrm -f ${dir}/key ${parts}\n`,
+      ];
+      const header = `umask 077\npart() { openssl base64 -d -A | openssl pkeyutl -decrypt -inkey ${dir}/key ${OPENSSL_OAEP} >${dir}/$1; }\n`;
+      let batch = "";
+      for (const line of lines) {
+        if (batch !== "" && batch.length + line.length > UPLOAD_CHUNK_CHARS) {
+          yield* step(config, sandboxId, header + batch);
+          batch = "";
+        }
+        batch += line;
+      }
+      yield* step(config, sandboxId, header + batch);
+      return yield* run(
+        config,
+        sandboxId,
+        `. ${dir}/env\nrm -rf ${dir}\n${input.command}`,
+        input.timeoutSeconds,
+      );
+    }).pipe(Effect.onError(() => step(config, sandboxId, `rm -rf ${dir}`).pipe(Effect.ignore)));
   }),
   exposePort: (input) => exposePort(input.config.apiKey, input.sandboxId, input.port),
   stop: (input) =>
