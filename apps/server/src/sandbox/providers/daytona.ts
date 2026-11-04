@@ -1,4 +1,4 @@
-import { type SandboxProviderInfo, SandboxProviderError } from "@t3tools/contracts";
+import { SandboxProviderError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import { HttpClientRequest } from "effect/http";
@@ -10,11 +10,14 @@ import {
   jsonBody,
   requestJson,
   type SandboxProviderDriver,
+  type SandboxProviderStatus,
 } from "../SandboxProvider.ts";
 
 const DAYTONA_API_BASE = "https://app.daytona.io/api";
 const POLL_INTERVAL = "2 seconds";
 const POLL_ATTEMPTS = 90;
+// Daytona's TTL deletes the sandbox, disk included, so it trails T3's non-destructive stop by a day.
+const DESTROY_GRACE_MINUTES = 1440;
 
 const DaytonaSandbox = Schema.Struct({
   id: Schema.String,
@@ -32,6 +35,46 @@ const DaytonaExecResult = Schema.Struct({
   result: Schema.String,
 });
 
+const DaytonaApiKey = Schema.Struct({ organizationId: Schema.String });
+
+const DaytonaUsage = Schema.Struct({
+  regionUsage: Schema.Array(
+    Schema.Struct({
+      totalCpuQuota: Schema.Number,
+      currentCpuUsage: Schema.Number,
+      totalMemoryQuota: Schema.Number,
+      currentMemoryUsage: Schema.Number,
+    }),
+  ),
+});
+
+// CPU and memory (GB) of each snapshot in `info.sizes`, compared against the org's free quota.
+const SIZE_RESOURCES: Record<string, { readonly cpu: number; readonly memory: number }> = {
+  "daytona-small": { cpu: 1, memory: 1 },
+  "daytona-medium": { cpu: 2, memory: 4 },
+  "daytona-large": { cpu: 4, memory: 8 },
+};
+
+// States missing here (building, resizing, snapshotting, forking, unknown) leave the record alone.
+const DAYTONA_STATUS: Record<string, SandboxProviderStatus> = {
+  started: "running",
+  creating: "starting",
+  restoring: "starting",
+  starting: "starting",
+  pulling_snapshot: "starting",
+  resuming: "starting",
+  stopped: "stopped",
+  stopping: "stopped",
+  archived: "stopped",
+  archiving: "stopped",
+  paused: "stopped",
+  pausing: "stopped",
+  error: "error",
+  build_failed: "error",
+  destroyed: "deleted",
+  destroying: "deleted",
+};
+
 const info = {
   kind: "daytona",
   label: "Daytona",
@@ -44,7 +87,7 @@ const info = {
     { id: "daytona-medium", label: "Medium", detail: "2 vCPU · 4 GB · 8 GB" },
     { id: "daytona-large", label: "Large", detail: "4 vCPU · 8 GB · 10 GB" },
   ],
-} satisfies Omit<SandboxProviderInfo, "configured">;
+} satisfies SandboxProviderDriver["info"];
 
 const getSandbox = (apiKey: string, sandboxId: string) =>
   requestJson({
@@ -113,7 +156,11 @@ export const daytonaDriver: SandboxProviderDriver = {
           public: true,
           autoStopInterval: 0,
           autoDeleteInterval: -1,
-          ...(input.ttlMinutes === undefined ? {} : { ttlMinutes: input.ttlMinutes }),
+          // Daytona's `ttlMinutes` destroys the sandbox, disk included, so it lands a day after
+          // T3's own deadline stop and only cleans up when T3 never got to act.
+          ...(input.ttlMinutes === undefined
+            ? {}
+            : { ttlMinutes: input.ttlMinutes + DESTROY_GRACE_MINUTES }),
           labels: { "t3.code/role": "environment" },
         },
       ),
@@ -136,6 +183,52 @@ export const daytonaDriver: SandboxProviderDriver = {
         name: sandbox.name ?? input.name,
       })),
     ),
+  limits: Effect.fn("Daytona.limits")(
+    function* (input) {
+      const key = yield* requestJson({
+        provider: "daytona",
+        stage: "config",
+        schema: DaytonaApiKey,
+        request: authorize(
+          HttpClientRequest.get(`${DAYTONA_API_BASE}/api-keys/current`),
+          input.config.apiKey,
+        ),
+      });
+      const usage = yield* requestJson({
+        provider: "daytona",
+        stage: "config",
+        schema: DaytonaUsage,
+        request: authorize(
+          HttpClientRequest.get(
+            `${DAYTONA_API_BASE}/organizations/${encodeURIComponent(key.organizationId)}/usage`,
+          ),
+          input.config.apiKey,
+        ),
+      });
+      return {
+        canStart: true,
+        sizes: info.sizes.map((size) => {
+          const needs = SIZE_RESOURCES[size.id];
+          const fits =
+            needs === undefined ||
+            usage.regionUsage.length === 0 ||
+            usage.regionUsage.some(
+              (region) =>
+                region.totalCpuQuota - region.currentCpuUsage >= needs.cpu &&
+                region.totalMemoryQuota - region.currentMemoryUsage >= needs.memory,
+            );
+          return fits
+            ? { id: size.id, available: true }
+            : { id: size.id, available: false, reason: "Not enough CPU or memory quota left." };
+        }),
+      };
+    },
+    // Keys scoped to sandboxes only cannot read the organization's usage; that is "unknown".
+    Effect.catchIf(
+      (error) => error.status === 401 || error.status === 403,
+      () => Effect.succeed(null),
+    ),
+  ),
   execute: Effect.fn("Daytona.execute")(function* (input) {
     const baseUrl = yield* toolboxBaseUrl(input.config.apiKey, input.sandboxId);
     const result = yield* requestJson({
@@ -174,6 +267,55 @@ export const daytonaDriver: SandboxProviderDriver = {
         input.config.apiKey,
       ),
     }).pipe(Effect.map((preview) => preview.url)),
+  stop: (input) =>
+    requestJson({
+      provider: "daytona",
+      stage: "delete",
+      schema: Schema.Struct({ id: Schema.optionalKey(Schema.String) }),
+      request: authorize(
+        HttpClientRequest.post(
+          `${DAYTONA_API_BASE}/sandbox/${encodeURIComponent(input.sandboxId)}/stop`,
+        ),
+        input.config.apiKey,
+      ),
+    }).pipe(Effect.asVoid),
+  resume: (input) =>
+    requestJson({
+      provider: "daytona",
+      stage: "start",
+      schema: DaytonaSandbox,
+      request: authorize(
+        HttpClientRequest.post(
+          `${DAYTONA_API_BASE}/sandbox/${encodeURIComponent(input.sandboxId)}/start`,
+        ),
+        input.config.apiKey,
+      ),
+    }).pipe(
+      Effect.flatMap((sandbox) => waitUntilStarted(input.config.apiKey, sandbox.id)),
+      Effect.map(() => ({})),
+    ),
+  // `/ttl/{minutes}` is re-anchored at the call and deletes even a stopped sandbox, so it keeps the
+  // same day of grace past T3's deadline as create.
+  extend: (input) =>
+    requestJson({
+      provider: "daytona",
+      stage: "config",
+      schema: Schema.Struct({ id: Schema.optionalKey(Schema.String) }),
+      request: authorize(
+        HttpClientRequest.post(
+          `${DAYTONA_API_BASE}/sandbox/${encodeURIComponent(input.sandboxId)}/ttl/${input.ttlMinutes + DESTROY_GRACE_MINUTES}`,
+        ),
+        input.config.apiKey,
+      ),
+    }).pipe(Effect.asVoid),
+  status: (input) =>
+    getSandbox(input.config.apiKey, input.sandboxId).pipe(
+      Effect.map((sandbox) => DAYTONA_STATUS[sandbox.state] ?? null),
+      Effect.catchIf(
+        (error) => error.code === "not_found",
+        () => Effect.succeed("deleted" as const),
+      ),
+    ),
   destroy: (input) =>
     requestJson({
       provider: "daytona",
