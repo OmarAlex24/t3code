@@ -19,6 +19,8 @@ import { useProjects } from "../../state/entities";
 import { useEnvironments } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import {
+  isForeignSandbox,
+  keepsSandboxEnvironment,
   sandboxOptionConfigId,
   sandboxOptionId,
   useSandboxComposerStore,
@@ -88,10 +90,8 @@ export function useSandboxLaunch(input: {
   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
 
   // The machine picker hides other threads' sandboxes: each belongs to its own thread.
-  const keptEnvironments = input.logicalProjectEnvironments.filter(
-    (environment) =>
-      !sandboxThreadEnvironmentIds.has(environment.environmentId) ||
-      environment.environmentId === activeEnvironmentId,
+  const keptEnvironments = input.logicalProjectEnvironments.filter((environment) =>
+    keepsSandboxEnvironment(sandboxThreadEnvironmentIds, environment.environmentId, threadId),
   );
   // Keeps the caller's array when nothing is hidden, so its effects do not rerun.
   const logicalProjectEnvironments =
@@ -131,6 +131,32 @@ export function useSandboxLaunch(input: {
     machine: "cloud",
   }));
   const selectedConfig = usableConfigs.find((config) => config.id === selectedConfigId) ?? null;
+
+  // A new draft for the project can land on another thread's sandbox, since it holds a copy of the
+  // same repository. That machine belongs to its thread, so the draft moves back to the host.
+  const onForeignSandbox = isForeignSandbox(
+    sandboxThreadEnvironmentIds,
+    activeEnvironmentId,
+    threadId,
+  );
+  const hostProjectId = hostEntry?.projectId ?? null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves an unsent draft off a sandbox that belongs to another thread
+  useEffect(() => {
+    if (!onForeignSandbox || envLocked || draftId === null || hostEnvironmentId === null) return;
+    if (hostProjectId === null) return;
+    setDraftThreadContext(draftId, {
+      projectRef: scopeProjectRef(hostEnvironmentId, hostProjectId),
+      environmentSelection: "manual",
+      loadBalancedEnvironmentId: null,
+    });
+  }, [
+    draftId,
+    envLocked,
+    hostEnvironmentId,
+    hostProjectId,
+    onForeignSandbox,
+    setDraftThreadContext,
+  ]);
 
   // The launch this view started, keyed to its draft so another draft never shows its card.
   const [launch, setLaunch] = useState<{

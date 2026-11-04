@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { environmentCatalog } from "../connection/catalog";
 import { usePrimaryEnvironmentId } from "./environments";
@@ -21,10 +21,10 @@ export function useSandboxProvisionerEnvironmentId(): EnvironmentId | null {
 }
 
 /**
- * Environments that are a thread's own sandbox. They belong to the Sandboxes section, under their
- * config, instead of the list of machines the user paired.
+ * Environments that are a thread's own sandbox, with the thread each belongs to. They belong to the
+ * Sandboxes section, under their config, instead of the list of machines the user paired.
  */
-export function useSandboxThreadEnvironmentIds(): ReadonlySet<EnvironmentId> {
+export function useSandboxThreadEnvironmentIds(): ReadonlyMap<EnvironmentId, ThreadId> {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const list = useEnvironmentQuery(
     provisionerEnvironmentId === null
@@ -34,11 +34,11 @@ export function useSandboxThreadEnvironmentIds(): ReadonlySet<EnvironmentId> {
           input: undefined,
         }),
   );
-  return new Set(
+  return new Map(
     (list.data?.sandboxes ?? []).flatMap((sandbox) =>
       sandbox.threadId === undefined || sandbox.environmentId === null
         ? []
-        : [sandbox.environmentId],
+        : [[sandbox.environmentId, sandbox.threadId] as const],
     ),
   );
 }

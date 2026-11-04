@@ -23,6 +23,19 @@ vi.mock(import("~/hooks/useSettings"), async (original) => ({
   useUpdateEnvironmentSettings: (() => () => {}) as never,
 }));
 vi.mock(import("~/hooks/useNowMinute"), () => ({ useNowMinute: () => "2026-11-01T12:00" }));
+// The sandbox's own server is connected, so the row can tell whether its thread is there.
+vi.mock(import("~/state/environments"), async (original) => ({
+  ...(await original()),
+  useEnvironments: (() => ({
+    environments: [
+      {
+        environmentId: "22222222-2222-4222-8222-222222222222",
+        connection: { phase: "connected" },
+        serverConfig: {},
+      },
+    ],
+  })) as never,
+}));
 vi.mock(import("~/state/sandboxes"), async (original) => ({
   ...(await original()),
   useSandboxProvisionerEnvironmentId: (() =>
@@ -66,6 +79,7 @@ vi.mock(import("~/state/query"), async (original) => ({
   })) as never,
 }));
 
+import { useComposerDraftStore } from "~/composerDraftStore";
 import { SandboxManagementSection } from "./SandboxManagementSection";
 
 const boatInfo = {
@@ -173,6 +187,25 @@ describe("SandboxManagementSection", () => {
       .toBeVisible();
     // The warning makes Delete the labeled action instead of an icon.
     await expect.element(page.getByRole("button", { name: "Delete", exact: true })).toBeVisible();
+  });
+
+  it("warns about a sandbox whose thread is gone, but not one whose message waits in a draft", async () => {
+    const threadId = ThreadId.make("thread-waiting");
+    setup("running", { threadId, projectTitle: "hello" });
+    useComposerDraftStore.setState({ draftThreadsByThreadKey: {} });
+    const first = await render(<SandboxManagementSection />);
+    await expect.element(page.getByText(/Its thread was deleted/u)).toBeVisible();
+    await first[Symbol.asyncDispose]();
+
+    // The provider on the sandbox is not signed in yet, so the handed-off message has not sent.
+    useComposerDraftStore.setState({
+      draftThreadsByThreadKey: {
+        "draft-1": { threadId, promotedTo: null } as never,
+      },
+    });
+    await using _screen = await render(<SandboxManagementSection />);
+    await expect.element(page.getByText("hello", { exact: true })).toBeVisible();
+    await expect.element(page.getByText(/Its thread was deleted/u)).not.toBeInTheDocument();
   });
 
   it("lists tagged sandboxes T3 Code does not track and deletes one on confirm", async () => {
