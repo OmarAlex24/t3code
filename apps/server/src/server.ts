@@ -70,16 +70,13 @@ import * as NativeChildWorkQuery from "./orchestration-v2/NativeChildWorkQuery.t
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
-import * as SandboxHostAccess from "./sandbox/SandboxHostAccess.ts";
-import * as SandboxProvider from "./sandbox/SandboxProvider.ts";
-import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
-import * as SandboxRecords from "./persistence/SandboxRecords.ts";
 import { BUILT_IN_SOURCE_CONTROL_DRIVER_LIST } from "./sourceControl/sourceControlDefinitions.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as SecretResolver from "./secrets/SecretResolver.ts";
 import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
@@ -678,18 +675,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(SecretResolver.layer),
   Layer.provideMerge(layerServerSettings),
-  Layer.provideMerge(
-    SandboxProvisioner.layer.pipe(
-      Layer.provide(SandboxHostAccess.layer),
-      Layer.provide(SandboxProvider.layerHttpClient),
-    ),
-  ),
+  Layer.provideMerge(SandboxProvisioner.layerRuntime),
   Layer.provideMerge(layerSourceControlProviderRegistry),
   Layer.provideMerge(layerGit),
   Layer.provideMerge(layerVcs),
   Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPreview, layerDevice)),
   Layer.provideMerge(layerPersistence),
-  Layer.provideMerge(SandboxRecords.layer),
   Layer.provideMerge(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
   ),
