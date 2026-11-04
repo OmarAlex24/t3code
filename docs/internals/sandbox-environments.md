@@ -29,8 +29,9 @@ Drivers must keep two invariants:
   environment pointing at it. Drivers must make `destroy` safe on a machine that never started.
   The provisioner never receives an id the driver did not return, so the driver cleans up two
   paths itself: a machine it creates before its own start polling, and a create whose answer was
-  lost (`mayHaveCreated`). Boat replays the create with the same `Idempotency-Key`; Daytona,
-  Upstash, and Vercel name each attempt uniquely (`attemptSandboxName`) and delete that name. The sweep does not
+  lost (`mayHaveCreated`). Boat and Celesto replay the create with the same `Idempotency-Key`;
+  Daytona, Upstash, and Vercel name each attempt uniquely (`attemptSandboxName`) and delete that
+  name. The sweep does not
   delete provider sandboxes without a record: records are written only once provisioning ends,
   and nothing on a sandbox tells this T3 server apart from another one sharing the account.
 
@@ -50,6 +51,9 @@ entry, its kind in contracts, and its logo; nothing else branches on the provide
    from `SandboxProvider.ts` so status handling and error mapping stay consistent. Their client has
    no transport timeout, because a synchronous command answers only when it ends; each call is cut
    at 300 s instead, so one that runs a command passes `commandRequestSeconds` of its run time.
+   Celesto refuses an exec over 300 s or 10,000 characters, so its driver uploads a longer command,
+   starts it under `setsid`, and polls a status file; any `execute` must honor the full
+   `timeoutSeconds` the provisioner asks for (ten minutes for install).
    `requestJson` turns provider error bodies into a stable `code` (rate limited, concurrency full,
    billing required, size unavailable, …) with a bounded message; add the provider's own error
    codes to its table instead of writing messages in the driver, because clients react to `code`.
@@ -138,7 +142,8 @@ server except into the sandbox.
   from environment variables that `execute` takes as `secrets`, and print nothing secret. Daytona
   and Vercel pass them as the command's env, which neither lists; Boat and Upstash have no
   per-command env, so their drivers write them to a 0600 file through the files API, and the
-  command sources and deletes it first. Provider errors can echo the command they ran, so a step that carries a secret maps its
+  command sources and deletes it first. Celesto has neither, so a separate short exec writes that
+  file; its command history API lists no command text. Provider errors can echo the command they ran, so a step that carries a secret maps its
   failure to a fixed message instead of the driver's detail.
 - **A hub key belongs to one sandbox.** When the server's Claude endpoint is a CLIProxyAPI hub with
   a management key, the provisioner adds a fresh `t3-sandbox-<label>-<hex>` key through the hub's
@@ -194,8 +199,9 @@ deletes the sandbox, disk included, even when stopped, so it is always set 24 ho
 deadline: a stopped Daytona sandbox keeps its disk for a day and is then gone. Vercel's is the
 session timeout, set on create and resume and moved with `extend-timeout`, but the plan caps one
 session (45 minutes on Hobby, a day on Pro), so a Hobby sandbox stops early and the sweep records
-it as stopped until the user resumes it. Its stopped disk is kept for 30 days. Upstash has no
-lifetime of its own, so its `extend` moves nothing and the sweep's stop is the only deadline. It also
+it as stopped until the user resumes it. Its stopped disk is kept for 30 days. Upstash and Celesto
+have no lifetime of their own, so their `extend` moves nothing and the sweep's stop is the only
+deadline; a Celesto sandbox bills until T3 stops it. Upstash also
 pauses an idle box and wakes it on any visit to its URL, restarting T3 through the box's init
 command; the sweep records both, and a box woken past its deadline is paused again on the next sweep.
 
