@@ -140,8 +140,16 @@ server except into the sandbox.
   failed with a warning, and the hub key is kept, since fixing the network makes it work. The form
   warns earlier when the server's own endpoint resolves only to private addresses, judged by
   address rather than name, because a `*.ts.net` Funnel host is public.
-- **Templates do not inherit access.** The template scrub also removes the Claude endpoint and the
-  `gh` login, and a successful save revokes the source's hub key along with deleting the source.
+- **A tailnet node belongs to one sandbox.** A private endpoint is reached by joining the sandbox
+  to the server's tailnet, never by sharing the OAuth client: the server mints one single-use,
+  pre-approved, ephemeral key per join, tagged so the tailnet policy can limit what sandboxes
+  reach. Ephemeral means Tailscale removes a node it stops hearing from, so a provider-side delete
+  or a lost record cannot leave one behind for long; T3 still deletes the device on delete, on a
+  failed create, and when a resume rejoins as a new one, because that removal can take an hour.
+  The join runs before Claude's settings, since a sandbox without a TUN device needs Claude
+  pointed at tailscaled's userspace proxy.
+- **Templates do not inherit access.** The template scrub also removes the Claude endpoint, the
+  `gh` login, and the tailnet node (`tailscale logout` and its state), and a successful save revokes the source's hub key along with deleting the source.
 - **Missing tools are installed, never required.** git, the GitHub CLI, and Claude Code are
   installed only when `command -v` cannot find them, into `~/.local/bin` where root is not
   available, and the script always exits zero and reports what is still missing. Boat ships all
