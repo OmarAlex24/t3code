@@ -142,8 +142,9 @@ describe("SandboxManagementSection", () => {
     expect(mocks.stopSandbox).not.toHaveBeenCalled();
   });
 
-  it("groups a thread's sandbox under its config with its uptime and running limit", async () => {
+  it("groups a thread's sandbox under its config with its short id, uptime and time left", async () => {
     setup("running", {
+      sandboxId: "bx_46wrgghp",
       configId: "config-1",
       threadId: ThreadId.make("thread-1"),
       projectId: ProjectId.make("project-1"),
@@ -171,9 +172,11 @@ describe("SandboxManagementSection", () => {
     await using _screen = await render(<SandboxManagementSection />);
 
     await expect.element(page.getByText("Boat small", { exact: true })).toBeVisible();
-    await expect
-      .element(page.getByText("hello · Small · Running · up 2 h, stops at 8 h"))
-      .toBeVisible();
+    // The size is in the config's header, so the row leaves it out and counts down the limit.
+    await expect.element(page.getByText("hello · bx_46wr · up 2 h · stops in 6 h")).toBeVisible();
+    await userEvent.hover(page.getByText("bx_46wr", { exact: true }));
+    await expect.element(page.getByText("bx_46wrgghp", { exact: true })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Running" })).toBeVisible();
   });
 
   it("recommends deleting a stopped disk close to the provider's retention", async () => {
@@ -185,8 +188,12 @@ describe("SandboxManagementSection", () => {
         page.getByText(/keeps a stopped disk for 14 days; this one has been stopped 12 days/u),
       )
       .toBeVisible();
-    // The warning makes Delete the labeled action instead of an icon.
-    await expect.element(page.getByRole("button", { name: "Delete", exact: true })).toBeVisible();
+    // Delete keeps its place and look in every state.
+    await expect.element(page.getByRole("button", { name: "Resume" })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Delete sandbox" })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Delete", exact: true }))
+      .not.toBeInTheDocument();
   });
 
   it("warns about a sandbox whose thread is gone, but not one whose message waits in a draft", async () => {
@@ -214,8 +221,9 @@ describe("SandboxManagementSection", () => {
     mocks.orphans = [{ provider: "boat", sandboxId: "bx_lost", name: "lost sandbox" }];
     await using _screen = await render(<SandboxManagementSection />);
 
-    await expect.element(page.getByText("Not tracked by T3 Code")).toBeVisible();
-    await userEvent.click(page.getByRole("button", { name: "Delete", exact: true }));
+    await expect.element(page.getByText("Not tracked by T3 Code", { exact: true })).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Delete sandbox" }));
+    expect(mocks.deleteSandbox).not.toHaveBeenCalled();
     await userEvent.click(page.getByRole("button", { name: "Delete sandbox" }));
     expect(mocks.deleteSandbox).toHaveBeenCalledWith(
       expect.objectContaining({ input: { provider: "boat", sandboxId: "bx_lost" } }),

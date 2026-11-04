@@ -1,5 +1,4 @@
 import {
-  ArrowUpRightIcon,
   CheckIcon,
   ExternalLinkIcon,
   LayersIcon,
@@ -35,6 +34,7 @@ import { useEnvironments } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
 import { useSandboxProvisionerEnvironmentId } from "~/state/sandboxes";
 import { useEnvironmentQuery } from "~/state/query";
+import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
@@ -48,7 +48,6 @@ import {
 import { SandboxEnvironmentFields } from "./SandboxEnvironmentFields";
 import { SandboxProviderLogo } from "./SandboxProviderLogo";
 import { SandboxTemplateList, SaveSandboxTemplateDialog } from "./SandboxTemplates";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -96,7 +95,35 @@ const stateLabel = (sandbox: SandboxRecord): string => {
   }
 };
 
-// States the user has to act on get a badge and one line on what happened.
+// The dot reuses the connection colours: green running, pulsing amber while it starts, red on an
+// error, amber once the disk is gone, grey while stopped.
+const STATE_DOT: Record<
+  SandboxRecord["state"],
+  { readonly dot: string; readonly ping?: string; readonly meta: string }
+> = {
+  running: { dot: "bg-success", meta: "running" },
+  provisioning: { dot: "bg-warning", ping: "bg-warning/60 duration-2000", meta: "starting" },
+  stopped: { dot: "bg-muted-foreground/40", meta: "stopped" },
+  error: { dot: "bg-destructive", meta: "error" },
+  expired: { dot: "bg-warning", meta: "disk expired" },
+  deleted: { dot: "bg-muted-foreground/40", meta: "deleted outside T3 Code" },
+};
+
+// Enough of the provider's id to tell two sandboxes with one thread title apart; hover shows it all.
+const shortSandboxId = (sandboxId: string) => {
+  const separator = sandboxId.indexOf("_");
+  return separator === -1 ? sandboxId.slice(0, 7) : sandboxId.slice(0, separator + 5);
+};
+
+// Rows sit straight in the group with the insets of every settings row and a hairline between them.
+const ROW_CLASSNAME = "@container/sandbox-row px-3 py-3 sm:px-4";
+const ROW_INNER_CLASSNAME =
+  "flex flex-col gap-2 @min-[32rem]/sandbox-row:flex-row @min-[32rem]/sandbox-row:items-start @min-[32rem]/sandbox-row:justify-between @min-[32rem]/sandbox-row:gap-4";
+// Lines under the title start where the title does, past the status dot.
+const ROW_INDENT_CLASSNAME = "pl-5";
+const ROW_ACTIONS_CLASSNAME = `flex shrink-0 items-center gap-1.5 ${ROW_INDENT_CLASSNAME} @min-[32rem]/sandbox-row:pl-0`;
+
+// States the user has to act on get one line on what happened.
 const ATTENTION: Partial<
   Record<SandboxRecord["state"], { readonly variant: "error" | "warning"; readonly line: string }>
 > = {
@@ -114,8 +141,11 @@ const ATTENTION: Partial<
   },
 };
 
+// A config, its sandboxes and the orphans each read as one block of the section's group.
+const GROUP_CLASSNAME = "divide-y divide-border/50";
+
 const formatCost = (dollars: number) =>
-  dollars < 0.01 ? "under $0.01 this month" : `$${dollars.toFixed(2)} this month`;
+  dollars < 0.01 ? "<$0.01 this month" : `$${dollars.toFixed(2)} this month`;
 
 // A stopped disk this close to the provider's limit gets a warning that recommends deleting it.
 const RETENTION_WARNING_DAYS = 3;
@@ -187,12 +217,13 @@ export function SandboxManagementSection() {
     void list.refresh();
     void configsQuery.refresh();
   };
-  const row = (sandbox: SandboxRecord) => (
+  const row = (sandbox: SandboxRecord, inConfig: boolean) => (
     <SandboxRow
       key={sandbox.instanceId}
       environmentId={provisionerEnvironmentId}
       sandbox={sandbox}
       provider={providerOf(sandbox.provider)}
+      inConfig={inConfig}
       onChanged={refresh}
     />
   );
@@ -216,10 +247,12 @@ export function SandboxManagementSection() {
       }
     >
       <SandboxTailscaleRow environmentId={provisionerEnvironmentId} />
-      {list.error ? <p className="px-1 pb-2 text-xs text-destructive">{list.error}</p> : null}
+      {list.error ? (
+        <p className="px-3 py-3 text-xs text-destructive sm:px-4">{list.error}</p>
+      ) : null}
       {groups.map(({ config, sandboxes: members }) => (
-        <div key={config.id} className="space-y-2 py-2">
-          <div className="flex items-center justify-between gap-3 px-1">
+        <div key={config.id} className={GROUP_CLASSNAME}>
+          <div className="flex items-center justify-between gap-3 px-3 py-2.5 sm:px-4">
             <div className="flex min-w-0 items-center gap-2">
               <SandboxProviderLogo kind={config.provider} />
               <p className="truncate text-sm font-medium text-foreground">{config.label}</p>
@@ -245,26 +278,28 @@ export function SandboxManagementSection() {
             </Button>
           </div>
           {members.length === 0 ? (
-            <p className="px-1 text-xs text-muted-foreground">
+            <p className="px-3 py-3 text-xs text-muted-foreground sm:px-4">
               No sandboxes. Pick Sandbox: {config.label} in the composer to start a thread on its
               own machine.
             </p>
           ) : (
-            members.map(row)
+            members.map((sandbox) => row(sandbox, true))
           )}
         </div>
       ))}
       {other.length === 0 ? null : (
-        <div className="space-y-2 py-2">
+        <div className={GROUP_CLASSNAME}>
           {groups.length === 0 ? null : (
-            <p className="px-1 text-sm font-medium text-foreground">Other sandboxes</p>
+            <p className="px-3 py-2.5 text-sm font-medium text-foreground sm:px-4">
+              Other sandboxes
+            </p>
           )}
-          {other.map(row)}
+          {other.map((sandbox) => row(sandbox, false))}
         </div>
       )}
       {orphans.length === 0 ? null : (
-        <div className="space-y-2 py-2">
-          <div className="px-1">
+        <div className={GROUP_CLASSNAME}>
+          <div className="px-3 py-2.5 sm:px-4">
             <p className="text-sm font-medium text-foreground">Not tracked by T3 Code</p>
             <p className="text-xs text-muted-foreground">
               These sandboxes carry this server's tag but no record, usually after a crash. They may
@@ -358,42 +393,74 @@ function OrphanRow({
     onChanged();
   };
   return (
-    <div className="space-y-2 rounded-lg border border-border/60 px-4 py-3">
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <SandboxProviderLogo kind={orphan.provider} />
-          <div className="min-w-0">
+    <div className={ROW_CLASSNAME}>
+      <div className={ROW_INNER_CLASSNAME}>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-h-6 min-w-0 items-center gap-2">
+            <ConnectionStatusDot tooltipText="Not tracked by T3 Code" dotClassName="bg-warning" />
             <p className="truncate text-sm font-medium text-foreground">{orphan.name}</p>
-            <p className="truncate text-xs text-muted-foreground">
-              {orphan.sandboxId}
-              {orphan.createdAt === undefined
-                ? ""
-                : ` · made ${new Date(orphan.createdAt).toLocaleDateString()}`}
-            </p>
           </div>
+          <p className={`${ROW_INDENT_CLASSNAME} truncate text-xs text-muted-foreground`}>
+            {orphan.sandboxId}
+            {orphan.createdAt === undefined
+              ? ""
+              : ` · made ${new Date(orphan.createdAt).toLocaleDateString()}`}
+          </p>
         </div>
-        {confirming ? null : (
-          <Button
-            size="xs"
-            variant="destructive-outline"
-            disabled={pending}
+        <div className={ROW_ACTIONS_CLASSNAME}>
+          <DeleteSandboxButton
+            pending={pending}
+            confirming={confirming}
             onClick={() => setConfirming(true)}
-          >
-            {pending ? <Spinner className="size-3" /> : <Trash2Icon className="size-3" />}
-            Delete
-          </Button>
-        )}
+          />
+        </div>
       </div>
       {confirming && !pending ? (
-        <SandboxStartConfirmation
-          warnings={["This deletes the machine and its disk at the provider. It cannot be undone."]}
-          confirmLabel="Delete sandbox"
-          destructive
-          onConfirm={() => void remove()}
-          onCancel={() => setConfirming(false)}
-        />
+        <div className={`${ROW_INDENT_CLASSNAME} pt-2`}>
+          <SandboxStartConfirmation
+            warnings={[
+              "This deletes the machine and its disk at the provider. It cannot be undone.",
+            ]}
+            confirmLabel="Delete sandbox"
+            destructive
+            onConfirm={() => void remove()}
+            onCancel={() => setConfirming(false)}
+          />
+        </div>
       ) : null}
     </div>
+  );
+}
+
+// Delete is the same quiet icon in every state and always last, so the actions never shift.
+function DeleteSandboxButton({
+  pending,
+  confirming,
+  onClick,
+}: {
+  readonly pending: boolean;
+  readonly confirming: boolean;
+  readonly onClick: () => void;
+}) {
+  // While its confirmation is open an empty slot holds its place, so the other actions stay put.
+  if (confirming) return <span aria-hidden className="size-7 shrink-0 sm:size-6" />;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            size="icon-xs"
+            variant="ghost-destructive"
+            aria-label="Delete sandbox"
+            disabled={pending}
+            onClick={onClick}
+          />
+        }
+      >
+        {pending ? <Spinner className="size-3.5" /> : <Trash2Icon className="size-3.5" />}
+      </TooltipTrigger>
+      <TooltipPopup side="top">Delete sandbox</TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -537,11 +604,14 @@ function SandboxRow({
   environmentId,
   sandbox,
   provider,
+  inConfig,
   onChanged,
 }: {
   readonly environmentId: EnvironmentId;
   readonly sandbox: SandboxRecord;
   readonly provider: SandboxProviderInfo | undefined;
+  /** Under its config's header, which already names the size and template. */
+  readonly inConfig: boolean;
   readonly onChanged: () => void;
 }) {
   const navigate = useNavigate();
@@ -602,9 +672,6 @@ function SandboxRow({
   const canStopResume = provider?.capabilities.stopResume ?? true;
   const canStop = canStopResume && (sandbox.state === "running" || sandbox.state === "error");
   const canResume = canStopResume && sandbox.state === "stopped";
-  // Delete is always offered; it stays an icon beside Stop or Resume so it never reads as the
-  // main action, and becomes the labeled action once neither can move the sandbox forward.
-  const deleteIsSecondary = (canStop || canResume) && !nearRetention && !threadGone;
   // Only a stopped sandbox can spend a start, so only it reads the provider's limits.
   const startCheck = useSandboxStartCheck({
     environmentId,
@@ -691,89 +758,121 @@ function SandboxRow({
     sandbox.threadId === undefined
       ? sandbox.label
       : (thread?.title ?? sandbox.projectTitle ?? sandbox.label);
-  const subtitle = [
-    ...(sandbox.threadId === undefined
-      ? [provider?.label ?? sandbox.provider]
-      : [sandbox.projectTitle ?? "Project"]),
-    provider?.sizes.find((size) => size.id === sandbox.size)?.label ?? sandbox.size,
-    ...(sandbox.template === undefined ? [] : [`from ${sandbox.template}`]),
-    ...(attention === undefined ? [stateLabel(sandbox)] : []),
-    ...(runningMinutes === null
+  const dot = STATE_DOT[sandbox.state];
+  const meta = [
+    sandbox.threadId === undefined
+      ? (provider?.label ?? sandbox.provider)
+      : (sandbox.projectTitle ?? "Project"),
+    ...(inConfig
       ? []
       : [
-          `up ${formatDuration(runningMinutes)}, stops at ${formatDuration(sandbox.maxRunningMinutes)}`,
+          provider?.sizes.find((size) => size.id === sandbox.size)?.label ?? sandbox.size,
+          ...(sandbox.template === undefined ? [] : [`from ${sandbox.template}`]),
         ]),
-    ...(stoppedMinutes === null ? [] : [`disk kept ${formatDuration(stoppedMinutes)}`]),
+    ...(runningMinutes === null
+      ? [dot.meta + (stoppedMinutes === null ? "" : ` ${formatDuration(stoppedMinutes)}`)]
+      : [
+          `up ${formatDuration(runningMinutes)}`,
+          `stops in ${formatDuration(Math.max(0, sandbox.maxRunningMinutes - runningMinutes))}`,
+        ]),
     ...(sandbox.costDollars === undefined ? [] : [formatCost(sandbox.costDollars)]),
-  ].join(" · ");
+  ];
+  const warningClassName = `${ROW_INDENT_CLASSNAME} mt-0.5 text-xs text-warning-foreground`;
 
   return (
-    <div className="space-y-2 rounded-lg border border-border/60 px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex min-w-0 items-start gap-3">
-          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-background text-muted-foreground">
-            <SandboxProviderLogo kind={sandbox.provider} />
-          </span>
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <p className="truncate text-sm font-medium text-foreground">{title}</p>
-              {attention === undefined ? null : (
-                <Badge variant={attention.variant} size="sm">
-                  {stateLabel(sandbox)}
-                </Badge>
-              )}
-            </div>
-            <p className="mt-0.5 truncate text-xs text-muted-foreground">{subtitle}</p>
-            {attention === undefined ? null : (
-              <p className="mt-0.5 text-xs text-muted-foreground">{attention.line}</p>
-            )}
-            {threadGone ? (
-              <p className="mt-0.5 text-xs text-warning-foreground">
-                Its thread was deleted. Delete the sandbox unless you still need its disk.
-              </p>
-            ) : null}
-            {nearRetention ? (
-              <p className="mt-0.5 text-xs text-warning-foreground">
-                {provider?.label ?? sandbox.provider} keeps a stopped disk for {retentionDays} days;
-                this one has been stopped {stoppedDays} {stoppedDays === 1 ? "day" : "days"}. Delete
-                it unless you need what is on it. T3 Code never deletes it for you.
-              </p>
-            ) : null}
-            {startCheck.limits === null ? null : <SandboxQuotaLine limits={startCheck.limits} />}
+    <div className={ROW_CLASSNAME}>
+      <div className={ROW_INNER_CLASSNAME}>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-h-6 min-w-0 items-center gap-2">
+            <ConnectionStatusDot
+              tooltipText={stateLabel(sandbox)}
+              dotClassName={dot.dot}
+              pingClassName={dot.ping ?? null}
+            />
+            <p className="truncate text-sm font-medium text-foreground">{title}</p>
           </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {thread === undefined ? null : (
-            <Button
-              size="xs"
-              variant="ghost-muted"
-              onClick={() =>
-                void navigate({
-                  to: "/$environmentId/$threadId",
-                  params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
-                })
+          <p className={`${ROW_INDENT_CLASSNAME} text-xs text-muted-foreground`}>
+            {meta[0]}
+            {" · "}
+            <Tooltip>
+              <TooltipTrigger render={<span />}>{shortSandboxId(sandbox.sandboxId)}</TooltipTrigger>
+              <TooltipPopup side="top">{sandbox.sandboxId}</TooltipPopup>
+            </Tooltip>
+            {meta
+              .slice(1)
+              .map((part) => ` · ${part}`)
+              .join("")}
+          </p>
+          {attention === undefined ? null : (
+            <p
+              className={
+                attention.variant === "error"
+                  ? `${ROW_INDENT_CLASSNAME} mt-0.5 text-xs text-destructive-foreground`
+                  : warningClassName
               }
             >
-              <ArrowUpRightIcon className="size-3" />
-              Open thread
-            </Button>
+              {attention.line}
+            </p>
+          )}
+          {threadGone ? (
+            <p className={warningClassName}>
+              Its thread was deleted. Delete the sandbox unless you still need its disk.
+            </p>
+          ) : null}
+          {nearRetention ? (
+            <p className={warningClassName}>
+              {provider?.label ?? sandbox.provider} keeps a stopped disk for {retentionDays} days;
+              this one has been stopped {stoppedDays} {stoppedDays === 1 ? "day" : "days"}. Delete
+              it unless you need what is on it. T3 Code never deletes it for you.
+            </p>
+          ) : null}
+          {startCheck.limits === null ? null : (
+            <div className={ROW_INDENT_CLASSNAME}>
+              <SandboxQuotaLine limits={startCheck.limits} />
+            </div>
+          )}
+        </div>
+        <div className={ROW_ACTIONS_CLASSNAME}>
+          {thread === undefined ? null : (
+            <span className="text-muted-foreground">
+              <Button
+                size="xs"
+                variant="link"
+                onClick={() =>
+                  void navigate({
+                    to: "/$environmentId/$threadId",
+                    params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
+                  })
+                }
+              >
+                Open thread
+              </Button>
+            </span>
           )}
           {canStop ? (
             <Button size="xs" variant="outline" disabled={pending} onClick={() => void run("stop")}>
-              {pending ? <Spinner className="size-3" /> : <SquareIcon className="size-3" />}
+              {pending ? (
+                <Spinner className="size-3" />
+              ) : (
+                <SquareIcon aria-hidden className="size-2.5 fill-current" />
+              )}
               Stop
             </Button>
           ) : null}
-          {canResume && !startCheck.isConfirming ? (
+          {canResume ? (
             <Button
               size="xs"
               variant="outline"
-              disabled={pending || startCheck.blocked !== null}
+              disabled={pending || startCheck.blocked !== null || startCheck.isConfirming}
               onClick={() =>
                 startCheck.needsConfirmation ? startCheck.confirm() : void run("resume")
               }
             >
-              {pending ? <Spinner className="size-3" /> : <PlayIcon className="size-3" />}
+              {pending ? (
+                <Spinner className="size-3" />
+              ) : (
+                <PlayIcon aria-hidden className="size-3 fill-current" />
+              )}
               Resume
             </Button>
           ) : null}
@@ -788,63 +887,46 @@ function SandboxRow({
               Save as template…
             </Button>
           ) : null}
-          {confirmingDelete ? null : deleteIsSecondary ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    size="icon-xs"
-                    variant="ghost-destructive"
-                    aria-label="Delete sandbox"
-                    disabled={pending}
-                    onClick={() => setConfirmingDelete(true)}
-                  />
-                }
-              >
-                <Trash2Icon className="size-3.5" />
-              </TooltipTrigger>
-              <TooltipPopup side="top">Delete sandbox</TooltipPopup>
-            </Tooltip>
-          ) : (
-            <Button
-              size="xs"
-              variant="destructive-outline"
-              disabled={pending}
-              onClick={() =>
-                // A deleted sandbox has nothing left at the provider to lose.
-                sandbox.state === "deleted" ? void run("delete") : setConfirmingDelete(true)
-              }
-            >
-              {pending ? <Spinner className="size-3" /> : <Trash2Icon className="size-3" />}
-              Delete
-            </Button>
-          )}
+          <DeleteSandboxButton
+            pending={pending}
+            confirming={confirmingDelete}
+            onClick={() =>
+              // A deleted sandbox has nothing left at the provider to lose.
+              sandbox.state === "deleted" ? void run("delete") : setConfirmingDelete(true)
+            }
+          />
         </div>
       </div>
       {startCheck.blocked === null ? null : (
-        <SandboxStartBlocked
-          reason={startCheck.blocked.reason}
-          billingUrl={startCheck.limits?.billingUrl}
-        />
+        <div className={`${ROW_INDENT_CLASSNAME} pt-2`}>
+          <SandboxStartBlocked
+            reason={startCheck.blocked.reason}
+            billingUrl={startCheck.limits?.billingUrl}
+          />
+        </div>
       )}
       {startCheck.isConfirming && !pending ? (
-        <SandboxStartConfirmation
-          warnings={startCheck.assessment?.warnings ?? []}
-          confirmLabel="Resume anyway"
-          onConfirm={() => void run("resume")}
-          onCancel={startCheck.cancel}
-        />
+        <div className={`${ROW_INDENT_CLASSNAME} pt-2`}>
+          <SandboxStartConfirmation
+            warnings={startCheck.assessment?.warnings ?? []}
+            confirmLabel="Resume anyway"
+            onConfirm={() => void run("resume")}
+            onCancel={startCheck.cancel}
+          />
+        </div>
       ) : null}
       {confirmingDelete && !pending ? (
-        <SandboxStartConfirmation
-          warnings={[
-            `This deletes the machine and its disk at ${provider?.label ?? sandbox.provider}${sandbox.threadId === undefined ? "" : ", along with any work in its thread that is not pushed"}. It cannot be undone.`,
-          ]}
-          confirmLabel="Delete sandbox"
-          destructive
-          onConfirm={() => void run("delete")}
-          onCancel={() => setConfirmingDelete(false)}
-        />
+        <div className={`${ROW_INDENT_CLASSNAME} pt-2`}>
+          <SandboxStartConfirmation
+            warnings={[
+              `This deletes the machine and its disk at ${provider?.label ?? sandbox.provider}${sandbox.threadId === undefined ? "" : ", along with any work in its thread that is not pushed"}. It cannot be undone.`,
+            ]}
+            confirmLabel="Delete sandbox"
+            destructive
+            onConfirm={() => void run("delete")}
+            onCancel={() => setConfirmingDelete(false)}
+          />
+        </div>
       ) : null}
       {canSaveTemplate ? (
         <SaveSandboxTemplateDialog
