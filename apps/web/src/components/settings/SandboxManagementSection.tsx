@@ -24,7 +24,7 @@ import {
 import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "~/hooks/useSettings";
 import { useNowMinute } from "~/hooks/useNowMinute";
 import { serverEnvironment } from "~/state/server";
-import { useSandboxProvisionerEnvironmentId } from "~/state/environments";
+import { useSandboxProvisionerEnvironmentId } from "~/state/sandboxes";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
