@@ -32,6 +32,7 @@ export * from "./managedPolicy.ts";
 export * from "./git.ts";
 export * from "./vcs.ts";
 export * from "./sourceControl.ts";
+export * from "./sandbox.ts";
 export * from "./projectClone.ts";
 export * from "./speech.ts";
 export * from "./pullRequest.ts";
