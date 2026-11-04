@@ -291,7 +291,7 @@ export type SandboxLifecycleInput = typeof SandboxLifecycleInput.Type;
 
 export const SANDBOX_LIFETIME_CAP_MIN_MINUTES = 60;
 export const SANDBOX_LIFETIME_CAP_MAX_MINUTES = 30 * 24 * 60;
-export const DEFAULT_SANDBOX_LIFETIME_CAP_MINUTES = 24 * 60;
+const DEFAULT_SANDBOX_LIFETIME_CAP_MINUTES = 24 * 60;
 
 /** The longest a sandbox may live, from creation to its deadline, counting every extension. */
 export const SandboxLifetimeCapMinutes = Schema.Int.check(
@@ -603,3 +603,28 @@ export const SandboxTailscaleSettings = Schema.Struct({
   ),
 });
 export type SandboxTailscaleSettings = typeof SandboxTailscaleSettings.Type;
+
+export const SandboxServerSettingsFields = {
+  // Sandbox provider API keys, only read by the server that provisions the sandbox.
+  sandboxProviders: Schema.Record(Schema.String, SandboxSettings).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  sandboxLifetimeCapMinutes: SandboxLifetimeCapMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SANDBOX_LIFETIME_CAP_MINUTES)),
+  ),
+  sandboxTailscale: SandboxTailscaleSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+};
+
+export const SandboxServerSettingsPatchFields = {
+  /** Merges per provider; a redaction marker retains the saved key, an empty key removes it. */
+  sandboxProviders: Schema.optionalKey(Schema.Record(Schema.String, SandboxSettings)),
+  sandboxLifetimeCapMinutes: Schema.optionalKey(SandboxLifetimeCapMinutes),
+  /** Merges per field; a redaction marker retains the saved secret, an empty one removes it. */
+  sandboxTailscale: Schema.optionalKey(
+    Schema.Struct({
+      clientId: Schema.optionalKey(TrimmedString),
+      clientSecret: Schema.optionalKey(TrimmedString),
+      tag: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+};
