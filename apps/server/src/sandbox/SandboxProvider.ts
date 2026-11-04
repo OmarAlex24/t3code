@@ -54,6 +54,20 @@ export interface SandboxUsage {
   readonly since: string;
 }
 
+/** Tags every create carries, so a sandbox can be traced to the server and record that made it. */
+export interface SandboxTags {
+  readonly host: string;
+  readonly instance: string;
+}
+
+/** A sandbox the provider lists as tagged by this server. */
+export interface ListedSandbox {
+  readonly id: string;
+  readonly name: string;
+  readonly instance?: string | undefined;
+  readonly createdAt?: string | undefined;
+}
+
 export interface SandboxProviderDriver {
   readonly info: Omit<
     SandboxProviderInfo,
@@ -73,6 +87,9 @@ export interface SandboxProviderDriver {
     readonly idempotencyKey: string;
     /** Start from this saved template instead of a fresh machine. */
     readonly template?: string | undefined;
+    readonly tags?: SandboxTags | undefined;
+    /** False for a tailnet-only sandbox: the server port gets no public URL. */
+    readonly publishPort?: boolean | undefined;
   }) => Effect.Effect<CreatedSandbox, SandboxProviderError, HttpClient.HttpClient>;
   /** Null when the account's limits are unreadable (for example a key without that scope). */
   readonly limits?: (input: {
@@ -96,6 +113,16 @@ export interface SandboxProviderDriver {
      */
     readonly secrets?: Readonly<Record<string, string>> | undefined;
   }) => Effect.Effect<SandboxExecResult, SandboxProviderError, HttpClient.HttpClient>;
+  /**
+   * Writes a file the command text must never carry, such as an env file, through the provider's
+   * files API. Without it, the provisioner pipes the content through `execute`'s `secrets`.
+   */
+  readonly uploadFile?: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly sandboxId: string;
+    readonly path: string;
+    readonly content: string;
+  }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
   readonly exposePort: (input: {
     readonly config: SandboxProviderConfig;
     readonly sandboxId: string;
@@ -123,16 +150,6 @@ export interface SandboxProviderDriver {
     readonly sandboxId: string;
   }) => Effect.Effect<SandboxProviderStatus | null, SandboxProviderError, HttpClient.HttpClient>;
   /**
-   * Moves the provider's own backstop to match an extended deadline. `ttlMinutes` is the time left
-   * until the new deadline, counted from now.
-   */
-  readonly extend?: (input: {
-    readonly config: SandboxProviderConfig;
-    readonly sandboxId: string;
-    readonly ttlMinutes: number;
-    readonly running: boolean;
-  }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
-  /**
    * Saves a stopped sandbox's disk under `name` and waits until it can start new sandboxes. The
    * provisioner scrubs T3's identity and stops the machine first; the driver waits for the
    * provider to finish stopping when its snapshot needs that.
@@ -155,6 +172,11 @@ export interface SandboxProviderDriver {
     readonly config: SandboxProviderConfig;
     readonly name: string;
   }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
+  /** Every sandbox this server tagged at create, so the sweep can flag ones no record tracks. */
+  readonly listSandboxes?: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly host: string;
+  }) => Effect.Effect<ReadonlyArray<ListedSandbox>, SandboxProviderError, HttpClient.HttpClient>;
   /** This month's cost of every T3 sandbox on the account in one call, keyed by sandbox id. */
   readonly usage?: (input: {
     readonly config: SandboxProviderConfig;
