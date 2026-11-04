@@ -1636,7 +1636,7 @@ function ConnectionsSettingsContent({
         ))}
         <CloudRemoteEnvironmentRows
           primaryEnvironmentId={primaryEnvironmentId}
-          savedEnvironments={savedEnvironments}
+          savedEnvironments={listedEnvironments}
         />
       </SettingsSection>
       <SandboxManagementSection />
