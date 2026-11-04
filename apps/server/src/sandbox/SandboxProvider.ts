@@ -55,7 +55,10 @@ export interface SandboxUsage {
 }
 
 export interface SandboxProviderDriver {
-  readonly info: Omit<SandboxProviderInfo, "configured" | "capabilities" | "settings">;
+  readonly info: Omit<
+    SandboxProviderInfo,
+    "configured" | "capabilities" | "settings" | "defaultSize"
+  >;
   readonly defaultSize: string;
   readonly serverPort: number;
   /** Extra environment for `t3 serve` in the sandbox, for what the provider's routing needs. */
