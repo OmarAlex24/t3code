@@ -76,6 +76,7 @@ import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import * as SandboxHostAccess from "./sandbox/SandboxHostAccess.ts";
+import * as SandboxProvider from "./sandbox/SandboxProvider.ts";
 import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
 import * as SandboxRecords from "./persistence/SandboxRecords.ts";
 import { BUILT_IN_SOURCE_CONTROL_DRIVER_LIST } from "./sourceControl/sourceControlDefinitions.ts";
@@ -706,7 +707,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(SecretCheck.layer),
   Layer.provideMerge(SecretResolver.layer),
   Layer.provideMerge(layerServerSettings),
-  Layer.provideMerge(SandboxProvisioner.layer.pipe(Layer.provide(SandboxHostAccess.layer))),
+  Layer.provideMerge(
+    SandboxProvisioner.layer.pipe(
+      Layer.provide(SandboxHostAccess.layer),
+      Layer.provide(SandboxProvider.layerHttpClient),
+    ),
+  ),
   Layer.provideMerge(layerSourceControlProviderRegistry),
   Layer.provideMerge(layerGit),
   Layer.provideMerge(layerVcs),
