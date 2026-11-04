@@ -8,6 +8,7 @@ import {
   type ServerSettings,
   type SettingsSecretValue,
   SandboxSettings,
+  SandboxTailscaleSettings,
   SimlockDeviceHostConfig,
   TextGeneratorConfig,
   UsageLimitSourceConfig,
@@ -51,6 +52,7 @@ const usageLimitSecretFields = secretSettingsFields(UsageLimitSourceConfig);
 const textGeneratorSecretFields = secretSettingsFields(TextGeneratorConfig);
 const voiceSecretFields = secretSettingsFields(CloudSpeechCredentials);
 const sandboxSecretFields = secretSettingsFields(SandboxSettings);
+const sandboxTailscaleSecretFields = secretSettingsFields(SandboxTailscaleSettings);
 const easDeviceHostSecretFields = secretSettingsFields(EasDeviceHostConfig);
 const simlockDeviceHostSecretFields = secretSettingsFields(SimlockDeviceHostConfig);
 const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url");
@@ -260,6 +262,12 @@ function mapSecretFieldGroups(
     ]),
   ) as ServerSettings["sandboxProviders"];
 
+  const sandboxTailscale = mapFields(
+    settings.sandboxTailscale,
+    sandboxTailscaleSecretFields,
+    (field) => `sandbox-tailscale-${encode(field)}`,
+  ) as ServerSettings["sandboxTailscale"];
+
   return {
     ...settings,
     cloudSpeechCredentials: mapFields(
@@ -270,6 +278,7 @@ function mapSecretFieldGroups(
     providerInstances,
     sourceControlHosts,
     sandboxProviders,
+    sandboxTailscale,
     usageLimitSources,
     textGenerators,
     easDeviceHosts,

@@ -15,9 +15,10 @@ appears when Claude here talks to a custom endpoint, and points Claude in the sa
 one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
 the sandbox gets its own key on the hub, which T3 Code removes when you delete the sandbox;
 otherwise this machine's Claude token is copied, and it stays valid after the sandbox is gone. The
-sandbox must be able to reach that endpoint over the internet: one that only answers on your
-tailnet or local network works here but not in a cloud sandbox, so expose it publicly (for
-example with Tailscale Funnel or Cloudflare Tunnel) first. The dialog warns when it can tell.
+sandbox must be able to reach that endpoint: one that only answers on your tailnet or local
+network works here but not in a cloud sandbox, so let the sandbox
+[join your tailnet](#private-endpoints-tailscale) or expose the endpoint publicly (for example with
+Tailscale Funnel or Cloudflare Tunnel). The dialog warns when it can tell.
 **Sign GitHub in with this machine's token** lets `gh` and `git` in the sandbox reach every
 repository that token can. T3 Code also installs git, the GitHub CLI, and Claude Code when the
 provider's image lacks them. Once the sandbox is ready, the dialog lists what was set up; sign Codex
@@ -45,8 +46,43 @@ offers your projects from your other machines; **Add** clones one onto the sandb
 in the same list, and choose the template under **Start from** when you add the next sandbox. Saving
 resets T3 Code on the sandbox and deletes it once the template is ready, so each copy connects as a
 new environment. Its files live on in the template, `.env` files included, so leave out secrets you
-do not want in every copy; T3 Code removes only its own identity and the Claude and GitHub logins it
-set up.
+do not want in every copy; T3 Code removes only its own identity and the Claude, GitHub, and
+Tailscale logins it set up.
+
+### Private endpoints (Tailscale)
+
+A sandbox can join your tailnet to reach an endpoint that is only on it, such as a CLIProxyAPI
+server, without exposing that endpoint publicly. Each sandbox joins as its own ephemeral device,
+tagged `tag:t3-sandbox`, with a single-use key; deleting the sandbox removes the device. A sandbox
+that stays stopped for more than about an hour drops off the tailnet and rejoins as a new device
+when you resume it.
+
+1. In the Tailscale admin console, add the tag and let it reach only the endpoint. In the tailnet
+   policy file, with your endpoint's tailnet address as the destination:
+
+   ```json
+   "tagOwners": {
+     "tag:t3-sandbox": ["autogroup:admin"]
+   },
+   "grants": [
+     { "src": ["tag:t3-sandbox"], "dst": ["100.x.y.z"], "ip": ["tcp:443"] }
+   ]
+   ```
+
+   If the policy still has the default grant that lets every device reach every other one, the
+   sandbox can reach your whole tailnet; narrow that grant first.
+
+2. Create an OAuth client under **Settings → Trust credentials** (OAuth clients) with two scopes,
+   **Auth Keys** (write) and **Devices → Core** (write), and select `tag:t3-sandbox` for both.
+3. In T3 Code, open **Settings → Connections → Sandboxes → Tailscale**, choose **Set up**, and paste
+   the client ID and secret. The secret stays on this server; sandboxes never get it.
+4. When you add a sandbox, keep **Join my tailnet** checked. It is on by default when Claude's
+   endpoint has a private address.
+
+Most sandboxes get a full Tailscale connection. One that cannot create a network device runs
+Tailscale in userspace instead: T3 Code then points Claude at Tailscale's local proxy, and other
+programs in the sandbox reach the tailnet only through `http://localhost:1055`. Tailscale needs root
+or passwordless sudo on the sandbox, which Boat and Vercel provide.
 
 ## T3 Connect
 

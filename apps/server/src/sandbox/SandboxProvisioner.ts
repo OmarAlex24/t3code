@@ -1,5 +1,6 @@
 import {
   assessSandboxStart,
+  DEFAULT_SANDBOX_TAILSCALE_TAG,
   ExecutionEnvironmentDescriptor,
   type EnvironmentId,
   type SandboxCreateInput,
@@ -57,10 +58,16 @@ import {
   ENSURE_TOOLS_SCRIPT,
   parseEndpointReach,
   parseMissingTools,
+  parseTailscaleReport,
   type SandboxTool,
   GITHUB_LOGIN_SCRUB,
   githubLoginScript,
+  TAILSCALE_PROXY_URL,
+  tailscaleProxyEnv,
+  tailscaleScript,
+  tailscaleScrub,
 } from "./sandboxSetup.ts";
+import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
 import {
   requestJson,
   shellQuote,
@@ -180,6 +187,7 @@ done
 rm -rf "$HOME/.t3/userdata" "$HOME/.t3/environment-label" "$HOME/.t3/usage-host-id"
 ${CLAUDE_SETTINGS_SCRUB}
 ${GITHUB_LOGIN_SCRUB}
+${tailscaleScrub()}
 rm -f "$HOME/.t3/sandbox-server.log" "$HOME/.t3/sandbox-server.pid"`;
 
 // Lowercase words joined by dashes, so a hub key says which sandbox it belongs to.
@@ -197,12 +205,34 @@ const TOOL_LABELS: Record<SandboxTool, string> = {
   claude: "Claude Code",
 };
 
-const unreachableEndpointWarning = (baseUrl: string, isPrivate: boolean) => {
+const tailnetHostname = (label: string) => `t3-sandbox-${labelSlug(label)}`;
+
+const unreachableEndpointWarning = (
+  baseUrl: string,
+  isPrivate: boolean,
+  tailnetTag: string | undefined,
+) => {
   const host = URL.parse(baseUrl)?.host ?? baseUrl;
+  if (tailnetTag !== undefined) {
+    return `The sandbox joined your tailnet but cannot reach ${host}. Check that your tailnet policy lets ${tailnetTag} reach it.`;
+  }
   return isPrivate
-    ? `The sandbox cannot reach ${host}. It is only reachable from your private network or tailnet; expose it publicly (for example with Tailscale Funnel or Cloudflare Tunnel) or use another endpoint.`
+    ? `The sandbox cannot reach ${host}. It is only reachable from your private network or tailnet; let the sandbox join your tailnet, expose it publicly (for example with Tailscale Funnel or Cloudflare Tunnel), or use another endpoint.`
     : `The sandbox cannot reach ${host}. Check that it accepts connections from the internet, or use another endpoint.`;
 };
+
+// The key travels inside the join script, so a failure keeps neither the driver's detail nor output.
+const TAILNET_JOIN_FAILED = "The sandbox could not join your tailnet.";
+
+interface TailnetJoin {
+  readonly client: TailscaleOAuthClient;
+  readonly token: Redacted.Redacted<string>;
+}
+
+interface TailnetJoined {
+  readonly deviceId: string;
+  readonly proxy: boolean;
+}
 
 interface HubKey {
   readonly sourceId: string;
@@ -300,6 +330,7 @@ const make = Effect.gen(function* () {
   const hostAccess = yield* SandboxHostAccess.SandboxHostAccess;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const hubApi = yield* makeCliproxyApi;
+  const tailscaleApi = yield* makeTailscaleApi;
   const onHttp = Effect.provideService(HttpClient.HttpClient, httpClient);
 
   // A settings patch needs the key, and merges `settings` per field, so a save writes the key and
@@ -384,12 +415,139 @@ const make = Effect.gen(function* () {
       ([, source]) => source.enabled && source.kind === "cliproxy" && source.managementKey !== "",
     );
 
+  const tailscaleClient = (value: ServerSettingsValue): TailscaleOAuthClient | undefined => {
+    const { clientId, clientSecret, tag } = value.sandboxTailscale;
+    if (clientId === "" || clientSecret === "") return undefined;
+    return {
+      clientId,
+      clientSecret: Redacted.make(clientSecret),
+      tag: tag === "" ? DEFAULT_SANDBOX_TAILSCALE_TAG : tag,
+    };
+  };
+
+  const tailscaleToken = (client: TailscaleOAuthClient) => tailscaleApi.accessToken(client);
+
+  // Mints a single-use key and runs the join. A warning means it did not end up connected; `joined`
+  // is set whenever the sandbox registered, so a failure can still remove the device.
+  const joinTailnet = Effect.fn("SandboxProvisioner.joinTailnet")(function* (
+    join: TailnetJoin,
+    label: string,
+    run: (
+      command: string,
+      timeoutSeconds: number,
+    ) => Effect.Effect<{ readonly stdout: string }, SandboxProviderError, HttpClient.HttpClient>,
+  ): Effect.fn.Return<
+    { readonly joined: TailnetJoined | null; readonly warning: string | null },
+    never,
+    HttpClient.HttpClient
+  > {
+    const authKey = yield* tailscaleApi
+      .createAuthKey(join.token, {
+        tag: join.client.tag,
+        description: `T3 Code sandbox ${labelSlug(label)}`.slice(0, 50),
+      })
+      .pipe(Effect.result);
+    if (authKey._tag === "Failure") {
+      return { joined: null, warning: `${TAILNET_JOIN_FAILED} ${authKey.failure.detail}` };
+    }
+    const report = yield* run(
+      tailscaleScript({
+        authKey: Redacted.value(authKey.success),
+        hostname: tailnetHostname(label),
+      }),
+      420,
+    ).pipe(
+      Effect.map((result) => parseTailscaleReport(result.stdout)),
+      Effect.orElseSucceed(() => null),
+    );
+    const nodeId = report?.nodeId;
+    const joined =
+      nodeId === undefined ? null : { deviceId: nodeId, proxy: report?.mode === "userspace" };
+    if (report?.state === "Running" && joined !== null) return { joined, warning: null };
+    const reason =
+      report?.error === "root"
+        ? " Installing Tailscale needs root or passwordless sudo on the sandbox."
+        : report?.error === "install"
+          ? " Tailscale did not install."
+          : report?.error === "start"
+            ? " tailscaled did not start."
+            : "";
+    return { joined, warning: `${TAILNET_JOIN_FAILED}${reason}` };
+  });
+
+  // An ephemeral node is removed once it has been offline for a while, so a resumed sandbox may
+  // need a new one. tailscaled is restarted first; only a sandbox that is not connected gets a key.
+  const rejoinTailnet = Effect.fn("SandboxProvisioner.rejoinTailnet")(function* (
+    record: SandboxRecord,
+    run: (
+      command: string,
+      timeoutSeconds: number,
+    ) => Effect.Effect<{ readonly stdout: string }, SandboxProviderError, HttpClient.HttpClient>,
+  ): Effect.fn.Return<
+    { readonly tailscale: SandboxRecord["tailscale"]; readonly warning: string | null },
+    never,
+    HttpClient.HttpClient
+  > {
+    const current = record.tailscale;
+    if (current === undefined) return { tailscale: undefined, warning: null };
+    const status = yield* run(
+      tailscaleScript({ hostname: tailnetHostname(record.label) }),
+      420,
+    ).pipe(
+      Effect.map((result) => parseTailscaleReport(result.stdout)),
+      Effect.orElseSucceed(() => null),
+    );
+    if (status?.state === "Running") return { tailscale: current, warning: null };
+    const client = tailscaleClient(yield* settings.getSettings.pipe(Effect.orDie));
+    if (client === undefined) {
+      return {
+        tailscale: current,
+        warning:
+          "The sandbox is no longer on your tailnet, and no Tailscale OAuth client is saved to rejoin it.",
+      };
+    }
+    const token = yield* tailscaleToken(client).pipe(Effect.result);
+    if (token._tag === "Failure") {
+      return {
+        tailscale: current,
+        warning: `The sandbox could not rejoin your tailnet. ${token.failure.detail}`,
+      };
+    }
+    const join = yield* joinTailnet({ client, token: token.success }, record.label, run);
+    if (join.joined === null) return { tailscale: current, warning: join.warning };
+    if (join.joined.deviceId !== current.deviceId) {
+      yield* tailscaleApi.deleteDevice(token.success, current.deviceId).pipe(Effect.ignore);
+    }
+    return { tailscale: { deviceId: join.joined.deviceId }, warning: join.warning };
+  });
+
+  // Never blocks a delete: a device that cannot be removed becomes a warning naming it.
+  const releaseTailnetDevice = Effect.fn("SandboxProvisioner.releaseTailnetDevice")(function* (
+    record: Pick<SandboxRecord, "label" | "tailscale">,
+  ) {
+    const deviceId = record.tailscale?.deviceId;
+    if (deviceId === undefined) return null;
+    const warning = `T3 Code could not remove ${tailnetHostname(record.label)} from your tailnet. Remove it in the Tailscale admin console.`;
+    const client = tailscaleClient(yield* settings.getSettings.pipe(Effect.orDie));
+    if (client === undefined) return warning;
+    const removed = yield* tailscaleToken(client).pipe(
+      Effect.flatMap((token) => tailscaleApi.deleteDevice(token, deviceId)),
+      Effect.tapError((error) =>
+        Effect.logWarning("sandbox tailnet device removal failed", { detail: error.detail }),
+      ),
+      Effect.exit,
+    );
+    return Exit.isSuccess(removed) ? null : warning;
+  });
+
   const hostAccessFacts = Effect.gen(function* () {
     const claude = yield* hostAccess.claude;
-    const hub = hubSource(yield* settings.getSettings.pipe(Effect.orDie));
+    const current = yield* settings.getSettings.pipe(Effect.orDie);
+    const hub = hubSource(current);
     const github = Option.isSome(yield* hostAccess.githubToken);
+    const tailscale = tailscaleClient(current) !== undefined;
     if (claude.baseUrl === undefined || (hub === undefined && claude.authToken === undefined)) {
-      return { github } satisfies SandboxHostAccessFacts;
+      return { github, tailscale } satisfies SandboxHostAccessFacts;
     }
     return {
       claude: {
@@ -398,6 +556,7 @@ const make = Effect.gen(function* () {
         privateNetwork: yield* hostAccess.endpointIsPrivate(claude.baseUrl),
       },
       github,
+      tailscale,
     } satisfies SandboxHostAccessFacts;
   });
 
@@ -564,8 +723,13 @@ const make = Effect.gen(function* () {
     if (input.passGithubToken === true && Option.isNone(githubToken)) {
       return yield* configError(input.provider, "This server has no GitHub token to share.");
     }
+    // Signed in before anything bills, so a bad OAuth client costs nothing. The key itself is minted
+    // just before the join, since it expires in minutes.
+    const tailnet = input.joinTailnet === true ? yield* resolveTailnet(input.provider) : undefined;
     // Minted before anything bills, so a hub that refuses costs nothing; revoked on any failure.
     const claude = yield* resolveClaudeAccess(input, label);
+    // A sandbox that joined and then failed must not linger on the tailnet until Tailscale's sweep.
+    const joinedDevice: { deviceId?: string } = {};
 
     return yield* provision({
       input,
@@ -579,13 +743,45 @@ const make = Effect.gen(function* () {
       startCommand,
       claude,
       githubToken: Option.getOrUndefined(githubToken),
+      tailnet,
+      joinedDevice,
     }).pipe(
       Effect.onExit((exit) =>
-        Exit.isSuccess(exit) || claude?.hubKey === undefined
+        Exit.isSuccess(exit)
           ? Effect.void
-          : revokeHubKey(claude.hubKey).pipe(Effect.ignore),
+          : Effect.all(
+              [
+                claude?.hubKey === undefined
+                  ? Effect.void
+                  : revokeHubKey(claude.hubKey).pipe(Effect.ignore),
+                tailnet === undefined || joinedDevice.deviceId === undefined
+                  ? Effect.void
+                  : tailscaleApi
+                      .deleteDevice(tailnet.token, joinedDevice.deviceId)
+                      .pipe(Effect.ignore),
+              ],
+              { discard: true },
+            ),
       ),
     );
+  });
+
+  const resolveTailnet = Effect.fn("SandboxProvisioner.resolveTailnet")(function* (
+    provider: SandboxProviderKind,
+  ) {
+    const client = tailscaleClient(yield* settings.getSettings.pipe(Effect.orDie));
+    if (client === undefined) {
+      return yield* configError(
+        provider,
+        "Add a Tailscale OAuth client under Sandboxes in Settings → Connections first.",
+      );
+    }
+    const token = yield* tailscaleToken(client).pipe(
+      Effect.mapError((error) =>
+        configError(provider, `Could not sign in to Tailscale. ${error.detail}`),
+      ),
+    );
+    return { client, token } satisfies TailnetJoin;
   });
 
   const provision = Effect.fn("SandboxProvisioner.provision")(function* ({
@@ -600,6 +796,8 @@ const make = Effect.gen(function* () {
     startCommand,
     claude,
     githubToken,
+    tailnet,
+    joinedDevice,
   }: {
     readonly input: SandboxCreateInput;
     readonly driver: SandboxProviderDriver;
@@ -618,6 +816,8 @@ const make = Effect.gen(function* () {
         }
       | undefined;
     readonly githubToken: Redacted.Redacted<string> | undefined;
+    readonly tailnet: TailnetJoin | undefined;
+    readonly joinedDevice: { deviceId?: string };
   }) {
     const idempotencyKey = yield* crypto.randomUUIDv4().pipe(
       Effect.mapError(
@@ -691,6 +891,19 @@ const make = Effect.gen(function* () {
     }
     const missing = (tool: SandboxTool) => missingTools?.includes(tool) === true;
 
+    // Joined before Claude's settings are written, since a userspace tailnet needs Claude's proxy.
+    const tailnetJoin =
+      tailnet === undefined ? null : yield* stopOnFailure(joinTailnet(tailnet, label, run));
+    if (tailnetJoin !== null && tailnetJoin.joined !== null) {
+      joinedDevice.deviceId = tailnetJoin.joined.deviceId;
+    }
+    if (tailnetJoin !== null && tailnetJoin.warning !== null) warnings.push(tailnetJoin.warning);
+    const tailnetJoined =
+      tailnetJoin !== null && tailnetJoin.warning === null ? tailnetJoin.joined : null;
+    const tailscaleState: SandboxSetupState =
+      tailnet === undefined ? "skipped" : tailnetJoined === null ? "failed" : "ready";
+    const viaProxy = tailnetJoined?.proxy === true;
+
     const claudeWritten: SandboxSetupState =
       claude === undefined
         ? "skipped"
@@ -699,6 +912,7 @@ const make = Effect.gen(function* () {
               claudeSettingsScript({
                 ANTHROPIC_BASE_URL: claude.baseUrl,
                 ANTHROPIC_AUTH_TOKEN: Redacted.value(claude.token),
+                ...(viaProxy ? tailscaleProxyEnv : {}),
               }),
               60,
             ).pipe(
@@ -724,7 +938,10 @@ const make = Effect.gen(function* () {
       claude === undefined || claudeInstalled !== "ready"
         ? claudeInstalled
         : yield* stopOnFailure(
-            run(endpointReachScript(claude.baseUrl), 30).pipe(
+            run(
+              endpointReachScript(claude.baseUrl, viaProxy ? TAILSCALE_PROXY_URL : undefined),
+              30,
+            ).pipe(
               Effect.map((result) => parseEndpointReach(result.stdout)),
               Effect.orElseSucceed(() => null),
             ),
@@ -734,7 +951,13 @@ const make = Effect.gen(function* () {
                 ? Effect.succeed<SandboxSetupState>("ready")
                 : hostAccess.endpointIsPrivate(claude.baseUrl).pipe(
                     Effect.map((isPrivate): SandboxSetupState => {
-                      warnings.push(unreachableEndpointWarning(claude.baseUrl, isPrivate));
+                      warnings.push(
+                        unreachableEndpointWarning(
+                          claude.baseUrl,
+                          isPrivate,
+                          tailnetJoined === null ? undefined : tailnet?.client.tag,
+                        ),
+                      );
                       return "failed";
                     }),
                   ),
@@ -837,6 +1060,9 @@ const make = Effect.gen(function* () {
         ? {}
         : { providerSettings: sandboxConfig.settings }),
       ...(claudeHubKey === undefined ? {} : { claudeHubKey }),
+      ...(joinedDevice.deviceId === undefined
+        ? {}
+        : { tailscale: { deviceId: joinedDevice.deviceId } }),
     };
     yield* records.put(record).pipe(Effect.orDie);
 
@@ -847,7 +1073,7 @@ const make = Effect.gen(function* () {
       label,
       httpBaseUrl,
       pairingCode,
-      setup: { claude: claudeState, github: githubState, warnings },
+      setup: { claude: claudeState, github: githubState, tailscale: tailscaleState, warnings },
     } satisfies SandboxCreateResult;
   });
 
@@ -909,8 +1135,12 @@ const make = Effect.gen(function* () {
     }
     yield* records.remove(input.environmentId).pipe(Effect.orDie);
     // A sandbox deleted outside T3 still has its key on the hub, so this runs for every record.
-    const warning = Option.isNone(record) ? null : yield* releaseHubKey(record.value);
-    return { warnings: warning === null ? [] : [warning] } satisfies SandboxDeleteResult;
+    const warnings = Option.isNone(record)
+      ? []
+      : [yield* releaseHubKey(record.value), yield* releaseTailnetDevice(record.value)].filter(
+          (warning): warning is string => warning !== null,
+        );
+    return { warnings } satisfies SandboxDeleteResult;
   });
 
   const environments = Effect.fn("SandboxProvisioner.environments")(function* (
@@ -1019,6 +1249,11 @@ const make = Effect.gen(function* () {
       }),
     );
     const httpBaseUrl = resumed.publicUrl ?? record.httpBaseUrl;
+    const rejoined = yield* onHttp(
+      rejoinTailnet(record, (command, timeoutSeconds) =>
+        driver.execute({ config, sandboxId: record.sandboxId, command, timeoutSeconds }),
+      ),
+    );
     yield* onHttp(
       driver.execute({
         config,
@@ -1071,9 +1306,14 @@ const make = Effect.gen(function* () {
       state: "running",
       updatedAt: now,
       httpBaseUrl,
+      ...(rejoined.tailscale === undefined ? {} : { tailscale: rejoined.tailscale }),
     };
     yield* records.put(updated).pipe(Effect.orDie);
-    return { sandbox: updated, httpBaseUrl: updated.httpBaseUrl } satisfies SandboxResumeResult;
+    return {
+      sandbox: updated,
+      httpBaseUrl: updated.httpBaseUrl,
+      ...(rejoined.warning === null ? {} : { warnings: [rejoined.warning] }),
+    } satisfies SandboxResumeResult;
   });
 
   const extend = Effect.fn("SandboxProvisioner.extend")(function* (input: SandboxExtendInput) {
@@ -1219,6 +1459,8 @@ const make = Effect.gen(function* () {
       Effect.andThen(records.remove(record.environmentId).pipe(Effect.orDie)),
       // The scrub removed the token from the disk; the key on the hub goes with its sandbox.
       Effect.andThen(releaseHubKey(record)),
+      // The scrub logged the node out; this covers a logout that never reached Tailscale.
+      Effect.andThen(releaseTailnetDevice(record)),
       // The template is saved either way; a sandbox that survives stays listed for a manual delete.
       Effect.catch((cause) =>
         Effect.logWarning("sandbox delete after saving a template failed", {

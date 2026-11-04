@@ -147,6 +147,16 @@ const boatResponse = (request: HttpClientRequest.HttpClientRequest) =>
     }),
   );
 
+// JSON for JSON bodies, the raw text for form posts such as Tailscale's OAuth token request.
+const decodeBody = (body: Uint8Array): unknown => {
+  const text = new TextDecoder().decode(body);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+};
+
 const recording = (
   requests: Array<{
     readonly method: string;
@@ -161,10 +171,7 @@ const recording = (
     requests.push({
       method: request.method,
       url: query === "" ? request.url : `${request.url}?${query}`,
-      body:
-        request.body._tag === "Uint8Array"
-          ? JSON.parse(new TextDecoder().decode(request.body.body))
-          : undefined,
+      body: request.body._tag === "Uint8Array" ? decodeBody(request.body.body) : undefined,
       authorization: request.headers.authorization,
     });
     return Effect.succeed(HttpClientResponse.fromWeb(request, respond(request)));
@@ -2407,7 +2414,7 @@ describe("SandboxProvisioner", () => {
         label: "My sandbox",
         httpBaseUrl: "https://boat.example/t3",
         pairingCode: "pair_abc",
-        setup: { claude: "skipped", github: "skipped", warnings: [] },
+        setup: { claude: "skipped", github: "skipped", tailscale: "skipped", warnings: [] },
       });
       expect(providers.providers.find((provider) => provider.kind === "boat")?.configured).toBe(
         true,
@@ -2679,6 +2686,23 @@ describe("sandbox agent access", () => {
     githubToken: "ghp_host_token",
   };
   const HUB_KEY = /^t3-sandbox-web-stack-[0-9a-f]{16}$/u;
+  const TS_CLIENT_SECRET = "tskey-client-kSECRET-oauth";
+  const TS_ACCESS_TOKEN = "tskey-api-ACCESS-token";
+  const TS_AUTH_KEY = "tskey-auth-kEPHEMERAL-key";
+  const tailnetSettings = {
+    ...hubSettings,
+    sandboxTailscale: {
+      clientId: "kCLIENT",
+      clientSecret: TS_CLIENT_SECRET,
+      tag: "tag:t3-sandbox",
+    },
+  } as const;
+  // The auth key travels only base64-encoded inside the join script.
+  const joinKeyOf = (commands: ReadonlyArray<string>) =>
+    commands
+      .filter((command) => command.includes('--auth-key="file:'))
+      .map((command) => /([A-Za-z0-9+/=]{16,})\W*\| base64 -d >"\$key_file"/u.exec(command)?.[1])
+      .map((encoded) => (encoded === undefined ? undefined : atob(encoded)));
 
   // A Boat account plus a CLIProxyAPI hub. `failCommand` fails the steps whose script contains it;
   // the options are read on every request, so a test can change them between creates.
@@ -2689,12 +2713,33 @@ describe("sandbox agent access", () => {
       hubStatus?: number;
       missingTools?: string;
       endpointStatus?: string;
+      /** tailscaled's state before a join; `Running` means a resumed sandbox is still connected. */
+      tailnetIdleState?: string;
+      tailnetMode?: "kernel" | "userspace";
+      tailnetNode?: string;
+      tokenStatus?: number;
     } = {},
   ) => {
     const commands: Array<string> = [];
     const client = recording(requests, (request) => {
       if (request.url.startsWith("https://hub.test/")) {
         return Response.json({ status: "ok" }, { status: options.hubStatus ?? 200 });
+      }
+      if (request.url === "https://api.tailscale.com/api/v2/oauth/token") {
+        return Response.json(
+          { access_token: TS_ACCESS_TOKEN, token_type: "Bearer", expires_in: 3600 },
+          { status: options.tokenStatus ?? 200 },
+        );
+      }
+      if (request.url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+        return Response.json({ id: "k123", key: TS_AUTH_KEY });
+      }
+      if (request.url.startsWith("https://api.tailscale.com/api/v2/device/")) {
+        return new Response(null, { status: 200 });
+      }
+      if (request.url.endsWith("/resume")) return Response.json({ ok: true });
+      if (request.method === "GET" && request.url.endsWith(`/sandboxes/${boatSandboxId}`)) {
+        return Response.json({ sandbox: { id: boatSandboxId, state: "ready", error: null } });
       }
       if (request.url.endsWith("/limits")) return Response.json({}, { status: 503 });
       if (request.url.endsWith("/.well-known/t3/environment")) return Response.json(descriptor);
@@ -2719,11 +2764,19 @@ describe("sandbox agent access", () => {
           exitCode: failed ? 1 : 0,
           stdout: command.includes("t3 pair")
             ? "Token: pair_agent\n"
-            : command.includes("T3_TOOLS_MISSING")
-              ? `T3_TOOLS_MISSING: ${options.missingTools ?? ""}\n`
-              : command.includes("T3_ENDPOINT_STATUS")
-                ? `T3_ENDPOINT_STATUS:${options.endpointStatus ?? "200"}\n`
-                : "",
+            : command.includes("T3_TAILSCALE_")
+              ? [
+                  "T3_TAILSCALE_DAEMON: nohup",
+                  `T3_TAILSCALE_MODE: ${options.tailnetMode ?? "kernel"}`,
+                  command.includes('--auth-key="file:')
+                    ? `T3_TAILSCALE_STATE: Running\nT3_TAILSCALE_NODE: ${options.tailnetNode ?? "nNODE1CNTRL"}`
+                    : `T3_TAILSCALE_STATE: ${options.tailnetIdleState ?? "NeedsLogin"}\nT3_TAILSCALE_NODE: `,
+                ].join("\n")
+              : command.includes("T3_TOOLS_MISSING")
+                ? `T3_TOOLS_MISSING: ${options.missingTools ?? ""}\n`
+                : command.includes("T3_ENDPOINT_STATUS")
+                  ? `T3_ENDPOINT_STATUS:${options.endpointStatus ?? "200"}\n`
+                  : "",
           // A failing step's output is the most likely place for a secret to leak from.
           stderr: failed ? command : "",
         });
@@ -2752,6 +2805,7 @@ describe("sandbox agent access", () => {
       expect((yield* provisioner.providers).host).toEqual({
         claude: { baseUrl: "https://api.example.test", key: "hub", privateNetwork: false },
         github: true,
+        tailscale: false,
       });
 
       const created = yield* provisioner.create({
@@ -2760,7 +2814,12 @@ describe("sandbox agent access", () => {
         label: "Web Stack!",
         agentAccess: { claude: { baseUrl: "https://claude.example.test" } },
       });
-      expect(created.setup).toEqual({ claude: "ready", github: "skipped", warnings: [] });
+      expect(created.setup).toEqual({
+        claude: "ready",
+        github: "skipped",
+        tailscale: "skipped",
+        warnings: [],
+      });
 
       // The key is added before the machine exists, so a refusing hub costs nothing.
       const mint = requests.findIndex((request) => request.method === "PATCH");
@@ -2826,6 +2885,7 @@ describe("sandbox agent access", () => {
         expect((yield* provisioner.providers).host).toEqual({
           claude: { baseUrl: "https://api.example.test", key: "copy", privateNetwork: false },
           github: true,
+          tailscale: false,
         });
         const created = yield* provisioner.create({
           provider: "boat",
@@ -2833,7 +2893,12 @@ describe("sandbox agent access", () => {
           agentAccess: { claude: { baseUrl: "https://api.example.test" } },
           passGithubToken: true,
         });
-        expect(created.setup).toEqual({ claude: "ready", github: "ready", warnings: [] });
+        expect(created.setup).toEqual({
+          claude: "ready",
+          github: "ready",
+          tailscale: "skipped",
+          warnings: [],
+        });
         expect(requests.some((request) => request.url.startsWith("https://hub.test/"))).toBe(false);
         expect(claudeEnvOf(commands)).toEqual({
           ANTHROPIC_BASE_URL: "https://api.example.test",
@@ -2867,6 +2932,7 @@ describe("sandbox agent access", () => {
         expect(withoutTools.setup).toEqual({
           claude: "failed",
           github: "failed",
+          tailscale: "skipped",
           warnings: [
             "The GitHub CLI could not be installed on the sandbox.",
             "Claude Code could not be installed on the sandbox.",
@@ -2905,8 +2971,9 @@ describe("sandbox agent access", () => {
       expect(unreachable.setup).toEqual({
         claude: "failed",
         github: "skipped",
+        tailscale: "skipped",
         warnings: [
-          "The sandbox cannot reach 100.92.23.53. It is only reachable from your private network or tailnet; expose it publicly (for example with Tailscale Funnel or Cloudflare Tunnel) or use another endpoint.",
+          "The sandbox cannot reach 100.92.23.53. It is only reachable from your private network or tailnet; let the sandbox join your tailnet, expose it publicly (for example with Tailscale Funnel or Cloudflare Tunnel), or use another endpoint.",
         ],
       });
       // The check runs after the settings are written and before T3 starts.
@@ -2937,6 +3004,7 @@ describe("sandbox agent access", () => {
       expect((yield* create("https://claude.example.test")).setup).toEqual({
         claude: "ready",
         github: "skipped",
+        tailscale: "skipped",
         warnings: [],
       });
     }).pipe(
@@ -3058,4 +3126,230 @@ describe("sandbox agent access", () => {
       Effect.provideService(HttpClient.HttpClient, client),
     );
   });
+  it.effect(
+    "joins the tailnet with a single-use ephemeral key and removes the device when deleted",
+    () => {
+      const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+      const { client, commands } = agentClient(requests, { tailnetMode: "userspace" });
+      const repository = memoryRepository();
+      const tailnetHost = { ...host, claude: { ...host.claude, baseUrl: "https://100.92.23.53" } };
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        // Clients learn that a sandbox can join, never the OAuth client's secret.
+        const facts = (yield* provisioner.providers).host;
+        expect(facts.tailscale).toBe(true);
+        expect(JSON.stringify(facts)).not.toContain(TS_CLIENT_SECRET);
+
+        const created = yield* provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          label: "Web Stack",
+          joinTailnet: true,
+          agentAccess: { claude: { baseUrl: "https://100.92.23.53" } },
+        });
+        expect(created.setup).toEqual({
+          claude: "ready",
+          github: "skipped",
+          tailscale: "ready",
+          warnings: [],
+        });
+
+        // Signing in comes before anything bills; the key is minted only once the machine runs.
+        const index = (predicate: (request: (typeof requests)[number]) => boolean) =>
+          requests.findIndex(predicate);
+        const signIn = index((request) => request.url.endsWith("/oauth/token"));
+        const sandboxCreate = index((request) => request.url.endsWith("/sandboxes"));
+        const mint = index((request) => request.url.endsWith("/tailnet/-/keys"));
+        expect(signIn).toBeGreaterThanOrEqual(0);
+        expect(signIn).toBeLessThan(sandboxCreate);
+        expect(mint).toBeGreaterThan(sandboxCreate);
+        expect(new URLSearchParams(requests[signIn]!.body as string).toString()).toBe(
+          new URLSearchParams({
+            grant_type: "client_credentials",
+            client_id: "kCLIENT",
+            client_secret: TS_CLIENT_SECRET,
+          }).toString(),
+        );
+        expect(requests[mint]).toMatchObject({
+          method: "POST",
+          url: "https://api.tailscale.com/api/v2/tailnet/-/keys",
+          authorization: `Bearer ${TS_ACCESS_TOKEN}`,
+          body: {
+            capabilities: {
+              devices: {
+                create: {
+                  reusable: false,
+                  ephemeral: true,
+                  preauthorized: true,
+                  tags: ["tag:t3-sandbox"],
+                },
+              },
+            },
+            expirySeconds: 600,
+            description: "T3 Code sandbox web-stack",
+          },
+        });
+
+        // The key reaches the sandbox only encoded, and the join comes before Claude's settings.
+        expect(joinKeyOf(commands)).toEqual([TS_AUTH_KEY]);
+        for (const secret of [TS_AUTH_KEY, TS_CLIENT_SECRET, TS_ACCESS_TOKEN]) {
+          expect(commands.some((command) => command.includes(secret))).toBe(false);
+        }
+        expect(commands.find((command) => command.includes('--auth-key="file:'))).toMatch(
+          /--hostname=\W*t3-sandbox-web-stack\W/u,
+        );
+        const step = (marker: string) => commands.findIndex((command) => command.includes(marker));
+        expect(step('--auth-key="file:')).toBeLessThan(step("T3_CLAUDE_ENV"));
+        // A userspace tailnet is reached through tailscaled's proxy, by Claude and by the check.
+        expect(claudeEnvOf(commands)).toMatchObject({
+          ANTHROPIC_BASE_URL: "https://100.92.23.53",
+          HTTPS_PROXY: "http://localhost:1055",
+          HTTP_PROXY: "http://localhost:1055",
+          NO_PROXY: "localhost,127.0.0.1,::1",
+        });
+        expect(commands.find((command) => command.includes("T3_ENDPOINT_STATUS"))).toMatch(
+          /--proxy \W*http:\/\/localhost:1055\W/u,
+        );
+        expect(repository.records.get(testEnvironmentId)?.tailscale).toEqual({
+          deviceId: "nNODE1CNTRL",
+        });
+
+        requests.length = 0;
+        expect(
+          yield* provisioner.delete({
+            provider: "boat",
+            sandboxId: boatSandboxId,
+            environmentId: testEnvironmentId,
+          }),
+        ).toEqual({ warnings: [] });
+        expect(requests).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              method: "DELETE",
+              url: "https://api.tailscale.com/api/v2/device/nNODE1CNTRL",
+              authorization: `Bearer ${TS_ACCESS_TOKEN}`,
+            }),
+          ]),
+        );
+      }).pipe(
+        Effect.provide(provisionerLayer(tailnetSettings, repository.layer, { host: tailnetHost })),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+    },
+  );
+
+  it.effect(
+    "removes a joined device when provisioning fails and keeps secrets out of errors",
+    () => {
+      const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+      const options: { failCommand?: string; tokenStatus?: number } = {
+        failCommand: "nohup t3 serve",
+      };
+      const { client } = agentClient(requests, options);
+      const secrets = [TS_AUTH_KEY, TS_CLIENT_SECRET, TS_ACCESS_TOKEN];
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const create = provisioner.create({
+          provider: "boat",
+          apiKey: "boat_test",
+          label: "Web Stack",
+          joinTailnet: true,
+        });
+        // T3 failing to start after the join deletes the machine and its tailnet device.
+        const failed = yield* Effect.flip(create);
+        expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual(
+          expect.arrayContaining([
+            `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+            "DELETE https://api.tailscale.com/api/v2/device/nNODE1CNTRL",
+          ]),
+        );
+        for (const secret of secrets) expect(failed.message).not.toContain(secret);
+
+        // A join that fails leaves a working sandbox and a warning without the script's output.
+        options.failCommand = "T3_TAILSCALE_";
+        const joinFailed = yield* create;
+        expect(joinFailed.setup.tailscale).toBe("failed");
+        expect(joinFailed.setup.warnings).toEqual(["The sandbox could not join your tailnet."]);
+
+        // An OAuth client Tailscale rejects fails the create before any machine is billed.
+        requests.length = 0;
+        options.tokenStatus = 401;
+        const refused = yield* Effect.flip(create);
+        expect(refused.detail).toBe(
+          "Could not sign in to Tailscale. Tailscale answered with HTTP 401 while signing in with the OAuth client. Check the OAuth client ID and secret.",
+        );
+        expect(requests.some((request) => request.url.endsWith("/sandboxes"))).toBe(false);
+        for (const secret of secrets) expect(refused.message).not.toContain(secret);
+      }).pipe(
+        Effect.provide(provisionerLayer(tailnetSettings, recordRepository, { host })),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+    },
+  );
+
+  it.effect(
+    "rejoins a resumed sandbox whose ephemeral node is gone and replaces its device",
+    () => {
+      const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+      const options: { tailnetIdleState?: string; tailnetNode?: string } = {
+        tailnetNode: "nNEWCNTRL",
+      };
+      const { client, commands } = agentClient(requests, options);
+      const stopped: SandboxRecord = {
+        environmentId: testEnvironmentId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "Web Stack",
+        size: "default",
+        state: "stopped",
+        createdAt: "2026-11-01T00:00:00.000Z",
+        updatedAt: "2026-11-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        hardDeadlineAt: null,
+        ttlMinutes: 480,
+        tailscale: { deviceId: "nOLDCNTRL" },
+      };
+      const repository = memoryRepository([stopped]);
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const resumed = yield* provisioner.resume({ environmentId: testEnvironmentId });
+        expect(resumed.warnings).toBeUndefined();
+        expect(resumed.sandbox.tailscale).toEqual({ deviceId: "nNEWCNTRL" });
+        expect(repository.records.get(testEnvironmentId)?.tailscale).toEqual({
+          deviceId: "nNEWCNTRL",
+        });
+        expect(joinKeyOf(commands)).toEqual([TS_AUTH_KEY]);
+        expect(requests.map((request) => `${request.method} ${request.url}`)).toContain(
+          "DELETE https://api.tailscale.com/api/v2/device/nOLDCNTRL",
+        );
+        // tailscaled is back before T3 starts, so the first Claude check can reach the endpoint.
+        const step = (marker: string) => commands.findIndex((command) => command.includes(marker));
+        expect(step('--auth-key="file:')).toBeLessThan(step("nohup t3 serve"));
+
+        // A sandbox still connected after a short stop needs no new key.
+        yield* provisioner.stop({ environmentId: testEnvironmentId });
+        requests.length = 0;
+        commands.length = 0;
+        options.tailnetIdleState = "Running";
+        const again = yield* provisioner.resume({ environmentId: testEnvironmentId });
+        expect(again.sandbox.tailscale).toEqual({ deviceId: "nNEWCNTRL" });
+        expect(
+          requests.some((request) => request.url.startsWith("https://api.tailscale.com/")),
+        ).toBe(false);
+        expect(joinKeyOf(commands)).toEqual([]);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            {
+              ...tailnetSettings,
+              sandboxProviders: { boat: { apiKey: "boat_test", settings: {} } },
+            },
+            repository.layer,
+            { host },
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+    },
+  );
 });
