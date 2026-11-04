@@ -29,6 +29,7 @@ import {
 import { environmentCatalog } from "~/connection/catalog";
 import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "~/hooks/useSettings";
 import { useNowMinute } from "~/hooks/useNowMinute";
+import { useComposerDraftStore } from "~/composerDraftStore";
 import { useThreadShells } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
@@ -572,10 +573,17 @@ function SandboxRow({
           (candidate) =>
             candidate.environmentId === sandbox.environmentId && candidate.id === sandbox.threadId,
         );
+  // A message still waiting in the composer has no thread yet, but its draft keeps the sandbox.
+  const hasDraft = useComposerDraftStore((state) =>
+    Object.values(state.draftThreadsByThreadKey).some(
+      (draft) => draft.threadId === sandbox.threadId && draft.promotedTo == null,
+    ),
+  );
   // Only a connected sandbox can say its thread is gone; an offline one simply has not loaded it.
   const threadGone =
     sandbox.threadId !== undefined &&
     thread === undefined &&
+    !hasDraft &&
     sandboxEnvironment?.connection.phase === "connected" &&
     sandboxEnvironment.serverConfig !== null;
   const runningMinutes =
