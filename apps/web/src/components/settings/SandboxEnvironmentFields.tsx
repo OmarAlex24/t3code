@@ -48,6 +48,7 @@ import {
 import { useSandboxTemplates } from "./SandboxTemplates";
 import { openAddProjectToMachine } from "../AddProjectToMachineDialog";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useProjects } from "~/state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
@@ -316,6 +317,11 @@ function SandboxSetupChecklist({
               ? "GitHub is not connected. Run gh auth login in the sandbox's terminal."
               : "GitHub is not connected"}
         </ChecklistRow>
+        {setup.tailscale === "skipped" ? null : (
+          <ChecklistRow state={setup.tailscale === "ready" ? "done" : "todo"}>
+            {setup.tailscale === "ready" ? "On your tailnet" : "Not on your tailnet"}
+          </ChecklistRow>
+        )}
         <SandboxProjectStep sandboxEnvironmentId={sandbox.environmentId} onLeave={onDone} />
         {canSaveTemplates ? (
           <li className="flex items-start gap-2.5 py-1.5 text-sm">
@@ -387,6 +393,8 @@ export function SandboxEnvironmentFields({
   // Null until edited, so the field follows the server's current endpoint.
   const [claudeBaseUrl, setClaudeBaseUrl] = useState<string | null>(null);
   const [passGithub, setPassGithub] = useState(false);
+  // Null until toggled, so it follows whether the server's Claude endpoint is private.
+  const [joinTailnet, setJoinTailnet] = useState<boolean | null>(null);
   const [isProvisioning, setIsProvisioning] = useState(false);
   const [created, setCreated] = useState<SandboxCreateResult | null>(null);
   const providers = providersQuery.data?.providers ?? EMPTY_PROVIDERS;
@@ -430,6 +438,13 @@ export function SandboxEnvironmentFields({
   const canWriteSettings = readEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const claudeEndpoint = (claudeBaseUrl ?? host?.claude?.baseUrl ?? "").trim();
   const sendsClaude = useClaude && host?.claude !== undefined;
+  // Read from settings, so a client saved in the Sandboxes section applies without a refetch.
+  const tailscaleReady = useEnvironmentSettings(
+    environmentId,
+    (settings) =>
+      settings.sandboxTailscale.clientId !== "" && settings.sandboxTailscale.clientSecret !== "",
+  );
+  const joinsTailnet = tailscaleReady && (joinTailnet ?? host?.claude?.privateNetwork === true);
   const disabled =
     isProvisioning ||
     provider === undefined ||
@@ -473,6 +488,7 @@ export function SandboxEnvironmentFields({
           : { environment: credentialEnvironment, allowCredentials: true }),
         ...(sendsClaude ? { agentAccess: { claude: { baseUrl: claudeEndpoint } } } : {}),
         ...(passGithub && host?.github === true ? { passGithubToken: true } : {}),
+        ...(joinsTailnet ? { joinTailnet: true } : {}),
       },
     });
     // Any attempt can spend a start, so the quota line re-reads the provider either way.
@@ -766,12 +782,40 @@ export function SandboxEnvironmentFields({
                     : "Copies this machine's Claude token to the sandbox. Deleting the sandbox does not revoke it."}
                 </OptIn>
                 {/* Judged by the server for its own endpoint only; an edited URL is checked live. */}
-                {host.claude.privateNetwork && claudeEndpoint === host.claude.baseUrl ? (
-                  <p className="flex items-start gap-1.5 ps-6.5 text-2xs leading-relaxed text-warning-foreground">
-                    <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
-                    Resolves to a private address; a cloud sandbox probably can't reach it.
+                {!host.claude.privateNetwork ||
+                claudeEndpoint !== host.claude.baseUrl ? null : joinsTailnet ? (
+                  <p className="flex items-start gap-1.5 ps-6.5 text-2xs leading-relaxed text-muted-foreground">
+                    <CheckIcon aria-hidden className="mt-px size-3 shrink-0 text-success" />
+                    Private address, reached through your tailnet.
                   </p>
-                ) : null}
+                ) : (
+                  <p className="flex flex-wrap items-start gap-x-1.5 ps-6.5 text-2xs leading-relaxed text-warning-foreground">
+                    <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
+                    <span className="min-w-0 flex-1">
+                      Resolves to a private address; a cloud sandbox can't reach it
+                      {tailscaleReady ? " unless it joins your tailnet." : "."}
+                      {/* The Sandboxes section that holds the setup row needs a saved provider key. */}
+                      {tailscaleReady || !provider.configured ? null : (
+                        <>
+                          {" "}
+                          <button
+                            type="button"
+                            className="font-medium underline underline-offset-2 hover:text-foreground"
+                            onClick={() => {
+                              onDone();
+                              void navigate({
+                                to: "/settings/connections",
+                                hash: "sandbox-tailscale",
+                              });
+                            }}
+                          >
+                            Set up Tailscale
+                          </button>
+                        </>
+                      )}
+                    </span>
+                  </p>
+                )}
                 {useClaude ? (
                   <label className="block ps-6.5">
                     <FieldLabel>Claude endpoint</FieldLabel>
@@ -786,6 +830,17 @@ export function SandboxEnvironmentFields({
                 ) : null}
               </div>
             )}
+            {tailscaleReady ? (
+              <OptIn
+                checked={joinsTailnet}
+                disabled={isProvisioning}
+                onCheckedChange={setJoinTailnet}
+                title="Join my tailnet"
+              >
+                Joins as an ephemeral, tagged Tailscale device so the sandbox can reach private
+                endpoints. Deleting the sandbox removes the device.
+              </OptIn>
+            ) : null}
             <OptIn
               checked={passGithub && host?.github === true}
               disabled={isProvisioning || host?.github !== true}

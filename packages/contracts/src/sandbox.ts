@@ -68,6 +68,8 @@ export const SandboxHostAccess = Schema.Struct({
   ),
   /** This server has a GitHub token for github.com it could forward. */
   github: Schema.Boolean,
+  /** A Tailscale OAuth client is saved, so a sandbox can join this tailnet. */
+  tailscale: Schema.Boolean,
 });
 export type SandboxHostAccess = typeof SandboxHostAccess.Type;
 
@@ -179,6 +181,8 @@ export const SandboxCreateInput = Schema.Struct({
   ),
   /** Signs `gh` and git in the sandbox in with this server's GitHub token. */
   passGithubToken: Schema.optional(Schema.Boolean),
+  /** Joins the sandbox to this server's tailnet as an ephemeral, tagged node. */
+  joinTailnet: Schema.optional(Schema.Boolean),
 });
 export type SandboxCreateInput = typeof SandboxCreateInput.Type;
 
@@ -199,6 +203,7 @@ export const SandboxCreateResult = Schema.Struct({
   setup: Schema.Struct({
     claude: SandboxSetupState,
     github: SandboxSetupState,
+    tailscale: SandboxSetupState,
     /** Steps that did not finish but left a working sandbox. Never carries command output. */
     warnings: Schema.Array(Schema.String),
   }),
@@ -256,6 +261,8 @@ export const SandboxRecord = Schema.Struct({
   claudeHubKey: Schema.optionalKey(
     Schema.Struct({ sourceId: TrimmedString, secret: TrimmedString }),
   ),
+  /** The tailnet device T3 joined the sandbox as, removed when the sandbox is deleted. */
+  tailscale: Schema.optionalKey(Schema.Struct({ deviceId: TrimmedString })),
   /** Provider settings the sandbox was created with; they win over the current ones for it. */
   providerSettings: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   /** Machine cost this calendar month at list price, when the provider reports it. */
@@ -383,6 +390,8 @@ export type SandboxStopResult = typeof SandboxStopResult.Type;
 export const SandboxResumeResult = Schema.Struct({
   sandbox: SandboxRecord,
   httpBaseUrl: TrimmedString,
+  /** Setup that did not come back with the sandbox, such as rejoining the tailnet. */
+  warnings: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type SandboxResumeResult = typeof SandboxResumeResult.Type;
 
@@ -568,3 +577,21 @@ export const SandboxSettings = Schema.Struct({
   ),
 });
 export type SandboxSettings = typeof SandboxSettings.Type;
+
+export const DEFAULT_SANDBOX_TAILSCALE_TAG = "tag:t3-sandbox";
+
+/**
+ * The Tailscale OAuth client sandboxes join the tailnet with. The secret stays on the server; each
+ * sandbox gets only a single-use key minted from it.
+ */
+export const SandboxTailscaleSettings = Schema.Struct({
+  clientId: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  clientSecret: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+    Schema.annotateKey({ settingsSecret: true }),
+  ),
+  tag: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SANDBOX_TAILSCALE_TAG)),
+  ),
+});
+export type SandboxTailscaleSettings = typeof SandboxTailscaleSettings.Type;
