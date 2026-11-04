@@ -155,8 +155,10 @@ describe("command permissions", () => {
   it.effect.each([
     { method: WS_METHODS.serverRunStorageCleanup, scope: AuthSettingsWriteScope },
     { method: WS_METHODS.serverReclaimDatabaseSpace, scope: AuthEnvironmentMaintainScope },
-    // Extending a sandbox keeps a billable machine alive longer, like the other sandbox writes.
+    // Sandbox writes keep a billable machine alive longer or change what the account keeps.
     { method: WS_METHODS.sandboxesExtend, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesSaveTemplate, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesDeleteTemplate, scope: AuthSettingsWriteScope },
   ])("requires the destination $scope grant for $method", ({ method, scope }) =>
     Effect.gen(function* () {
       const registry = yield* setup;
