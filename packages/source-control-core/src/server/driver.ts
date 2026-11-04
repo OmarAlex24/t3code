@@ -10,6 +10,8 @@ import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import type { HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
 import * as Layer from "effect/Layer";
+import type * as Option from "effect/Option";
+import type * as Redacted from "effect/Redacted";
 import type * as Scope from "effect/Scope";
 
 import type { SourceControlDefinition } from "../shared/definition.ts";
@@ -69,6 +71,13 @@ export interface SourceControlDriverInstance {
   readonly isRepositoryStarred?: (host: string, repository: string) => Effect.Effect<boolean>;
   /** Stars `repository` as the server's account on `host`; false when the forge refused. */
   readonly starRepository?: (host: string, repository: string) => Effect.Effect<boolean>;
+  /**
+   * The token the server itself uses on `host`, for handing to a machine the user asked to share
+   * it with (a sandbox). None when the server is not signed in there.
+   */
+  readonly credentialToken?: (
+    host: string,
+  ) => Effect.Effect<Option.Option<Redacted.Redacted<string>>>;
 }
 
 /** What the server gives every driver. A driver builds anything else it needs itself. */

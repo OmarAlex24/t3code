@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import {
   assessSandboxStart,
   describeSandboxTemplateNameProblem,
+  SandboxCreateInput,
   type SandboxProviderLimits,
   SandboxTemplateName,
 } from "./sandbox.ts";
@@ -67,5 +68,18 @@ describe("SandboxTemplateName", () => {
       expect(describeSandboxTemplateNameProblem(name), name).toBe(problem);
       expect(isSandboxTemplateName(name), name).toBe(problem === null);
     }
+  });
+});
+
+const decodeSandboxCreateInput = Schema.decodeUnknownSync(SandboxCreateInput);
+
+describe("SandboxCreateInput", () => {
+  // Projects reach a sandbox through "Add project to another machine"; the server clones nothing.
+  it("drops a repository to clone sent by an older client", () => {
+    const decoded = decodeSandboxCreateInput({
+      provider: "boat",
+      repositoryUrl: "https://github.com/owner/repo",
+    });
+    expect(decoded).toEqual({ provider: "boat" });
   });
 });

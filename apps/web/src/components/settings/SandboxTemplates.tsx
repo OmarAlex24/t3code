@@ -52,6 +52,7 @@ export function useSandboxTemplates(
     templates: query.data?.templates ?? EMPTY_TEMPLATES,
     allowance: query.data?.templateAllowance,
     error: query.error,
+    isPending: query.isPending,
     refresh: () => query.refresh(),
   };
 }
@@ -186,6 +187,11 @@ export function SaveSandboxTemplateDialog({
                   Saving resets T3 Code on {sandbox.label} so copies start as new environments, then
                   stops the sandbox and deletes it once the template is ready. Its files live on in
                   the template.
+                </span>
+                <span>
+                  Project files stay in the template too, including .env files copied with a
+                  project. T3 Code removes only its own identity and the Claude and GitHub logins it
+                  set up.
                 </span>
                 {sandbox.credentialEnvironment === undefined ? null : (
                   <span>
