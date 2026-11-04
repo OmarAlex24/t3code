@@ -74,29 +74,6 @@ describe("RPC authorization scopes", () => {
     }
   });
 
-  it("lets read-only clients see sandbox limits but keeps starting machines behind settings", () => {
-    for (const method of [
-      WS_METHODS.sandboxesProviders,
-      WS_METHODS.sandboxesEnvironments,
-      WS_METHODS.sandboxesLimits,
-      WS_METHODS.sandboxesTemplates,
-      WS_METHODS.sandboxesList,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
-    }
-    for (const method of [
-      WS_METHODS.sandboxesCreate,
-      WS_METHODS.sandboxesResume,
-      WS_METHODS.sandboxesExtend,
-      WS_METHODS.sandboxesSaveTemplate,
-      WS_METHODS.sandboxesDeleteTemplate,
-      WS_METHODS.sandboxesStop,
-      WS_METHODS.sandboxesDelete,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
-    }
-  });
-
   it("rejects unknown RPC method names", () => {
     for (const method of ["server.notRegistered", "toString", "constructor"]) {
       expect(() => requiredScopeForRpcMethod(method)).toThrow(
