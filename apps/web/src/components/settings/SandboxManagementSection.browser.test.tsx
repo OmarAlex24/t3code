@@ -1,5 +1,5 @@
 import { AsyncResult } from "effect/reactivity";
-import { EnvironmentId, type SandboxRecord } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type SandboxRecord, ThreadId } from "@t3tools/contracts";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -7,6 +7,8 @@ import { render } from "../../../test/render";
 
 const mocks = vi.hoisted(() => ({
   sandboxes: [] as Array<unknown>,
+  orphans: [] as Array<unknown>,
+  configs: [] as Array<unknown>,
   deleteSandbox: vi.fn(async () => AsyncResult.success({ warnings: [] })),
   stopSandbox: vi.fn(async () => AsyncResult.success(undefined)),
 }));
@@ -39,6 +41,7 @@ vi.mock(import("~/state/server"), async (original) => {
     serverEnvironment: {
       ...actual.serverEnvironment,
       sandboxesList: (() => "list") as never,
+      sandboxesConfigs: (() => "configs") as never,
       sandboxesProviders: (() => "providers") as never,
       sandboxesLimits: (() => "limits") as never,
       sandboxesStop: mocks.stopSandbox as never,
@@ -51,10 +54,12 @@ vi.mock(import("~/state/query"), async (original) => ({
   useEnvironmentQuery: ((atom: unknown) => ({
     data:
       atom === "list"
-        ? { sandboxes: mocks.sandboxes }
-        : atom === "providers"
-          ? { providers: [], host: { github: false } }
-          : null,
+        ? { sandboxes: mocks.sandboxes, orphans: mocks.orphans }
+        : atom === "configs"
+          ? { configs: mocks.configs }
+          : atom === "providers"
+            ? { providers: [boatInfo], host: { github: false } }
+            : null,
     isPending: false,
     error: null,
     refresh: () => {},
@@ -63,7 +68,27 @@ vi.mock(import("~/state/query"), async (original) => ({
 
 import { SandboxManagementSection } from "./SandboxManagementSection";
 
+const boatInfo = {
+  kind: "boat",
+  label: "Boat",
+  detail: "",
+  apiKeyLabel: "Boat API key",
+  apiKeyPlaceholder: "",
+  docsUrl: "https://boat.dev",
+  sizes: [{ id: "small", label: "Small", detail: "2 vCPU" }],
+  defaultSize: "small",
+  configured: true,
+  diskRetentionDays: 14,
+  capabilities: {
+    limits: false,
+    stopResume: true,
+    credentialEnvironments: false,
+    templates: false,
+  },
+};
+
 const sandbox = (state: SandboxRecord["state"]): SandboxRecord => ({
+  instanceId: "instance-1",
   environmentId: EnvironmentId.make("22222222-2222-4222-8222-222222222222"),
   provider: "boat",
   sandboxId: "bx_1",
@@ -73,12 +98,14 @@ const sandbox = (state: SandboxRecord["state"]): SandboxRecord => ({
   createdAt: "2026-11-01T10:00:00.000Z",
   updatedAt: "2026-11-01T10:00:00.000Z",
   httpBaseUrl: "https://bx-1.example.test",
-  hardDeadlineAt: "2026-11-01T18:00:00.000Z",
-  ttlMinutes: 480,
+  runningSince: state === "running" ? "2026-11-01T10:00:00.000Z" : null,
+  maxRunningMinutes: 480,
 });
 
-function setup(state: SandboxRecord["state"]) {
-  mocks.sandboxes = [sandbox(state)];
+function setup(state: SandboxRecord["state"], patch: Partial<SandboxRecord> = {}) {
+  mocks.sandboxes = [{ ...sandbox(state), ...patch }];
+  mocks.orphans = [];
+  mocks.configs = [];
   mocks.deleteSandbox.mockClear();
   mocks.stopSandbox.mockClear();
 }
@@ -95,13 +122,70 @@ describe("SandboxManagementSection", () => {
     await userEvent.click(page.getByRole("button", { name: "Delete sandbox" }));
     expect(mocks.deleteSandbox).toHaveBeenCalledWith(
       expect.objectContaining({
-        input: {
-          provider: "boat",
-          sandboxId: "bx_1",
-          environmentId: "22222222-2222-4222-8222-222222222222",
-        },
+        input: { provider: "boat", sandboxId: "bx_1", instanceId: "instance-1" },
       }),
     );
     expect(mocks.stopSandbox).not.toHaveBeenCalled();
+  });
+
+  it("groups a thread's sandbox under its config with its uptime and running limit", async () => {
+    setup("running", {
+      configId: "config-1",
+      threadId: ThreadId.make("thread-1"),
+      projectId: ProjectId.make("project-1"),
+      projectTitle: "hello",
+      label: "hello on Boat small",
+      size: "small",
+    });
+    mocks.configs = [
+      {
+        id: "config-1",
+        label: "Boat small",
+        provider: "boat",
+        size: "small",
+        passGithubToken: false,
+        joinTailnet: false,
+        access: "public",
+        projectIds: [],
+        envFiles: {},
+        idleMinutes: 30,
+        maxRunningMinutes: 480,
+        createdAt: "2026-11-01T09:00:00.000Z",
+        updatedAt: "2026-11-01T09:00:00.000Z",
+      },
+    ];
+    await using _screen = await render(<SandboxManagementSection />);
+
+    await expect.element(page.getByText("Boat small", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("hello · Small · Running · up 2 h, stops at 8 h"))
+      .toBeVisible();
+  });
+
+  it("recommends deleting a stopped disk close to the provider's retention", async () => {
+    setup("stopped", { stoppedAt: "2026-10-20T12:00:00.000Z" });
+    await using _screen = await render(<SandboxManagementSection />);
+
+    await expect
+      .element(
+        page.getByText(/keeps a stopped disk for 14 days; this one has been stopped 12 days/u),
+      )
+      .toBeVisible();
+    // The warning makes Delete the labeled action instead of an icon.
+    await expect.element(page.getByRole("button", { name: "Delete", exact: true })).toBeVisible();
+  });
+
+  it("lists tagged sandboxes T3 Code does not track and deletes one on confirm", async () => {
+    setup("running");
+    mocks.sandboxes = [];
+    mocks.orphans = [{ provider: "boat", sandboxId: "bx_lost", name: "lost sandbox" }];
+    await using _screen = await render(<SandboxManagementSection />);
+
+    await expect.element(page.getByText("Not tracked by T3 Code")).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Delete", exact: true }));
+    await userEvent.click(page.getByRole("button", { name: "Delete sandbox" }));
+    expect(mocks.deleteSandbox).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { provider: "boat", sandboxId: "bx_lost" } }),
+    );
   });
 });
