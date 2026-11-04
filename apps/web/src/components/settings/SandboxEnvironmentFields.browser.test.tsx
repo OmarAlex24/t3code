@@ -80,6 +80,7 @@ vi.mock(import("~/state/query"), async (original) => ({
                   { id: "small", label: "Small", detail: "2 vCPU" },
                   { id: "default", label: "Default", detail: "4 vCPU" },
                 ],
+                defaultSize: "default",
                 capabilities: {
                   limits: true,
                   stopResume: true,
@@ -96,7 +97,11 @@ vi.mock(import("~/state/query"), async (original) => ({
                 apiKeyPlaceholder: "vcp_...",
                 docsUrl: "https://vercel.com/account/settings/tokens",
                 configured: true,
-                sizes: [{ id: "vercel-2", label: "Small", detail: "2 vCPU" }],
+                sizes: [
+                  { id: "vercel-2", label: "Small", detail: "2 vCPU" },
+                  { id: "vercel-4", label: "Medium", detail: "4 vCPU" },
+                ],
+                defaultSize: "vercel-2",
                 settingsFields: [
                   { id: "teamId", label: "Team", optional: true },
                   {
@@ -177,6 +182,7 @@ describe("SandboxEnvironmentFields", () => {
       expect.objectContaining({
         input: expect.objectContaining({
           provider: "vercel",
+          size: "vercel-2",
           settings: { teamId: "acme", projectId: "saved-project" },
         }),
       }),

@@ -569,6 +569,7 @@ const make = Effect.gen(function* () {
     return {
       providers: SANDBOX_PROVIDER_DRIVERS.map((driver): SandboxProviderInfo => ({
         ...driver.info,
+        defaultSize: driver.defaultSize,
         configured: (value.sandboxProviders[driver.info.kind]?.apiKey.trim() ?? "") !== "",
         ...(driver.info.settingsFields === undefined
           ? {}

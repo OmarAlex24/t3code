@@ -231,6 +231,12 @@ printf '%s' "$T3_TAILSCALE_AUTH_KEY" >"$key_file"
 unset T3_TAILSCALE_AUTH_KEY
 ts up --auth-key="file:$key_file" --hostname=${shellQuote(options.hostname)} --accept-dns=false --reset --timeout=60s >/dev/null 2>&1 || true
 rm -f "$key_file"
+# A register request can hang past up's timeout and then succeed on tailscaled's own retry.
+i=0
+while [ "$i" -lt 90 ] && [ "$(backend)" != Running ]; do
+  i=$((i + 1))
+  sleep 1
+done
 `;
   const command = `export PATH="$HOME/.local/bin:$PATH:/usr/local/sbin:/usr/sbin:/sbin"
 ${AS_ROOT}

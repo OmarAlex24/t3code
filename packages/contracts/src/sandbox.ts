@@ -43,6 +43,8 @@ export const SandboxProviderInfo = Schema.Struct({
   /** False until an API key is saved on this server. */
   configured: Schema.Boolean,
   sizes: Schema.Array(SandboxMachineSize),
+  /** The size a create without one gets, so clients preselect what the server would pick. */
+  defaultSize: TrimmedString,
   settingsFields: Schema.optionalKey(Schema.Array(SandboxProviderSettingsField)),
   /** The saved values of `settingsFields`, keyed by field id. */
   settings: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
