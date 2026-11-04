@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./copiedFiles": {
+      "types": "./src/copiedFiles.ts",
+      "import": "./src/copiedFiles.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

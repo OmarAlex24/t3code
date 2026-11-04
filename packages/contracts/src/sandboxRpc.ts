@@ -3,15 +3,21 @@ import * as Schema from "effect/Schema";
 
 import { AuthSettingsWriteScope, EnvironmentAuthorizationError } from "./auth.ts";
 import {
+  SandboxConfigsResult,
   SandboxCreateInput,
   SandboxCreateResult,
   SandboxCredentialEnvironmentsInput,
   SandboxCredentialEnvironmentsResult,
+  SandboxDeleteConfigInput,
   SandboxDeleteInput,
   SandboxDeleteResult,
   SandboxDeleteTemplateInput,
-  SandboxExtendInput,
-  SandboxExtendResult,
+  SandboxLaunchCancelResult,
+  SandboxLaunchInput,
+  SandboxLaunchPairResult,
+  SandboxLaunchResult,
+  SandboxLaunchStreamEvent,
+  SandboxLaunchThreadInput,
   SandboxLifecycleInput,
   SandboxLimitsInput,
   SandboxLimitsResult,
@@ -19,6 +25,8 @@ import {
   SandboxProviderError,
   SandboxProvidersResult,
   SandboxResumeResult,
+  SandboxSaveConfigInput,
+  SandboxSaveConfigResult,
   SandboxSaveTemplateInput,
   SandboxSaveTemplateResult,
   SandboxStopResult,
@@ -35,11 +43,21 @@ export const SANDBOX_WS_METHODS = {
   sandboxesList: "sandboxes.list",
   sandboxesStop: "sandboxes.stop",
   sandboxesResume: "sandboxes.resume",
-  sandboxesExtend: "sandboxes.extend",
   sandboxesTemplates: "sandboxes.templates",
   sandboxesSaveTemplate: "sandboxes.saveTemplate",
   sandboxesDeleteTemplate: "sandboxes.deleteTemplate",
+  sandboxesConfigs: "sandboxes.configs",
+  sandboxesSaveConfig: "sandboxes.saveConfig",
+  sandboxesDeleteConfig: "sandboxes.deleteConfig",
+  sandboxesLaunch: "sandboxes.launch",
+  sandboxesSubscribeLaunch: "sandboxes.subscribeLaunch",
+  sandboxesCancelLaunch: "sandboxes.cancelLaunch",
+  sandboxesRetryLaunch: "sandboxes.retryLaunch",
+  sandboxesPairLaunch: "sandboxes.pairLaunch",
+  sandboxesCompleteLaunch: "sandboxes.completeLaunch",
 } as const;
+
+const SandboxFailure = Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]);
 
 const WsSandboxesProvidersRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesProviders, {
   payload: Schema.Void,
@@ -50,67 +68,116 @@ const WsSandboxesProvidersRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesProviders, 
 const WsSandboxesEnvironmentsRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesEnvironments, {
   payload: SandboxCredentialEnvironmentsInput,
   success: SandboxCredentialEnvironmentsResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesLimitsRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesLimits, {
   payload: SandboxLimitsInput,
   success: SandboxLimitsResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesListRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesList, {
   payload: Schema.Void,
   success: SandboxListResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesStopRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesStop, {
   payload: SandboxLifecycleInput,
   success: SandboxStopResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesResumeRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesResume, {
   payload: SandboxLifecycleInput,
   success: SandboxResumeResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesExtendRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesExtend, {
-  payload: SandboxExtendInput,
-  success: SandboxExtendResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesTemplatesRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesTemplates, {
   payload: SandboxTemplatesInput,
   success: SandboxTemplatesResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesSaveTemplateRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesSaveTemplate, {
   payload: SandboxSaveTemplateInput,
   success: SandboxSaveTemplateResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesDeleteTemplateRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesDeleteTemplate, {
   payload: SandboxDeleteTemplateInput,
   success: Schema.Void,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesCreateRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCreate, {
   payload: SandboxCreateInput,
   success: SandboxCreateResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
 });
 
 const WsSandboxesDeleteRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesDelete, {
   payload: SandboxDeleteInput,
   success: SandboxDeleteResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
+  error: SandboxFailure,
+});
+
+const WsSandboxesConfigsRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesConfigs, {
+  payload: Schema.Void,
+  success: SandboxConfigsResult,
+  error: SandboxFailure,
+});
+
+const WsSandboxesSaveConfigRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesSaveConfig, {
+  payload: SandboxSaveConfigInput,
+  success: SandboxSaveConfigResult,
+  error: SandboxFailure,
+});
+
+const WsSandboxesDeleteConfigRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesDeleteConfig, {
+  payload: SandboxDeleteConfigInput,
+  success: Schema.Void,
+  error: SandboxFailure,
+});
+
+const WsSandboxesLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesLaunch, {
+  payload: SandboxLaunchInput,
+  success: SandboxLaunchResult,
+  error: SandboxFailure,
+});
+
+const WsSandboxesSubscribeLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesSubscribeLaunch, {
+  payload: SandboxLaunchThreadInput,
+  success: SandboxLaunchStreamEvent,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsSandboxesCancelLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCancelLaunch, {
+  payload: SandboxLaunchThreadInput,
+  success: SandboxLaunchCancelResult,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsSandboxesRetryLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesRetryLaunch, {
+  payload: SandboxLaunchThreadInput,
+  success: Schema.Void,
+  error: SandboxFailure,
+});
+
+const WsSandboxesPairLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesPairLaunch, {
+  payload: SandboxLaunchThreadInput,
+  success: SandboxLaunchPairResult,
+  error: SandboxFailure,
+});
+
+const WsSandboxesCompleteLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCompleteLaunch, {
+  payload: SandboxLaunchThreadInput,
+  success: Schema.Void,
+  error: SandboxFailure,
 });
 
 export const SandboxRpcs = [
@@ -122,19 +189,34 @@ export const SandboxRpcs = [
   WsSandboxesListRpc,
   WsSandboxesStopRpc,
   WsSandboxesResumeRpc,
-  WsSandboxesExtendRpc,
   WsSandboxesTemplatesRpc,
   WsSandboxesSaveTemplateRpc,
   WsSandboxesDeleteTemplateRpc,
+  WsSandboxesConfigsRpc,
+  WsSandboxesSaveConfigRpc,
+  WsSandboxesDeleteConfigRpc,
+  WsSandboxesLaunchRpc,
+  WsSandboxesSubscribeLaunchRpc,
+  WsSandboxesCancelLaunchRpc,
+  WsSandboxesRetryLaunchRpc,
+  WsSandboxesPairLaunchRpc,
+  WsSandboxesCompleteLaunchRpc,
 ] as const;
 
+// Each of these spends the saved provider key, changes billable machines, or hands out a pairing
+// code for one.
 export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
-  // Creates a billable machine with the saved provider key.
   [SANDBOX_WS_METHODS.sandboxesCreate]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesDelete]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesStop]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesResume]: AuthSettingsWriteScope,
-  [SANDBOX_WS_METHODS.sandboxesExtend]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesSaveTemplate]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesDeleteTemplate]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesSaveConfig]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesDeleteConfig]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesLaunch]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesCancelLaunch]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesRetryLaunch]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesPairLaunch]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesCompleteLaunch]: AuthSettingsWriteScope,
 } as const;
