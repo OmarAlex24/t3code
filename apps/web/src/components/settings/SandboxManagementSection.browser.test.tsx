@@ -21,7 +21,7 @@ vi.mock(import("~/hooks/useSettings"), async (original) => ({
   useUpdateEnvironmentSettings: (() => () => {}) as never,
 }));
 vi.mock(import("~/hooks/useNowMinute"), () => ({ useNowMinute: () => "2026-11-01T12:00" }));
-vi.mock(import("~/state/environments"), async (original) => ({
+vi.mock(import("~/state/sandboxes"), async (original) => ({
   ...(await original()),
   useSandboxProvisionerEnvironmentId: (() =>
     EnvironmentId.make("11111111-1111-4111-8111-111111111111")) as never,
