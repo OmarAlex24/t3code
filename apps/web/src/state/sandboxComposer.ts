@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
 
 import type { DraftId } from "../composerDraftStore";
@@ -13,6 +13,27 @@ export const sandboxOptionId = (configId: string) =>
 /** The config a picker value names, or null for a real environment. */
 export const sandboxOptionConfigId = (id: string): string | null =>
   id.startsWith(SANDBOX_OPTION_PREFIX) ? id.slice(SANDBOX_OPTION_PREFIX.length) : null;
+
+/**
+ * A thread's sandbox holds a copy of the project's repository, so project grouping can put a new
+ * draft on it. That machine belongs to its thread; any other draft has to leave it.
+ */
+export const isForeignSandbox = (
+  owners: ReadonlyMap<EnvironmentId, ThreadId>,
+  environmentId: EnvironmentId | null,
+  threadId: ThreadId | null,
+): boolean => {
+  if (environmentId === null) return false;
+  const owner = owners.get(environmentId);
+  return owner !== undefined && owner !== threadId;
+};
+
+/** Whether the machine picker offers this environment: never another thread's sandbox. */
+export const keepsSandboxEnvironment = (
+  owners: ReadonlyMap<EnvironmentId, ThreadId>,
+  environmentId: EnvironmentId,
+  threadId: ThreadId | null,
+): boolean => !isForeignSandbox(owners, environmentId, threadId);
 
 interface SandboxComposerState {
   /** The sandbox config each unsent draft will launch on. */
