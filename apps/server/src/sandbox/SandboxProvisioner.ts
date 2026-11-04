@@ -73,6 +73,7 @@ import {
   tailscaleScript,
   tailscaleScrub,
 } from "./sandboxSetup.ts";
+import { makePairingKey, pairScript, type PairReport, readPairReport } from "./sandboxPairing.ts";
 import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
 import {
   layerHttpClient,
@@ -124,7 +125,8 @@ while [ "$i" -lt 90 ]; do
   i=$((i + 1))
   sleep 1
 done
-tail -50 "$HOME/.t3/sandbox-server.log" >&2 || true
+# Headless serve logs a pairing token, URL, and QR code; providers keep this output.
+tail -50 "$HOME/.t3/sandbox-server.log" | grep -v -i -e token -e pair -e 'app link' -e '█' -e '▀' -e '▄' >&2 || true
 exit 1`;
 };
 
@@ -250,13 +252,11 @@ interface HubKey {
 const asScript = (script: string | SandboxScript): SandboxScript =>
   typeof script === "string" ? { command: script } : script;
 
-const PAIR_SCRIPT = `set -eu
-export PATH="$HOME/.local/bin:$PATH"
-t3 pair --ttl 30m`;
-
-const parsePairingToken = (output: string): string | null => {
-  const match = /^\s*Token:\s*(\S+)\s*$/mu.exec(output);
-  return match?.[1] ?? null;
+const PAIR_FAILURES: Record<Exclude<PairReport, { _tag: "token" }>["reason"], string> = {
+  seal: "The sandbox has neither the openssl CLI nor Node.js, which T3 Code needs to receive its pairing code safely. Install openssl in the sandbox image.",
+  pair: "t3 pair failed on the sandbox.",
+  token: "The sandbox did not return a pairing code.",
+  unreadable: "The sandbox did not return a pairing code.",
 };
 
 // An empty value is an unset field, which drivers see as absent.
@@ -1027,20 +1027,19 @@ const make = Effect.gen(function* () {
     );
 
     const pairingCode = yield* stopOnFailure(
-      run(PAIR_SCRIPT, 60).pipe(
-        Effect.flatMap((paired) => {
-          const code = parsePairingToken(paired.stdout);
-          return code === null
-            ? Effect.fail(
-                new SandboxProviderError({
-                  provider: input.provider,
-                  stage: "pair",
-                  detail: "The sandbox did not return a pairing code.",
-                }),
-              )
-            : Effect.succeed(code);
-        }),
-      ),
+      Effect.gen(function* () {
+        const key = yield* makePairingKey;
+        const paired = yield* run(pairScript(key.publicKeyPem), 60);
+        const report = readPairReport(paired.stdout, key.privateKey);
+        if (report._tag === "token") return report.token;
+        const status = report.exitCode === undefined ? "" : ` It exited with ${report.exitCode}.`;
+        return yield* new SandboxProviderError({
+          provider: input.provider,
+          stage: "pair",
+          detail: `${PAIR_FAILURES[report.reason]}${status}`,
+          ...(report.stderr === undefined ? {} : { cause: new Error(report.stderr) }),
+        });
+      }),
     );
 
     // The record names where the key is kept; the key itself stays in this server's secrets.
