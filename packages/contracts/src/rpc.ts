@@ -26,29 +26,7 @@ import {
   PeerLinkRequestError,
   PeerLinkSummary,
 } from "./peerLink.ts";
-import {
-  SandboxCreateInput,
-  SandboxCreateResult,
-  SandboxCredentialEnvironmentsInput,
-  SandboxLimitsInput,
-  SandboxLimitsResult,
-  SandboxCredentialEnvironmentsResult,
-  SandboxDeleteInput,
-  SandboxDeleteResult,
-  SandboxLifecycleInput,
-  SandboxListResult,
-  SandboxProviderError,
-  SandboxProvidersResult,
-  SandboxResumeResult,
-  SandboxExtendInput,
-  SandboxExtendResult,
-  SandboxStopResult,
-  SandboxTemplatesInput,
-  SandboxTemplatesResult,
-  SandboxSaveTemplateInput,
-  SandboxSaveTemplateResult,
-  SandboxDeleteTemplateInput,
-} from "./sandbox.ts";
+import { SANDBOX_WS_METHODS, SandboxRpcs } from "./sandboxRpc.ts";
 import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
@@ -619,18 +597,6 @@ export const WS_METHODS = {
   sourceControlAppAccess: "sourceControl.appAccess",
   sourceControlStarred: "sourceControl.starred",
   sourceControlStar: "sourceControl.star",
-  sandboxesProviders: "sandboxes.providers",
-  sandboxesEnvironments: "sandboxes.environments",
-  sandboxesLimits: "sandboxes.limits",
-  sandboxesCreate: "sandboxes.create",
-  sandboxesDelete: "sandboxes.delete",
-  sandboxesList: "sandboxes.list",
-  sandboxesStop: "sandboxes.stop",
-  sandboxesResume: "sandboxes.resume",
-  sandboxesExtend: "sandboxes.extend",
-  sandboxesTemplates: "sandboxes.templates",
-  sandboxesSaveTemplate: "sandboxes.saveTemplate",
-  sandboxesDeleteTemplate: "sandboxes.deleteTemplate",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -647,6 +613,7 @@ export const WS_METHODS = {
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+  ...SANDBOX_WS_METHODS,
 } as const;
 
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -1296,78 +1263,6 @@ const WsSourceControlStarRpc = Rpc.make(WS_METHODS.sourceControlStar, {
 });
 
 // Returns when the project exists and cloning starts; progress uses the subscription.
-const WsSandboxesProvidersRpc = Rpc.make(WS_METHODS.sandboxesProviders, {
-  payload: Schema.Void,
-  success: SandboxProvidersResult,
-  error: EnvironmentAuthorizationError,
-});
-
-const WsSandboxesEnvironmentsRpc = Rpc.make(WS_METHODS.sandboxesEnvironments, {
-  payload: SandboxCredentialEnvironmentsInput,
-  success: SandboxCredentialEnvironmentsResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesLimitsRpc = Rpc.make(WS_METHODS.sandboxesLimits, {
-  payload: SandboxLimitsInput,
-  success: SandboxLimitsResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesListRpc = Rpc.make(WS_METHODS.sandboxesList, {
-  payload: Schema.Void,
-  success: SandboxListResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesStopRpc = Rpc.make(WS_METHODS.sandboxesStop, {
-  payload: SandboxLifecycleInput,
-  success: SandboxStopResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesResumeRpc = Rpc.make(WS_METHODS.sandboxesResume, {
-  payload: SandboxLifecycleInput,
-  success: SandboxResumeResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesExtendRpc = Rpc.make(WS_METHODS.sandboxesExtend, {
-  payload: SandboxExtendInput,
-  success: SandboxExtendResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesTemplatesRpc = Rpc.make(WS_METHODS.sandboxesTemplates, {
-  payload: SandboxTemplatesInput,
-  success: SandboxTemplatesResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesSaveTemplateRpc = Rpc.make(WS_METHODS.sandboxesSaveTemplate, {
-  payload: SandboxSaveTemplateInput,
-  success: SandboxSaveTemplateResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesDeleteTemplateRpc = Rpc.make(WS_METHODS.sandboxesDeleteTemplate, {
-  payload: SandboxDeleteTemplateInput,
-  success: Schema.Void,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesCreateRpc = Rpc.make(WS_METHODS.sandboxesCreate, {
-  payload: SandboxCreateInput,
-  success: SandboxCreateResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
-const WsSandboxesDeleteRpc = Rpc.make(WS_METHODS.sandboxesDelete, {
-  payload: SandboxDeleteInput,
-  success: SandboxDeleteResult,
-  error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
-});
-
 const WsProjectCloneStartRpc = Rpc.make(WS_METHODS.projectCloneStart, {
   payload: ProjectCloneStartInput,
   success: ProjectCloneStartResult,
@@ -2206,18 +2101,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlAppAccessRpc,
   WsSourceControlStarredRpc,
   WsSourceControlStarRpc,
-  WsSandboxesProvidersRpc,
-  WsSandboxesEnvironmentsRpc,
-  WsSandboxesLimitsRpc,
-  WsSandboxesCreateRpc,
-  WsSandboxesDeleteRpc,
-  WsSandboxesListRpc,
-  WsSandboxesStopRpc,
-  WsSandboxesResumeRpc,
-  WsSandboxesExtendRpc,
-  WsSandboxesTemplatesRpc,
-  WsSandboxesSaveTemplateRpc,
-  WsSandboxesDeleteTemplateRpc,
   WsProjectCloneStartRpc,
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,
@@ -2317,4 +2200,5 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
+  ...SandboxRpcs,
 ).middleware(RpcScopeAuthorization);
