@@ -155,6 +155,17 @@ const parsePairingToken = (output: string): string | null => {
   return match?.[1] ?? null;
 };
 
+// An empty value is an unset field, which drivers see as absent.
+const withSettings = (
+  config: SandboxProviderConfig,
+  overrides: Readonly<Record<string, string>> = {},
+): SandboxProviderConfig => ({
+  apiKey: config.apiKey,
+  settings: Object.fromEntries(
+    Object.entries({ ...config.settings, ...overrides }).filter(([, value]) => value !== ""),
+  ),
+});
+
 // `starting` has no record state, and an `error` record means T3 is not serving on a machine the
 // provider reports running, so neither overwrites what the record says.
 const reconcileState = (
@@ -222,16 +233,47 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const onHttp = Effect.provideService(HttpClient.HttpClient, httpClient);
 
-  const resolveApiKey = Effect.fn("SandboxProvisioner.resolveApiKey")(function* (
-    provider: SandboxProviderKind,
-    apiKey: string | undefined,
+  // A settings patch needs the key, and merges `settings` per field, so a save writes the key and
+  // every declared field; an empty value is how a field is cleared.
+  const resolveConfig = Effect.fn("SandboxProvisioner.resolveConfig")(function* (
+    driver: SandboxProviderDriver,
+    provided: {
+      readonly apiKey?: string | undefined;
+      readonly settings?: Readonly<Record<string, string>> | undefined;
+    } = {},
   ) {
-    const provided = apiKey?.trim() ?? "";
-    if (provided !== "") {
+    const provider = driver.info.kind;
+    const saved = (yield* settings.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new SandboxProviderError({
+            provider,
+            stage: "config",
+            detail: "Could not read the provider API key from this server's settings.",
+            cause,
+          }),
+      ),
+    )).sandboxProviders[provider];
+    const providedKey = provided.apiKey?.trim() ?? "";
+    const apiKey = providedKey || (saved?.apiKey.trim() ?? "");
+    const fields = driver.info.settingsFields ?? [];
+    const savedValue = (id: string) => saved?.settings[id]?.trim() ?? "";
+    const values = Object.fromEntries(
+      fields.map((field) => [
+        field.id,
+        (provided.settings?.[field.id] ?? savedValue(field.id)).trim(),
+      ]),
+    );
+    if (apiKey === "") {
+      return yield* new SandboxProviderError({
+        provider,
+        stage: "config",
+        detail: `Add a ${driver.info.label} API key to create this sandbox.`,
+      });
+    }
+    if (providedKey !== "" || fields.some((field) => values[field.id] !== savedValue(field.id))) {
       yield* settings
-        .updateSettings({
-          sandboxProviders: { [provider]: { apiKey: provided } },
-        })
+        .updateSettings({ sandboxProviders: { [provider]: { apiKey, settings: values } } })
         .pipe(
           Effect.mapError(
             (cause) =>
@@ -243,28 +285,16 @@ const make = Effect.gen(function* () {
               }),
           ),
         );
-      return provided;
     }
-    const saved = (yield* settings.getSettings.pipe(
-      Effect.mapError(
-        (cause) =>
-          new SandboxProviderError({
-            provider,
-            stage: "config",
-            detail: "Could not read the provider API key from this server's settings.",
-            cause,
-          }),
-      ),
-    )).sandboxProviders[provider]?.apiKey.trim();
-    if (saved === undefined || saved === "") {
-      return yield* new SandboxProviderError({
-        provider,
-        stage: "config",
-        detail: `Add a ${provider} API key to create this sandbox.`,
-      });
-    }
-    return saved;
+    return withSettings({ apiKey, settings: {} }, values);
   });
+
+  // A sandbox stays where it was created (Vercel's team and project) after the settings change;
+  // a record without settings follows the current ones.
+  const recordConfig = (driver: SandboxProviderDriver, record: SandboxRecord) =>
+    resolveConfig(driver).pipe(
+      Effect.map((config) => withSettings(config, record.providerSettings)),
+    );
 
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const readRecord = (environmentId: EnvironmentId) =>
@@ -284,6 +314,9 @@ const make = Effect.gen(function* () {
       providers: SANDBOX_PROVIDER_DRIVERS.map((driver): SandboxProviderInfo => ({
         ...driver.info,
         configured: (value.sandboxProviders[driver.info.kind]?.apiKey.trim() ?? "") !== "",
+        ...(driver.info.settingsFields === undefined
+          ? {}
+          : { settings: value.sandboxProviders[driver.info.kind]?.settings ?? {} }),
         capabilities: {
           limits: driver.limits !== undefined,
           stopResume: driver.stop !== undefined && driver.resume !== undefined,
@@ -331,8 +364,7 @@ const make = Effect.gen(function* () {
 
   const create = Effect.fn("SandboxProvisioner.create")(function* (input: SandboxCreateInput) {
     const driver = findDriver(input.provider);
-    const apiKey = yield* resolveApiKey(input.provider, input.apiKey);
-    const config = { apiKey };
+    const config = yield* resolveConfig(driver, { apiKey: input.apiKey, settings: input.settings });
     const label = input.label?.trim() || `${driver.info.label} sandbox`;
     if (input.environment !== undefined && input.allowCredentials !== true) {
       return yield* new SandboxProviderError({
@@ -391,6 +423,7 @@ const make = Effect.gen(function* () {
         template,
       }),
     );
+    const sandboxConfig = withSettings(config, sandbox.settings);
 
     // A machine that costs money must not survive a failure or an interruption (a client
     // disconnecting mid-install interrupts this fiber), so cleanup runs on every non-success exit.
@@ -399,20 +432,26 @@ const make = Effect.gen(function* () {
         Effect.onExit((exit) =>
           Exit.isSuccess(exit)
             ? Effect.void
-            : onHttp(driver.destroy({ config, sandboxId: sandbox.id })).pipe(Effect.ignore),
+            : onHttp(driver.destroy({ config: sandboxConfig, sandboxId: sandbox.id })).pipe(
+                Effect.ignore,
+              ),
         ),
       );
 
     const httpBaseUrl = yield* stopOnFailure(
       sandbox.publicUrl === undefined
-        ? driver.exposePort({ config, sandboxId: sandbox.id, port: driver.serverPort })
+        ? driver.exposePort({
+            config: sandboxConfig,
+            sandboxId: sandbox.id,
+            port: driver.serverPort,
+          })
         : Effect.succeed(sandbox.publicUrl),
     );
 
     if (input.repositoryUrl !== undefined && input.repositoryUrl.trim() !== "") {
       yield* stopOnFailure(
         driver.execute({
-          config,
+          config: sandboxConfig,
           sandboxId: sandbox.id,
           command: cloneScript(input.repositoryUrl.trim()),
           timeoutSeconds: 300,
@@ -422,7 +461,7 @@ const make = Effect.gen(function* () {
 
     yield* stopOnFailure(
       driver.execute({
-        config,
+        config: sandboxConfig,
         sandboxId: sandbox.id,
         command: installScript(label),
         timeoutSeconds: 600,
@@ -463,7 +502,7 @@ const make = Effect.gen(function* () {
     const pairingCode = yield* stopOnFailure(
       driver
         .execute({
-          config,
+          config: sandboxConfig,
           sandboxId: sandbox.id,
           command: PAIR_SCRIPT,
           timeoutSeconds: 60,
@@ -501,6 +540,9 @@ const make = Effect.gen(function* () {
       httpBaseUrl,
       ...(input.environment === undefined ? {} : { credentialEnvironment: input.environment }),
       ...(template === undefined ? {} : { template }),
+      ...(Object.keys(sandboxConfig.settings).length === 0
+        ? {}
+        : { providerSettings: sandboxConfig.settings }),
     };
     yield* records.put(record).pipe(Effect.orDie);
 
@@ -518,8 +560,10 @@ const make = Effect.gen(function* () {
     const record = yield* records.get(input.environmentId).pipe(Effect.orDie);
     if (Option.isNone(record) || record.value.state !== "deleted") {
       const driver = findDriver(input.provider);
-      const apiKey = yield* resolveApiKey(input.provider, undefined);
-      yield* onHttp(driver.destroy({ config: { apiKey }, sandboxId: input.sandboxId })).pipe(
+      const config = Option.isNone(record)
+        ? yield* resolveConfig(driver)
+        : yield* recordConfig(driver, record.value);
+      yield* onHttp(driver.destroy({ config, sandboxId: input.sandboxId })).pipe(
         // Deleted from the provider's dashboard before the sweep noticed: the record still goes.
         Effect.catchIf(
           (error) => error.code === "not_found",
@@ -537,18 +581,18 @@ const make = Effect.gen(function* () {
     if (driver.listEnvironments === undefined) {
       return { environments: [] as ReadonlyArray<SandboxCredentialEnvironment> };
     }
-    const apiKey = yield* resolveApiKey(input.provider, undefined);
-    const listed = yield* onHttp(driver.listEnvironments({ config: { apiKey } }));
+    const config = yield* resolveConfig(driver);
+    const listed = yield* onHttp(driver.listEnvironments({ config }));
     return { environments: listed };
   });
 
   const limits = Effect.fn("SandboxProvisioner.limits")(function* (input: SandboxLimitsInput) {
     const driver = findDriver(input.provider);
     if (driver.limits === undefined) return { limits: null } satisfies SandboxLimitsResult;
-    const apiKey = yield* resolveApiKey(input.provider, undefined).pipe(Effect.option);
-    if (Option.isNone(apiKey)) return { limits: null } satisfies SandboxLimitsResult;
+    const config = yield* resolveConfig(driver).pipe(Effect.option);
+    if (Option.isNone(config)) return { limits: null } satisfies SandboxLimitsResult;
     return {
-      limits: yield* onHttp(driver.limits({ config: { apiKey: apiKey.value } })),
+      limits: yield* onHttp(driver.limits({ config: config.value })),
     } satisfies SandboxLimitsResult;
   });
 
@@ -567,8 +611,8 @@ const make = Effect.gen(function* () {
         detail: "This provider cannot stop a sandbox.",
       });
     }
-    const apiKey = yield* resolveApiKey(record.provider, undefined);
-    yield* onHttp(driver.stop({ config: { apiKey }, sandboxId: record.sandboxId }));
+    const config = yield* recordConfig(driver, record);
+    yield* onHttp(driver.stop({ config, sandboxId: record.sandboxId }));
     const updated: SandboxRecord = {
       ...record,
       state: "stopped",
@@ -624,12 +668,12 @@ const make = Effect.gen(function* () {
                 60_000,
             ),
           );
-    const apiKey = yield* resolveApiKey(record.provider, undefined);
+    const config = yield* recordConfig(driver, record);
     // Providers such as Boat count a resume as a start, so it gets the same preflight as create.
-    const limits = yield* preflightStart(driver, { apiKey }, undefined);
+    const limits = yield* preflightStart(driver, config, undefined);
     const resumed = yield* onHttp(
       driver.resume({
-        config: { apiKey },
+        config,
         sandboxId: record.sandboxId,
         // The provider's own TTL is a backstop; it must not outlive the record's deadline.
         ttlMinutes: Math.min(remainingMinutes, limits?.maxTtlMinutes ?? Infinity),
@@ -638,7 +682,7 @@ const make = Effect.gen(function* () {
     const httpBaseUrl = resumed.publicUrl ?? record.httpBaseUrl;
     yield* onHttp(
       driver.execute({
-        config: { apiKey },
+        config,
         sandboxId: record.sandboxId,
         command: RESUME_SCRIPT,
         timeoutSeconds: 180,
@@ -723,16 +767,14 @@ const make = Effect.gen(function* () {
       );
     }
     const deadline = deadlineMillis + granted * 60_000;
-    const apiKey = yield* resolveApiKey(record.provider, undefined);
+    const config = yield* recordConfig(driver, record);
     const limits =
       driver.limits === undefined
         ? null
-        : yield* onHttp(driver.limits({ config: { apiKey } })).pipe(
-            Effect.orElseSucceed(() => null),
-          );
+        : yield* onHttp(driver.limits({ config })).pipe(Effect.orElseSucceed(() => null));
     yield* onHttp(
       driver.extend({
-        config: { apiKey },
+        config,
         sandboxId: record.sandboxId,
         // A plan that caps auto-stop lower stops the machine early; T3's deadline still stands.
         ttlMinutes: Math.min(
@@ -758,9 +800,9 @@ const make = Effect.gen(function* () {
     const driver = findDriver(input.provider);
     if (driver.listTemplates === undefined)
       return { templates: [] } satisfies SandboxTemplatesResult;
-    const apiKey = yield* resolveApiKey(input.provider, undefined).pipe(Effect.option);
-    if (Option.isNone(apiKey)) return { templates: [] } satisfies SandboxTemplatesResult;
-    const listed = yield* onHttp(driver.listTemplates({ config: { apiKey: apiKey.value } }));
+    const config = yield* resolveConfig(driver).pipe(Effect.option);
+    if (Option.isNone(config)) return { templates: [] } satisfies SandboxTemplatesResult;
+    const listed = yield* onHttp(driver.listTemplates({ config: config.value }));
     return listed satisfies SandboxTemplatesResult;
   });
 
@@ -785,8 +827,7 @@ const make = Effect.gen(function* () {
         detail: "Only a running sandbox can be saved as a template. Resume it first.",
       });
     }
-    const apiKey = yield* resolveApiKey(record.provider, undefined);
-    const config = { apiKey };
+    const config = yield* recordConfig(driver, record);
     // The provider refuses a save only after the reset would have run, so a plan that cannot save
     // is refused here first. Unknown limits let the save through, as with starts.
     const limits =
@@ -860,8 +901,8 @@ const make = Effect.gen(function* () {
         detail: "This provider cannot delete templates.",
       });
     }
-    const apiKey = yield* resolveApiKey(input.provider, undefined);
-    yield* onHttp(driver.deleteTemplate({ config: { apiKey }, name: input.name }));
+    const config = yield* resolveConfig(driver);
+    yield* onHttp(driver.deleteTemplate({ config, name: input.name }));
   });
 
   // The sweep reads records, then waits on the provider; a user action in between wins.
@@ -937,30 +978,35 @@ const make = Effect.gen(function* () {
     const live = (yield* records.list.pipe(Effect.orDie)).filter(
       (record) => record.state !== "deleted",
     );
-    const configs = new Map<SandboxProviderKind, SandboxProviderConfig>();
-    const costs = new Map<SandboxProviderKind, ReadonlyMap<string, SandboxUsage>>();
+    const current = new Map<SandboxProviderKind, SandboxProviderConfig>();
     for (const provider of new Set(live.map((record) => record.provider))) {
-      const apiKey = yield* resolveApiKey(provider, undefined).pipe(Effect.option);
-      if (Option.isNone(apiKey)) continue;
-      const config = { apiKey: apiKey.value };
-      configs.set(provider, config);
-      const driver = findDriver(provider);
-      if (driver.usage === undefined) continue;
-      yield* onHttp(driver.usage({ config })).pipe(
-        Effect.tap((usage) => Effect.sync(() => costs.set(provider, usage))),
+      const resolved = yield* resolveConfig(findDriver(provider)).pipe(Effect.option);
+      if (Option.isSome(resolved)) current.set(provider, resolved.value);
+    }
+    const targets = live.flatMap((record) => {
+      const base = current.get(record.provider);
+      if (base === undefined) return [];
+      const config = withSettings(base, record.providerSettings);
+      // Usage is read once per provider and settings, since settings can scope the account.
+      const scope = `${record.provider}:${JSON.stringify(Object.entries(config.settings).toSorted())}`;
+      return [{ record, config, scope }];
+    });
+    const costs = new Map<string, ReadonlyMap<string, SandboxUsage>>();
+    const scopes = new Map(targets.map((target) => [target.scope, target]));
+    for (const { record, config, scope } of scopes.values()) {
+      const { usage } = findDriver(record.provider);
+      if (usage === undefined) continue;
+      yield* onHttp(usage({ config })).pipe(
+        Effect.tap((read) => Effect.sync(() => costs.set(scope, read))),
         Effect.catch((cause) =>
-          Effect.logWarning("sandbox usage read failed", { provider, cause }),
+          Effect.logWarning("sandbox usage read failed", { provider: record.provider, cause }),
         ),
       );
     }
     yield* Effect.forEach(
-      live,
-      (record) => {
-        const config = configs.get(record.provider);
-        return config === undefined
-          ? Effect.void
-          : sweepRecord(record, config, costs.get(record.provider)?.get(record.sandboxId), now);
-      },
+      targets,
+      ({ record, config, scope }) =>
+        sweepRecord(record, config, costs.get(scope)?.get(record.sandboxId), now),
       { concurrency: 4, discard: true },
     );
   });
