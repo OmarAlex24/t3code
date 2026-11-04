@@ -6,7 +6,7 @@ machine. That machine must stay running and reachable while you work.
 ## Sandbox environments
 
 A sandbox is a cloud machine that runs its own T3 Code server. Open **Settings → Environments →
-Add environment**, choose **Sandbox**, and enter an API key for Boat, Daytona, Upstash, or Vercel. The server
+Add environment**, choose **Sandbox**, and enter an API key for Boat, Celesto, Daytona, Upstash, or Vercel. The server
 creates the machine, installs T3 Code, exposes it on a public HTTPS URL, and pairs it. The new
 environment reconnects like any other remote environment.
 
@@ -34,6 +34,16 @@ a box after an hour idle (six hours on paid plans) and may not count a running a
 so a long turn can stop partway and the sandbox then shows as stopped. Opening the sandbox's URL or
 choosing **Resume** wakes it, and T3 Code starts again on it. Medium and Large boxes need a paid
 plan. Upstash sandboxes cannot be saved as templates and show no cost.
+
+Celesto is new. Create an API key in the Celesto console under **Settings → Security**; a scoped
+key needs all three computer permissions (see, create and run, delete). Celesto never stops a
+sandbox on its own, so the lifetime limit below is the only thing that stops one, and a sandbox
+keeps billing while this T3 Code server is off. The free trial runs Micro only and keeps one
+sandbox, stopped ones included, so delete it before you create another. Celesto keeps a stopped
+sandbox's disk for 30 days. Celesto can also move a running sandbox to another machine on its own,
+and does not promise to keep the sandbox's files when it does, so push work you want to keep. If a
+sandbox stops answering after such a move, delete it and create a new one. Celesto sandboxes cannot
+be saved as templates and show no cost.
 
 The key is saved on the T3 Code server that provisions the sandbox, not on the client. Creating a
 sandbox bills the provider account that owns the key. Stop, resume, and delete sandboxes from

@@ -8,7 +8,13 @@ import { EnvironmentId, TrimmedString } from "./baseSchemas.ts";
  * provider's API key is saved in that server's settings, so an environment can be created from
  * any client without ever sending its key to the other machines on the account.
  */
-export const SandboxProviderKind = Schema.Literals(["boat", "daytona", "upstash", "vercel"]);
+export const SandboxProviderKind = Schema.Literals([
+  "boat",
+  "celesto",
+  "daytona",
+  "upstash",
+  "vercel",
+]);
 export type SandboxProviderKind = typeof SandboxProviderKind.Type;
 
 export const SandboxMachineSize = Schema.Struct({

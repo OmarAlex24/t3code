@@ -599,7 +599,7 @@ export function SandboxEnvironmentFields({
         <div className="space-y-1.5">
           <ToggleGroup
             aria-label="Sandbox provider"
-            className="w-full"
+            className="w-full flex-wrap"
             value={[provider.kind]}
             disabled={isProvisioning}
             onValueChange={(values) => {
@@ -617,7 +617,7 @@ export function SandboxEnvironmentFields({
             }}
           >
             {providers.map((candidate) => (
-              <Toggle key={candidate.kind} value={candidate.kind} className="flex-1">
+              <Toggle key={candidate.kind} value={candidate.kind} className="grow">
                 <SandboxProviderLogo kind={candidate.kind} />
                 {candidate.label}
                 {candidate.configured ? (
