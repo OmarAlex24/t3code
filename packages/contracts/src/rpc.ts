@@ -34,6 +34,7 @@ import {
   SandboxLimitsResult,
   SandboxCredentialEnvironmentsResult,
   SandboxDeleteInput,
+  SandboxDeleteResult,
   SandboxLifecycleInput,
   SandboxListResult,
   SandboxProviderError,
@@ -1363,7 +1364,7 @@ const WsSandboxesCreateRpc = Rpc.make(WS_METHODS.sandboxesCreate, {
 
 const WsSandboxesDeleteRpc = Rpc.make(WS_METHODS.sandboxesDelete, {
   payload: SandboxDeleteInput,
-  success: Schema.Void,
+  success: SandboxDeleteResult,
   error: Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]),
 });
 

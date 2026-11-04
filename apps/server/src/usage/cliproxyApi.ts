@@ -178,12 +178,8 @@ export const makeCliproxyApi = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
   const digest = yield* Digest.Digest;
 
-  const management = Effect.fn("CliproxyApi.management")(function* (
-    hub: CliproxyHub,
-    path: string,
-    body?: unknown,
-  ) {
-    const url = yield* Effect.try({
+  const managementUrl = (hub: CliproxyHub, path: string) =>
+    Effect.try({
       try: () =>
         new URL(
           `v0/management/${path}`,
@@ -191,20 +187,59 @@ export const makeCliproxyApi = Effect.gen(function* () {
         ).toString(),
       catch: () => new UsageLimitSourceError({ detail: "The hub URL is not valid." }),
     });
-    const request = (
-      body === undefined ? HttpClientRequest.get(url) : HttpClientRequest.post(url)
-    ).pipe(HttpClientRequest.setHeader("Authorization", `Bearer ${hub.managementKey}`));
-    const response = yield* client
-      .execute(body === undefined ? request : request.pipe(HttpClientRequest.bodyJsonUnsafe(body)))
+
+  const send = (hub: CliproxyHub, request: HttpClientRequest.HttpClientRequest) =>
+    client
+      .execute(
+        request.pipe(HttpClientRequest.setHeader("Authorization", `Bearer ${hub.managementKey}`)),
+      )
       .pipe(
         Effect.flatMap(HttpClientResponse.filterStatusOk),
-        Effect.flatMap((response) => response.json),
         Effect.timeout("15 seconds"),
         Effect.mapError(
           (error) => new UsageLimitSourceError({ detail: describeManagementFailure(error) }),
         ),
       );
-    return response;
+
+  const management = Effect.fn("CliproxyApi.management")(function* (
+    hub: CliproxyHub,
+    path: string,
+    body?: unknown,
+  ) {
+    const url = yield* managementUrl(hub, path);
+    const response = yield* send(
+      hub,
+      body === undefined
+        ? HttpClientRequest.get(url)
+        : HttpClientRequest.post(url).pipe(HttpClientRequest.bodyJsonUnsafe(body)),
+    );
+    return yield* response.json.pipe(
+      Effect.timeout("15 seconds"),
+      Effect.mapError(
+        (error) => new UsageLimitSourceError({ detail: describeManagementFailure(error) }),
+      ),
+    );
+  });
+
+  // PATCH appends `new` when `old` is not in the list, under the hub's lock. PUT would replace the
+  // whole list, dropping every other client's key.
+  const addApiKey = Effect.fn("CliproxyApi.addApiKey")(function* (hub: CliproxyHub, key: string) {
+    const url = yield* managementUrl(hub, "api-keys");
+    yield* send(
+      hub,
+      HttpClientRequest.patch(url).pipe(HttpClientRequest.bodyJsonUnsafe({ old: key, new: key })),
+    );
+  });
+
+  const removeApiKey = Effect.fn("CliproxyApi.removeApiKey")(function* (
+    hub: CliproxyHub,
+    key: string,
+  ) {
+    const url = yield* managementUrl(hub, "api-keys");
+    yield* send(
+      hub,
+      HttpClientRequest.delete(url).pipe(HttpClientRequest.setUrlParams({ value: key })),
+    );
   });
 
   const authFiles = Effect.fn("CliproxyApi.authFiles")(function* (hub: CliproxyHub) {
@@ -443,5 +478,5 @@ export const makeCliproxyApi = Effect.gen(function* () {
       ),
     );
   });
-  return { readAccounts, consume };
+  return { readAccounts, consume, addApiKey, removeApiKey };
 });
