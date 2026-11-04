@@ -51,7 +51,11 @@ import {
   ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
-import { SandboxSettings } from "./sandbox.ts";
+import {
+  DEFAULT_SANDBOX_LIFETIME_CAP_MINUTES,
+  SandboxLifetimeCapMinutes,
+  SandboxSettings,
+} from "./sandbox.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
@@ -1365,6 +1369,9 @@ export const ServerSettings = Schema.Struct({
   sandboxProviders: Schema.Record(Schema.String, SandboxSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  sandboxLifetimeCapMinutes: SandboxLifetimeCapMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SANDBOX_LIFETIME_CAP_MINUTES)),
+  ),
   // User-chosen ids preserve rows across edits; undecodable entries round-trip untouched.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1709,6 +1716,7 @@ export const ServerSettingsPatch = Schema.Struct({
   sourceControlHosts: Schema.optionalKey(Schema.Record(Schema.String, SourceControlHostSettings)),
   /** Merges per provider; a redaction marker retains the saved key, an empty key removes it. */
   sandboxProviders: Schema.optionalKey(Schema.Record(Schema.String, SandboxSettings)),
+  sandboxLifetimeCapMinutes: Schema.optionalKey(SandboxLifetimeCapMinutes),
   // Replace whole maps to avoid half-merged driver configs.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
   // Merge per source to avoid racing other edits; null removes an entry.
