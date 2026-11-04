@@ -161,8 +161,8 @@ describe("command permissions", () => {
   it.effect.each([
     { method: WS_METHODS.serverRunStorageCleanup, scope: AuthSettingsWriteScope },
     { method: WS_METHODS.serverReclaimDatabaseSpace, scope: AuthEnvironmentMaintainScope },
-    // Sandbox writes keep a billable machine alive longer or change what the account keeps.
-    { method: WS_METHODS.sandboxesExtend, scope: AuthSettingsWriteScope },
+    // Sandbox writes start billable machines or change what the account keeps.
+    { method: WS_METHODS.sandboxesLaunch, scope: AuthSettingsWriteScope },
     { method: WS_METHODS.sandboxesSaveTemplate, scope: AuthSettingsWriteScope },
     { method: WS_METHODS.sandboxesDeleteTemplate, scope: AuthSettingsWriteScope },
   ])("requires the destination $scope grant for $method", ({ method, scope }) =>
