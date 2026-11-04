@@ -28,6 +28,9 @@ const TRIAL_MAX_TTL_MINUTES = 120;
 const MAX_TTL_MINUTES = 43200;
 // Tags every sandbox T3 creates, so one filtered list call can read all their costs.
 const ROLE_LABEL = { key: "t3.code/role", value: "environment" } as const;
+// Which T3 server and record a sandbox belongs to, so the sweep can find ones no record tracks.
+const HOST_LABEL = "t3.code/host";
+const INSTANCE_LABEL = "t3.code/instance";
 
 const BoatSandbox = Schema.Struct({
   sandbox: Schema.Struct({
@@ -59,6 +62,18 @@ const BoatLifecycle = Schema.Struct({
     error: Schema.optionalKey(Schema.NullOr(Schema.String)),
     dataExpiredAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
   }),
+});
+
+const BoatSandboxList = Schema.Struct({
+  sandboxes: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      name: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      state: Schema.optionalKey(Schema.String),
+      createdAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      labels: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Schema.String))),
+    }),
+  ),
 });
 
 const BoatCostList = Schema.Struct({
@@ -298,6 +313,8 @@ const info = {
     { id: "large", label: "Large", detail: "8 vCPU · 16 GB · 111 GB" },
     { id: "xlarge", label: "Extra large", detail: "16 vCPU · 32 GB · 251 GB" },
   ],
+  // https://docs.boat.dev/api/v1.md: an archived sandbox's data expires 14 days after the stop.
+  diskRetentionDays: 14,
 } satisfies SandboxProviderDriver["info"];
 
 const sandboxUrl = (sandboxId: string, path: string) =>
@@ -338,6 +355,18 @@ const runCommand = (apiKey: string, sandboxId: string, command: string, timeoutS
   );
 };
 
+// The files API carries content in a request body, which Boat does not keep with its command history.
+const writeFile = (apiKey: string, sandboxId: string, path: string, content: string) =>
+  requestJson({
+    provider: "boat",
+    stage: "install",
+    schema: Schema.Unknown,
+    request: jsonBody(authorize(HttpClientRequest.put(sandboxUrl(sandboxId, "files")), apiKey), {
+      path,
+      content,
+    }),
+  }).pipe(Effect.asVoid);
+
 export const boatDriver: SandboxProviderDriver = {
   info,
   defaultSize: "default",
@@ -364,10 +393,17 @@ export const boatDriver: SandboxProviderDriver = {
           // A paired environment is meant to outlive the setup session, so the provider's auto-stop
           // must never fire before T3's own lifetime limit (eight hours by default).
           ttlSeconds: (input.ttlMinutes ?? 480) * 60,
-          labels: { [ROLE_LABEL.key]: ROLE_LABEL.value },
+          labels: {
+            [ROLE_LABEL.key]: ROLE_LABEL.value,
+            ...(input.tags === undefined
+              ? {}
+              : { [HOST_LABEL]: input.tags.host, [INSTANCE_LABEL]: input.tags.instance }),
+          },
           // `localhost` keeps the port reachable whether t3 binds 0.0.0.0 or the
-          // background service's loopback default.
-          hostedPorts: [{ port: 3773, public: true, localhost: true, title: "T3 Code" }],
+          // background service's loopback default. A tailnet-only sandbox hosts no port.
+          ...(input.publishPort === false
+            ? {}
+            : { hostedPorts: [{ port: 3773, public: true, localhost: true, title: "T3 Code" }] }),
         },
       ),
     });
@@ -376,7 +412,7 @@ export const boatDriver: SandboxProviderDriver = {
     // A sandbox started from a saved snapshot does not relay the hosted port to loopback until
     // the port is hosted again, so the provisioner exposes it once the machine runs.
     const url =
-      input.template === undefined
+      input.template === undefined && input.publishPort !== false
         ? created.hostedPorts?.find((port) => port.port === 3773)?.url
         : undefined;
     return {
@@ -414,20 +450,14 @@ export const boatDriver: SandboxProviderDriver = {
     const dir = `/tmp/t3-secrets-${(yield* Random.nextIntBetween(0, Number.MAX_SAFE_INTEGER)).toString(36)}`;
     const file = `${dir}/env`;
     yield* runCommand(apiKey, input.sandboxId, `umask 077\nmkdir ${dir}\n: >${file}`, 30);
-    return yield* requestJson({
-      provider: "boat",
-      stage: "install",
-      schema: Schema.Unknown,
-      request: jsonBody(
-        authorize(HttpClientRequest.put(sandboxUrl(input.sandboxId, "files")), apiKey),
-        {
-          path: file,
-          content: Object.entries(input.secrets)
-            .map(([name, value]) => `export ${name}=${shellQuote(value)}\n`)
-            .join(""),
-        },
-      ),
-    }).pipe(
+    return yield* writeFile(
+      apiKey,
+      input.sandboxId,
+      file,
+      Object.entries(input.secrets)
+        .map(([name, value]) => `export ${name}=${shellQuote(value)}\n`)
+        .join(""),
+    ).pipe(
       Effect.andThen(
         runCommand(
           apiKey,
@@ -451,6 +481,7 @@ export const boatDriver: SandboxProviderDriver = {
       ),
     );
   }),
+  uploadFile: (input) => writeFile(input.config.apiKey, input.sandboxId, input.path, input.content),
   // Boat refuses to host a port on a machine that is not running.
   exposePort: (input) =>
     waitUntilRunning(input.config.apiKey, input.sandboxId, "expose").pipe(
@@ -502,25 +533,6 @@ export const boatDriver: SandboxProviderDriver = {
     yield* waitUntilRunning(input.config.apiKey, input.sandboxId, "start");
     return {};
   }),
-  // Boat's TTL is an auto-stop counted from create or resume, so a stopped sandbox gets the remaining
-  // time when it resumes and only a running one needs it moved now. PATCH sets now + ttlSeconds.
-  extend: (input) =>
-    input.running
-      ? requestJson({
-          provider: "boat",
-          stage: "config",
-          schema: Schema.Struct({ ok: Schema.optionalKey(Schema.Boolean) }),
-          request: jsonBody(
-            authorize(
-              HttpClientRequest.patch(
-                `${BOAT_API_BASE}/sandboxes/${encodeURIComponent(input.sandboxId)}`,
-              ),
-              input.config.apiKey,
-            ),
-            { ttlSeconds: input.ttlMinutes * 60 },
-          ),
-        }).pipe(Effect.asVoid)
-      : Effect.void,
   status: (input) =>
     requestJson({
       provider: "boat",
@@ -630,6 +642,29 @@ export const boatDriver: SandboxProviderDriver = {
         input.config.apiKey,
       ),
     }).pipe(Effect.asVoid),
+  listSandboxes: (input) =>
+    requestJson({
+      provider: "boat",
+      stage: "config",
+      schema: BoatSandboxList,
+      request: authorize(
+        HttpClientRequest.get(`${BOAT_API_BASE}/sandboxes`).pipe(
+          HttpClientRequest.setUrlParams({ label: `${HOST_LABEL}=${input.host}`, limit: "200" }),
+        ),
+        input.config.apiKey,
+      ),
+    }).pipe(
+      Effect.map((listed) =>
+        listed.sandboxes
+          .filter((sandbox) => sandbox.state !== "cancelled")
+          .map((sandbox) => ({
+            id: sandbox.id,
+            name: sandbox.name ?? sandbox.id,
+            instance: sandbox.labels?.[INSTANCE_LABEL],
+            createdAt: sandbox.createdAt ?? undefined,
+          })),
+      ),
+    ),
   usage: (input) =>
     requestJson({
       provider: "boat",
