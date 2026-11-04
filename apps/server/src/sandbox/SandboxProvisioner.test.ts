@@ -35,6 +35,7 @@ import type { SandboxRecord } from "@t3tools/contracts";
 import { layerHttpClient, requestJson } from "./SandboxProvider.ts";
 import { boatDriver } from "./providers/boat.ts";
 import { daytonaDriver } from "./providers/daytona.ts";
+import { upstashDriver } from "./providers/upstash.ts";
 import { vercelDriver } from "./providers/vercel.ts";
 
 const boatSandboxId = "bx_abcdefgh";
@@ -630,6 +631,218 @@ describe("daytonaDriver", () => {
       ]);
       // Daytona has no idempotency key, so each attempt gets its own name.
       expect(requests[0]?.body).toMatchObject({ name: "box-0f1e2d3c" });
+    });
+  });
+});
+
+describe("upstashDriver", () => {
+  const upstashConfig = { apiKey: "box_test", settings: {} };
+  const upstashRecording = (
+    requests: Array<{ method: string; url: string; body: unknown; key: string | undefined }>,
+    respond: (request: HttpClientRequest.HttpClientRequest) => Response,
+  ) =>
+    HttpClient.make((request) => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        body: request.body._tag === "Uint8Array" ? decodeBody(request.body.body) : undefined,
+        key: request.headers["x-box-api-key"],
+      });
+      return Effect.succeed(HttpClientResponse.fromWeb(request, respond(request)));
+    });
+
+  it.effect(
+    "creates a box, waits for it, runs commands under timeout, and opens a public URL",
+    () => {
+      const requests: Array<{
+        method: string;
+        url: string;
+        body: unknown;
+        key: string | undefined;
+      }> = [];
+      let polls = 0;
+      const client = upstashRecording(requests, (request) => {
+        if (request.url.endsWith("/exec")) {
+          return Response.json({ exit_code: 0, output: "Token: pair_xyz\n" });
+        }
+        if (request.url.endsWith("/preview")) {
+          return Response.json({ url: "https://box_1-3773.preview.box.upstash.com", port: 3773 });
+        }
+        if (request.method === "POST") return Response.json({ id: "box_1", status: "creating" });
+        return Response.json({ id: "box_1", status: ++polls < 2 ? "creating" : "idle" });
+      });
+      return Effect.gen(function* () {
+        const create = yield* upstashDriver
+          .create({
+            config: upstashConfig,
+            name: "Upstash sandbox",
+            size: "small",
+            ttlMinutes: 480,
+            idempotencyKey: "0f1e2d3c-aaaa-bbbb",
+          })
+          .pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.forkChild);
+        yield* TestClock.adjust("2 seconds");
+        expect(yield* Fiber.join(create)).toEqual({ id: "box_1", name: "Upstash sandbox" });
+        const executed = yield* upstashDriver
+          .execute({
+            config: upstashConfig,
+            sandboxId: "box_1",
+            command: "t3 pair",
+            timeoutSeconds: 900,
+          })
+          .pipe(Effect.provideService(HttpClient.HttpClient, client));
+        const url = yield* upstashDriver
+          .exposePort({ config: upstashConfig, sandboxId: "box_1", port: 3773 })
+          .pipe(Effect.provideService(HttpClient.HttpClient, client));
+
+        expect(executed.stdout).toContain("Token: pair_xyz");
+        expect(url).toBe("https://box_1-3773.preview.box.upstash.com");
+        expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+          "POST https://us-east-1.box.upstash.com/v2/box",
+          "GET https://us-east-1.box.upstash.com/v2/box/box_1",
+          "GET https://us-east-1.box.upstash.com/v2/box/box_1",
+          "POST https://us-east-1.box.upstash.com/v2/box/box_1/exec",
+          "POST https://us-east-1.box.upstash.com/v2/box/box_1/preview",
+        ]);
+        // Upstash reads its own header, not a bearer token.
+        for (const request of requests) expect(request.key).toBe("box_test");
+        const body = requests[0]!.body as Record<string, unknown>;
+        // No idempotency key, so the attempt's own name is how a lost create is found again.
+        expect(body).toMatchObject({
+          name: "upstash-sandbox-0f1e2d3c",
+          size: "small",
+          runtime: "node",
+        });
+        // Upstash restarts T3 itself when a URL visit wakes a paused box, but not before T3 ran once.
+        expect(body.init_command).toContain('[ -d "$HOME/.t3/userdata" ]');
+        expect(body.init_command).toContain("t3 serve --host 0.0.0.0 --port 3773");
+        // There is no server-side timeout, so the box ends the command itself, capped at ten minutes.
+        expect(requests[3]!.body).toEqual({
+          command: ["timeout", "-k", "5", "600", "sh", "-c", "t3 pair"],
+        });
+        // Browsers cannot send a bearer token or basic auth, so the URL is public.
+        expect(requests[4]!.body).toEqual({ port: 3773 });
+      });
+    },
+  );
+
+  it.effect("maps Upstash's box states to the states T3 records", () =>
+    Effect.gen(function* () {
+      const cases = [
+        { state: "idle", expected: "running" },
+        { state: "running", expected: "running" },
+        { state: "creating", expected: "starting" },
+        { state: "paused", expected: "stopped" },
+        { state: "error", expected: "error" },
+        { state: "deleted", expected: "deleted" },
+        { status: 404, expected: "deleted" },
+        { state: "migrating", expected: null },
+      ] as const;
+      for (const testCase of cases) {
+        const requests: Array<string> = [];
+        const client = HttpClient.make((request) => {
+          requests.push(`${request.method} ${request.url}`);
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              "status" in testCase
+                ? Response.json({ error: "box not found" }, { status: testCase.status })
+                : Response.json({ status: testCase.state }),
+            ),
+          );
+        });
+        const status = yield* upstashDriver.status!({
+          config: upstashConfig,
+          sandboxId: "box_1",
+        }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+        expect(status, JSON.stringify(testCase)).toBe(testCase.expected);
+        expect(requests).toEqual(["GET https://us-east-1.box.upstash.com/v2/box/box_1/status"]);
+      }
+    }),
+  );
+
+  it.effect("hands secrets over in a private file and fails a command by its exit status", () => {
+    const requests: Array<{ method: string; url: string; body: unknown; key: string | undefined }> =
+      [];
+    let exitCode = 0;
+    const client = upstashRecording(requests, (request) =>
+      request.url.endsWith("/exec")
+        ? Response.json({
+            exit_code: requests.length > 2 ? exitCode : 0,
+            output: "",
+            error: "boom",
+          })
+        : new Response(null, { status: 200 }),
+    );
+    const secret = "hub-key-'$(touch pwned)\"";
+    const run = upstashDriver
+      .execute({
+        config: upstashConfig,
+        sandboxId: "box_1",
+        command: "printf '%s' \"$T3_TEST_SECRET\" >out",
+        timeoutSeconds: 60,
+        secrets: { T3_TEST_SECRET: secret },
+      })
+      .pipe(Effect.provideService(HttpClient.HttpClient, client));
+    return Effect.gen(function* () {
+      yield* run;
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        "POST https://us-east-1.box.upstash.com/v2/box/box_1/exec",
+        "POST https://us-east-1.box.upstash.com/v2/box/box_1/files/write",
+        "POST https://us-east-1.box.upstash.com/v2/box/box_1/exec",
+      ]);
+      const commands = requests
+        .filter((request) => request.url.endsWith("/exec"))
+        .map((request) => (request.body as { command: Array<string> }).command.join(" "));
+      for (const command of commands) expect(command).not.toContain("hub-key");
+      const file = requests[1]!.body as { path: string; content: string };
+      const dir = file.path.replace(/\/env$/u, "");
+      expect(dir).toMatch(/^\/tmp\/t3-secrets-[0-9a-z]+$/u);
+      expect(commands[0]).toContain("umask 077");
+      expect(commands[0]).toContain(`mkdir ${dir}`);
+      expect(file.content).toBe(`export T3_TEST_SECRET='hub-key-'\\''$(touch pwned)"'\n`);
+      expect(commands[1]).toContain(`. ${file.path}\nrm -rf ${dir}\n`);
+
+      // A failed command keeps its output in the cause only, and leaves no file behind.
+      requests.length = 0;
+      exitCode = 2;
+      const error = yield* run.pipe(Effect.flip);
+      expect(error.detail).toBe("The command exited with 2.");
+      expect(error.message).not.toContain("boom");
+      expect(String(error.cause)).toContain("boom");
+      expect(requests.at(-1)).toMatchObject({
+        method: "POST",
+        url: "https://us-east-1.box.upstash.com/v2/box/box_1/files/remove",
+        body: { path: expect.stringMatching(/^\/tmp\/t3-secrets-[0-9a-z]+$/u), recursive: true },
+      });
+    });
+  });
+
+  it.effect("deletes a box whose create answer was lost, found by the attempt's name", () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const client = losing(
+      requests,
+      (request) => request.method === "POST",
+      (request) =>
+        request.method === "DELETE"
+          ? new Response(null, { status: 200 })
+          : Response.json({ id: "box_lost", status: "creating" }),
+    );
+    return Effect.gen(function* () {
+      const error = yield* upstashDriver
+        .create({
+          config: upstashConfig,
+          name: "Box",
+          size: "small",
+          idempotencyKey: "0f1e2d3c-aaaa-bbbb",
+        })
+        .pipe(Effect.provideService(HttpClient.HttpClient, client), Effect.flip);
+      expect(error).toMatchObject({ stage: "create" });
+      expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        "POST https://us-east-1.box.upstash.com/v2/box",
+        "GET https://us-east-1.box.upstash.com/v2/box/box-0f1e2d3c",
+        "DELETE https://us-east-1.box.upstash.com/v2/box/box_lost",
+      ]);
     });
   });
 });

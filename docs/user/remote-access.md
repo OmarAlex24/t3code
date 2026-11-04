@@ -6,7 +6,7 @@ machine. That machine must stay running and reachable while you work.
 ## Sandbox environments
 
 A sandbox is a cloud machine that runs its own T3 Code server. Open **Settings → Environments →
-Add environment**, choose **Sandbox**, and enter an API key for Boat, Daytona, or Vercel. The server
+Add environment**, choose **Sandbox**, and enter an API key for Boat, Daytona, Upstash, or Vercel. The server
 creates the machine, installs T3 Code, exposes it on a public HTTPS URL, and pairs it. The new
 environment reconnects like any other remote environment.
 
@@ -28,6 +28,12 @@ For Vercel, create an access token at vercel.com/account/settings/tokens; T3 Cod
 team and a `t3-sandboxes` project unless you fill in **Team** or **Project** (a change applies to
 new sandboxes; existing ones stay where they were created), and a sandbox on the
 Hobby plan stops after 45 minutes, so resume it from the Sandboxes list to keep working.
+
+Upstash is new. Create a Box API key in the Upstash Console at console.upstash.com. Upstash pauses
+a box after an hour idle (six hours on paid plans) and may not count a running agent as activity,
+so a long turn can stop partway and the sandbox then shows as stopped. Opening the sandbox's URL or
+choosing **Resume** wakes it, and T3 Code starts again on it. Medium and Large boxes need a paid
+plan. Upstash sandboxes cannot be saved as templates and show no cost.
 
 The key is saved on the T3 Code server that provisions the sandbox, not on the client. Creating a
 sandbox bills the provider account that owns the key. Stop, resume, and delete sandboxes from
@@ -82,7 +88,7 @@ when you resume it.
 Most sandboxes get a full Tailscale connection. One that cannot create a network device runs
 Tailscale in userspace instead: T3 Code then points Claude at Tailscale's local proxy, and other
 programs in the sandbox reach the tailnet only through `http://localhost:1055`. Tailscale needs root
-or passwordless sudo on the sandbox, which Boat and Vercel provide.
+or passwordless sudo on the sandbox, which Boat, Upstash, and Vercel provide.
 
 ## T3 Connect
 
