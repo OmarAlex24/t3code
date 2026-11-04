@@ -335,6 +335,7 @@ fi
 report MODE "$mode"
 ${join}report STATE "$(backend)"
 report NODE "$(status_json | sed -n 's/^ *"ID": *"\\([^"]*\\)".*/\\1/p' | head -n 1)"
+report IP "$(ts ip -4 2>/dev/null | head -n 1)"
 exit 0`;
   return options.authKey === undefined
     ? { command }
@@ -350,6 +351,8 @@ export interface TailscaleReport {
   readonly state?: string;
   /** The node's stable id, which the Tailscale API accepts as the device id. */
   readonly nodeId?: string;
+  /** The node's tailnet IPv4 address, where a tailnet-only sandbox serves T3. */
+  readonly ip?: string;
 }
 
 /** What `tailscaleScript` reported, or null when it printed nothing T3 recognizes. */
@@ -369,12 +372,16 @@ export const parseTailscaleReport = (stdout: string): TailscaleReport | null => 
   const daemon = pick("DAEMON", ["systemd", "nohup"] as const);
   const state = values.get("STATE") || undefined;
   const nodeId = values.get("NODE") || undefined;
+  const ip = /^100\.\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(values.get("IP") ?? "")
+    ? values.get("IP")
+    : undefined;
   return {
     ...(error === undefined ? {} : { error }),
     ...(mode === undefined ? {} : { mode }),
     ...(daemon === undefined ? {} : { daemon }),
     ...(state === undefined ? {} : { state }),
     ...(nodeId === undefined ? {} : { nodeId }),
+    ...(ip === undefined ? {} : { ip }),
   };
 };
 
@@ -392,3 +399,52 @@ if command -v tailscale >/dev/null 2>&1; then
   as_root rm -rf ${paths.state} >/dev/null 2>&1 || true
 fi`;
 };
+
+const REPO_PREFIX = "T3_REPO_";
+
+/**
+ * Clones the project into `~/work/<directory>` and registers it with the running T3 server. A
+ * retry starts from a fresh clone, and a project an earlier attempt registered is replaced, since
+ * nothing has run in it yet. The clone URL never carries a credential: `gh auth setup-git` from the
+ * credentials step answers for private repositories.
+ */
+export const repositoryScript = (input: {
+  readonly cloneUrl: string;
+  readonly directory: string;
+  readonly title: string;
+  readonly branch?: string | undefined;
+}) => `set -eu
+export PATH="$HOME/.local/bin:$PATH"
+dir="$HOME/work/${input.directory}"
+mkdir -p "$HOME/work"
+rm -rf "$dir"
+GIT_TERMINAL_PROMPT=0 git clone --quiet${input.branch === undefined ? "" : ` --branch ${shellQuote(input.branch)}`} -- ${shellQuote(input.cloneUrl)} "$dir"
+printf '${REPO_PREFIX}DIR: %s\\n' "$dir"
+if ! added="$(t3 project add "$dir" --title ${shellQuote(input.title)} 2>&1)"; then
+  t3 project remove "$dir" >/dev/null 2>&1 || true
+  added="$(t3 project add "$dir" --title ${shellQuote(input.title)} 2>&1)"
+fi
+printf '%s\\n' "$added" | sed -n 's/^Added project \\([^ ]*\\) .*/${REPO_PREFIX}PROJECT: \\1/p'`;
+
+/** The clone's directory and the project id `t3 project add` printed, or null for either. */
+export const parseRepositoryReport = (stdout: string) => {
+  const values = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    const match = /^T3_REPO_([A-Z]+): (.+)$/u.exec(line.trim());
+    if (match !== null) values.set(match[1]!, match[2]!.trim());
+  }
+  return { directory: values.get("DIR") ?? null, projectId: values.get("PROJECT") ?? null };
+};
+
+/**
+ * Writes a file whose content must not appear in command text, for drivers without a files API.
+ * The content travels base64-encoded in `secrets`, which every driver keeps out of the command.
+ */
+export const writeFileScript = (path: string, content: string): SandboxScript => ({
+  secrets: { T3_FILE_CONTENT: base64(content) },
+  command: `set -eu
+umask 077
+mkdir -p "$(dirname -- ${shellQuote(path)})"
+printf '%s' "$T3_FILE_CONTENT" | base64 -d >${shellQuote(path)}
+unset T3_FILE_CONTENT`,
+});

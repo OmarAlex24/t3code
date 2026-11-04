@@ -1,5 +1,4 @@
 import { SandboxProviderError, type SandboxTemplate } from "@t3tools/contracts";
-import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { HttpClientRequest } from "effect/http";
@@ -517,38 +516,6 @@ export const vercelDriver: SandboxProviderDriver = {
     });
     const url = resumed.routes?.find((route) => route.port === SERVER_PORT)?.url;
     return url === undefined ? {} : { publicUrl: url };
-  }),
-  extend: Effect.fn("Vercel.extend")(function* (input) {
-    // A stopped sandbox gets the time left when it resumes.
-    if (!input.running) return;
-    const scope = yield* resolveScope(input.config);
-    const current = yield* getSandbox(input.config, scope, input.sandboxId, "start");
-    const session = current.session;
-    const expiresAt = current.sandbox.expiresAt;
-    if (current.sandbox.status !== "running" || session === undefined || !expiresAt) return;
-    const now = yield* Clock.currentTimeMillis;
-    // `extend-timeout` adds to the session, which the plan caps; past the cap the session stops
-    // early and T3's deadline still stands.
-    const duration = Math.min(
-      now + input.ttlMinutes * 60_000 - expiresAt,
-      scope.sessionMaxMinutes * 60_000 - session.timeout,
-    );
-    if (duration < 1000) return;
-    yield* requestJson({
-      provider: "vercel",
-      stage: "config",
-      schema: Ignored,
-      request: jsonBody(
-        request(
-          input.config,
-          scope,
-          HttpClientRequest.post(
-            `${VERCEL_API_BASE}/v2/sandboxes/sessions/${encodeURIComponent(session.id)}/extend-timeout`,
-          ),
-        ),
-        { duration },
-      ),
-    });
   }),
   status: Effect.fn("Vercel.status")(function* (input) {
     const scope = yield* resolveScope(input.config);

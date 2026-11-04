@@ -9,9 +9,14 @@ import * as NodePath from "node:path";
 
 import * as EffectNodeCrypto from "@effect/platform-node/NodeCrypto";
 import { it } from "@effect/vitest";
-import { EnvironmentId, SandboxProviderError, SecretProviderId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  SandboxProviderError,
+  SecretProviderId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
-import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -20,6 +25,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import {
   FetchHttpClient,
@@ -37,7 +43,14 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as SandboxRecords from "../persistence/SandboxRecords.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SandboxHostAccess from "./SandboxHostAccess.ts";
-import type { SandboxRecord } from "@t3tools/contracts";
+import type {
+  SandboxEnvironmentConfig,
+  SandboxRecord,
+  SandboxSetupSnapshot,
+} from "@t3tools/contracts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
+import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import { layerHttpClient, requestJson } from "./SandboxProvider.ts";
 import { boatDriver } from "./providers/boat.ts";
 import { celestoDriver } from "./providers/celesto.ts";
@@ -56,13 +69,111 @@ const descriptor = {
   capabilities: {},
 };
 
-const recordRepository = Layer.succeed(
+const hostEnvironmentId = EnvironmentId.make("99999999-9999-4999-8999-999999999999");
+
+const memoryRepository = (initial: ReadonlyArray<SandboxRecord> = []) => {
+  const records = new Map(initial.map((record) => [record.instanceId, record]));
+  const layer = Layer.succeed(
+    SandboxRecords.SandboxRecordRepository,
+    SandboxRecords.SandboxRecordRepository.of({
+      list: Effect.sync(() => [...records.values()]),
+      get: (instanceId) => Effect.sync(() => Option.fromUndefinedOr(records.get(instanceId))),
+      findByEnvironmentId: (environmentId) =>
+        Effect.sync(() =>
+          Option.fromUndefinedOr(
+            [...records.values()].find((record) => record.environmentId === environmentId),
+          ),
+        ),
+      put: (record) =>
+        Effect.sync(() => {
+          records.set(record.instanceId, record);
+        }),
+      remove: (instanceId) =>
+        Effect.sync(() => {
+          records.delete(instanceId);
+        }),
+    }),
+  );
+  /** The record of the sandbox that answers as `environmentId`. */
+  const byEnvironment = (environmentId: string) =>
+    [...records.values()].find((record) => record.environmentId === environmentId);
+  return { layer, records, byEnvironment };
+};
+
+// Keeps nothing, so a test can create several sandboxes that answer as the same environment.
+const discardingRepository = Layer.succeed(
   SandboxRecords.SandboxRecordRepository,
   SandboxRecords.SandboxRecordRepository.of({
     list: Effect.succeed([]),
     get: () => Effect.succeedNone,
+    findByEnvironmentId: () => Effect.succeedNone,
     put: () => Effect.void,
     remove: () => Effect.void,
+  }),
+);
+
+const memoryConfigs = (initial: ReadonlyArray<SandboxEnvironmentConfig> = []) => {
+  const configs = new Map(initial.map((config) => [config.id, config]));
+  const layer = Layer.succeed(
+    SandboxRecords.SandboxConfigRepository,
+    SandboxRecords.SandboxConfigRepository.of({
+      list: Effect.sync(() => [...configs.values()]),
+      get: (configId) => Effect.sync(() => Option.fromUndefinedOr(configs.get(configId))),
+      put: (config) =>
+        Effect.sync(() => {
+          configs.set(config.id, config);
+        }),
+      remove: (configId) =>
+        Effect.sync(() => {
+          configs.delete(configId);
+        }),
+    }),
+  );
+  return { layer, configs };
+};
+
+/** The host's checkout: ignored files listed for env-file copies, and their contents. */
+const memoryWorkspace = (files: Readonly<Record<string, string>> = {}) =>
+  Layer.mergeAll(
+    Layer.succeed(
+      WorkspaceEntries.WorkspaceEntries,
+      WorkspaceEntries.WorkspaceEntries.of({
+        browse: () => Effect.die("unused"),
+        list: () => Effect.die("unused"),
+        search: () => Effect.die("unused"),
+        searchContents: () => Effect.die("unused"),
+        refresh: () => Effect.void,
+        listIgnoredFiles: () =>
+          Effect.succeed({
+            files: Object.entries(files).map(([path, contents]) => ({
+              path,
+              byteLength: new TextEncoder().encode(contents).length,
+            })),
+            truncated: false,
+          }),
+      }),
+    ),
+    Layer.succeed(
+      WorkspaceFileSystem.WorkspaceFileSystem,
+      WorkspaceFileSystem.WorkspaceFileSystem.of({
+        getMetadata: () => Effect.die("unused"),
+        writeFile: () => Effect.die("unused"),
+        readFile: (input) =>
+          Effect.succeed({
+            relativePath: input.relativePath,
+            contents: files[input.relativePath] ?? "",
+            byteLength: new TextEncoder().encode(files[input.relativePath] ?? "").length,
+            truncated: false,
+            exists: files[input.relativePath] !== undefined,
+          }),
+      }),
+    ),
+  );
+
+const hostIdentity = Layer.succeed(
+  ServerEnvironment.ServerEnvironmentIdentity,
+  ServerEnvironment.ServerEnvironmentIdentity.of({
+    getEnvironmentId: Effect.succeed(hostEnvironmentId),
   }),
 );
 
@@ -83,15 +194,20 @@ const memorySecrets = () => {
 
 const provisionerLayer = (
   settings: Parameters<typeof ServerSettings.layerTest>[0] = {},
-  repository: Layer.Layer<SandboxRecords.SandboxRecordRepository> = recordRepository,
+  repository: Layer.Layer<SandboxRecords.SandboxRecordRepository> = discardingRepository,
   options: {
     readonly host?: Parameters<typeof SandboxHostAccess.layerTest>[0];
     readonly secrets?: Layer.Layer<ServerSecretStore.ServerSecretStore>;
+    readonly configs?: Layer.Layer<SandboxRecords.SandboxConfigRepository>;
+    readonly workspace?: Readonly<Record<string, string>>;
   } = {},
 ) =>
   SandboxProvisioner.layer.pipe(
     Layer.provideMerge(ServerSettings.layerTest(settings)),
     Layer.provide(repository),
+    Layer.provide(options.configs ?? memoryConfigs().layer),
+    Layer.provide(hostIdentity),
+    Layer.provide(memoryWorkspace(options.workspace)),
     Layer.provide(SandboxHostAccess.layerTest(options.host)),
     Layer.provide(options.secrets ?? memorySecrets().layer),
     Layer.provide(secretResolver),
@@ -110,26 +226,6 @@ const secretResolver = Layer.succeed(SecretResolver.SecretResolver, {
 });
 
 const testLayer = provisionerLayer();
-
-const memoryRepository = (initial: ReadonlyArray<SandboxRecord> = []) => {
-  const records = new Map(initial.map((record) => [record.environmentId, record]));
-  const layer = Layer.succeed(
-    SandboxRecords.SandboxRecordRepository,
-    SandboxRecords.SandboxRecordRepository.of({
-      list: Effect.sync(() => [...records.values()]),
-      get: (environmentId) => Effect.sync(() => Option.fromUndefinedOr(records.get(environmentId))),
-      put: (record) =>
-        Effect.sync(() => {
-          records.set(record.environmentId, record);
-        }),
-      remove: (environmentId) =>
-        Effect.sync(() => {
-          records.delete(environmentId);
-        }),
-    }),
-  );
-  return { layer, records };
-};
 
 // Shaped like a live `GET /limits` response, with invented numbers and no account ids.
 const boatLimitsFixture = (overrides: Record<string, unknown> = {}) => ({
@@ -958,16 +1054,15 @@ describe("daytonaDriver", () => {
       expect(created).toEqual({ id: "sandbox_1", name: "Daytona sandbox" });
       expect(executed.stdout).toContain("Token: pair_xyz");
       expect(preview).toBe("https://3773-sandbox_1.proxy.daytona.works");
-      yield* daytonaDriver.extend!({
+      yield* daytonaDriver.resume!({
         config: { apiKey: "dtn_test", settings: {} },
         sandboxId: created.id,
         ttlMinutes: 180,
-        running: false,
       }).pipe(Effect.provideService(HttpClient.HttpClient, client));
 
       // Daytona deletes at its TTL, so the backstop sits a day past T3's non-destructive stop.
       expect(JSON.parse(requests[0]!.body)).toMatchObject({ ttlMinutes: 480 + 1440 });
-      // `/ttl/{minutes}` counts from the call, even on a stopped sandbox, so it gets the same day.
+      // `/ttl/{minutes}` counts from the call, so each start gets the same day past its running limit.
       expect(requests.at(-1)).toMatchObject({
         method: "POST",
         url: "https://app.daytona.io/api/sandbox/sandbox_1/ttl/1620",
@@ -1485,82 +1580,50 @@ describe("vercelDriver", () => {
     }),
   );
 
-  it.effect(
-    "stops the current session, resumes into a new one, and extends within the plan",
-    () => {
-      const requests: Array<{ method: string; url: string; body: unknown }> = [];
-      let plan = "pro";
-      let running = true;
-      const client = recording(requests, (request) => {
-        const url = new URL(request.url);
-        if (url.pathname === "/v2/teams") return Response.json({ teams: [vercelTeam(plan)] });
-        if (request.method === "POST" || request.method === "PATCH") return Response.json({});
-        return Response.json(
-          url.searchParams.get("resume") === "true"
-            ? vercelSandbox({ currentSessionId: "sbx_next" }, { id: "sbx_next" })
-            : vercelSandbox({ status: running ? "running" : "stopped" }),
-        );
+  it.effect("stops the current session and resumes into a new one", () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const plan = "pro";
+    let running = true;
+    const client = recording(requests, (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === "/v2/teams") return Response.json({ teams: [vercelTeam(plan)] });
+      if (request.method === "POST" || request.method === "PATCH") return Response.json({});
+      return Response.json(
+        url.searchParams.get("resume") === "true"
+          ? vercelSandbox({ currentSessionId: "sbx_next" }, { id: "sbx_next" })
+          : vercelSandbox({ status: running ? "running" : "stopped" }),
+      );
+    });
+    const calls = () => requests.map((request) => `${request.method} ${request.url}`);
+    return Effect.gen(function* () {
+      yield* vercelDriver.stop!({ config: vercelConfig, sandboxId: "box-attempt1" });
+      expect(calls().at(-1)).toBe(
+        "POST https://api.vercel.com/v2/sandboxes/sessions/sbx_current/stop?teamId=team_1",
+      );
+      // Vercel answers 415 to a POST without a JSON body.
+      expect(requests.at(-1)?.body).toEqual({});
+
+      requests.length = 0;
+      const resumed = yield* vercelDriver.resume!({
+        config: vercelConfig,
+        sandboxId: "box-attempt1",
+        ttlMinutes: 120,
       });
-      const calls = () => requests.map((request) => `${request.method} ${request.url}`);
-      return Effect.gen(function* () {
-        yield* vercelDriver.stop!({ config: vercelConfig, sandboxId: "box-attempt1" });
-        expect(calls().at(-1)).toBe(
-          "POST https://api.vercel.com/v2/sandboxes/sessions/sbx_current/stop?teamId=team_1",
-        );
-        // Vercel answers 415 to a POST without a JSON body.
-        expect(requests.at(-1)?.body).toEqual({});
+      expect(resumed).toEqual({ publicUrl: "https://sb-t3.vercel.run" });
+      // The new session takes the sandbox's timeout, so it is set before the resume.
+      expect(calls().slice(1)).toEqual([
+        "PATCH https://api.vercel.com/v2/sandboxes/box-attempt1?teamId=team_1&projectId=t3-sandboxes",
+        "GET https://api.vercel.com/v2/sandboxes/box-attempt1?teamId=team_1&projectId=t3-sandboxes&resume=true",
+      ]);
+      expect(requests[1]?.body).toEqual({ timeout: 120 * 60_000 });
 
-        requests.length = 0;
-        const resumed = yield* vercelDriver.resume!({
-          config: vercelConfig,
-          sandboxId: "box-attempt1",
-          ttlMinutes: 120,
-        });
-        expect(resumed).toEqual({ publicUrl: "https://sb-t3.vercel.run" });
-        // The new session takes the sandbox's timeout, so it is set before the resume.
-        expect(calls().slice(1)).toEqual([
-          "PATCH https://api.vercel.com/v2/sandboxes/box-attempt1?teamId=team_1&projectId=t3-sandboxes",
-          "GET https://api.vercel.com/v2/sandboxes/box-attempt1?teamId=team_1&projectId=t3-sandboxes&resume=true",
-        ]);
-        expect(requests[1]?.body).toEqual({ timeout: 120 * 60_000 });
-
-        // The session ends 20 minutes from now (TestClock starts at 0) and should end in 80.
-        requests.length = 0;
-        yield* vercelDriver.extend!({
-          config: vercelConfig,
-          sandboxId: "box-attempt1",
-          ttlMinutes: 80,
-          running: true,
-        });
-        expect(calls().at(-1)).toBe(
-          "POST https://api.vercel.com/v2/sandboxes/sessions/sbx_current/extend-timeout?teamId=team_1",
-        );
-        expect(requests.at(-1)?.body).toEqual({ duration: 60 * 60_000 });
-
-        // Hobby caps the session at 45 minutes; the rest of T3's deadline needs a resume.
-        plan = "hobby";
-        yield* vercelDriver.extend!({
-          config: vercelConfig,
-          sandboxId: "box-attempt1",
-          ttlMinutes: 80,
-          running: true,
-        });
-        expect(requests.at(-1)?.body).toEqual({ duration: 25 * 60_000 });
-
-        // A stopped sandbox gets its time when it resumes, and a stopped one is not stopped again.
-        requests.length = 0;
-        running = false;
-        yield* vercelDriver.extend!({
-          config: vercelConfig,
-          sandboxId: "box-attempt1",
-          ttlMinutes: 80,
-          running: false,
-        });
-        yield* vercelDriver.stop!({ config: vercelConfig, sandboxId: "box-attempt1" });
-        expect(requests.map((request) => request.method)).toEqual(["GET", "GET"]);
-      }).pipe(Effect.provideService(HttpClient.HttpClient, client));
-    },
-  );
+      // A stopped sandbox is not stopped again.
+      requests.length = 0;
+      running = false;
+      yield* vercelDriver.stop!({ config: vercelConfig, sandboxId: "box-attempt1" });
+      expect(requests.map((request) => request.method)).not.toContain("POST");
+    }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+  });
 
   it.effect("deletes a sandbox whose create answer was lost", () => {
     const requests: Array<{ method: string; url: string; body: unknown }> = [];
@@ -2612,10 +2675,10 @@ describe("SandboxProvisioner lifecycle", () => {
             });
             const listed = yield* provisioner.list;
             const stopped = yield* provisioner.stop({
-              environmentId: created.environmentId,
+              instanceId: created.instanceId,
             });
             const resumed = yield* provisioner.resume({
-              environmentId: created.environmentId,
+              instanceId: created.instanceId,
             });
             return { created, listed, stopped, resumed };
           }),
@@ -2627,14 +2690,17 @@ describe("SandboxProvisioner lifecycle", () => {
       expect(result.created.environmentId).toBe(testEnvironmentId);
       expect(result.listed.sandboxes).toHaveLength(1);
       expect(result.listed.sandboxes[0]?.state).toBe("running");
-      expect(result.listed.sandboxes[0]?.ttlMinutes).toBe(480);
-      expect(result.listed.sandboxes[0]?.hardDeadlineAt).not.toBeNull();
-      const deadline = result.listed.sandboxes[0]?.hardDeadlineAt;
+      expect(result.listed.sandboxes[0]?.maxRunningMinutes).toBe(480);
+      expect(result.listed.sandboxes[0]?.runningSince).not.toBeNull();
+      expect(result.listed.sandboxes[0]?.threadId).toBeUndefined();
+      expect(result.listed.orphans).toEqual([]);
+      // The running limit counts from the last start, so a stop clears it and a resume restarts it.
       expect(result.stopped.sandbox.state).toBe("stopped");
-      // The deadline is the sandbox's lifetime, so neither stop nor resume extends it.
-      expect(result.stopped.sandbox.hardDeadlineAt).toBe(deadline);
+      expect(result.stopped.sandbox.runningSince).toBeNull();
+      expect(result.stopped.sandbox.stoppedAt).toBeDefined();
       expect(result.resumed.sandbox.state).toBe("running");
-      expect(result.resumed.sandbox.hardDeadlineAt).toBe(deadline);
+      expect(result.resumed.sandbox.runningSince).not.toBeNull();
+      expect(result.resumed.sandbox.stoppedAt).toBeUndefined();
       expect(requests.some((request) => request.endsWith("/stop"))).toBe(true);
       expect(requests.some((request) => request.endsWith("/resume"))).toBe(true);
       // Providers without systemd come back without `t3 serve`, so resume restarts it and only
@@ -2648,6 +2714,7 @@ describe("SandboxProvisioner lifecycle", () => {
 
   it.effect("marks a resumed sandbox as errored when T3 does not start on it", () => {
     const stopped: SandboxRecord = {
+      instanceId: testEnvironmentId,
       environmentId: testEnvironmentId,
       provider: "boat",
       sandboxId: boatSandboxId,
@@ -2657,15 +2724,15 @@ describe("SandboxProvisioner lifecycle", () => {
       createdAt: "1970-01-01T00:00:00.000Z",
       updatedAt: "1970-01-01T00:00:00.000Z",
       httpBaseUrl: "https://boat.example/t3",
-      hardDeadlineAt: "2100-01-01T00:00:00.000Z",
-      ttlMinutes: 480,
+      runningSince: null,
+      maxRunningMinutes: 480,
     };
     const repository = memoryRepository([stopped]);
     const requests: Array<string> = [];
     return Effect.gen(function* () {
       const failure = yield* SandboxProvisioner.SandboxProvisioner.pipe(
         Effect.flatMap((provisioner) =>
-          provisioner.resume({ environmentId: testEnvironmentId }).pipe(Effect.flip),
+          provisioner.resume({ instanceId: testEnvironmentId }).pipe(Effect.flip),
         ),
         Effect.provide(
           provisionerLayer(
@@ -2683,41 +2750,32 @@ describe("SandboxProvisioner lifecycle", () => {
       expect(failure.detail).toBe("The sandbox resumed, but T3 Code did not start on it.");
       expect(failure.message).not.toContain("boom");
       // The machine is running and billing, so the record must not claim it is still stopped.
-      expect(repository.records.get(testEnvironmentId)?.state).toBe("error");
+      expect(repository.byEnvironment(testEnvironmentId)?.state).toBe("error");
       expect(requests.some((request) => request.endsWith("/resume"))).toBe(true);
     });
   });
 
-  it.effect("refuses to resume a sandbox past its hard deadline", () => {
-    const expired: SandboxRecord = {
+  it.effect("refuses to resume a sandbox whose disk the provider no longer keeps", () => {
+    const diskExpired: SandboxRecord = {
+      instanceId: testEnvironmentId,
       environmentId: testEnvironmentId,
       provider: "boat",
       sandboxId: boatSandboxId,
       label: "Expired sandbox",
       size: "small",
-      state: "stopped",
+      state: "expired",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
       httpBaseUrl: "https://boat.example/t3",
-      hardDeadlineAt: "1960-01-01T00:00:00.000Z",
-      ttlMinutes: 480,
+      runningSince: null,
+      maxRunningMinutes: 480,
     };
-    // Within its lifetime, but the provider no longer keeps the stopped sandbox's disk.
-    const diskExpired: SandboxRecord = {
-      ...expired,
-      environmentId: EnvironmentId.make("22222222-2222-4222-8222-222222222222"),
-      state: "expired",
-      hardDeadlineAt: "2100-01-01T00:00:00.000Z",
-    };
-    const repository = memoryRepository([expired, diskExpired]);
+    const repository = memoryRepository([diskExpired]);
     const requests: Array<string> = [];
     return Effect.gen(function* () {
-      const [failure, expiredFailure] = yield* SandboxProvisioner.SandboxProvisioner.pipe(
+      const failure = yield* SandboxProvisioner.SandboxProvisioner.pipe(
         Effect.flatMap((provisioner) =>
-          Effect.all([
-            provisioner.resume({ environmentId: testEnvironmentId }).pipe(Effect.flip),
-            provisioner.resume({ environmentId: diskExpired.environmentId }).pipe(Effect.flip),
-          ]),
+          provisioner.resume({ instanceId: diskExpired.instanceId }).pipe(Effect.flip),
         ),
         Effect.provide(
           provisionerLayer(
@@ -2728,15 +2786,13 @@ describe("SandboxProvisioner lifecycle", () => {
         Effect.provideService(HttpClient.HttpClient, lifecycleClient(requests)),
       );
 
-      expect(failure.detail).toContain("8-hour limit");
-      expect(expiredFailure).toMatchObject({
+      expect(failure).toMatchObject({
         stage: "start",
         code: "snapshot_expired",
         detail: "Boat no longer keeps this stopped sandbox's disk. Delete it and create a new one.",
       });
-      expect(repository.records.get(testEnvironmentId)?.state).toBe("stopped");
-      expect(repository.records.get(diskExpired.environmentId)?.state).toBe("expired");
-      // Neither spends a start nor reads the provider's limits.
+      expect(repository.records.get(diskExpired.instanceId)?.state).toBe("expired");
+      // It neither spends a start nor reads the provider's limits.
       expect(requests).toEqual([]);
     });
   });
@@ -2820,14 +2876,16 @@ describe("SandboxProvisioner lifecycle", () => {
       expect(
         bodies.find((entry) => entry.url === "https://boat.dev/api/v1/sandboxes")?.body,
       ).toMatchObject({ ttlSeconds: 7200 });
-      const record = repository.records.get(testEnvironmentId);
-      expect(record?.ttlMinutes).toBe(120);
-      expect(record?.hardDeadlineAt).toBe("1970-01-01T02:00:00.000Z");
+      const record = repository.byEnvironment(testEnvironmentId);
+      // The provider's auto-stop is the backstop, so the running limit cannot outlast it.
+      expect(record?.maxRunningMinutes).toBe(120);
+      expect(record?.runningSince).toBe("1970-01-01T00:00:00.000Z");
     });
   });
 
   it.effect("checks the provider's limits before resuming, since a resume is a start", () => {
     const stopped: SandboxRecord = {
+      instanceId: testEnvironmentId,
       environmentId: testEnvironmentId,
       provider: "boat",
       sandboxId: boatSandboxId,
@@ -2837,15 +2895,15 @@ describe("SandboxProvisioner lifecycle", () => {
       createdAt: "1970-01-01T00:00:00.000Z",
       updatedAt: "1970-01-01T00:00:00.000Z",
       httpBaseUrl: "https://boat.example/t3",
-      hardDeadlineAt: "2100-01-01T00:00:00.000Z",
-      ttlMinutes: 480,
+      runningSince: null,
+      maxRunningMinutes: 480,
     };
     const repository = memoryRepository([stopped]);
     const requests: Array<string> = [];
     return Effect.gen(function* () {
       const failure = yield* SandboxProvisioner.SandboxProvisioner.pipe(
         Effect.flatMap((provisioner) =>
-          provisioner.resume({ environmentId: testEnvironmentId }).pipe(Effect.flip),
+          provisioner.resume({ instanceId: testEnvironmentId }).pipe(Effect.flip),
         ),
         Effect.provide(
           provisionerLayer(
@@ -2861,12 +2919,13 @@ describe("SandboxProvisioner lifecycle", () => {
 
       expect(failure).toMatchObject({ stage: "config", code: "billing_required" });
       expect(requests).toEqual(["GET https://boat.dev/api/v1/limits"]);
-      expect(repository.records.get(testEnvironmentId)?.state).toBe("stopped");
+      expect(repository.byEnvironment(testEnvironmentId)?.state).toBe("stopped");
     });
   });
 
-  it.effect("stops a running sandbox when its hard deadline passes", () => {
+  it.effect("stops a running sandbox once it has run past its limit", () => {
     const expired: SandboxRecord = {
+      instanceId: testEnvironmentId,
       environmentId: testEnvironmentId,
       provider: "boat",
       sandboxId: boatSandboxId,
@@ -2876,16 +2935,25 @@ describe("SandboxProvisioner lifecycle", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
       httpBaseUrl: "https://boat.example/t3",
-      hardDeadlineAt: "1960-01-01T00:00:00.000Z",
-      ttlMinutes: 480,
+      runningSince: "1969-12-31T16:00:00.000Z",
+      maxRunningMinutes: 480,
     };
     // A resume that could not start T3 leaves the machine running under an `error` record.
     const errored: SandboxRecord = {
       ...expired,
+      instanceId: "errored",
       environmentId: EnvironmentId.make("22222222-2222-4222-8222-222222222222"),
       state: "error",
     };
-    const repository = memoryRepository([expired, errored]);
+    // Started a minute short of its limit, so it keeps running.
+    const fresh: SandboxRecord = {
+      ...expired,
+      instanceId: "fresh",
+      environmentId: EnvironmentId.make("33333333-3333-4333-8333-333333333333"),
+      sandboxId: "bx_fresh",
+      runningSince: "1969-12-31T16:01:00.000Z",
+    };
+    const repository = memoryRepository([expired, errored, fresh]);
     const requests: Array<string> = [];
     return Effect.gen(function* () {
       yield* SandboxProvisioner.SandboxProvisioner.pipe(
@@ -2899,152 +2967,18 @@ describe("SandboxProvisioner lifecycle", () => {
         Effect.provideService(HttpClient.HttpClient, lifecycleClient(requests)),
       );
 
-      expect(repository.records.get(testEnvironmentId)?.state).toBe("stopped");
-      expect(repository.records.get(errored.environmentId)?.state).toBe("stopped");
+      expect(repository.byEnvironment(testEnvironmentId)?.state).toBe("stopped");
+      expect(repository.byEnvironment(testEnvironmentId)).toMatchObject({
+        runningSince: null,
+        stoppedAt: "1970-01-01T00:00:00.000Z",
+      });
+      expect(repository.records.get("errored")?.state).toBe("stopped");
+      expect(repository.records.get("fresh")?.state).toBe("running");
       expect(requests.filter((request) => request.endsWith("/stop"))).toHaveLength(2);
-      // One provider call per record per sweep: the deadline stop replaces the status check.
+      // One provider call per record per sweep: the limit stop replaces the status check.
       expect(requests).not.toContain(`GET https://boat.dev/api/v1/sandboxes/${boatSandboxId}`);
     });
   });
-
-  it.effect("extends a deadline up to the lifetime cap and moves the provider's backstop", () =>
-    Effect.gen(function* () {
-      const base: SandboxRecord = {
-        environmentId: testEnvironmentId,
-        provider: "boat",
-        sandboxId: boatSandboxId,
-        label: "Extended sandbox",
-        size: "small",
-        state: "running",
-        createdAt: "1970-01-01T00:00:00.000Z",
-        updatedAt: "1970-01-01T00:00:00.000Z",
-        httpBaseUrl: "https://boat.example/t3",
-        hardDeadlineAt: "1970-01-01T08:00:00.000Z",
-        ttlMinutes: 480,
-      };
-      const atLifetime = (ttlMinutes: number) => ({
-        ttlMinutes,
-        hardDeadlineAt: DateTime.formatIso(DateTime.makeUnsafe(ttlMinutes * 60_000)),
-      });
-      const cases = [
-        {
-          name: "adds to a running sandbox and re-arms Boat's auto-stop from now",
-          record: base,
-          minutes: 120,
-          expected: { ttlMinutes: 600, hardDeadlineAt: "1970-01-01T10:00:00.000Z" },
-          patchTtlSeconds: 600 * 60,
-        },
-        {
-          name: "keeps a trial's auto-stop within the plan maximum",
-          record: base,
-          minutes: 120,
-          limits: trialLimits,
-          expected: { ttlMinutes: 600, hardDeadlineAt: "1970-01-01T10:00:00.000Z" },
-          patchTtlSeconds: 120 * 60,
-        },
-        {
-          // A stopped Boat sandbox gets the remaining time when it resumes.
-          name: "grants only what is left under the cap, without a Boat call when stopped",
-          record: { ...base, state: "stopped", ...atLifetime(1380) },
-          minutes: 240,
-          expected: { ttlMinutes: 1440, hardDeadlineAt: "1970-01-02T00:00:00.000Z" },
-          patchTtlSeconds: null,
-        },
-        {
-          name: "refuses a sandbox at the cap",
-          record: { ...base, ...atLifetime(1440) },
-          minutes: 120,
-          error: "This sandbox is at the 24-hour lifetime limit set in Settings.",
-        },
-        {
-          name: "follows a lower cap from settings",
-          record: base,
-          minutes: 120,
-          cap: 480,
-          error: "This sandbox is at the 8-hour lifetime limit set in Settings.",
-        },
-        {
-          name: "refuses a sandbox past its deadline",
-          record: { ...base, state: "stopped", hardDeadlineAt: "1960-01-01T00:00:00.000Z" },
-          minutes: 120,
-          error: "This sandbox reached its 8-hour limit. Delete it and create a new one.",
-        },
-        {
-          name: "refuses an expired sandbox",
-          record: { ...base, state: "expired" },
-          minutes: 120,
-          error: "Only a running or stopped sandbox can be extended.",
-        },
-        {
-          name: "refuses a deleted sandbox",
-          record: { ...base, state: "deleted" },
-          minutes: 120,
-          error: "Only a running or stopped sandbox can be extended.",
-        },
-      ] satisfies ReadonlyArray<{
-        readonly name: string;
-        readonly record: SandboxRecord;
-        readonly minutes: number;
-        readonly limits?: unknown;
-        readonly cap?: number;
-        readonly expected?: Pick<SandboxRecord, "ttlMinutes" | "hardDeadlineAt">;
-        readonly patchTtlSeconds?: number | null;
-        readonly error?: string;
-      }>;
-      for (const testCase of cases) {
-        const repository = memoryRepository([testCase.record]);
-        const requests: Array<string> = [];
-        const bodies: Array<{ readonly url: string; readonly body: unknown }> = [];
-        const result = yield* SandboxProvisioner.SandboxProvisioner.pipe(
-          Effect.flatMap((provisioner) =>
-            provisioner.extend({ environmentId: testEnvironmentId, minutes: testCase.minutes }),
-          ),
-          Effect.provide(
-            provisionerLayer(
-              {
-                sandboxProviders: { boat: { apiKey: "boat_test" } },
-                ...("cap" in testCase ? { sandboxLifetimeCapMinutes: testCase.cap } : {}),
-              },
-              repository.layer,
-            ),
-          ),
-          Effect.provideService(
-            HttpClient.HttpClient,
-            lifecycleClient(requests, {
-              bodies,
-              ...("limits" in testCase ? { limits: testCase.limits } : {}),
-            }),
-          ),
-          Effect.result,
-        );
-        const stored = repository.records.get(testEnvironmentId);
-        const patches = requests.filter((request) => request.startsWith("PATCH"));
-        if ("error" in testCase) {
-          expect(result._tag, testCase.name).toBe("Failure");
-          if (result._tag === "Failure") {
-            expect(result.failure).toMatchObject({ detail: testCase.error });
-          }
-          expect(stored, testCase.name).toEqual(testCase.record);
-          expect(patches, testCase.name).toEqual([]);
-          continue;
-        }
-        expect(result._tag, testCase.name).toBe("Success");
-        expect(stored, testCase.name).toMatchObject(testCase.expected);
-        expect(stored?.createdAt).toBe(testCase.record.createdAt);
-        if (testCase.patchTtlSeconds === null) {
-          expect(patches, testCase.name).toEqual([]);
-        } else {
-          expect(patches, testCase.name).toEqual([
-            `PATCH https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
-          ]);
-          // Boat's PATCH sets the deadline to now + ttlSeconds; it does not add to it.
-          expect(bodies.find((entry) => entry.url.endsWith(boatSandboxId))?.body).toEqual({
-            ttlSeconds: testCase.patchTtlSeconds,
-          });
-        }
-      }
-    }),
-  );
 
   it.effect("syncs records with what the provider reports and fills their cost", () => {
     const environmentId = (digit: string) =>
@@ -3058,38 +2992,49 @@ describe("SandboxProvisioner lifecycle", () => {
       createdAt: "1970-01-01T00:00:00.000Z",
       updatedAt: "1970-01-01T00:00:00.000Z",
       httpBaseUrl: "https://boat.example/t3",
-      hardDeadlineAt: "2100-01-01T00:00:00.000Z",
-      ttlMinutes: 480,
+      runningSince: null,
+      maxRunningMinutes: 480,
     } as const;
     const records = {
       stoppedOutside: {
         ...base,
+        instanceId: environmentId("1"),
         environmentId: environmentId("1"),
         sandboxId: "bx_stopped",
         state: "running",
       },
       diskExpired: {
         ...base,
+        instanceId: environmentId("2"),
         environmentId: environmentId("2"),
         sandboxId: "bx_expired",
         state: "stopped",
       },
       unreachable: {
         ...base,
+        instanceId: environmentId("3"),
         environmentId: environmentId("3"),
         sandboxId: "bx_unreach",
         state: "running",
       },
-      gone: { ...base, environmentId: environmentId("4"), sandboxId: "bx_gone", state: "stopped" },
+      gone: {
+        ...base,
+        instanceId: environmentId("4"),
+        environmentId: environmentId("4"),
+        sandboxId: "bx_gone",
+        state: "stopped",
+      },
       // The machine runs but T3 did not start on it; "running" would hide that.
       notServing: {
         ...base,
+        instanceId: environmentId("5"),
         environmentId: environmentId("5"),
         sandboxId: "bx_errored",
         state: "error",
       },
       resumedMeanwhile: {
         ...base,
+        instanceId: environmentId("6"),
         environmentId: environmentId("6"),
         sandboxId: "bx_raced",
         state: "running",
@@ -3132,7 +3077,7 @@ describe("SandboxProvisioner lifecycle", () => {
           return respond(request, { sandbox: { id, state: "ready" } });
         case "bx_raced":
           // The provider auto-stopped it, and the user resumes it while this read is in flight.
-          repository.records.set(records.resumedMeanwhile.environmentId, {
+          repository.records.set(records.resumedMeanwhile.instanceId, {
             ...records.resumedMeanwhile,
             state: "running",
             updatedAt: "1970-01-01T00:00:30.000Z",
@@ -3149,7 +3094,7 @@ describe("SandboxProvisioner lifecycle", () => {
               provisioner.delete({
                 provider: "boat",
                 sandboxId: records.gone.sandboxId,
-                environmentId: records.gone.environmentId,
+                instanceId: records.gone.instanceId,
               }),
             ),
           ),
@@ -3167,28 +3112,27 @@ describe("SandboxProvisioner lifecycle", () => {
       yield* TestClock.adjust("1 minute");
       yield* Fiber.join(swept);
 
-      const stateOf = (record: SandboxRecord) =>
-        repository.records.get(record.environmentId)?.state;
+      const stateOf = (record: SandboxRecord) => repository.records.get(record.instanceId)?.state;
       expect(stateOf(records.stoppedOutside)).toBe("stopped");
       expect(stateOf(records.diskExpired)).toBe("expired");
       // An unreachable provider says nothing about the machine.
       expect(stateOf(records.unreachable)).toBe("running");
       expect(stateOf(records.notServing)).toBe("error");
-      expect(repository.records.get(records.resumedMeanwhile.environmentId)).toMatchObject({
+      expect(repository.byEnvironment(records.resumedMeanwhile.environmentId)).toMatchObject({
         state: "running",
         updatedAt: "1970-01-01T00:00:30.000Z",
       });
-      expect(repository.records.get(records.stoppedOutside.environmentId)).toMatchObject({
+      expect(repository.byEnvironment(records.stoppedOutside.environmentId)).toMatchObject({
         costDollars: 0.42,
         costSince: "1970-01-01T00:00:00.000Z",
       });
       // Cost alone is not a lifecycle change.
-      expect(repository.records.get(records.unreachable.environmentId)).toMatchObject({
+      expect(repository.byEnvironment(records.unreachable.environmentId)).toMatchObject({
         costDollars: 1.5,
         updatedAt: "1970-01-01T00:00:00.000Z",
       });
       // The 404 record was marked deleted, so deleting it only drops the record.
-      expect(repository.records.has(records.gone.environmentId)).toBe(false);
+      expect(repository.byEnvironment(records.gone.environmentId) !== undefined).toBe(false);
       expect(requests.filter((request) => request.startsWith("DELETE"))).toEqual([]);
       expect(requests.filter((request) => request.includes("include=cost"))).toEqual([
         "GET https://boat.dev/api/v1/sandboxes?include=cost&label=t3.code%2Frole%3Denvironment&limit=200",
@@ -3198,6 +3142,7 @@ describe("SandboxProvisioner lifecycle", () => {
     });
   });
   const runningRecord: SandboxRecord = {
+    instanceId: testEnvironmentId,
     environmentId: testEnvironmentId,
     provider: "boat",
     sandboxId: boatSandboxId,
@@ -3207,8 +3152,8 @@ describe("SandboxProvisioner lifecycle", () => {
     createdAt: "1970-01-01T00:00:00.000Z",
     updatedAt: "1970-01-01T00:00:00.000Z",
     httpBaseUrl: "https://boat.example/t3",
-    hardDeadlineAt: "2100-01-01T00:00:00.000Z",
-    ttlMinutes: 480,
+    runningSince: null,
+    maxRunningMinutes: 480,
   };
 
   // Boat as the save sees it: archived only after `/stop`, the saved snapshot `saving` until its
@@ -3290,7 +3235,7 @@ describe("SandboxProvisioner lifecycle", () => {
       const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
       // A plan that cannot save is refused before anything on the machine changes.
       const refused = yield* provisioner
-        .saveTemplate({ environmentId: testEnvironmentId, name: "web-stack" })
+        .saveTemplate({ instanceId: testEnvironmentId, name: "web-stack" })
         .pipe(Effect.flip);
       expect(refused.code).toBe("templates_unavailable");
       expect(requests).toEqual(["GET https://boat.dev/api/v1/limits"]);
@@ -3298,7 +3243,7 @@ describe("SandboxProvisioner lifecycle", () => {
       requests.length = 0;
 
       const fiber = yield* provisioner
-        .saveTemplate({ environmentId: testEnvironmentId, name: "web-stack" })
+        .saveTemplate({ instanceId: testEnvironmentId, name: "web-stack" })
         .pipe(Effect.forkChild);
       yield* TestClock.adjust("1 minute");
       const saved = yield* Fiber.join(fiber);
@@ -3325,7 +3270,7 @@ describe("SandboxProvisioner lifecycle", () => {
       expect(commands[0]).toContain(`rm -rf "$HOME/.t3/userdata" "$HOME/.t3/environment-label"`);
       expect(commands[0]).not.toContain("pkill");
       // Without its T3 identity the source could only come back as a different environment.
-      expect(repository.records.has(testEnvironmentId)).toBe(false);
+      expect(repository.byEnvironment(testEnvironmentId) !== undefined).toBe(false);
     }).pipe(
       Effect.provide(
         provisionerLayer({ sandboxProviders: { boat: { apiKey: "boat_test" } } }, repository.layer),
@@ -3343,7 +3288,7 @@ describe("SandboxProvisioner lifecycle", () => {
     return Effect.gen(function* () {
       const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
       const fiber = yield* provisioner
-        .saveTemplate({ environmentId: testEnvironmentId, name: "web-stack" })
+        .saveTemplate({ instanceId: testEnvironmentId, name: "web-stack" })
         .pipe(Effect.flip, Effect.forkChild);
       yield* TestClock.adjust("1 minute");
       const failure = yield* Fiber.join(fiber);
@@ -3354,16 +3299,16 @@ describe("SandboxProvisioner lifecycle", () => {
       );
       expect(failure.message).not.toContain("disk read failed");
       expect(requests.some((request) => request.startsWith("DELETE"))).toBe(false);
-      expect(repository.records.get(testEnvironmentId)?.state).toBe("stopped");
+      expect(repository.byEnvironment(testEnvironmentId)?.state).toBe("stopped");
 
       // A resumed source answers with a new id that no client holds a session for.
       const resumeFiber = yield* provisioner
-        .resume({ environmentId: testEnvironmentId })
+        .resume({ instanceId: testEnvironmentId })
         .pipe(Effect.flip, Effect.forkChild);
       yield* TestClock.adjust("1 minute");
       const resumeFailure = yield* Fiber.join(resumeFiber);
       expect(resumeFailure.detail).toContain("cannot reconnect as this environment");
-      expect(repository.records.get(testEnvironmentId)?.state).toBe("error");
+      expect(repository.byEnvironment(testEnvironmentId)?.state).toBe("error");
     }).pipe(
       Effect.provide(
         provisionerLayer({ sandboxProviders: { boat: { apiKey: "boat_test" } } }, repository.layer),
@@ -3445,7 +3390,7 @@ describe("SandboxProvisioner lifecycle", () => {
           public: true,
           localhost: true,
         });
-        expect(repository.records.get(created.environmentId)).toMatchObject({
+        expect(repository.byEnvironment(created.environmentId)).toMatchObject({
           template: "web-stack",
           size: "large",
         });
@@ -3532,6 +3477,7 @@ describe("SandboxProvisioner", () => {
       );
 
       expect(result).toEqual({
+        instanceId: expect.any(String),
         provider: "boat",
         sandboxId: boatSandboxId,
         environmentId: testEnvironmentId,
@@ -3625,7 +3571,7 @@ describe("SandboxProvisioner", () => {
 
       // The record keeps the team the driver detected, so a later Team change cannot strand it.
       // A record from before records kept settings follows the current ones.
-      const record = repository.records.get(testEnvironmentId)!;
+      const record = repository.byEnvironment(testEnvironmentId)!;
       expect(record.providerSettings).toEqual({ teamId: "team_1", projectId: "mine" });
       const { providerSettings: _, ...legacy } = record;
       const legacyId = EnvironmentId.make("22222222-2222-4222-8222-222222222222");
@@ -3643,7 +3589,7 @@ describe("SandboxProvisioner", () => {
           "https://api.vercel.com/v2/sandboxes/legacy?teamId=team_2&projectId=other",
         ]),
       );
-      expect(repository.records.get(testEnvironmentId)?.state).toBe("running");
+      expect(repository.byEnvironment(testEnvironmentId)?.state).toBe("running");
     }).pipe(
       Effect.provide(
         provisionerLayer(
@@ -4019,7 +3965,7 @@ describe("sandbox agent access", () => {
       expect(settingsStep).toBeLessThan(commands.findIndex((command) => command.includes("nohup")));
 
       // The record says where the key lives; the key itself is a server secret.
-      const record = repository.records.get(testEnvironmentId)!;
+      const record = repository.byEnvironment(testEnvironmentId)!;
       expect(record.claudeHubKey).toEqual({ sourceId: "hub", secret: expect.any(String) });
       expect(JSON.stringify(record)).not.toContain(key);
       expect(new TextDecoder().decode(secrets.values.get(record.claudeHubKey!.secret))).toBe(key);
@@ -4028,7 +3974,7 @@ describe("sandbox agent access", () => {
       const deleted = yield* provisioner.delete({
         provider: "boat",
         sandboxId: boatSandboxId,
-        environmentId: testEnvironmentId,
+        instanceId: repository.byEnvironment(testEnvironmentId)?.instanceId,
       });
       expect(deleted).toEqual({ warnings: [] });
       expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
@@ -4114,7 +4060,7 @@ describe("sandbox agent access", () => {
         expect(step("T3_TOOLS_MISSING")).toBeLessThan(step("T3_CLAUDE_ENV"));
         expect(step("T3_CLAUDE_ENV")).toBeLessThan(step("nohup"));
       }).pipe(
-        Effect.provide(provisionerLayer({}, recordRepository, { host })),
+        Effect.provide(provisionerLayer({}, discardingRepository, { host })),
         Effect.provideService(HttpClient.HttpClient, client),
       );
     },
@@ -4153,12 +4099,12 @@ describe("sandbox agent access", () => {
       expect(step("T3_ENDPOINT_STATUS")).toBeLessThan(step("nohup"));
       // The sandbox works, and fixing the network makes its key work as is.
       expect(requests.some((request) => request.method === "DELETE")).toBe(false);
-      expect(repository.records.get(testEnvironmentId)?.claudeHubKey).toBeDefined();
+      expect(repository.byEnvironment(testEnvironmentId)?.claudeHubKey).toBeDefined();
 
       yield* provisioner.delete({
         provider: "boat",
         sandboxId: boatSandboxId,
-        environmentId: testEnvironmentId,
+        instanceId: repository.byEnvironment(testEnvironmentId)?.instanceId,
       });
       const publicHost = yield* create("https://claude.example.test");
       expect(publicHost.setup.warnings).toEqual([
@@ -4169,7 +4115,7 @@ describe("sandbox agent access", () => {
       yield* provisioner.delete({
         provider: "boat",
         sandboxId: boatSandboxId,
-        environmentId: testEnvironmentId,
+        instanceId: repository.byEnvironment(testEnvironmentId)?.instanceId,
       });
       options.endpointStatus = "401";
       expect((yield* create("https://claude.example.test")).setup).toEqual({
@@ -4250,7 +4196,7 @@ describe("sandbox agent access", () => {
       );
       expect(requests.some((request) => request.url.endsWith("/sandboxes"))).toBe(false);
     }).pipe(
-      Effect.provide(provisionerLayer(hubSettings, recordRepository, { host })),
+      Effect.provide(provisionerLayer(hubSettings, discardingRepository, { host })),
       Effect.provideService(HttpClient.HttpClient, client),
     );
   });
@@ -4295,7 +4241,7 @@ describe("sandbox agent access", () => {
         yield* provisioner.delete({
           provider: "boat",
           sandboxId: boatSandboxId,
-          environmentId: testEnvironmentId,
+          instanceId: repository.byEnvironment(testEnvironmentId)?.instanceId,
         });
         expect(
           requests.find((request) => request.url.startsWith("https://hub.test/")),
@@ -4325,6 +4271,7 @@ describe("sandbox agent access", () => {
       secrets.values.set("sandbox-hub-key-1", new TextEncoder().encode("t3-sandbox-web-stack-0"));
       const repository = memoryRepository([
         {
+          instanceId: testEnvironmentId,
           environmentId: testEnvironmentId,
           provider: "boat",
           sandboxId: boatSandboxId,
@@ -4334,8 +4281,8 @@ describe("sandbox agent access", () => {
           createdAt: "2026-11-01T00:00:00.000Z",
           updatedAt: "2026-11-01T00:00:00.000Z",
           httpBaseUrl: "https://boat.example/t3",
-          hardDeadlineAt: null,
-          ttlMinutes: 480,
+          runningSince: null,
+          maxRunningMinutes: 480,
           claudeHubKey: { sourceId: "hub", secret: "sandbox-hub-key-1" },
         },
       ]);
@@ -4363,7 +4310,7 @@ describe("sandbox agent access", () => {
         const deleted = yield* provisioner.delete({
           provider: "boat",
           sandboxId: boatSandboxId,
-          environmentId: testEnvironmentId,
+          instanceId: repository.byEnvironment(testEnvironmentId)?.instanceId,
         });
         expect(requests).toEqual([]);
         expect(repository.records.size).toBe(0);
@@ -4387,6 +4334,7 @@ describe("sandbox agent access", () => {
     const secrets = memorySecrets();
     secrets.values.set("sandbox-hub-key-1", new TextEncoder().encode("t3-sandbox-web-stack-0"));
     const record: SandboxRecord = {
+      instanceId: testEnvironmentId,
       environmentId: testEnvironmentId,
       provider: "boat",
       sandboxId: boatSandboxId,
@@ -4397,8 +4345,8 @@ describe("sandbox agent access", () => {
       createdAt: "2026-11-01T00:00:00.000Z",
       updatedAt: "2026-11-01T00:00:00.000Z",
       httpBaseUrl: "https://boat.example/t3",
-      hardDeadlineAt: null,
-      ttlMinutes: 480,
+      runningSince: null,
+      maxRunningMinutes: 480,
       claudeHubKey: { sourceId: "hub", secret: "sandbox-hub-key-1" },
     };
     const repository = memoryRepository([record]);
@@ -4408,7 +4356,7 @@ describe("sandbox agent access", () => {
       const deleted = yield* provisioner.delete({
         provider: "boat",
         sandboxId: boatSandboxId,
-        environmentId: testEnvironmentId,
+        instanceId: repository.byEnvironment(testEnvironmentId)?.instanceId,
       });
       expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
         "DELETE https://hub.test/v0/management/api-keys?value=t3-sandbox-web-stack-0",
@@ -4508,7 +4456,7 @@ describe("sandbox agent access", () => {
         expect(commands.find((command) => command.includes("T3_ENDPOINT_STATUS"))).toMatch(
           /--proxy \W*http:\/\/localhost:1055\W/u,
         );
-        expect(repository.records.get(testEnvironmentId)?.tailscale).toEqual({
+        expect(repository.byEnvironment(testEnvironmentId)?.tailscale).toEqual({
           deviceId: "nNODE1CNTRL",
         });
 
@@ -4517,7 +4465,7 @@ describe("sandbox agent access", () => {
           yield* provisioner.delete({
             provider: "boat",
             sandboxId: boatSandboxId,
-            environmentId: testEnvironmentId,
+            instanceId: repository.byEnvironment(testEnvironmentId)?.instanceId,
           }),
         ).toEqual({ warnings: [] });
         expect(requests).toEqual(
@@ -4579,7 +4527,7 @@ describe("sandbox agent access", () => {
         expect(requests.some((request) => request.url.endsWith("/sandboxes"))).toBe(false);
         for (const secret of secrets) expect(refused.message).not.toContain(secret);
       }).pipe(
-        Effect.provide(provisionerLayer(tailnetSettings, recordRepository, { host })),
+        Effect.provide(provisionerLayer(tailnetSettings, discardingRepository, { host })),
         Effect.provideService(HttpClient.HttpClient, client),
       );
     },
@@ -4594,6 +4542,7 @@ describe("sandbox agent access", () => {
       };
       const { client, commands, secretsOf } = agentClient(requests, options);
       const stopped: SandboxRecord = {
+        instanceId: testEnvironmentId,
         environmentId: testEnvironmentId,
         provider: "boat",
         sandboxId: boatSandboxId,
@@ -4603,17 +4552,17 @@ describe("sandbox agent access", () => {
         createdAt: "2026-11-01T00:00:00.000Z",
         updatedAt: "2026-11-01T00:00:00.000Z",
         httpBaseUrl: "https://boat.example/t3",
-        hardDeadlineAt: null,
-        ttlMinutes: 480,
+        runningSince: null,
+        maxRunningMinutes: 480,
         tailscale: { deviceId: "nOLDCNTRL" },
       };
       const repository = memoryRepository([stopped]);
       return Effect.gen(function* () {
         const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
-        const resumed = yield* provisioner.resume({ environmentId: testEnvironmentId });
+        const resumed = yield* provisioner.resume({ instanceId: testEnvironmentId });
         expect(resumed.warnings).toBeUndefined();
         expect(resumed.sandbox.tailscale).toEqual({ deviceId: "nNEWCNTRL" });
-        expect(repository.records.get(testEnvironmentId)?.tailscale).toEqual({
+        expect(repository.byEnvironment(testEnvironmentId)?.tailscale).toEqual({
           deviceId: "nNEWCNTRL",
         });
         expect(joinKeyOf(secretsOf)).toEqual([TS_AUTH_KEY]);
@@ -4626,11 +4575,11 @@ describe("sandbox agent access", () => {
         expect(step('--auth-key="file:')).toBeLessThan(step("nohup t3 serve"));
 
         // A sandbox still connected after a short stop needs no new key.
-        yield* provisioner.stop({ environmentId: testEnvironmentId });
+        yield* provisioner.stop({ instanceId: testEnvironmentId });
         requests.length = 0;
         commands.length = 0;
         options.tailnetIdleState = "Running";
-        const again = yield* provisioner.resume({ environmentId: testEnvironmentId });
+        const again = yield* provisioner.resume({ instanceId: testEnvironmentId });
         expect(again.sandbox.tailscale).toEqual({ deviceId: "nNEWCNTRL" });
         expect(
           requests.some((request) => request.url.startsWith("https://api.tailscale.com/")),
@@ -4648,6 +4597,447 @@ describe("sandbox agent access", () => {
           ),
         ),
         Effect.provideService(HttpClient.HttpClient, client),
+      );
+    },
+  );
+});
+
+describe("SandboxProvisioner per-thread launches", () => {
+  const threadId = ThreadId.make("thread-launch");
+  const projectId = ProjectId.make("project-host");
+  const project = {
+    id: projectId,
+    title: "hello",
+    workspaceRoot: "/host/hello",
+    remoteUrl: "git@github.com:octo/hello.git",
+  };
+  const pairToken = "PAIRLAUNCH42";
+  const configInput = {
+    label: "Boat small",
+    provider: "boat",
+    size: "small",
+    passGithubToken: false,
+    joinTailnet: false,
+    access: "public",
+    projectIds: [],
+    envFiles: {},
+    idleMinutes: 30,
+    maxRunningMinutes: 480,
+  } as const;
+
+  interface BoatFake {
+    readonly requests: Array<string>;
+    readonly commands: Array<string>;
+    readonly bodies: Array<{ readonly url: string; readonly body: unknown }>;
+    /** Sandboxes Boat lists under this host's label; deletes take theirs out. */
+    readonly listed: Array<{ id: string; name: string; labels?: Record<string, string> }>;
+    readonly client: HttpClient.HttpClient;
+  }
+
+  const boatFake = (
+    options: {
+      /** Commands containing this text fail with exit code 1, the given number of times. */
+      readonly failing?: { readonly text: string; times: number };
+      /** Commands containing this text wait on the deferred before answering. */
+      readonly holding?: { readonly text: string; readonly until: Deferred.Deferred<void> };
+      readonly listed?: BoatFake["listed"];
+    } = {},
+  ): BoatFake => {
+    const requests: Array<string> = [];
+    const commands: Array<string> = [];
+    const bodies: Array<{ readonly url: string; readonly body: unknown }> = [];
+    const listed = options.listed ?? [];
+    const respond = (request: HttpClientRequest.HttpClientRequest, body: unknown, status = 200) =>
+      Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(body, { status })));
+    const client = HttpClient.make((request) => {
+      const query = UrlParams.toString(request.urlParams);
+      requests.push(`${request.method} ${request.url}${query === "" ? "" : `?${query}`}`);
+      const body =
+        request.body._tag === "Uint8Array"
+          ? JSON.parse(new TextDecoder().decode(request.body.body))
+          : undefined;
+      if (body !== undefined) bodies.push({ url: request.url, body });
+      if (request.url.endsWith("/limits")) return respond(request, { ok: false }, 401);
+      if (request.url.endsWith("/.well-known/t3/environment")) return respond(request, descriptor);
+      if (request.url.endsWith("/files")) return respond(request, { ok: true });
+      if (request.url.endsWith("/commands")) {
+        const command: string = body?.command ?? "";
+        commands.push(command);
+        const answer = Effect.suspend(() => {
+          if (options.failing !== undefined && command.includes(options.failing.text)) {
+            if (options.failing.times > 0) {
+              options.failing.times -= 1;
+              return respond(request, { exitCode: 1, stdout: "", stderr: "boom" });
+            }
+          }
+          const stdout = command.includes("git clone")
+            ? "T3_REPO_DIR: /home/boat/work/hello\nT3_REPO_PROJECT: project-remote\n"
+            : pairOr(bodyTextOf(request), pairToken, "");
+          return respond(request, { exitCode: 0, stdout, stderr: "" });
+        });
+        return options.holding !== undefined && command.includes(options.holding.text)
+          ? Deferred.await(options.holding.until).pipe(Effect.andThen(answer))
+          : answer;
+      }
+      if (request.method === "DELETE" && request.url.includes("/sandboxes/")) {
+        const id = request.url.split("/").at(-1);
+        const index = listed.findIndex((sandbox) => sandbox.id === id);
+        if (index >= 0) listed.splice(index, 1);
+        return respond(request, { ok: true });
+      }
+      if (request.method === "GET" && request.url.endsWith("/sandboxes")) {
+        const label = new URLSearchParams(query).get("label") ?? "";
+        return respond(
+          request,
+          label.startsWith("t3.code/host=") ? { sandboxes: listed } : { sandboxes: [] },
+        );
+      }
+      if (request.method === "GET" && request.url.endsWith(`/sandboxes/${boatSandboxId}`)) {
+        return respond(request, { sandbox: { id: boatSandboxId, state: "ready", error: null } });
+      }
+      return Effect.succeed(boatResponse(request));
+    });
+    return { requests, commands, bodies, listed, client };
+  };
+
+  const snapshotWhere = (
+    provisioner: SandboxProvisioner.SandboxProvisioner["Service"],
+    predicate: (snapshot: SandboxSetupSnapshot) => boolean,
+  ) =>
+    provisioner.subscribeLaunch({ threadId }).pipe(
+      Stream.filter(
+        (snapshot): snapshot is SandboxSetupSnapshot => snapshot !== null && predicate(snapshot),
+      ),
+      Stream.runHead,
+      Effect.map(Option.getOrThrow),
+    );
+
+  const stageOf = (snapshot: SandboxSetupSnapshot, id: string) =>
+    snapshot.stages.find((stage) => stage.id === id);
+
+  const deletes = (fake: BoatFake) =>
+    fake.requests.filter((request) => request.startsWith("DELETE") && !request.includes("/files"));
+
+  it.effect("saves a config without creating a machine and validates it", () => {
+    const fake = boatFake();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const saved = yield* provisioner.saveConfig({ config: configInput, apiKey: "boat_test" });
+      expect(saved.config).toMatchObject({ label: "Boat small", size: "small" });
+      const renamed = yield* provisioner.saveConfig({
+        config: { ...saved.config, label: "Boat tiny" },
+      });
+      expect(renamed.config.id).toBe(saved.config.id);
+      expect(renamed.config.createdAt).toBe(saved.config.createdAt);
+      expect((yield* provisioner.configs).configs.map((config) => config.label)).toEqual([
+        "Boat tiny",
+      ]);
+
+      const refusals = yield* Effect.forEach(
+        [
+          { ...configInput, label: "  " },
+          { ...configInput, size: "huge" },
+          { ...configInput, access: "tailnet" as const },
+        ],
+        (config) => provisioner.saveConfig({ config }).pipe(Effect.flip),
+      );
+      expect(refusals.map((error) => error.detail)).toEqual([
+        "Enter a name for this sandbox config.",
+        "Boat has no machine size huge.",
+        "A tailnet-only sandbox has to join your tailnet.",
+      ]);
+
+      yield* provisioner.deleteConfig({ configId: saved.config.id });
+      expect(configs.configs.size).toBe(0);
+      // Registering a config never makes a machine.
+      expect(fake.requests.filter((request) => request.startsWith("POST"))).toEqual([]);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, discardingRepository, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("launches a thread's sandbox through every stage and hands it to the client", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(waiting).toMatchObject({ instanceId, configId: config.id, phase: "running" });
+      expect(stageOf(waiting, "repo")).toMatchObject({ status: "done", detail: "~/work/hello" });
+      expect(stageOf(waiting, "env-files")).toMatchObject({ status: "done", detail: "1 file" });
+      expect(stageOf(waiting, "pair")?.status).toBe("running");
+      // The record exists from the moment the machine does, and names its thread.
+      expect(repository.records.get(instanceId)).toMatchObject({
+        state: "provisioning",
+        threadId,
+        projectId,
+        projectTitle: "hello",
+        configId: config.id,
+        label: "hello on Boat small",
+        environmentId: testEnvironmentId,
+      });
+
+      const paired = yield* provisioner.pairLaunch({ threadId });
+      expect(paired).toEqual({
+        environmentId: testEnvironmentId,
+        httpBaseUrl: "https://boat.example/t3",
+        pairingCode: pairToken,
+        projectId: "project-remote",
+      });
+      yield* provisioner.completeLaunch({ threadId });
+      const done = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+      expect(done.stages.map((stage) => stage.status)).toEqual([
+        "done",
+        "done",
+        "done",
+        "done",
+        "done",
+        "done",
+        "done",
+        "done",
+      ]);
+      expect(repository.records.get(instanceId)?.state).toBe("running");
+
+      // Boat tags the machine with this host and instance, so a sweep can find it again.
+      const created = fake.bodies.find((entry) => entry.url.endsWith("/sandboxes"))?.body;
+      expect(created).toMatchObject({
+        labels: {
+          "t3.code/role": "environment",
+          "t3.code/host": hostEnvironmentId,
+          "t3.code/instance": instanceId,
+        },
+      });
+      expect(
+        fake.commands.some((command) => command.includes("https://github.com/octo/hello.git")),
+      ).toBe(true);
+      // The env file travels in a files request body, never in a command's text.
+      expect(fake.bodies).toContainEqual({
+        url: `https://boat.dev/api/v1/sandboxes/${boatSandboxId}/files`,
+        body: { path: "/home/boat/work/hello/.env", content: "API_TOKEN=shh" },
+      });
+      expect(fake.commands.some((command) => command.includes("API_TOKEN"))).toBe(false);
+      expect(deletes(fake)).toEqual([]);
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: configs.layer,
+          workspace: { ".env": "API_TOKEN=shh", "build/output.log": "ignored" },
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("deletes the machine when install fails and offers a relaunch", () => {
+    const fake = boatFake({ failing: { text: "t3.codes/install.sh", times: 1 } });
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
+      expect(failed.recovery).toBe("relaunch");
+      expect(stageOf(failed, "create")?.status).toBe("done");
+      expect(stageOf(failed, "install")?.status).toBe("failed");
+      expect(failed.error).not.toContain("boom");
+      expect(deletes(fake)).toEqual([`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`]);
+      expect(repository.records.size).toBe(0);
+
+      // A relaunch is a new machine; this time install works.
+      yield* provisioner.retryLaunch({ threadId });
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(waiting.instanceId).not.toBe(failed.instanceId);
+      expect(repository.records.size).toBe(1);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("keeps the machine when the clone fails, retries it, and cleans up on cancel", () => {
+    const fake = boatFake({ failing: { text: "git clone", times: 1 } });
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
+      expect(failed.recovery).toBe("retry");
+      expect(stageOf(failed, "repo")?.status).toBe("failed");
+      expect(failed.error).toContain("Could not clone octo/hello");
+      expect(deletes(fake)).toEqual([]);
+
+      yield* provisioner.retryLaunch({ threadId });
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(waiting.instanceId).toBe(failed.instanceId);
+      expect(stageOf(waiting, "repo")?.status).toBe("done");
+
+      // Cancelling at the handoff deletes the machine and its record.
+      expect(yield* provisioner.cancelLaunch({ threadId })).toEqual({ cancelled: true });
+      const cancelled = yield* snapshotWhere(
+        provisioner,
+        (snapshot) => snapshot.phase === "cancelled",
+      );
+      expect(stageOf(cancelled, "pair")?.status).toBe("skipped");
+      expect(deletes(fake)).toEqual([`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`]);
+      expect(repository.records.size).toBe(0);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("cancels a launch mid-install and deletes what it made", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "t3.codes/install.sh", until } });
+      const repository = memoryRepository();
+      const configs = memoryConfigs();
+      yield* Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const { config } = yield* provisioner.saveConfig({
+          config: configInput,
+          apiKey: "boat_test",
+        });
+        yield* provisioner.launch({ configId: config.id, threadId, project });
+        yield* snapshotWhere(
+          provisioner,
+          (snapshot) => stageOf(snapshot, "install")?.status === "running",
+        );
+        expect(repository.records.size).toBe(1);
+
+        expect(yield* provisioner.cancelLaunch({ threadId })).toEqual({ cancelled: true });
+        const cancelled = yield* snapshotWhere(
+          provisioner,
+          (snapshot) => snapshot.phase === "cancelled",
+        );
+        expect(stageOf(cancelled, "install")?.status).toBe("skipped");
+        expect(deletes(fake)).toEqual([
+          `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        ]);
+        expect(repository.records.size).toBe(0);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
+  it.effect("refuses a launch the config does not allow before anything bills", () => {
+    const fake = boatFake();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: { ...configInput, projectIds: [ProjectId.make("project-other")] },
+        apiKey: "boat_test",
+      });
+      const notAllowed = yield* provisioner
+        .launch({ configId: config.id, threadId, project })
+        .pipe(Effect.flip);
+      expect(notAllowed.detail).toBe("Boat small is not set up for this project.");
+      const open = yield* provisioner.saveConfig({ config: configInput });
+      const notGithub = yield* provisioner
+        .launch({
+          configId: open.config.id,
+          threadId,
+          project: { ...project, remoteUrl: "https://gitlab.com/octo/hello.git" },
+        })
+        .pipe(Effect.flip);
+      expect(notGithub.detail).toBe(
+        "Only projects with a github.com remote can start in a sandbox.",
+      );
+      const gone = yield* provisioner
+        .launch({ configId: "missing", threadId, project })
+        .pipe(Effect.flip);
+      expect(gone.detail).toBe("This sandbox config no longer exists.");
+      expect(fake.requests.filter((request) => request.startsWith("POST"))).toEqual([]);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, discardingRepository, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect(
+    "flags tagged sandboxes without a record and deletes a launch nobody is finishing",
+    () => {
+      const base: SandboxRecord = {
+        instanceId: "tracked",
+        environmentId: testEnvironmentId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "hello on Boat small",
+        size: "small",
+        state: "running",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        runningSince: "1970-01-01T00:00:00.000Z",
+        maxRunningMinutes: 480,
+        threadId,
+      };
+      // The server restarted mid-launch: the record says provisioning, but no fiber owns it.
+      const abandoned: SandboxRecord = {
+        ...base,
+        instanceId: "abandoned",
+        environmentId: null,
+        sandboxId: "bx_abandon",
+        state: "provisioning",
+      };
+      const repository = memoryRepository([base, abandoned]);
+      const fake = boatFake({
+        listed: [
+          { id: boatSandboxId, name: "hello on Boat small" },
+          { id: "bx_abandon", name: "hello on Boat small" },
+          { id: "bx_orphan", name: "lost", labels: { "t3.code/instance": "gone" } },
+        ],
+      });
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        yield* provisioner.sweep;
+        expect(deletes(fake)).toEqual(["DELETE https://boat.dev/api/v1/sandboxes/bx_abandon"]);
+        expect(repository.records.has("abandoned")).toBe(false);
+        const listed = yield* provisioner.list;
+        expect(listed.sandboxes.map((record) => record.instanceId)).toEqual(["tracked"]);
+        // A tagged sandbox no record tracks is only reported; the user decides.
+        expect(listed.orphans).toEqual([
+          { provider: "boat", sandboxId: "bx_orphan", name: "lost", instanceId: "gone" },
+        ]);
+
+        // A thread's machine cannot become a template, since saving deletes its source.
+        const refused = yield* provisioner
+          .saveTemplate({ instanceId: "tracked", name: "web" })
+          .pipe(Effect.flip);
+        expect(refused.detail).toContain("cannot be saved as a template");
+
+        yield* provisioner.delete({ provider: "boat", sandboxId: "bx_orphan" });
+        expect(deletes(fake).at(-1)).toBe("DELETE https://boat.dev/api/v1/sandboxes/bx_orphan");
+        expect((yield* provisioner.list).orphans).toEqual([]);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
       );
     },
   );

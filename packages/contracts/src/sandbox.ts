@@ -1,7 +1,16 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { EnvironmentId, TrimmedString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  NonNegativeInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+  TrimmedString,
+} from "./baseSchemas.ts";
+import { WorktreeSetupPhase, WorktreeSetupStageStatus } from "./worktreeSetup.ts";
 
 /**
  * Sandbox providers are provisioned by the server a client is already connected to. The
@@ -48,12 +57,13 @@ export const SandboxProviderInfo = Schema.Struct({
   settingsFields: Schema.optionalKey(Schema.Array(SandboxProviderSettingsField)),
   /** The saved values of `settingsFields`, keyed by field id. */
   settings: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  /** Days the provider keeps a stopped sandbox's disk, where it documents a limit. */
+  diskRetentionDays: Schema.optionalKey(Schema.Int),
   /** Derived from the optional methods the driver implements, so clients never branch on `kind`. */
   capabilities: Schema.Struct({
     limits: Schema.Boolean,
     stopResume: Schema.Boolean,
     credentialEnvironments: Schema.Boolean,
-    extend: Schema.Boolean,
     templates: Schema.Boolean,
   }),
 });
@@ -163,6 +173,16 @@ export const SandboxLimitsResult = Schema.Struct({
 });
 export type SandboxLimitsResult = typeof SandboxLimitsResult.Type;
 
+/** `public` serves T3 on a provider URL; `tailnet` reaches the sandbox only at its tailnet address. */
+export const SandboxAccess = Schema.Literals(["public", "tailnet"]);
+export type SandboxAccess = typeof SandboxAccess.Type;
+
+export const DEFAULT_SANDBOX_MAX_RUNNING_MINUTES = 480;
+export const DEFAULT_SANDBOX_IDLE_MINUTES = 30;
+export const SandboxMaxRunningMinutes = Schema.Int.check(
+  Schema.isBetween({ minimum: 10, maximum: 43200 }),
+);
+
 export const SandboxCreateInput = Schema.Struct({
   provider: SandboxProviderKind,
   /** Saved on this server when present; when omitted the saved key is used. */
@@ -177,8 +197,8 @@ export const SandboxCreateInput = Schema.Struct({
   environment: Schema.optional(TrimmedString),
   /** Required with `environment`: the user confirmed that this environment passes credentials. */
   allowCredentials: Schema.optional(Schema.Boolean),
-  /** Stop the machine after this many minutes. Omit to leave the provider default. */
-  ttlMinutes: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 43200 }))),
+  /** Stop the machine after it has run this many minutes. Defaults to eight hours. */
+  maxRunningMinutes: Schema.optional(SandboxMaxRunningMinutes),
   /** A saved template to start from. The template decides the machine size. */
   template: Schema.optional(TrimmedString),
   /** Sets up agents in the sandbox from this server's own setup. Omit for none. */
@@ -191,6 +211,8 @@ export const SandboxCreateInput = Schema.Struct({
   passGithubToken: Schema.optional(Schema.Boolean),
   /** Joins the sandbox to this server's tailnet as an ephemeral, tagged node. */
   joinTailnet: Schema.optional(Schema.Boolean),
+  /** `tailnet` publishes no public URL; clients reach the sandbox at its Tailscale address. */
+  access: Schema.optional(SandboxAccess),
 });
 export type SandboxCreateInput = typeof SandboxCreateInput.Type;
 
@@ -199,6 +221,7 @@ export const SandboxSetupState = Schema.Literals(["ready", "failed", "skipped"])
 export type SandboxSetupState = typeof SandboxSetupState.Type;
 
 export const SandboxCreateResult = Schema.Struct({
+  instanceId: TrimmedNonEmptyString,
   provider: SandboxProviderKind,
   sandboxId: TrimmedString,
   environmentId: EnvironmentId,
@@ -218,10 +241,11 @@ export const SandboxCreateResult = Schema.Struct({
 });
 export type SandboxCreateResult = typeof SandboxCreateResult.Type;
 
+/** Without `instanceId`, deletes an untracked sandbox the sweep flagged as an orphan. */
 export const SandboxDeleteInput = Schema.Struct({
   provider: SandboxProviderKind,
   sandboxId: TrimmedString,
-  environmentId: EnvironmentId,
+  instanceId: Schema.optional(TrimmedNonEmptyString),
 });
 export type SandboxDeleteInput = typeof SandboxDeleteInput.Type;
 
@@ -245,9 +269,18 @@ export const SandboxLifecycleState = Schema.Literals([
 ]);
 export type SandboxLifecycleState = typeof SandboxLifecycleState.Type;
 
-/** Server-side record that ties a provider machine to the T3 environment it became. */
+/**
+ * Server-side record of one provider machine, keyed by an id T3 picks before the machine exists.
+ * A per-thread sandbox names the config it was launched from and the thread it runs; the
+ * environment id is known once T3 answers on the machine.
+ */
 export const SandboxRecord = Schema.Struct({
-  environmentId: EnvironmentId,
+  instanceId: TrimmedNonEmptyString,
+  environmentId: Schema.NullOr(EnvironmentId),
+  configId: Schema.optionalKey(TrimmedNonEmptyString),
+  threadId: Schema.optionalKey(ThreadId),
+  projectId: Schema.optionalKey(ProjectId),
+  projectTitle: Schema.optionalKey(TrimmedString),
   provider: SandboxProviderKind,
   sandboxId: TrimmedString,
   label: TrimmedString,
@@ -255,10 +288,15 @@ export const SandboxRecord = Schema.Struct({
   state: SandboxLifecycleState,
   createdAt: TrimmedString,
   updatedAt: TrimmedString,
+  /** Empty until the machine has an origin. */
   httpBaseUrl: TrimmedString,
-  /** Null disables the hard deadline. */
-  hardDeadlineAt: Schema.NullOr(TrimmedString),
-  ttlMinutes: Schema.Int,
+  access: Schema.optionalKey(SandboxAccess),
+  /** Start of the current running stretch; null while stopped. */
+  runningSince: Schema.NullOr(TrimmedString),
+  /** The sweep stops a sandbox that has run this long since its last start. */
+  maxRunningMinutes: Schema.Int,
+  /** When the sandbox last stopped, so the list can say how old its kept disk is. */
+  stoppedAt: Schema.optionalKey(TrimmedString),
   credentialEnvironment: Schema.optionalKey(TrimmedString),
   /** The template the sandbox started from, for display. */
   template: Schema.optionalKey(TrimmedString),
@@ -279,41 +317,26 @@ export const SandboxRecord = Schema.Struct({
 });
 export type SandboxRecord = typeof SandboxRecord.Type;
 
+/** A provider sandbox tagged by this server that no record tracks. Listed, never deleted. */
+export const SandboxOrphan = Schema.Struct({
+  provider: SandboxProviderKind,
+  sandboxId: TrimmedString,
+  name: TrimmedString,
+  instanceId: Schema.optionalKey(TrimmedString),
+  createdAt: Schema.optionalKey(TrimmedString),
+});
+export type SandboxOrphan = typeof SandboxOrphan.Type;
+
 export const SandboxListResult = Schema.Struct({
   sandboxes: Schema.Array(SandboxRecord),
+  orphans: Schema.Array(SandboxOrphan),
 });
 export type SandboxListResult = typeof SandboxListResult.Type;
 
 export const SandboxLifecycleInput = Schema.Struct({
-  environmentId: EnvironmentId,
+  instanceId: TrimmedNonEmptyString,
 });
 export type SandboxLifecycleInput = typeof SandboxLifecycleInput.Type;
-
-export const SANDBOX_LIFETIME_CAP_MIN_MINUTES = 60;
-export const SANDBOX_LIFETIME_CAP_MAX_MINUTES = 30 * 24 * 60;
-const DEFAULT_SANDBOX_LIFETIME_CAP_MINUTES = 24 * 60;
-
-/** The longest a sandbox may live, from creation to its deadline, counting every extension. */
-export const SandboxLifetimeCapMinutes = Schema.Int.check(
-  Schema.isBetween({
-    minimum: SANDBOX_LIFETIME_CAP_MIN_MINUTES,
-    maximum: SANDBOX_LIFETIME_CAP_MAX_MINUTES,
-  }),
-);
-
-export const SandboxExtendInput = Schema.Struct({
-  environmentId: EnvironmentId,
-  /** Added to the deadline; the server grants less when the lifetime cap is closer. */
-  minutes: Schema.Int.check(
-    Schema.isBetween({ minimum: 1, maximum: SANDBOX_LIFETIME_CAP_MAX_MINUTES }),
-  ),
-});
-export type SandboxExtendInput = typeof SandboxExtendInput.Type;
-
-export const SandboxExtendResult = Schema.Struct({
-  sandbox: SandboxRecord,
-});
-export type SandboxExtendResult = typeof SandboxExtendResult.Type;
 
 const SANDBOX_TEMPLATE_RESERVED_NAMES: ReadonlySet<string> = new Set([
   "latest",
@@ -374,7 +397,7 @@ export const SandboxTemplatesResult = Schema.Struct({
 export type SandboxTemplatesResult = typeof SandboxTemplatesResult.Type;
 
 export const SandboxSaveTemplateInput = Schema.Struct({
-  environmentId: EnvironmentId,
+  instanceId: TrimmedNonEmptyString,
   name: SandboxTemplateName,
 });
 export type SandboxSaveTemplateInput = typeof SandboxSaveTemplateInput.Type;
@@ -408,6 +431,7 @@ export const SandboxStage = Schema.Literals([
   "install",
   "start",
   "expose",
+  "repo",
   "pair",
   "delete",
   "config",
@@ -574,6 +598,198 @@ export const assessSandboxStart = (
   return { blocked: null, warnings };
 };
 
+/**
+ * How to make a sandbox for one thread. Saving a config creates no machine; each thread launched
+ * on it gets its own sandbox, provisioned on the server that holds the provider key.
+ */
+export const SandboxEnvironmentConfig = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  label: TrimmedNonEmptyString,
+  provider: SandboxProviderKind,
+  /** One of the provider's size ids; ignored when `template` decides the size. */
+  size: TrimmedNonEmptyString,
+  template: Schema.optionalKey(TrimmedNonEmptyString),
+  /** A provider credential environment, which the user confirmed passes credentials. */
+  credentialEnvironment: Schema.optionalKey(TrimmedNonEmptyString),
+  /** Points Claude in the sandbox at this server's endpoint, with a hub key or a copied token. */
+  claude: Schema.optionalKey(Schema.Struct({ baseUrl: TrimmedNonEmptyString })),
+  passGithubToken: Schema.Boolean,
+  joinTailnet: Schema.Boolean,
+  access: SandboxAccess,
+  /** Projects on this server a thread may launch from; empty allows any GitHub project. */
+  projectIds: Schema.Array(ProjectId),
+  /**
+   * Git-ignored files copied from the project on this server into the clone, by project id. A
+   * project without an entry gets its env files (`.env*`, `.envrc`, `.dev.vars`).
+   */
+  envFiles: Schema.Record(Schema.String, Schema.Array(TrimmedNonEmptyString)),
+  /** Minutes without activity before the sandbox stops. */
+  idleMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 })),
+  maxRunningMinutes: SandboxMaxRunningMinutes,
+  createdAt: TrimmedString,
+  updatedAt: TrimmedString,
+});
+export type SandboxEnvironmentConfig = typeof SandboxEnvironmentConfig.Type;
+
+export const SandboxConfigsResult = Schema.Struct({
+  configs: Schema.Array(SandboxEnvironmentConfig),
+});
+export type SandboxConfigsResult = typeof SandboxConfigsResult.Type;
+
+export const SandboxSaveConfigInput = Schema.Struct({
+  config: Schema.Struct({
+    ...SandboxEnvironmentConfig.fields,
+    /** Omit to create a config. */
+    id: Schema.optionalKey(TrimmedNonEmptyString),
+    createdAt: Schema.optionalKey(TrimmedString),
+    updatedAt: Schema.optionalKey(TrimmedString),
+  }),
+  /** Saved on this server when present; when omitted the saved key is used. */
+  apiKey: Schema.optional(TrimmedString),
+  /** Values for the provider's `settingsFields`, saved next to the key. */
+  settings: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+});
+export type SandboxSaveConfigInput = typeof SandboxSaveConfigInput.Type;
+
+export const SandboxSaveConfigResult = Schema.Struct({
+  config: SandboxEnvironmentConfig,
+});
+export type SandboxSaveConfigResult = typeof SandboxSaveConfigResult.Type;
+
+export const SandboxDeleteConfigInput = Schema.Struct({
+  configId: TrimmedNonEmptyString,
+});
+export type SandboxDeleteConfigInput = typeof SandboxDeleteConfigInput.Type;
+
+/** Producers clamp free text to these before publishing so encoding never fails. */
+export const SANDBOX_SETUP_DETAIL_MAX_LENGTH = 200;
+export const SANDBOX_SETUP_ERROR_MAX_LENGTH = 1000;
+
+export const SandboxSetupStageId = Schema.Literals([
+  "preflight",
+  "create",
+  "install",
+  "credentials",
+  "start",
+  "repo",
+  "env-files",
+  "pair",
+]);
+export type SandboxSetupStageId = typeof SandboxSetupStageId.Type;
+
+export const SANDBOX_SETUP_STAGE_ORDER: ReadonlyArray<SandboxSetupStageId> = [
+  "preflight",
+  "create",
+  "install",
+  "credentials",
+  "start",
+  "repo",
+  "env-files",
+  "pair",
+];
+
+export function sandboxSetupStageLabel(id: SandboxSetupStageId): string {
+  switch (id) {
+    case "preflight":
+      return "Check limits and access";
+    case "create":
+      return "Create machine";
+    case "install":
+      return "Install T3 Code and tools";
+    case "credentials":
+      return "Set up credentials";
+    case "start":
+      return "Start T3 Code";
+    case "repo":
+      return "Clone repository";
+    case "env-files":
+      return "Copy env files";
+    case "pair":
+      return "Connect and start thread";
+  }
+}
+
+export const SandboxSetupStage = Schema.Struct({
+  id: SandboxSetupStageId,
+  status: WorktreeSetupStageStatus,
+  startedAt: Schema.NullOr(IsoDateTime),
+  endedAt: Schema.NullOr(IsoDateTime),
+  detail: Schema.NullOr(Schema.String.check(Schema.isMaxLength(SANDBOX_SETUP_DETAIL_MAX_LENGTH))),
+});
+export type SandboxSetupStage = typeof SandboxSetupStage.Type;
+
+/**
+ * What a failed launch can do next. `relaunch`: nothing was kept, so retry starts over.
+ * `retry`: the machine is kept, so retry runs the failed stage again; cancel deletes it.
+ */
+export const SandboxSetupRecovery = Schema.Literals(["relaunch", "retry"]);
+export type SandboxSetupRecovery = typeof SandboxSetupRecovery.Type;
+
+/** One thread's sandbox launch, streamed from the server provisioning it. */
+export const SandboxSetupSnapshot = Schema.Struct({
+  threadId: ThreadId,
+  instanceId: TrimmedNonEmptyString,
+  configId: TrimmedNonEmptyString,
+  label: TrimmedString,
+  provider: SandboxProviderKind,
+  phase: WorktreeSetupPhase,
+  startedAt: IsoDateTime,
+  endedAt: Schema.NullOr(IsoDateTime),
+  stages: Schema.Array(SandboxSetupStage),
+  /** Steps that did not finish but left a working sandbox. Never carries command output. */
+  warnings: Schema.Array(Schema.String.check(Schema.isMaxLength(SANDBOX_SETUP_DETAIL_MAX_LENGTH))),
+  error: Schema.NullOr(Schema.String.check(Schema.isMaxLength(SANDBOX_SETUP_ERROR_MAX_LENGTH))),
+  recovery: Schema.NullOr(SandboxSetupRecovery),
+  /** The sandbox serves T3 with the project added; the client pairs and starts the thread. */
+  awaitingHandoff: Schema.Boolean,
+  sequence: NonNegativeInt,
+});
+export type SandboxSetupSnapshot = typeof SandboxSetupSnapshot.Type;
+
+export const SandboxLaunchInput = Schema.Struct({
+  configId: TrimmedNonEmptyString,
+  /** The thread id the client allocated for the draft; the snapshot and record are keyed by it. */
+  threadId: ThreadId,
+  project: Schema.Struct({
+    id: ProjectId,
+    title: TrimmedNonEmptyString,
+    /** The project's directory on this server, where its env files are read. */
+    workspaceRoot: TrimmedNonEmptyString,
+    remoteUrl: TrimmedNonEmptyString,
+    /** Branch to clone; omitted clones the default branch. */
+    baseRef: Schema.optional(TrimmedNonEmptyString),
+  }),
+});
+export type SandboxLaunchInput = typeof SandboxLaunchInput.Type;
+
+export const SandboxLaunchResult = Schema.Struct({
+  instanceId: TrimmedNonEmptyString,
+});
+export type SandboxLaunchResult = typeof SandboxLaunchResult.Type;
+
+export const SandboxLaunchThreadInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type SandboxLaunchThreadInput = typeof SandboxLaunchThreadInput.Type;
+
+export const SandboxLaunchStreamEvent = Schema.NullOr(SandboxSetupSnapshot);
+export type SandboxLaunchStreamEvent = typeof SandboxLaunchStreamEvent.Type;
+
+export const SandboxLaunchCancelResult = Schema.Struct({
+  cancelled: Schema.Boolean,
+});
+export type SandboxLaunchCancelResult = typeof SandboxLaunchCancelResult.Type;
+
+/** What the client needs to pair with a launched sandbox and open the thread's project there. */
+export const SandboxLaunchPairResult = Schema.Struct({
+  environmentId: EnvironmentId,
+  httpBaseUrl: TrimmedNonEmptyString,
+  pairingCode: TrimmedNonEmptyString,
+  /** The project `t3 project add` registered for the clone on the sandbox. */
+  projectId: ProjectId,
+});
+export type SandboxLaunchPairResult = typeof SandboxLaunchPairResult.Type;
+
 export const SandboxSettings = Schema.Struct({
   apiKey: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed("")),
@@ -609,16 +825,12 @@ export const SandboxServerSettingsFields = {
   sandboxProviders: Schema.Record(Schema.String, SandboxSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
-  sandboxLifetimeCapMinutes: SandboxLifetimeCapMinutes.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SANDBOX_LIFETIME_CAP_MINUTES)),
-  ),
   sandboxTailscale: SandboxTailscaleSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 };
 
 export const SandboxServerSettingsPatchFields = {
   /** Merges per provider; a redaction marker retains the saved key, an empty key removes it. */
   sandboxProviders: Schema.optionalKey(Schema.Record(Schema.String, SandboxSettings)),
-  sandboxLifetimeCapMinutes: Schema.optionalKey(SandboxLifetimeCapMinutes),
   /** Merges per field; a redaction marker retains the saved secret, an empty one removes it. */
   sandboxTailscale: Schema.optionalKey(
     Schema.Struct({

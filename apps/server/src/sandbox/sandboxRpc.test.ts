@@ -10,13 +10,21 @@ it("lets read-only clients see sandbox limits but keeps starting machines behind
     WS_METHODS.sandboxesLimits,
     WS_METHODS.sandboxesTemplates,
     WS_METHODS.sandboxesList,
+    WS_METHODS.sandboxesConfigs,
+    WS_METHODS.sandboxesSubscribeLaunch,
   ]) {
     expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
   }
   for (const method of [
     WS_METHODS.sandboxesCreate,
     WS_METHODS.sandboxesResume,
-    WS_METHODS.sandboxesExtend,
+    WS_METHODS.sandboxesSaveConfig,
+    WS_METHODS.sandboxesDeleteConfig,
+    WS_METHODS.sandboxesLaunch,
+    WS_METHODS.sandboxesCancelLaunch,
+    WS_METHODS.sandboxesRetryLaunch,
+    WS_METHODS.sandboxesPairLaunch,
+    WS_METHODS.sandboxesCompleteLaunch,
     WS_METHODS.sandboxesSaveTemplate,
     WS_METHODS.sandboxesDeleteTemplate,
     WS_METHODS.sandboxesStop,
