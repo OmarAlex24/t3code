@@ -1,5 +1,6 @@
 import type { SandboxProviderDriver } from "../SandboxProvider.ts";
 import { boatDriver } from "./boat.ts";
+import { celestoDriver } from "./celesto.ts";
 import { daytonaDriver } from "./daytona.ts";
 import { upstashDriver } from "./upstash.ts";
 import { vercelDriver } from "./vercel.ts";
@@ -12,6 +13,7 @@ import { vercelDriver } from "./vercel.ts";
  */
 export const SANDBOX_PROVIDER_DRIVERS: ReadonlyArray<SandboxProviderDriver> = [
   boatDriver,
+  celestoDriver,
   daytonaDriver,
   upstashDriver,
   vercelDriver,
