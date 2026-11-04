@@ -1,6 +1,7 @@
 import { AuthOrchestrationReadScope, AuthSettingsWriteScope, WS_METHODS } from "@t3tools/contracts";
 
-// Creating or deleting a sandbox spends the saved provider key and changes billable machines.
+// Creating or deleting a sandbox spends the saved provider key and changes billable machines, and a
+// launch's pairing code connects to one.
 export const SANDBOX_RPC_REQUIRED_SCOPES = {
   [WS_METHODS.sandboxesProviders]: AuthOrchestrationReadScope,
   [WS_METHODS.sandboxesEnvironments]: AuthOrchestrationReadScope,
@@ -10,10 +11,18 @@ export const SANDBOX_RPC_REQUIRED_SCOPES = {
   [WS_METHODS.sandboxesList]: AuthOrchestrationReadScope,
   [WS_METHODS.sandboxesStop]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesResume]: AuthSettingsWriteScope,
-  [WS_METHODS.sandboxesExtend]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesTemplates]: AuthOrchestrationReadScope,
   [WS_METHODS.sandboxesSaveTemplate]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesDeleteTemplate]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesConfigs]: AuthOrchestrationReadScope,
+  [WS_METHODS.sandboxesSaveConfig]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesDeleteConfig]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesLaunch]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesSubscribeLaunch]: AuthOrchestrationReadScope,
+  [WS_METHODS.sandboxesCancelLaunch]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesRetryLaunch]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesPairLaunch]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesCompleteLaunch]: AuthSettingsWriteScope,
 } as const;
 
 export const SANDBOX_RPC_AGGREGATES = {
@@ -25,8 +34,16 @@ export const SANDBOX_RPC_AGGREGATES = {
   [WS_METHODS.sandboxesList]: "environments",
   [WS_METHODS.sandboxesStop]: "environments",
   [WS_METHODS.sandboxesResume]: "environments",
-  [WS_METHODS.sandboxesExtend]: "environments",
   [WS_METHODS.sandboxesTemplates]: "environments",
   [WS_METHODS.sandboxesSaveTemplate]: "environments",
   [WS_METHODS.sandboxesDeleteTemplate]: "environments",
+  [WS_METHODS.sandboxesConfigs]: "environments",
+  [WS_METHODS.sandboxesSaveConfig]: "environments",
+  [WS_METHODS.sandboxesDeleteConfig]: "environments",
+  [WS_METHODS.sandboxesLaunch]: "environments",
+  [WS_METHODS.sandboxesSubscribeLaunch]: "environments",
+  [WS_METHODS.sandboxesCancelLaunch]: "environments",
+  [WS_METHODS.sandboxesRetryLaunch]: "environments",
+  [WS_METHODS.sandboxesPairLaunch]: "environments",
+  [WS_METHODS.sandboxesCompleteLaunch]: "environments",
 } as const;
