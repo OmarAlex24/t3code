@@ -10,14 +10,27 @@ Add environment**, choose **Sandbox**, and enter an API key for Boat, Daytona, o
 creates the machine, installs T3 Code, exposes it on a public HTTPS URL, and pairs it. The new
 environment reconnects like any other remote environment.
 
+The sandbox gets none of this machine's logins unless you ask. **Use this machine's Claude setup**
+appears when Claude here talks to a custom endpoint, and points Claude in the sandbox at the same
+one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
+the sandbox gets its own key on the hub, which T3 Code removes when you delete the sandbox;
+otherwise this machine's Claude token is copied, and it stays valid after the sandbox is gone. The
+sandbox must be able to reach that endpoint over the internet: one that only answers on your
+tailnet or local network works here but not in a cloud sandbox, so expose it publicly (for
+example with Tailscale Funnel or Cloudflare Tunnel) first. The dialog warns when it can tell.
+**Sign GitHub in with this machine's token** lets `gh` and `git` in the sandbox reach every
+repository that token can. T3 Code also installs git, the GitHub CLI, and Claude Code when the
+provider's image lacks them. Once the sandbox is ready, the dialog lists what was set up; sign Codex
+in from the sandbox's **Settings → Providers**.
+
 For Vercel, create an access token at vercel.com/account/settings/tokens; T3 Code uses your only
 team and a `t3-sandboxes` project unless you fill in **Team** or **Project** (a change applies to
 new sandboxes; existing ones stay where they were created), and a sandbox on the
 Hobby plan stops after 45 minutes, so resume it from the Sandboxes list to keep working.
 
 The key is saved on the T3 Code server that provisions the sandbox, not on the client. Creating a
-sandbox bills the provider account that owns the key. Stop and resume sandboxes from **Settings →
-Environments → Sandboxes**. A sandbox stops eight hours after it was created; resuming does not
+sandbox bills the provider account that owns the key. Stop, resume, and delete sandboxes from
+**Settings → Environments → Sandboxes**; deleting removes the machine and its disk at the provider. A sandbox stops eight hours after it was created; resuming does not
 reset that. Use **Extend** there to add time before it runs out, up to the lifetime limit in the
 same section (24 hours by default). Once it is reached the sandbox cannot be resumed. Daytona deletes
 a sandbox, files included, a day after it stops for good, so copy out anything you need before then.
@@ -26,10 +39,14 @@ That list follows the provider: a sandbox you stop or delete in the provider's d
 stopped or deleted within a minute, and Boat's monthly cost appears next to each sandbox. Boat keeps
 a stopped sandbox's disk for 14 days; after that it shows as expired and can only be deleted.
 
-Once a sandbox has your tools and repositories, **Save as template…** in the same list turns it into
-a starting point: choose the template under **Start from** when you add the next sandbox. Saving
+Set up one sandbox by hand, then let the rest start ready. The checklist after creating a sandbox
+offers your projects from your other machines; **Add** clones one onto the sandbox, along with the
+`.env` files you pick. Install its dependencies there, then use **Save as template…** on the sandbox
+in the same list, and choose the template under **Start from** when you add the next sandbox. Saving
 resets T3 Code on the sandbox and deletes it once the template is ready, so each copy connects as a
-new environment; its files live on in the template.
+new environment. Its files live on in the template, `.env` files included, so leave out secrets you
+do not want in every copy; T3 Code removes only its own identity and the Claude and GitHub logins it
+set up.
 
 ## T3 Connect
 
