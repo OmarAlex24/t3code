@@ -109,6 +109,44 @@ Three details apply to every provider:
   `~/.t3/environment-label`) before starting the server, so the environment picks up the requested
   name without sudo or a writable `/etc`.
 
+## What a sandbox gets from this server
+
+A sandbox starts with none of the provisioning server's credentials. The create form can opt into
+two: Claude's endpoint and token, and the server's github.com token. `SandboxProvidersResult.host`
+tells clients only whether each exists and which Claude path applies; values never leave the
+server except into the sandbox.
+
+- **Setup runs before `t3 serve`.** The server's Claude status probe reads Claude's settings when
+  the server starts, so writing them first lets the new environment report Claude ready on its
+  first probe rather than signed out until the next refresh. Install, tool checks, Claude, and
+  GitHub each run as their own `execute` before the start step, and a failure in any of them
+  except install is a warning on the create result, not a failed create: the user still gets a
+  working sandbox and a checklist of what is missing.
+- **Secrets never reach a shell parser or an error.** Scripts in
+  [`sandboxSetup.ts`](../../apps/server/src/sandbox/sandboxSetup.ts) embed values as base64 inside
+  single quotes and decode them in the sandbox. Provider errors can echo the command they ran, so
+  a step that carries a secret maps its failure to a fixed message instead of the driver's detail.
+- **A hub key belongs to one sandbox.** When the server's Claude endpoint is a CLIProxyAPI hub with
+  a management key, the provisioner adds a fresh `t3-sandbox-<label>-<hex>` key through the hub's
+  management API instead of copying the server's own key, so deleting the sandbox can revoke
+  exactly what it was given. The key is added before the machine is created, so a hub that refuses
+  costs no provider start, and it is removed again if provisioning fails. The record keeps the
+  hub source id and a server-secret name, never the key. A failed revoke on delete is a warning
+  that names the key prefix; it never blocks the delete, because the machine is already gone.
+  Without a hub, the server's token is copied and cannot be revoked by T3.
+- **Reachable here is not reachable there.** A Claude endpoint on a tailnet or LAN address
+  works from the provisioning server and times out from a cloud machine. The provisioner curls
+  the endpoint from the sandbox after writing the settings; no HTTP answer at all marks Claude as
+  failed with a warning, and the hub key is kept, since fixing the network makes it work. The form
+  warns earlier when the server's own endpoint resolves only to private addresses, judged by
+  address rather than name, because a `*.ts.net` Funnel host is public.
+- **Templates do not inherit access.** The template scrub also removes the Claude endpoint and the
+  `gh` login, and a successful save revokes the source's hub key along with deleting the source.
+- **Missing tools are installed, never required.** git, the GitHub CLI, and Claude Code are
+  installed only when `command -v` cannot find them, into `~/.local/bin` where root is not
+  available, and the script always exits zero and reports what is still missing. Boat ships all
+  three, so it is a no-op there; other images can lack `gh`.
+
 ## Lifecycle and hard limits
 
 Every provisioned machine gets a row in `sandbox_records` (see
