@@ -8,7 +8,7 @@ import {
   PlusIcon,
 } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { canCreateProjectInEnvironment } from "@t3tools/client-runtime/operations/projects";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -352,6 +352,19 @@ function SandboxSetupChecklist({
       </div>
     </div>
   );
+}
+
+/** Keeps the Add environment dialog open while a sandbox is provisioning. */
+export function useSandboxProvisioningLock() {
+  const [isProvisioning, setIsProvisioning] = useState(false);
+  // The dialog's close handler runs in the same tick as the completion callback, before React
+  // re-renders, so the lock has to be readable synchronously.
+  const lockedRef = useRef(false);
+  const onProvisioningChange = (provisioning: boolean) => {
+    lockedRef.current = provisioning;
+    setIsProvisioning(provisioning);
+  };
+  return { isProvisioning, lockedRef, onProvisioningChange };
 }
 
 export function SandboxEnvironmentFields({
