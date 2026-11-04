@@ -35,6 +35,8 @@ import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
+import { SANDBOX_RPC_REQUIRED_SCOPES } from "../sandbox/sandboxRpc.ts";
+
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 export const RPC_REQUIRED_SCOPES = {
@@ -92,19 +94,6 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverGetDatabaseStorage]: AuthOrchestrationReadScope,
   [WS_METHODS.peerLinksList]: AuthAccessReadScope,
   [WS_METHODS.serverUpdateSettings]: AuthSettingsWriteScope,
-  // Creating or deleting a sandbox spends the saved provider key and changes billable machines.
-  [WS_METHODS.sandboxesProviders]: AuthOrchestrationReadScope,
-  [WS_METHODS.sandboxesEnvironments]: AuthOrchestrationReadScope,
-  [WS_METHODS.sandboxesLimits]: AuthOrchestrationReadScope,
-  [WS_METHODS.sandboxesCreate]: AuthSettingsWriteScope,
-  [WS_METHODS.sandboxesDelete]: AuthSettingsWriteScope,
-  [WS_METHODS.sandboxesList]: AuthOrchestrationReadScope,
-  [WS_METHODS.sandboxesStop]: AuthSettingsWriteScope,
-  [WS_METHODS.sandboxesResume]: AuthSettingsWriteScope,
-  [WS_METHODS.sandboxesExtend]: AuthSettingsWriteScope,
-  [WS_METHODS.sandboxesTemplates]: AuthOrchestrationReadScope,
-  [WS_METHODS.sandboxesSaveTemplate]: AuthSettingsWriteScope,
-  [WS_METHODS.sandboxesDeleteTemplate]: AuthSettingsWriteScope,
   [WS_METHODS.serverSearchAcpRegistry]: AuthOrchestrationReadScope,
   [WS_METHODS.serverPrepareAcpRegistryAgent]: AuthProvidersManageScope,
   [WS_METHODS.serverUninstallAcpRegistryManagedBinary]: AuthProvidersManageScope,
@@ -228,6 +217,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
+  ...SANDBOX_RPC_REQUIRED_SCOPES,
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
