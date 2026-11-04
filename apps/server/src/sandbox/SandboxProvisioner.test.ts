@@ -725,12 +725,17 @@ describe("celestoDriver", () => {
     }),
   );
 
-  it.effect("runs a long command detached past Celesto's 300 s cap, with secrets in a file", () => {
+  it.effect("runs a long command detached past Celesto's 300 s cap, with secrets sealed", () => {
     const requests: Array<Sent> = [];
     let exitCode = "0";
     let pollFailed = false;
+    const sandboxKey = NodeCrypto.generateKeyPairSync("rsa", { modulusLength: 3072 });
+    let publicKeyAnswer = `${sandboxKey.publicKey.export({ type: "spki", format: "pem" })}`;
     const client = celestoRecording(requests, () => {
       const command = commandOf(requests.at(-1)!);
+      if (command.includes("genpkey")) {
+        return Response.json({ exit_code: 0, stdout: publicKeyAnswer, stderr: "" });
+      }
       if (command.includes("/rc 2>/dev/null")) {
         if (!pollFailed) {
           pollFailed = true;
@@ -767,14 +772,29 @@ describe("celestoDriver", () => {
         expect(body.timeout).toBeLessThanOrEqual(300);
         expect(body.command.length).toBeLessThanOrEqual(10_000);
       }
-      // The secret travels once, base64-encoded, in the step that writes the private file.
-      const encodedSecret = Buffer.from(
-        `export T3_TEST_SECRET='hub-key-'\\''$(touch pwned)"'\n`,
-      ).toString("base64");
+      // No command carries the secret, plain or encoded: the sandbox makes a key pair, sends back
+      // only its public half, and the server seals the secrets file to it.
+      const envLine = `export T3_TEST_SECRET='hub-key-'\\''$(touch pwned)"'\n`;
+      for (const command of commands) {
+        expect(command).not.toContain("hub-key");
+        expect(command).not.toContain(Buffer.from(secret).toString("base64"));
+        expect(command).not.toContain(Buffer.from(envLine).toString("base64"));
+      }
       expect(commands[0]).toContain("umask 077");
-      expect(commands[0]).toContain(encodedSecret);
-      for (const command of commands) expect(command).not.toContain("hub-key");
-      for (const command of commands.slice(1)) expect(command).not.toContain(encodedSecret);
+      expect(commands[0]).toContain("genpkey");
+      const sealed = commands
+        .flatMap((command) => [...command.matchAll(/printf %s ([A-Za-z0-9+/=]+) \| part /gu)])
+        .map((match) =>
+          NodeCrypto.privateDecrypt(
+            {
+              key: sandboxKey.privateKey,
+              padding: NodeCrypto.constants.RSA_PKCS1_OAEP_PADDING,
+              oaepHash: "sha256",
+            },
+            Buffer.from(match[1]!, "base64"),
+          ),
+        );
+      expect(Buffer.concat(sealed).toString("utf8")).toBe(envLine);
       // The script runs under `setsid` and the caller's own time, and reports through a file.
       const start = commands.find((command) => command.includes("setsid -f"));
       expect(start).toContain("timeout -k 10 600 sh");
@@ -790,6 +810,21 @@ describe("celestoDriver", () => {
       expect(error.detail).toBe("The command exited with 3.");
       expect(String(error.cause)).toContain("warn");
       expect(commandOf(requests.at(-1)!)).toMatch(/rm -rf \/tmp\/t3-secrets-[0-9a-z]+/u);
+
+      // Anything but a strong RSA public key seals nothing and removes the sandbox's key.
+      const weakKey = NodeCrypto.generateKeyPairSync("rsa", { modulusLength: 1024 }).publicKey;
+      for (const answer of [
+        "",
+        "no key here",
+        `${weakKey.export({ type: "spki", format: "pem" })}`,
+      ]) {
+        requests.length = 0;
+        publicKeyAnswer = answer;
+        const refused = yield* run.pipe(Effect.flip);
+        expect(refused.detail).toBe("The sandbox did not return a usable key for its secrets.");
+        expect(requests).toHaveLength(2);
+        expect(commandOf(requests[1]!)).toMatch(/^sh -c 'rm -rf \/tmp\/t3-secrets-[0-9a-z]+'$/u);
+      }
     });
   });
 

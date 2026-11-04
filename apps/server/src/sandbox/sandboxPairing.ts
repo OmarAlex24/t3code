@@ -24,7 +24,10 @@ export const makePairingKey = Effect.callback<PairingKey>((resume) => {
   });
 });
 
-const OAEP = { padding: NodeCrypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" } as const;
+export const OAEP = {
+  padding: NodeCrypto.constants.RSA_PKCS1_OAEP_PADDING,
+  oaepHash: "sha256",
+} as const;
 
 // The fallback for an image without the openssl CLI; the fork already relies on Node for Claude.
 const NODE_SEAL = `const c = require("node:crypto"), f = require("node:fs");
