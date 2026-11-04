@@ -146,6 +146,7 @@ import {
   type ConnectDeviceRevokeRequest,
   RevokeConnectDeviceDialog,
 } from "./RevokeConnectDeviceDialog";
+import { SandboxManagementSection } from "./SandboxManagementSection";
 
 // Sessions T3 Connect minted for a device signed in to the linked account.
 const CLOUD_CONNECT_SESSION_SUBJECT = "cloud-connect";
@@ -1717,6 +1718,7 @@ function ConnectionsSettingsContent({
           savedEnvironments={savedEnvironments}
         />
       </SettingsSection>
+      <SandboxManagementSection />
       {hasCloudPublicConfig() ? (
         <RemoveT3ConnectEnvironmentDialog
           environmentLabel={pendingT3ConnectRemoval?.label ?? null}
