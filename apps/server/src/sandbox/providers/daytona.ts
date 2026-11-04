@@ -5,9 +5,12 @@ import { HttpClientRequest } from "effect/http";
 import * as Schema from "effect/Schema";
 
 import {
+  attemptSandboxName,
   authorize,
+  commandRequestSeconds,
   type CreatedSandbox,
   jsonBody,
+  mayHaveCreated,
   requestJson,
   type SandboxProviderDriver,
   type SandboxProviderStatus,
@@ -266,15 +269,16 @@ export const daytonaDriver: SandboxProviderDriver = {
   // Daytona's preview proxy answers CORS itself: it echoes the caller's origin with credentials.
   // If `t3 serve` also sends `*`, the response carries two values and browsers reject it.
   serveEnvironment: { T3CODE_PROXY_HANDLES_CORS: "true" },
-  create: (input) =>
-    requestJson({
+  create: Effect.fn("Daytona.create")(function* (input) {
+    const name = attemptSandboxName(input.name, input.idempotencyKey);
+    return yield* requestJson({
       provider: "daytona",
       stage: "create",
       schema: DaytonaSandbox,
       request: jsonBody(
         authorize(HttpClientRequest.post(`${DAYTONA_API_BASE}/sandbox`), input.config.apiKey),
         {
-          name: input.name,
+          name,
           snapshot:
             input.template === undefined ? input.size : templateSnapshotName(input.template),
           public: true,
@@ -289,6 +293,13 @@ export const daytonaDriver: SandboxProviderDriver = {
         },
       ),
     }).pipe(
+      // Names are unique per organization and reach a new sandbox at once, where Daytona's label
+      // search is eventually consistent, so the attempt's name finds what a lost create made.
+      Effect.catchIf(mayHaveCreated, (error) =>
+        daytonaDriver
+          .destroy({ config: input.config, sandboxId: name })
+          .pipe(Effect.ignore, Effect.andThen(Effect.fail(error))),
+      ),
       Effect.flatMap((sandbox) =>
         // Daytona is created with auto-stop and auto-delete disabled, so a machine that never
         // finishes starting would bill forever if the provisioner never learned its id.
@@ -302,11 +313,9 @@ export const daytonaDriver: SandboxProviderDriver = {
           ),
         ),
       ),
-      Effect.map((sandbox): CreatedSandbox => ({
-        id: sandbox.id,
-        name: sandbox.name ?? input.name,
-      })),
-    ),
+      Effect.map((sandbox): CreatedSandbox => ({ id: sandbox.id, name: input.name })),
+    );
+  }),
   limits: Effect.fn("Daytona.limits")(
     function* (input) {
       const key = yield* requestJson({
@@ -355,6 +364,7 @@ export const daytonaDriver: SandboxProviderDriver = {
   ),
   execute: Effect.fn("Daytona.execute")(function* (input) {
     const baseUrl = yield* toolboxBaseUrl(input.config.apiKey, input.sandboxId);
+    const seconds = Math.min(Math.max(input.timeoutSeconds, 1), 600);
     const result = yield* requestJson({
       provider: "daytona",
       stage: "install",
@@ -363,9 +373,11 @@ export const daytonaDriver: SandboxProviderDriver = {
         authorize(HttpClientRequest.post(`${baseUrl}/process/execute`), input.config.apiKey),
         {
           command: input.command,
-          timeout: Math.min(Math.max(input.timeoutSeconds, 1), 600),
+          ...(input.secrets === undefined ? {} : { envs: input.secrets }),
+          timeout: seconds,
         },
       ),
+      timeoutSeconds: commandRequestSeconds(seconds),
     });
     const exitCode = result.exitCode ?? 0;
     if (exitCode !== 0) {

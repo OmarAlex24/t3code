@@ -1,7 +1,13 @@
-// Scripts that set up what a sandbox gets beyond T3 Code. Secrets reach them only as base64 inside
-// single quotes, so no value is ever parsed by the shell, and none of them print what they write.
+// Scripts that set up what a sandbox gets beyond T3 Code. Secrets reach them only as environment
+// variables the driver delivers outside the command text, and none of them print what they write.
 
 import { shellQuote } from "./SandboxProvider.ts";
+
+/** A command and the secrets it reads from its environment, for `SandboxProviderDriver.execute`. */
+export interface SandboxScript {
+  readonly command: string;
+  readonly secrets?: Readonly<Record<string, string>>;
+}
 
 const base64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
 
@@ -13,15 +19,17 @@ export const claudeSettingsScript = (env: {
   readonly HTTPS_PROXY?: string;
   readonly HTTP_PROXY?: string;
   readonly NO_PROXY?: string;
-}) => `set -eu
+}): SandboxScript => ({
+  secrets: { T3_CLAUDE_ENV: JSON.stringify(env) },
+  command: `set -eu
 umask 077
 export PATH="$HOME/.local/bin:$PATH"
 dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "$dir"
-T3_CLAUDE_ENV='${base64(JSON.stringify(env))}' node -e '
+node -e '
 const fs = require("node:fs");
 const file = process.argv[1];
-const env = JSON.parse(Buffer.from(process.env.T3_CLAUDE_ENV, "base64").toString("utf8"));
+const env = JSON.parse(process.env.T3_CLAUDE_ENV);
 let settings = {};
 try {
   settings = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -36,7 +44,8 @@ settings.env = { ...current, ...env };
 fs.writeFileSync(file + ".t3-tmp", JSON.stringify(settings, null, 2) + "\\n", { mode: 0o600 });
 fs.renameSync(file + ".t3-tmp", file);
 ' "$dir/settings.json"
-chmod 600 "$dir/settings.json"`;
+chmod 600 "$dir/settings.json"`,
+});
 
 /** Where tailscaled's HTTP proxy listens when the sandbox cannot create a TUN device. */
 export const TAILSCALE_PROXY_URL = "http://localhost:1055";
@@ -67,14 +76,18 @@ if (settings && settings.env && typeof settings.env === "object") {
 ' "$dir/settings.json" >/dev/null 2>&1 || true
 fi`;
 
-export const githubLoginScript = (token: string) => `set -eu
+export const githubLoginScript = (token: string): SandboxScript => ({
+  secrets: { T3_GITHUB_TOKEN: token },
+  command: `set -eu
 export PATH="$HOME/.local/bin:$PATH"
 if ! command -v gh >/dev/null 2>&1; then
   echo "The GitHub CLI is not installed." >&2
   exit 3
 fi
-printf '%s' '${base64(token)}' | base64 -d | gh auth login --hostname github.com --git-protocol https --with-token
-gh auth setup-git --hostname github.com`;
+printf '%s' "$T3_GITHUB_TOKEN" | gh auth login --hostname github.com --git-protocol https --with-token
+unset T3_GITHUB_TOKEN
+gh auth setup-git --hostname github.com`,
+});
 
 // Run before a template save, with the Claude scrub: a copy must not inherit the GitHub login.
 export const GITHUB_LOGIN_SCRUB = `rm -f "\${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml"`;
@@ -200,13 +213,13 @@ const stopNohupTailscaled = (paths: ReturnType<typeof tailscalePaths>) => `{
 }`;
 
 // Installs Tailscale when missing, starts tailscaled (systemd where it is PID 1, else nohup), and
-// joins with the key passed as a 0600 file, never an argument. Kernel TUN first; without one,
+// joins with the key passed as a 0600 file, never an argument (printf is a shell builtin). Kernel TUN first; without one,
 // userspace with a local HTTP proxy for Claude. Exits 0 and reports `T3_TAILSCALE_*` lines.
 export const tailscaleScript = (options: {
   readonly authKey?: string;
   readonly hostname: string;
   readonly root?: string;
-}) => {
+}): SandboxScript => {
   const paths = tailscalePaths(options.root ?? "");
   const join =
     options.authKey === undefined
@@ -214,11 +227,12 @@ export const tailscaleScript = (options: {
       : `key_file="$(mktemp)"
 chmod 600 "$key_file"
 trap 'rm -f "$key_file"' EXIT
-printf '%s' '${base64(options.authKey)}' | base64 -d >"$key_file"
+printf '%s' "$T3_TAILSCALE_AUTH_KEY" >"$key_file"
+unset T3_TAILSCALE_AUTH_KEY
 ts up --auth-key="file:$key_file" --hostname=${shellQuote(options.hostname)} --accept-dns=false --reset --timeout=60s >/dev/null 2>&1 || true
 rm -f "$key_file"
 `;
-  return `export PATH="$HOME/.local/bin:$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+  const command = `export PATH="$HOME/.local/bin:$PATH:/usr/local/sbin:/usr/sbin:/sbin"
 ${AS_ROOT}
 report() { printf '${TAILSCALE_PREFIX}%s: %s\\n' "$1" "$2"; }
 if ! as_root true; then
@@ -316,6 +330,9 @@ report MODE "$mode"
 ${join}report STATE "$(backend)"
 report NODE "$(status_json | sed -n 's/^ *"ID": *"\\([^"]*\\)".*/\\1/p' | head -n 1)"
 exit 0`;
+  return options.authKey === undefined
+    ? { command }
+    : { command, secrets: { T3_TAILSCALE_AUTH_KEY: options.authKey } };
 };
 
 export interface TailscaleReport {

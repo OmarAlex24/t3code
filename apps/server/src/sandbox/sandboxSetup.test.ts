@@ -11,21 +11,33 @@ import {
   claudeSettingsScript,
   endpointReachScript,
   ENSURE_TOOLS_SCRIPT,
+  githubLoginScript,
   parseEndpointReach,
   parseMissingTools,
   parseTailscaleReport,
+  type SandboxScript,
   tailscaleScript,
   tailscaleScrub,
 } from "./sandboxSetup.ts";
 
-// The scripts run in a throwaway HOME with this machine's sh and node, as they would in a sandbox.
-const runIn = (home: string, script: string) =>
+const asScript = (script: string | SandboxScript): SandboxScript =>
+  typeof script === "string" ? { command: script } : script;
+
+// Providers keep command text, so a secret must not be in it, not even base64-encoded.
+const revealsSecret = (text: string, secret: string) =>
+  [text, ...(text.match(/[A-Za-z0-9+/=]{12,}/gu) ?? [])]
+    .map((run) => (run === text ? run : Buffer.from(run, "base64").toString("utf8")))
+    .some((candidate) => candidate.includes(secret));
+
+// The scripts run in a throwaway HOME with this machine's sh and node, as they would in a sandbox,
+// with their secrets in the environment the way drivers pass them.
+const runIn = (home: string, script: string | SandboxScript) =>
   ChildProcessSpawner.ChildProcessSpawner.pipe(
     Effect.flatMap((spawner) =>
       spawner.string(
-        ChildProcess.make("sh", ["-c", script], {
+        ChildProcess.make("sh", ["-c", asScript(script).command], {
           cwd: home,
-          env: { PATH: process.env.PATH, HOME: home },
+          env: { PATH: process.env.PATH, HOME: home, ...asScript(script).secrets },
           stdin: "ignore",
         }),
       ),
@@ -61,7 +73,9 @@ describe("claudeSettingsScript", () => {
             }),
           );
           const token = "t3-sandbox-test-'$(touch pwned)\"";
-          expect(yield* runIn(home, claudeSettingsScript(endpoint(token)))).toBe("");
+          const script = claudeSettingsScript(endpoint(token));
+          expect(revealsSecret(script.command, token)).toBe(false);
+          expect(yield* runIn(home, script)).toBe("");
           // The token is data, never shell: nothing in it ran.
           expect(yield* fs.exists(`${home}/pwned`)).toBe(false);
           expect(JSON.parse(yield* fs.readFileString(file))).toEqual({
@@ -174,7 +188,10 @@ fi`,
 };
 
 const withTailscaleStubs = <A, E, R>(
-  test: (run: (script: string) => Effect.Effect<string>, stub: string) => Effect.Effect<A, E, R>,
+  test: (
+    run: (script: string | SandboxScript) => Effect.Effect<string>,
+    stub: string,
+  ) => Effect.Effect<A, E, R>,
 ) =>
   withHome((home) =>
     Effect.gen(function* () {
@@ -188,12 +205,17 @@ const withTailscaleStubs = <A, E, R>(
         yield* fs.chmod(`${bin}/${name}`, 0o755);
       }
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const run = (script: string) =>
+      const run = (script: string | SandboxScript) =>
         spawner
           .string(
-            ChildProcess.make("sh", ["-c", script], {
+            ChildProcess.make("sh", ["-c", asScript(script).command], {
               cwd: home,
-              env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, T3_STUB: stub },
+              env: {
+                PATH: `${bin}:${process.env.PATH}`,
+                HOME: home,
+                T3_STUB: stub,
+                ...asScript(script).secrets,
+              },
               stdin: "ignore",
             }),
           )
@@ -211,9 +233,9 @@ describe("tailscaleScript", () => {
           const fs = yield* FileSystem.FileSystem;
           const root = `${stub}/root`;
           const authKey = "tskey-auth-'$(touch pwned)\"";
-          const joined = parseTailscaleReport(
-            yield* run(tailscaleScript({ authKey, hostname: "t3-sandbox-web", root })),
-          );
+          const join = tailscaleScript({ authKey, hostname: "t3-sandbox-web", root });
+          expect(revealsSecret(join.command, authKey)).toBe(false);
+          const joined = parseTailscaleReport(yield* run(join));
           expect(joined).toEqual({
             daemon: "nohup",
             mode: "userspace",
@@ -235,9 +257,9 @@ describe("tailscaleScript", () => {
 
           // A daemon that still answers in the recorded mode is left running.
           const starts = yield* fs.readFileString(`${stub}/starts`);
-          const resumed = parseTailscaleReport(
-            yield* run(tailscaleScript({ hostname: "t3-sandbox-web", root })),
-          );
+          const restart = tailscaleScript({ hostname: "t3-sandbox-web", root });
+          expect(restart.secrets).toBeUndefined();
+          const resumed = parseTailscaleReport(yield* run(restart));
           expect(resumed).toMatchObject({ mode: "userspace", state: "Running" });
           expect(yield* fs.readFileString(`${stub}/starts`)).toBe(starts);
 
@@ -246,5 +268,27 @@ describe("tailscaleScript", () => {
           expect(yield* fs.exists(`${root}/var/lib/tailscale`)).toBe(false);
         }),
       ),
+  );
+});
+
+describe("githubLoginScript", () => {
+  it.live("pipes the token from the environment to gh and keeps it out of the command", () =>
+    withTailscaleStubs((run, stub) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.writeFileString(
+          `${stub}/../bin/gh`,
+          `#!/bin/sh\necho "$*" >>"$T3_STUB/gh.argv"\ncase "$*" in *--with-token*) cat >"$T3_STUB/gh.stdin" ;; esac\n`,
+        );
+        yield* fs.chmod(`${stub}/../bin/gh`, 0o755);
+        const token = "ghp_'$(touch pwned)\"";
+        const script = githubLoginScript(token);
+        expect(revealsSecret(script.command, token)).toBe(false);
+        yield* run(script);
+        expect(yield* fs.readFileString(`${stub}/gh.stdin`)).toBe(token);
+        expect(yield* fs.readFileString(`${stub}/gh.argv`)).not.toContain("ghp_");
+        expect(yield* fs.exists(`${stub}/pwned`)).toBe(false);
+      }),
+    ),
   );
 });

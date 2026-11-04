@@ -59,6 +59,7 @@ import {
   parseEndpointReach,
   parseMissingTools,
   parseTailscaleReport,
+  type SandboxScript,
   type SandboxTool,
   GITHUB_LOGIN_SCRUB,
   githubLoginScript,
@@ -221,7 +222,7 @@ const unreachableEndpointWarning = (
     : `The sandbox cannot reach ${host}. Check that it accepts connections from the internet, or use another endpoint.`;
 };
 
-// The key travels inside the join script, so a failure keeps neither the driver's detail nor output.
+// The join handles the key, so a failure keeps neither the driver's detail nor its output.
 const TAILNET_JOIN_FAILED = "The sandbox could not join your tailnet.";
 
 interface TailnetJoin {
@@ -239,6 +240,9 @@ interface HubKey {
   readonly source: UsageLimitSourceConfig;
   readonly value: Redacted.Redacted<string>;
 }
+
+const asScript = (script: string | SandboxScript): SandboxScript =>
+  typeof script === "string" ? { command: script } : script;
 
 const PAIR_SCRIPT = `set -eu
 export PATH="$HOME/.local/bin:$PATH"
@@ -433,7 +437,7 @@ const make = Effect.gen(function* () {
     join: TailnetJoin,
     label: string,
     run: (
-      command: string,
+      script: string | SandboxScript,
       timeoutSeconds: number,
     ) => Effect.Effect<{ readonly stdout: string }, SandboxProviderError, HttpClient.HttpClient>,
   ): Effect.fn.Return<
@@ -480,7 +484,7 @@ const make = Effect.gen(function* () {
   const rejoinTailnet = Effect.fn("SandboxProvisioner.rejoinTailnet")(function* (
     record: SandboxRecord,
     run: (
-      command: string,
+      script: string | SandboxScript,
       timeoutSeconds: number,
     ) => Effect.Effect<{ readonly stdout: string }, SandboxProviderError, HttpClient.HttpClient>,
   ): Effect.fn.Return<
@@ -855,8 +859,13 @@ const make = Effect.gen(function* () {
               ),
         ),
       );
-    const run = (command: string, timeoutSeconds: number) =>
-      driver.execute({ config: sandboxConfig, sandboxId: sandbox.id, command, timeoutSeconds });
+    const run = (script: string | SandboxScript, timeoutSeconds: number) =>
+      driver.execute({
+        config: sandboxConfig,
+        sandboxId: sandbox.id,
+        timeoutSeconds,
+        ...asScript(script),
+      });
 
     const httpBaseUrl = yield* stopOnFailure(
       sandbox.publicUrl === undefined
@@ -1250,8 +1259,13 @@ const make = Effect.gen(function* () {
     );
     const httpBaseUrl = resumed.publicUrl ?? record.httpBaseUrl;
     const rejoined = yield* onHttp(
-      rejoinTailnet(record, (command, timeoutSeconds) =>
-        driver.execute({ config, sandboxId: record.sandboxId, command, timeoutSeconds }),
+      rejoinTailnet(record, (script, timeoutSeconds) =>
+        driver.execute({
+          config,
+          sandboxId: record.sandboxId,
+          timeoutSeconds,
+          ...asScript(script),
+        }),
       ),
     );
     yield* onHttp(
