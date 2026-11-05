@@ -465,6 +465,8 @@ const toolStatusOf = (status: OrchestrationV2TurnItem["status"]): AcpSchema.Tool
   }
 };
 
+const toolSentKey = (item: ToolItem) => `${toolStatusOf(item.status)}\u0000${toolTitleOf(item)}`;
+
 export type TurnAction =
   | {
       readonly _tag: "text";
@@ -478,6 +480,8 @@ export type TurnAction =
       readonly title: string;
       readonly kind: AcpSchema.ToolKind;
       readonly status: AcpSchema.ToolCallStatus;
+      /** The command a command tool runs, where the host reads it to show what ran. */
+      readonly command?: string;
     }
   | { readonly _tag: "approval"; readonly item: ApprovalItem }
   | { readonly _tag: "question"; readonly item: QuestionItem };
@@ -492,7 +496,8 @@ export class TurnTracker {
   private readonly items = new Map<string, OrchestrationV2TurnItem>();
   private readonly requests = new Map<string, OrchestrationV2RuntimeRequest>();
   private readonly sent = new Map<string, number>();
-  private readonly toolStatus = new Map<string, AcpSchema.ToolCallStatus>();
+  // The status and title last sent for each tool: a command's input often arrives after it starts.
+  private readonly toolSent = new Map<string, string>();
   private readonly handled = new Set<string>();
   private readonly settledRequests = new Map<string, Deferred.Deferred<void>>();
   private readonly messageId: MessageId;
@@ -514,7 +519,7 @@ export class TurnTracker {
         } else if (item.type === "proposed_plan") {
           this.sent.set(item.id, item.markdown.length);
         } else if (isToolItem(item)) {
-          this.toolStatus.set(item.id, toolStatusOf(item.status));
+          this.toolSent.set(item.id, toolSentKey(item));
         }
       }
     }
@@ -645,15 +650,17 @@ export class TurnTracker {
           text: text.slice(sent),
         });
       } else if (isToolItem(item)) {
-        const status = toolStatusOf(item.status);
-        if (this.toolStatus.get(item.id) === status) continue;
-        this.toolStatus.set(item.id, status);
+        const key = toolSentKey(item);
+        if (this.toolSent.get(item.id) === key) continue;
+        this.toolSent.set(item.id, key);
+        const command = item.type === "command_execution" ? summary(item.input) : "";
         actions.push({
           _tag: "tool",
           id: item.id,
           title: toolTitleOf(item),
           kind: toolKindOf(item),
-          status,
+          status: toolStatusOf(item.status),
+          ...(command === "" ? {} : { command }),
         });
       } else if (item.type === "approval_request" && this.isPending(item.requestId, item.status)) {
         this.handled.add(item.requestId);
@@ -1066,12 +1073,16 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       const title = `Sandbox ${sandboxName}: ${item.prompt ?? item.title ?? "Approve this action"}`;
       const kind = approvalToolKind(item.requestKind);
       const options = approvalOptions(item.options);
+      // The host names a command request by its command, as the desktop does.
+      const command = kind === "execute" ? summary(item.prompt) : "";
+      const rawInput = command === "" ? {} : { rawInput: { command } };
       yield* update(sessionId, {
         sessionUpdate: "tool_call_update",
         toolCallId,
         title,
         kind,
         status: "pending",
+        ...rawInput,
       });
       // Only a Supervised thread shows a permission request to the user; any other mode's
       // policy would answer it alone, so the request comes as a question instead.
@@ -1084,7 +1095,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
                 ...(item.reason === undefined ? {} : { description: item.reason }),
                 subject: {
                   type: "tool_call",
-                  toolCall: { toolCallId, title, kind, status: "pending" },
+                  toolCall: { toolCallId, title, kind, status: "pending", ...rawInput },
                 },
                 options,
               })
@@ -1173,6 +1184,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
             title: action.title,
             kind: action.kind,
             status: action.status,
+            ...(action.command === undefined ? {} : { rawInput: { command: action.command } }),
           });
         case "approval":
           return forwardApproval(action.item);
