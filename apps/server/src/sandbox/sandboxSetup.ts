@@ -162,11 +162,21 @@ const ENDPOINT_STATUS_PREFIX = "T3_ENDPOINT_STATUS:";
 
 // Any HTTP answer means the sandbox can reach the endpoint; curl prints 000 when it cannot connect.
 // Through tailscaled's userspace proxy when that is how Claude reaches it.
+// A sandbox that just joined the tailnet can need a few seconds for a route to the endpoint, so a
+// failed connection is tried again for about half a minute before it counts as unreachable.
 export const endpointReachScript = (
   baseUrl: string,
   proxy?: string,
 ) => `url="$(printf '%s' '${base64(baseUrl)}' | base64 -d)"
-printf '${ENDPOINT_STATUS_PREFIX}%s\\n' "$(curl -s -m 10 ${proxy === undefined ? "" : `--proxy '${proxy}' `}-o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+code=""
+if command -v curl >/dev/null 2>&1; then
+  for attempt in 1 2 3 4; do
+    code="$(curl -s -m 8 ${proxy === undefined ? "" : `--proxy '${proxy}' `}-o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+    [ "$code" != 000 ] && break
+    [ "$attempt" -lt 4 ] && sleep 3
+  done
+fi
+printf '${ENDPOINT_STATUS_PREFIX}%s\\n' "$code"
 exit 0`;
 
 /** Whether the sandbox reached the endpoint, or null when it could not tell (no curl, no report). */

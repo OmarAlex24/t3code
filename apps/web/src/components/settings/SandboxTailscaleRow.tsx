@@ -15,6 +15,7 @@ import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Input } from "../ui/input";
 import { Spinner } from "../ui/spinner";
+import { SandboxTailscaleSetup } from "./SandboxTailscaleSetup";
 
 const TAILSCALE_OAUTH_DOCS = "https://tailscale.com/kb/1215/oauth-clients";
 
@@ -32,6 +33,9 @@ export function SandboxTailscaleRow({ environmentId }: { readonly environmentId:
   const [tag, setTag] = useState("");
   const [checking, setChecking] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // The setup steps open for a first setup and stay folded when replacing a working client.
+  const [stepsOpen, setStepsOpen] = useState(false);
+  const effectiveTag = tag.trim() === "" ? DEFAULT_SANDBOX_TAILSCALE_TAG : tag.trim();
   // An OAuth client secret carries its client ID, so the secret alone is usually enough.
   const derivedClientId = tailscaleClientIdFromSecret(clientSecret);
 
@@ -48,6 +52,7 @@ export function SandboxTailscaleRow({ environmentId }: { readonly environmentId:
     setTag(saved.tag === DEFAULT_SANDBOX_TAILSCALE_TAG ? "" : saved.tag);
     setClientSecret("");
     setProblem(null);
+    setStepsOpen(!configured);
     setEditing(true);
   };
   // Saves only a client that signs in and holds the scopes sandboxes need.
@@ -59,6 +64,7 @@ export function SandboxTailscaleRow({ environmentId }: { readonly environmentId:
       input: {
         clientSecret: clientSecret.trim(),
         ...(clientId.trim() === "" ? {} : { clientId: clientId.trim() }),
+        tag: effectiveTag,
       },
     });
     setChecking(false);
@@ -69,13 +75,15 @@ export function SandboxTailscaleRow({ environmentId }: { readonly environmentId:
       return;
     }
     if (result.value.problem !== null) {
+      // The reason points at a step, so the steps open beside it.
       setProblem(result.value.problem);
+      setStepsOpen(true);
       return;
     }
     persist({
       clientId: result.value.clientId,
       clientSecret: clientSecret.trim(),
-      tag: tag.trim() === "" ? DEFAULT_SANDBOX_TAILSCALE_TAG : tag.trim(),
+      tag: effectiveTag,
     });
   };
 
@@ -133,83 +141,94 @@ export function SandboxTailscaleRow({ environmentId }: { readonly environmentId:
             void save();
           }}
         >
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              aria-label="Tailscale OAuth client secret"
-              type="password"
-              placeholder="tskey-client-…"
-              value={clientSecret}
-              onChange={(event) => {
-                setClientSecret(event.target.value);
-                setProblem(null);
-              }}
-              spellCheck={false}
-              autoComplete="off"
-              disabled={checking}
-            />
-            <div className="flex shrink-0 justify-end gap-2">
-              <Button
-                type="button"
-                size="xs"
-                variant="ghost"
-                disabled={checking}
-                onClick={() => setEditing(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                size="xs"
-                variant="outline"
-                disabled={
-                  checking ||
-                  clientSecret.trim() === "" ||
-                  (derivedClientId === null && clientId.trim() === "")
-                }
-              >
-                {checking ? <Spinner className="size-3" /> : null}
-                {checking ? "Checking…" : "Save"}
-              </Button>
-            </div>
-          </div>
-          {problem === null ? (
-            <p className="text-xs text-muted-foreground">
-              {derivedClientId !== null
-                ? `Client ID ${derivedClientId}, read from the secret. Saving signs in once to check its scopes.`
-                : "Paste the OAuth client secret. It needs write access to Auth Keys and Devices Core for the tag."}
-            </p>
-          ) : (
-            <p role="alert" className="text-xs text-destructive-foreground">
-              {problem}
-            </p>
-          )}
-          <Collapsible>
-            <CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground data-panel-open:[&_svg]:rotate-90">
-              <ChevronRightIcon aria-hidden className="size-3.5 transition-transform" />
-              Advanced
-            </CollapsibleTrigger>
-            <CollapsiblePanel>
-              <div className="grid gap-2 pt-2 sm:grid-cols-2">
+          <SandboxTailscaleSetup
+            environmentId={environmentId}
+            tag={effectiveTag}
+            open={stepsOpen}
+            onOpenChange={setStepsOpen}
+          >
+            <div className="space-y-2">
+              <div className="flex flex-col gap-2 sm:flex-row">
                 <Input
-                  aria-label="Tailscale OAuth client ID"
-                  placeholder={derivedClientId ?? "OAuth client ID, if the secret has another form"}
-                  value={clientId}
-                  onChange={(event) => setClientId(event.target.value)}
+                  aria-label="Tailscale OAuth client secret"
+                  type="password"
+                  placeholder="tskey-client-…"
+                  value={clientSecret}
+                  onChange={(event) => {
+                    setClientSecret(event.target.value);
+                    setProblem(null);
+                  }}
                   spellCheck={false}
                   autoComplete="off"
                   disabled={checking}
                 />
-                <Input
-                  aria-label="Tailscale tag"
-                  placeholder={DEFAULT_SANDBOX_TAILSCALE_TAG}
-                  value={tag}
-                  onChange={(event) => setTag(event.target.value)}
-                  spellCheck={false}
-                  disabled={checking}
-                />
+                <div className="flex shrink-0 justify-end gap-2">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    disabled={checking}
+                    onClick={() => setEditing(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="submit"
+                    size="xs"
+                    variant="outline"
+                    disabled={
+                      checking ||
+                      clientSecret.trim() === "" ||
+                      (derivedClientId === null && clientId.trim() === "")
+                    }
+                  >
+                    {checking ? <Spinner className="size-3" /> : null}
+                    {checking ? "Checking…" : "Save"}
+                  </Button>
+                </div>
               </div>
-            </CollapsiblePanel>
-          </Collapsible>
+              {problem === null ? (
+                <p className="text-xs text-muted-foreground">
+                  {derivedClientId !== null
+                    ? `Client ID ${derivedClientId}, read from the secret. Saving signs in once to check its scopes and tag.`
+                    : "Saving signs in once to check the client's scopes and tag."}
+                </p>
+              ) : (
+                <p role="alert" className="text-xs text-destructive-foreground">
+                  {problem}
+                </p>
+              )}
+              <Collapsible>
+                <CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground data-panel-open:[&_svg]:rotate-90">
+                  <ChevronRightIcon aria-hidden className="size-3.5 transition-transform" />
+                  Advanced
+                </CollapsibleTrigger>
+                <CollapsiblePanel>
+                  <div className="grid gap-2 pt-2 sm:grid-cols-2">
+                    <Input
+                      aria-label="Tailscale OAuth client ID"
+                      placeholder={
+                        derivedClientId ?? "OAuth client ID, if the secret has another form"
+                      }
+                      value={clientId}
+                      onChange={(event) => setClientId(event.target.value)}
+                      spellCheck={false}
+                      autoComplete="off"
+                      disabled={checking}
+                    />
+                    <Input
+                      aria-label="Tailscale tag"
+                      placeholder={DEFAULT_SANDBOX_TAILSCALE_TAG}
+                      value={tag}
+                      onChange={(event) => setTag(event.target.value)}
+                      spellCheck={false}
+                      disabled={checking}
+                    />
+                  </div>
+                </CollapsiblePanel>
+              </Collapsible>
+            </div>
+          </SandboxTailscaleSetup>
         </form>
       ) : null}
     </SettingsRow>
