@@ -518,6 +518,10 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         onSome: (resourceMonitorPath) => ({ resourceMonitorPath }),
       }),
       ...buildObservabilityFragment(input.observabilitySettings),
+      ...Option.match(environment.displayNameOverride, {
+        onNone: () => ({}),
+        onSome: (environmentLabel) => ({ environmentLabel }),
+      }),
     };
 
     return {
