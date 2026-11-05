@@ -33,6 +33,7 @@ import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import { AboutVersionTitle } from "./AboutVersionTitle";
+import { DiyBuildSection } from "./DiyBuildSection";
 import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
 import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
 import {
@@ -2319,6 +2320,8 @@ export function AboutSettingsPanel() {
           />
         )}
       </SettingsSection>
+
+      <DiyBuildSection />
 
       <SettingsSection id="legal" title="Legal">
         <SettingsRow
