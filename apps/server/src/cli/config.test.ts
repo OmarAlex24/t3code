@@ -490,6 +490,37 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  it.effect("names the environment after the desktop's display name only when it sends one", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-config-label-" });
+      const resolveWith = (bootstrap: DesktopBackendBootstrapValue) =>
+        openBootstrapFd(bootstrap).pipe(
+          Effect.flatMap((fd) =>
+            resolveServerConfig(
+              { ...minimalDesktopFlags(baseDir), bootstrapFd: Option.some(fd) },
+              Option.none(),
+            ),
+          ),
+          Effect.provide(
+            Layer.mergeAll(
+              ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+              NetService.layer,
+            ),
+          ),
+        );
+
+      const renamed = yield* resolveWith(
+        makeDesktopBootstrap({ environmentLabel: "T3 Code Custom" }),
+      );
+      const plain = yield* resolveWith(makeDesktopBootstrap());
+
+      assert.strictEqual(renamed.environmentLabel, "T3 Code Custom");
+      assert.isUndefined(plain.environmentLabel);
+      assert.isFalse("environmentLabel" in plain);
+    }),
+  );
+
   it.effect("reports saved settings as the source of endpoints read from settings.json", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
