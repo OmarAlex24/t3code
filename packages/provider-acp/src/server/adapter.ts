@@ -230,6 +230,8 @@ export interface AcpAdapterV2ExtensionContext {
   >;
   readonly captureProposedPlan: (input: { readonly planMarkdown: string }) => Effect.Effect<void>;
   readonly lastProposedPlanMarkdown: Effect.Effect<string | undefined>;
+  /** Cancels the session's pending approvals and questions, for an agent whose request was answered elsewhere. */
+  readonly withdrawPendingRequests: (sessionId: string) => Effect.Effect<void>;
 }
 
 /**
@@ -476,6 +478,12 @@ export interface AcpAdapterV2Flavor {
     sessionId: string,
   ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   readonly runtimeHarness?: string;
+  /** Metadata a prompt carries in `_meta`, for agents that act on T3's message identity. */
+  readonly promptMeta?: (message: {
+    readonly messageId: string;
+    readonly createdBy: string;
+    readonly creationSource: string;
+  }) => NonNullable<EffectAcpSchema.PromptRequest["_meta"]>;
   readonly registerExtensions?: (
     context: AcpAdapterV2ExtensionContext,
   ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
@@ -5843,6 +5851,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const waiting = turnAttached;
           turnAttached = yield* Deferred.make<boolean>();
           yield* Deferred.succeed(waiting, false);
+          yield* cancelPendingRequestsOnly();
+        });
+
+        const cancelPendingRequestsOnly = Effect.fnUntraced(function* () {
           const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => [
             [...current.values()],
             new Map<string, PendingRuntimeRequest>(),
@@ -6761,6 +6773,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               requestUserInput,
               captureProposedPlan,
               lastProposedPlanMarkdown,
+              withdrawPendingRequests: (sessionId) =>
+                runRuntimeCallbackAtGeneration(
+                  handlerGeneration,
+                  Effect.gen(function* () {
+                    if ((yield* Ref.get(activeSessionId)) !== sessionId) return;
+                    yield* cancelPendingRequestsOnly();
+                  }),
+                ).pipe(Effect.asVoid),
               finishSubagent: (notice) =>
                 runRuntimeCallbackAtGeneration(
                   handlerGeneration,
@@ -8333,7 +8353,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               : undefined;
             yield* (
               compactSession === undefined
-                ? runtime.prompt({ prompt: promptParts!.prompt }, promptOptions)
+                ? runtime.prompt(
+                    {
+                      prompt: promptParts!.prompt,
+                      ...(flavor.promptMeta === undefined
+                        ? {}
+                        : {
+                            _meta: flavor.promptMeta({
+                              messageId: turnInput.message.messageId,
+                              createdBy: turnInput.message.createdBy,
+                              creationSource: turnInput.message.creationSource,
+                            }),
+                          }),
+                    },
+                    promptOptions,
+                  )
                 : Deferred.succeed(context.promptDispatched, undefined).pipe(
                     Effect.andThen(compactSession(runtime, requestedSessionId)),
                     Effect.as({ stopReason: "end_turn" } satisfies EffectAcpSchema.PromptResponse),

@@ -53,6 +53,7 @@ interface Harness {
   readonly projects: Map<string, { readonly id: ProjectId; readonly workspaceRoot: string }>;
   readonly events: Queue.Queue<OrchestrationV2DomainEvent>;
   readonly resumes: Queue.Queue<string>;
+  readonly modeChanges: Queue.Queue<{ readonly threadId: ThreadId; readonly runtimeMode: string }>;
 }
 
 const makeHarness = Effect.gen(function* () {
@@ -63,6 +64,10 @@ const makeHarness = Effect.gen(function* () {
     projects: new Map(),
     events: yield* Queue.unbounded<OrchestrationV2DomainEvent>(),
     resumes: yield* Queue.unbounded<string>(),
+    modeChanges: yield* Queue.unbounded<{
+      readonly threadId: ThreadId;
+      readonly runtimeMode: string;
+    }>(),
   };
   const provisionerService: Partial<SandboxProvisioner.SandboxProvisioner["Service"]> = {
     list: Effect.sync(() => ({ sandboxes: harness.records, orphans: [] })),
@@ -126,9 +131,16 @@ const makeHarness = Effect.gen(function* () {
   const orchestrator = Layer.succeed(Orchestrator.OrchestratorV2, {
     streamDomainEvents: Stream.fromQueue(harness.events),
   } as unknown as Orchestrator.OrchestratorV2["Service"]);
+  const remote = Layer.succeed(SandboxBridge.SandboxThreadRemote, {
+    setModes: (threadId, modes) =>
+      Queue.offer(harness.modeChanges, { threadId, runtimeMode: modes.runtimeMode }).pipe(
+        Effect.asVoid,
+      ),
+  });
   const layer = SandboxBridge.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
+        remote,
         provisioner,
         projects,
         orchestrator,
@@ -268,6 +280,30 @@ describe("SandboxBridge", () => {
           .linkHostThread({ threadId: ThreadId.make("thread-without-sandbox") })
           .pipe(Effect.flip);
         expect(missing.detail).toBe("No sandbox belongs to this thread.");
+      }),
+    ),
+  );
+
+  it.effect("moves the sandbox's thread to a mode set on its host thread", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        yield* SandboxBridge.SandboxBridge;
+        const modeSet = (onInstance: string, runtimeMode: string) =>
+          ({
+            type: "thread.runtime-mode-updated",
+            threadId,
+            payload: {
+              id: threadId,
+              modelSelection: { instanceId: onInstance, model: "sandbox" },
+              runtimeMode,
+              interactionMode: "plan",
+            },
+          }) as unknown as OrchestrationV2DomainEvent;
+        yield* Queue.offerAll(harness.events, [
+          modeSet("codex", "full-access"),
+          modeSet(SANDBOX_BRIDGE_INSTANCE_ID, "auto"),
+        ]);
+        expect(yield* Queue.take(harness.modeChanges)).toEqual({ threadId, runtimeMode: "auto" });
       }),
     ),
   );

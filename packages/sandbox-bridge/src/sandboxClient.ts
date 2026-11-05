@@ -107,6 +107,15 @@ export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function
         Effect.asVoid,
         Effect.mapError(failed("The sandbox refused the command.")),
       ),
+    persistAttachments: (input) =>
+      client[WS_METHODS.assetsPersistChatAttachments]({
+        threadId: input.threadId,
+        messageId: input.messageId,
+        attachments: [...input.attachments],
+      }).pipe(
+        Effect.map((result) => result.attachments),
+        Effect.mapError(failed("The sandbox did not accept the images.")),
+      ),
     subscribe: (threadId) =>
       client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({ threadId }).pipe(
         Stream.mapError(failed("Lost the sandbox's thread stream.")),
