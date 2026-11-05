@@ -6,6 +6,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   AuthProvidersManageScope,
+  isInternalProviderInstance,
   isManagedDriverAllowed,
   type ProviderAuthResponse,
   type ServerProvider,
@@ -119,8 +120,10 @@ function managedProviders(
   environment: SettingsTarget,
   providersByEnvironment: ReadonlyMap<string, ReadonlyArray<ServerProvider>>,
 ) {
-  return (providersByEnvironment.get(environment.environmentId) ?? []).filter((provider) =>
-    isManagedDriverAllowed(environment.serverConfig.managedPolicy, provider.driver),
+  return (providersByEnvironment.get(environment.environmentId) ?? []).filter(
+    (provider) =>
+      !isInternalProviderInstance(provider.instanceId) &&
+      isManagedDriverAllowed(environment.serverConfig.managedPolicy, provider.driver),
   );
 }
 
