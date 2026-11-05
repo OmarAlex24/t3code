@@ -17,6 +17,7 @@ import {
   TurnItemId,
   WS_METHODS,
   WsRpcGroup,
+  type SandboxRecord,
   type VcsStatusStreamEvent,
   type OrchestrationProjectShell,
   type OrchestrationV2ProjectedTurnItem,
@@ -38,6 +39,7 @@ import type { WsRpcProtocolClient } from "@t3tools/client-runtime/rpc";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { APP_VERSION } from "~/branding";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import type * as Scope from "effect/Scope";
@@ -318,6 +320,8 @@ const json = (body: unknown, status = 200) =>
 const threadSubscribers = new Map<string, Queue.Queue<OrchestrationV2ThreadStreamItem>>();
 let terminalMetadataSubscriber: Queue.Queue<TerminalMetadataStreamEvent> | null = null;
 let threads: ReadonlyArray<FakeThread> = [];
+let sandboxes: ReadonlyArray<SandboxRecord> = [];
+let scopes: ReadonlyArray<string> = AuthStandardClientScopes;
 let sequence = 1;
 let vcsStatusSubscriber: Queue.Queue<VcsStatusStreamEvent> | null = null;
 
@@ -383,6 +387,8 @@ const handlers: Record<string, (input: never) => unknown> = {
     }),
   [WS_METHODS.subscribeServerConfig]: () =>
     subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig }]),
+  // The host's Sandboxes list, for threads whose environment is a sandbox.
+  "sandboxes.list": () => Effect.succeed({ sandboxes, orphans: [] }),
 };
 
 // Unanswered calls stay pending, like a server that has not replied yet.
@@ -395,33 +401,49 @@ const client = new Proxy(handlers, {
     }),
 });
 
-const session: EnvironmentConnectionLease["session"] = {
-  client: client as unknown as WsRpcProtocolClient,
-  initialConfig: Effect.succeed(serverConfig),
-  subscribeServerConfig: () =>
-    subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig }]),
-  ready: Effect.void,
-  probe: Effect.void,
-  inboundFrames: Effect.succeed(0),
-  closed: Effect.never,
-};
+// The open session's close signal, and whether the server has gone away (see `takeFakeEnvironmentOffline`).
+// Every open session, since the app keeps a connection from an earlier test open.
+const openSessions = new Set<Deferred.Deferred<never, ConnectionAttemptError>>();
+let offline = false;
+// Released when the environment comes back, so a reconnect left waiting by a stopped server goes on.
+let backOnline = Deferred.makeUnsafe<void>();
+
+const openSession = Effect.sync((): EnvironmentConnectionLease["session"] => {
+  const closed = Deferred.makeUnsafe<never, ConnectionAttemptError>();
+  openSessions.add(closed);
+  return {
+    client: client as unknown as WsRpcProtocolClient,
+    initialConfig: Effect.succeed(serverConfig),
+    subscribeServerConfig: () =>
+      subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig }]),
+    ready: Effect.void,
+    probe: Effect.void,
+    inboundFrames: Effect.succeed(0),
+    closed: Deferred.await(closed),
+  };
+});
 
 /** Stands in for client-runtime's ConnectionDriver: every connection opens the session above. */
 export const fakeDriver = {
   connect: (
     entry: ConnectionCatalogEntry,
   ): Effect.Effect<EnvironmentConnectionLease, ConnectionAttemptError, Scope.Scope> =>
-    Effect.succeed({
-      prepared: {
-        environmentId: ENVIRONMENT_ID,
-        label: descriptor.label,
-        httpBaseUrl: window.location.origin,
-        socketUrl: window.location.origin.replace(/^http/, "ws"),
-        httpAuthorization: null,
-        target: entry.target,
-      },
-      session,
-    }),
+    // An offline server never answers, so a reconnect waits like one to a stopped machine.
+    Effect.suspend(() =>
+      offline ? Deferred.await(backOnline).pipe(Effect.andThen(openSession)) : openSession,
+    ).pipe(
+      Effect.map((session) => ({
+        prepared: {
+          environmentId: ENVIRONMENT_ID,
+          label: descriptor.label,
+          httpBaseUrl: window.location.origin,
+          socketUrl: window.location.origin.replace(/^http/, "ws"),
+          httpAuthorization: null,
+          target: entry.target,
+        },
+        session,
+      })),
+    ),
   preflight: () => Effect.succeed(true),
   checkHost: () => Effect.succeed<RouteCheck>("unchecked"),
 };
@@ -433,8 +455,17 @@ const encodedDescriptor = Schema.encodeSync(ExecutionEnvironmentDescriptor)(
 );
 
 /** Serves the environment's HTTP API and these threads until disposed. */
-export function installFakeEnvironment(fixtures: ReadonlyArray<FakeThread>): Disposable {
+export function installFakeEnvironment(
+  fixtures: ReadonlyArray<FakeThread>,
+  options: {
+    readonly sandboxes?: ReadonlyArray<SandboxRecord>;
+    /** What the session grants; a scope left out is one this client cannot read as granted. */
+    readonly scopes?: ReadonlyArray<string>;
+  } = {},
+): Disposable {
   threads = fixtures;
+  sandboxes = options.sandboxes ?? [];
+  scopes = options.scopes ?? AuthStandardClientScopes;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
     if (url.origin !== window.location.origin) return realFetch(input, init);
@@ -443,7 +474,7 @@ export function installFakeEnvironment(fixtures: ReadonlyArray<FakeThread>): Dis
       return json({
         authenticated: true,
         auth,
-        scopes: AuthStandardClientScopes,
+        scopes,
         sessionMethod: "browser-session-cookie",
         expiresAt: "2099-01-01T00:00:00.000Z",
       });
@@ -456,8 +487,28 @@ export function installFakeEnvironment(fixtures: ReadonlyArray<FakeThread>): Dis
     [Symbol.dispose]: () => {
       globalThis.fetch = realFetch;
       threads = [];
+      sandboxes = [];
+      scopes = AuthStandardClientScopes;
+      if (offline) {
+        offline = false;
+        Effect.runSync(Deferred.succeed(backOnline, undefined));
+        backOnline = Deferred.makeUnsafe<void>();
+      }
     },
   };
+}
+
+/** Drops the open session and leaves every reconnect waiting, as a stopped machine would. */
+export async function takeFakeEnvironmentOffline(): Promise<void> {
+  offline = true;
+  // Loaded here: this module stands in for that package's driver, so a top-level import would cycle.
+  const { ConnectionTransientError } = await import("@t3tools/client-runtime/connection");
+  const error = new ConnectionTransientError({
+    reason: "transport",
+    detail: "The server stopped.",
+  });
+  for (const closed of openSessions) await Effect.runPromise(Deferred.fail(closed, error));
+  openSessions.clear();
 }
 
 type ThreadEvent = Extract<OrchestrationV2ThreadStreamItem, { readonly kind: "event" }>["event"];
