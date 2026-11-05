@@ -74,6 +74,7 @@ vi.mock(import("~/state/query"), async (original) => ({
                   limits: true,
                   stopResume: true,
                   credentialEnvironments: false,
+                  agentProviderAccess: true,
                   templates: false,
                 },
               },
@@ -104,6 +105,7 @@ vi.mock(import("~/state/query"), async (original) => ({
                   limits: false,
                   stopResume: true,
                   credentialEnvironments: false,
+                  agentProviderAccess: false,
                   templates: false,
                 },
               },
@@ -279,6 +281,22 @@ describe("SandboxEnvironmentFields", () => {
       claude: { baseUrl: "https://alt.test" },
       passGithubToken: false,
     });
+  });
+
+  it("lets the agent use Boat only when asked, and only where the provider can", async () => {
+    setup();
+    await using _screen = await render(fields());
+
+    await expect
+      .element(page.getByText(/delete only the forks it made. Forks bill like new sandboxes./u))
+      .toBeVisible();
+    await userEvent.click(page.getByText("Let the agent use Boat"));
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toMatchObject({ agentProviderAccess: true });
+
+    // Vercel cannot scope a key to one sandbox, so it offers nothing.
+    await userEvent.click(page.getByRole("button", { name: /^Vercel/u }));
+    await expect.element(page.getByText(/Let the agent use/u)).not.toBeInTheDocument();
   });
 
   it("joins the tailnet on its own when Claude's endpoint is private", async () => {

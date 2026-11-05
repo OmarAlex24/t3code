@@ -15,7 +15,7 @@ thread itself runs on the sandbox's own T3 server, as on any remote environment.
 
 [`SandboxProviderDriver`](../../apps/server/src/sandbox/SandboxProvider.ts) is the whole extension
 point: `create`, `execute`, `exposePort`, `destroy`, the optional `stop`/`resume` pair, `limits`,
-`listEnvironments`, `status`, `usage`, `uploadFile`, `listSandboxes`, and templates, and the
+`listEnvironments`, `status`, `usage`, `uploadFile`, `listSandboxes`, `agentAccess`, and templates, and the
 presentation metadata in `info`. Clients learn which optional
 methods exist from the `capabilities` the provisioner derives; they never branch on provider kind.
 [`providers/index.ts`](../../apps/server/src/sandbox/providers/index.ts) is the registry; settings,
@@ -198,6 +198,25 @@ server except into the sandbox.
   failed create, and when a resume rejoins as a new one, because that removal can take an hour.
   The join runs before Claude's settings, since a sandbox without a TUN device needs Claude
   pointed at tailscaled's userspace proxy.
+- **The agent's provider key belongs to one sandbox.** With `agentProviderAccess`, a driver that
+  implements `agentAccess` (Boat only) gives the sandbox's agent its own key. `prepare` refuses it
+  with a credential environment and runs `agentAccess.check` before anything bills; Boat's check
+  asks to mint a key for a sandbox no account has (`bx_t3probe0`), where only a key allowed to mint
+  gets as far as `403 api_key_sandbox_forbidden`, and any other 401/403 fails with
+  `scoped_keys_unavailable`. `provisionMachine` then creates an environment for this sandbox alone
+  (Boat answers a create with every environment, so the unique name finds it), turns off every
+  `pass*` flag and reads it back, deleting it and failing when anything is still passed, and
+  creates the sandbox in it. Forks land in the parent's environment, so `sandbox.create` scoped to
+  that environment is what lets `boat fork` work; without it Boat answers 403. After create, it
+  mints the key (`sandboxIds: [id]`, `environmentIds: [envId]`, ttl the running limit) and revokes
+  it on the spot when Boat reports a wider scope, since an empty `sandboxIds` means every sandbox.
+  The login script reads the key from `secrets`. A key that cannot be minted or signed in is a
+  warning and a revoke, not a failed launch. The record keeps the environment id and name and the
+  key id, never the key. Rollback destroys the machine, then deletes the environment, and revokes
+  the key; a user delete revokes the key first, deletes the forks it finds in the environment, then
+  the machine, and the environment only when nothing is left in it, since it is the only way to
+  find a fork again. The sweep's abandoned-launch delete never touches forks. The driver hides
+  `t3-sandbox-*` environments from `listEnvironments`, so they never show as credential choices.
 - **Templates do not inherit access.** The template scrub also removes the Claude endpoint, the
   `gh` login, and the tailnet node (`tailscale logout` and its state), and a successful save revokes the source's hub key along with deleting the source.
 - **Missing tools are installed, never required.** git, the GitHub CLI, and Claude Code are
@@ -286,6 +305,11 @@ carrying this host's tag that no record or running launch accounts for. `sandbox
 them as `orphans`, and the Sandboxes list shows them under "Not tracked by T3 Code" with a delete
 button. They are never deleted automatically, since a record can be lost while the machine still
 holds work.
+
+Forks carry no tags (Boat gives a fork empty labels), so the sweep also lists the environment of
+each record with `agentProviderAccess` and reports the sandboxes in it that no record tracks, with
+`forkOf` naming the parent's instance id. The list shows them under that sandbox, and a listing
+failure keeps the forks the last sweep found.
 
 Templates are saved only from a sandbox with no thread: saving deletes the source machine.
 
