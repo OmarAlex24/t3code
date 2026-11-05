@@ -70,12 +70,13 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import type * as Stream from "effect/Stream";
+import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientRequest } from "effect/http";
 
 import { forkParked } from "../serverActivation.ts";
@@ -459,6 +460,11 @@ export class SandboxProvisioner extends Context.Service<
     readonly delete: (
       input: SandboxDeleteInput,
     ) => Effect.Effect<SandboxDeleteResult, SandboxProviderError>;
+    /**
+     * Each record removed with its sandbox, by any path: a delete, the sweep, or a new launch
+     * replacing an abandoned one. The bridge keeps the chat of a linked one.
+     */
+    readonly removed: Stream.Stream<SandboxRecord>;
     readonly environments: (
       input: SandboxCredentialEnvironmentsInput,
     ) => Effect.Effect<SandboxCredentialEnvironmentsResult, SandboxProviderError>;
@@ -2266,6 +2272,7 @@ const make = Effect.gen(function* () {
   });
 
   const orphans = yield* Ref.make<ReadonlyArray<SandboxOrphan>>([]);
+  const removedRecords = yield* PubSub.unbounded<SandboxRecord>();
 
   // Revokes the agent's key first, so no fork starts while the rest goes. Forks are deleted only
   // when the user deletes their sandbox; the environment goes only once nothing is left in it,
@@ -2410,6 +2417,7 @@ const make = Effect.gen(function* () {
     }
     const environmentWarning = agent === null ? null : yield* agent.finish();
     if (instanceId !== undefined) yield* records.remove(instanceId).pipe(Effect.orDie);
+    if (Option.isSome(record)) yield* PubSub.publish(removedRecords, record.value);
     // The bearer dies with the machine; only this server's copy is left to clear.
     if (Option.isSome(record) && record.value.bridge !== undefined) {
       yield* secrets.remove(record.value.bridge.secret).pipe(Effect.ignore);
@@ -3039,6 +3047,7 @@ const make = Effect.gen(function* () {
     providers,
     create,
     delete: remove,
+    removed: Stream.fromPubSub(removedRecords),
     environments,
     limits,
     list,
