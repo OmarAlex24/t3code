@@ -21,8 +21,10 @@ const mocks = vi.hoisted(() => ({
   checkWork: vi.fn(async () => AsyncResult.success(mocks.work)),
   removeEnvironment: vi.fn(async () => AsyncResult.success(undefined)),
   deleteSandboxThread: vi.fn(async () => AsyncResult.success(undefined)),
+  renameThread: vi.fn(async () => AsyncResult.success(undefined)),
   // A bridged thread also lives on the host, under the same id.
   hostThread: false,
+  hostTitle: "Fix the login bug",
 }));
 
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
@@ -43,7 +45,7 @@ vi.mock(import("~/state/entities"), async (original) => ({
   useThreadShells: (() => [
     { environmentId: SANDBOX_ENV, id: "thread-1", title: "Fix the login bug" },
     ...(mocks.hostThread
-      ? [{ environmentId: HOST_ENV, id: "thread-1", title: "Fix the login bug" }]
+      ? [{ environmentId: HOST_ENV, id: "thread-1", title: mocks.hostTitle }]
       : []),
   ]) as never,
 }));
@@ -55,7 +57,11 @@ vi.mock(import("~/state/threads"), async (original) => {
   const actual = await original();
   return {
     ...actual,
-    threadEnvironment: { ...actual.threadEnvironment, delete: mocks.deleteSandboxThread as never },
+    threadEnvironment: {
+      ...actual.threadEnvironment,
+      delete: mocks.deleteSandboxThread as never,
+      updateMetadata: mocks.renameThread as never,
+    },
   };
 });
 vi.mock(import("~/state/sandboxes"), async (original) => ({
@@ -170,9 +176,14 @@ const config = (onSettle?: "ask" | "snapshot" | "delete") => ({
 function setup(
   onSettle?: "ask" | "snapshot" | "delete",
   work?: unknown,
-  options: { readonly bridged?: boolean; readonly state?: SandboxRecord["state"] } = {},
+  options: {
+    readonly bridged?: boolean;
+    readonly state?: SandboxRecord["state"];
+    readonly hostTitle?: string;
+  } = {},
 ) {
   mocks.hostThread = options.bridged === true;
+  mocks.hostTitle = options.hostTitle ?? "Fix the login bug";
   mocks.sandboxes = [
     {
       ...sandbox,
@@ -190,6 +201,7 @@ function setup(
     mocks.removeEnvironment,
     mocks.resumeSandbox,
     mocks.deleteSandboxThread,
+    mocks.renameThread,
   ]) {
     mock.mockClear();
   }
@@ -362,6 +374,25 @@ describe("SandboxThreadCoordinator", () => {
         expect.objectContaining({ environmentId: SANDBOX_ENV, input: { threadId: "thread-1" } }),
       );
       expect(mocks.deleteSandbox).toHaveBeenCalledOnce();
+    });
+
+    it("gives the sandbox's copy the host thread's title, once", async () => {
+      setup("ask", undefined, { bridged: true, hostTitle: "Greeting from boat.dev" });
+      await using screen = await render(<SandboxThreadCoordinator />);
+
+      await expect.poll(() => mocks.renameThread.mock.calls.length).toBe(1);
+      expect(mocks.renameThread).toHaveBeenCalledWith({
+        environmentId: SANDBOX_ENV,
+        input: { threadId: "thread-1", title: "Greeting from boat.dev" },
+      });
+      await screen.rerender(<SandboxThreadCoordinator />);
+      expect(mocks.renameThread).toHaveBeenCalledOnce();
+    });
+
+    it("leaves a copy alone when its title already matches", async () => {
+      setup("ask", undefined, { bridged: true });
+      await using _screen = await render(<SandboxThreadCoordinator />);
+      expect(mocks.renameThread).not.toHaveBeenCalled();
     });
 
     it("resumes a stopped sandbox without waiting for it, since the host's turn waits", async () => {

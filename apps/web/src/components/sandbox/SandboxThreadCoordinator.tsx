@@ -25,10 +25,12 @@ import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useSandboxProvisionerEnvironmentId } from "~/state/sandboxes";
 import {
+  bridgedSandboxCopies,
   findThreadSandbox,
   isBridgedSandbox,
   isHostThreadRef,
   registerSandboxThreadHandlers,
+  sandboxCopyTitleUpdates,
   shortSandboxId,
 } from "~/state/sandboxThreads";
 import { serverEnvironment } from "~/state/server";
@@ -161,6 +163,9 @@ export function SandboxThreadCoordinator() {
   const deleteRemoteThread = useOrchestrationCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
+  const renameRemoteThread = useOrchestrationCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
   const { entries } = useAtomValue(environmentCatalog.catalogValueAtom);
   const { environments } = useEnvironments();
   const threads = useThreadShells();
@@ -194,6 +199,29 @@ export function SandboxThreadCoordinator() {
       if (!isConnected(environmentId)) continue;
       waiters.current.delete(environmentId);
       for (const done of resolve) done();
+    }
+  });
+
+  // The rename last sent for each sandbox copy, as its title then and the title it was given, so
+  // shell ticks before it lands, or a refused rename, do not send it again. The sandbox naming
+  // the copy itself afterwards changes the pair, and the copy follows the host again.
+  const sentCopyTitles = useRef(new Map<string, string>());
+  const copyTitleUpdates = sandboxCopyTitleUpdates(
+    bridgedSandboxCopies(sandboxes, threads, provisionerEnvironmentId),
+    threads,
+  ).filter(({ copy }) => isConnected(copy.environmentId));
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- renames a sandbox's copy of a chat on its own server to follow the host thread's title
+  useEffect(() => {
+    for (const { copy, title, copyTitle } of copyTitleUpdates) {
+      const key = scopedThreadKey(copy);
+      const rename = `${copyTitle}\u0000${title}`;
+      if (sentCopyTitles.current.get(key) === rename) continue;
+      sentCopyTitles.current.set(key, rename);
+      void renameRemoteThread({
+        environmentId: copy.environmentId,
+        input: { threadId: copy.threadId, title },
+      });
     }
   });
 
