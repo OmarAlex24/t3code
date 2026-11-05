@@ -6,7 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { runMigrations } from "../Migrations.ts";
+import { runAllMigrations } from "../ForkMigrations.ts";
 import * as SandboxRecords from "../SandboxRecords.ts";
 
 const sqlite = NodeSqliteClient.layer({ filename: ":memory:" });
@@ -34,13 +34,13 @@ const legacy = (environmentId: string, state: string) => ({
   ttlMinutes: 240,
 });
 
-layer("081_SandboxPerThread", (it) => {
+layer("002_SandboxPerThread", (it) => {
   it.effect(
     "keys existing sandboxes by instance and turns their lifetime into a running limit",
     () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        yield* runMigrations({ toMigrationInclusive: 80 });
+        yield* runAllMigrations({ toForkMigrationInclusive: 1 });
         for (const [id, state] of [
           [running, "running"],
           [stopped, "stopped"],
@@ -50,7 +50,7 @@ layer("081_SandboxPerThread", (it) => {
           VALUES (${id}, ${JSON.stringify(legacy(id, state))}, '2026-10-02T00:00:00.000Z')
         `;
         }
-        yield* runMigrations({ toMigrationInclusive: 81 });
+        yield* runAllMigrations({ toForkMigrationInclusive: 2 });
 
         const records = yield* SandboxRecords.SandboxRecordRepository;
         const migrated = yield* records.get(running);
