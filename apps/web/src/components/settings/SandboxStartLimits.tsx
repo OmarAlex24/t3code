@@ -29,6 +29,7 @@ const FAILURE_TITLES: Record<SandboxProviderErrorCode, string | null> = {
   not_found: "Not found",
   templates_unavailable: "Templates not available",
   template_saving: "Template still saving",
+  tailscale_required: "Tailscale needs setting up",
   unknown: null,
 };
 
