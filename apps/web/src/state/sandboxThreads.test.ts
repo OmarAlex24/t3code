@@ -6,6 +6,7 @@ import {
   type ServerSettings,
   ThreadId,
 } from "@t3tools/contracts";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -14,7 +15,15 @@ import {
   resolveSelectableProviderInstanceEntry,
 } from "../providerInstances";
 
-import { findThreadSandbox, sandboxBridgeReady } from "./sandboxThreads";
+import {
+  bridgedSandboxCopies,
+  bridgedSandboxCopyHost,
+  findThreadSandbox,
+  isBridgedSandboxCopy,
+  sandboxBridgeReady,
+  sandboxCopyTitleUpdates,
+  withBridgedSandboxCopies,
+} from "./sandboxThreads";
 
 const HOST = EnvironmentId.make("host");
 const SANDBOX = EnvironmentId.make("sandbox");
@@ -51,6 +60,105 @@ describe("findThreadSandbox", () => {
     const linked = record({ hostProjectId: ProjectId.make("project-host") });
     const other = { environmentId: EnvironmentId.make("other"), threadId };
     expect(findThreadSandbox([linked], other, HOST)).toBeUndefined();
+  });
+});
+
+describe("isBridgedSandboxCopy", () => {
+  const copyRef = { environmentId: SANDBOX, threadId };
+  const hostThread = { environmentId: HOST, id: threadId };
+  const copyThread = { environmentId: SANDBOX, id: threadId };
+
+  it("is the sandbox's own thread once the host keeps the conversation", () => {
+    expect(isBridgedSandboxCopy(record(), copyRef, [hostThread, copyThread], HOST)).toBe(true);
+  });
+
+  it("is never the host thread itself", () => {
+    const hostRef = { environmentId: HOST, threadId };
+    expect(isBridgedSandboxCopy(record(), hostRef, [hostThread, copyThread], HOST)).toBe(false);
+  });
+
+  it("keeps a thread from before the bridge, which has no host thread, as the only one", () => {
+    expect(isBridgedSandboxCopy(record(), copyRef, [copyThread], HOST)).toBe(false);
+  });
+
+  it("ignores another thread on the sandbox, and a sandbox the host does not know yet", () => {
+    const other = { environmentId: SANDBOX, threadId: ThreadId.make("thread-2") };
+    expect(isBridgedSandboxCopy(record(), other, [hostThread], HOST)).toBe(false);
+    expect(isBridgedSandboxCopy(record(), copyRef, [hostThread], null)).toBe(false);
+    expect(isBridgedSandboxCopy(record({ environmentId: null }), copyRef, [hostThread], HOST)).toBe(
+      false,
+    );
+  });
+
+  it("never hides the only thread when the sandbox answers as the host's own environment", () => {
+    const hostRef = { environmentId: HOST, threadId };
+    expect(isBridgedSandboxCopy(record({ environmentId: HOST }), hostRef, [hostThread], HOST)).toBe(
+      false,
+    );
+  });
+});
+
+describe("bridgedSandboxCopies", () => {
+  it("maps each bridged copy to its host thread, and leaves older sandbox threads out", () => {
+    const legacyThreadId = ThreadId.make("thread-legacy");
+    const legacySandbox = EnvironmentId.make("sandbox-legacy");
+    const copies = bridgedSandboxCopies(
+      [
+        record(),
+        record({
+          instanceId: "instance-2",
+          environmentId: legacySandbox,
+          threadId: legacyThreadId,
+        }),
+      ],
+      [
+        { environmentId: HOST, id: threadId },
+        { environmentId: SANDBOX, id: threadId },
+        { environmentId: legacySandbox, id: legacyThreadId },
+      ],
+      HOST,
+    );
+    expect([...copies]).toEqual([
+      [threadKey({ environmentId: SANDBOX, threadId }), { environmentId: HOST, threadId }],
+    ]);
+  });
+});
+
+describe("withBridgedSandboxCopies and bridgedSandboxCopyHost", () => {
+  const copyRef = { environmentId: SANDBOX, threadId };
+  const hostRef = { environmentId: HOST, threadId };
+  const copies = new Map([[threadKey(copyRef), hostRef]]);
+
+  it("leaves copies out of lists as delegated tasks are, keeping the set when there are none", () => {
+    const delegated = new Set(["task"]);
+    expect(withBridgedSandboxCopies(delegated, new Map())).toBe(delegated);
+    expect([...withBridgedSandboxCopies(delegated, copies)]).toEqual(["task", threadKey(copyRef)]);
+  });
+
+  it("finds the host thread of a copy only", () => {
+    expect(bridgedSandboxCopyHost(copies, copyRef)).toEqual(hostRef);
+    expect(bridgedSandboxCopyHost(copies, hostRef)).toBeUndefined();
+  });
+});
+
+describe("sandboxCopyTitleUpdates", () => {
+  const copyRef = { environmentId: SANDBOX, threadId };
+  const hostRef = { environmentId: HOST, threadId };
+  const copies = new Map([[threadKey(copyRef), hostRef]]);
+  const host = { environmentId: HOST, id: threadId, title: "Greeting from boat.dev" };
+
+  it("gives the copy the host thread's title", () => {
+    const copy = { environmentId: SANDBOX, id: threadId, title: "say high from boat.dev:)" };
+    expect(sandboxCopyTitleUpdates(copies, [host, copy])).toEqual([
+      { copy: copyRef, title: "Greeting from boat.dev", copyTitle: "say high from boat.dev:)" },
+    ]);
+  });
+
+  it("does nothing once they match, or while either thread is not loaded", () => {
+    const copy = { environmentId: SANDBOX, id: threadId, title: "Greeting from boat.dev" };
+    expect(sandboxCopyTitleUpdates(copies, [host, copy])).toEqual([]);
+    expect(sandboxCopyTitleUpdates(copies, [host])).toEqual([]);
+    expect(sandboxCopyTitleUpdates(copies, [{ ...copy, title: "other" }])).toEqual([]);
   });
 });
 
