@@ -194,6 +194,7 @@ export const make = Effect.gen(function* () {
   const label = yield* resolveServerEnvironmentLabel({
     cwdBaseName,
     baseDir: serverConfig.baseDir,
+    displayName: serverConfig.environmentLabel,
   });
   const machine = yield* detectServerEnvironmentMachineKind();
   const launcher = yield* resolveServiceLauncherMode();
