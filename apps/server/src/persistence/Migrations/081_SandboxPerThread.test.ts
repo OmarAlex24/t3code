@@ -105,13 +105,24 @@ layer("081_SandboxPerThread", (it) => {
           passGithubToken: false,
           joinTailnet: false,
           access: "public",
-          projectIds: [],
           envFiles: { "project-1": [".env"] },
           idleMinutes: 30,
           maxRunningMinutes: 480,
           createdAt: "2026-10-03T00:00:00.000Z",
           updatedAt: "2026-10-03T00:00:00.000Z",
         } as const;
+        // A config saved when configs could be limited to some projects still reads; the limit
+        // is gone, so its old fields are dropped and the row itself is left as it was.
+        yield* sql`
+          INSERT INTO sandbox_configs (config_id, config_json, updated_at)
+          VALUES (
+            'config-1',
+            ${JSON.stringify({ ...config, projectIds: ["project-1"], repositories: ["octo/hello"] })},
+            '2026-10-03T00:00:00.000Z'
+          )
+        `;
+        assert.deepStrictEqual(Option.getOrThrow(yield* configs.get("config-1")), config);
+        assert.deepStrictEqual(yield* configs.list, [config]);
         yield* configs.put(config);
         assert.deepStrictEqual(Option.getOrThrow(yield* configs.get("config-1")), config);
         yield* configs.remove("config-1");

@@ -677,29 +677,6 @@ export const githubRepositoryOf = (remoteUrl: string) => {
   };
 };
 
-/**
- * Whether a config lets a project start a thread on it. Repositories match wherever the project
- * lives, since the sandbox clones from GitHub; configs saved before that list projects on the host
- * by id, which still match those projects.
- */
-export const sandboxConfigAllows = (
-  config: {
-    readonly projectIds: ReadonlyArray<string>;
-    readonly repositories?: ReadonlyArray<string>;
-  },
-  project: { readonly repository: string; readonly hostProjectId: string | null },
-): boolean => {
-  const repositories = config.repositories ?? [];
-  if (repositories.length > 0) {
-    const key = project.repository.toLowerCase();
-    return repositories.some((repository) => repository.toLowerCase() === key);
-  }
-  if (config.projectIds.length > 0) {
-    return project.hostProjectId !== null && config.projectIds.includes(project.hostProjectId);
-  }
-  return true;
-};
-
 export const SandboxSettleAction = Schema.Literals(["ask", "snapshot", "delete"]);
 export type SandboxSettleAction = typeof SandboxSettleAction.Type;
 
@@ -728,16 +705,8 @@ export const SandboxEnvironmentConfig = Schema.Struct({
    */
   onSettle: Schema.optionalKey(SandboxSettleAction),
   access: SandboxAccess,
-  /**
-   * Projects on this server by id, from configs saved before `repositories`; read only while
-   * `repositories` is empty. New saves leave it empty.
-   */
-  projectIds: Schema.Array(ProjectId),
-  /**
-   * GitHub repositories (`owner/name`) a thread may launch from, wherever the project lives;
-   * empty, with no `projectIds`, allows any GitHub repository.
-   */
-  repositories: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  // Any GitHub project can start on any config. Rows saved when a config could be limited still
+  // carry `projectIds` and `repositories`; decoding drops those keys, so nothing reads them.
   /**
    * Git-ignored files copied into the clone from the project's copy on this server, by repository
    * key (`owner/name`, lower case) or, for older configs, by project id. A project without an

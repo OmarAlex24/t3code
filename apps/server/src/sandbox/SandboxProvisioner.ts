@@ -57,7 +57,6 @@ import {
   type SandboxProviderKind,
   type SandboxProvidersResult,
   githubRepositoryOf,
-  sandboxConfigAllows,
   type WorktreeSetupStageStatus,
 } from "@t3tools/contracts";
 import { COPYABLE_FILE_MAX_BYTES, isDefaultCopiedFile } from "@t3tools/shared/copiedFiles";
@@ -1958,22 +1957,9 @@ const make = Effect.gen(function* () {
     }
     const config = found.value;
     // The sandbox clones from GitHub, so the project may live on any machine the client reaches.
-    const repository = githubRepositoryOf(input.project.remoteUrl);
-    if (repository === null) {
+    if (githubRepositoryOf(input.project.remoteUrl) === null) {
       return yield* launchConfigError(
         "Only projects with a github.com remote can start in a sandbox.",
-        config.provider,
-      );
-    }
-    const hostCopy = yield* verifiedHostCopy(input.project);
-    if (
-      !sandboxConfigAllows(config, {
-        repository: repository.key,
-        hostProjectId: hostCopy?.projectId ?? null,
-      })
-    ) {
-      return yield* launchConfigError(
-        `${config.label} is not set up for this project.`,
         config.provider,
       );
     }

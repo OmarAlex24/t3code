@@ -91,8 +91,6 @@ vi.mock(import("~/state/query"), async (original) => ({
                   id: "config-1",
                   label: "Boat small",
                   provider: "boat",
-                  projectIds: [],
-                  repositories: [],
                 },
               ],
             }

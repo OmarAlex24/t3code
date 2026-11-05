@@ -162,7 +162,6 @@ describe("SandboxManagementSection", () => {
         passGithubToken: false,
         joinTailnet: false,
         access: "public",
-        projectIds: [],
         envFiles: {},
         idleMinutes: 30,
         maxRunningMinutes: 480,

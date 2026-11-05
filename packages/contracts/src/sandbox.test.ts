@@ -6,12 +6,14 @@ import {
   assessSandboxStart,
   describeSandboxTemplateNameProblem,
   githubRepositoryOf,
-  sandboxConfigAllows,
+  SandboxEnvironmentConfig,
   tailscaleClientIdFromSecret,
   SandboxCreateInput,
   type SandboxProviderLimits,
   SandboxTemplateName,
 } from "./sandbox.ts";
+
+const decodeSavedConfig = Schema.decodeSync(Schema.fromJsonString(SandboxEnvironmentConfig));
 
 const assess = (limits: Partial<SandboxProviderLimits>) =>
   assessSandboxStart({ canStart: true, ...limits }, { providerLabel: "Boat", nowMillis: 0 });
@@ -116,28 +118,29 @@ describe("githubRepositoryOf", () => {
   });
 });
 
-describe("sandboxConfigAllows", () => {
-  const repo = "omaralex24/hello-world";
-  it("allows any GitHub repository when the config names none", () => {
-    expect(sandboxConfigAllows({ projectIds: [] }, { repository: repo, hostProjectId: null })).toBe(
-      true,
-    );
-  });
-
-  it("matches repositories by identity, wherever the project lives", () => {
-    const config = { projectIds: [], repositories: ["OmarAlex24/Hello-World"] };
-    expect(sandboxConfigAllows(config, { repository: repo, hostProjectId: null })).toBe(true);
-    expect(
-      sandboxConfigAllows(config, { repository: "omaralex24/other", hostProjectId: null }),
-    ).toBe(false);
-  });
-
-  it("keeps a config saved with host project ids working for those projects", () => {
-    const config = { projectIds: ["project-1"] };
-    expect(sandboxConfigAllows(config, { repository: repo, hostProjectId: "project-1" })).toBe(
-      true,
-    );
-    expect(sandboxConfigAllows(config, { repository: repo, hostProjectId: null })).toBe(false);
+describe("SandboxEnvironmentConfig", () => {
+  it("still reads a config saved with the repositories it once limited to, and drops them", () => {
+    // Rows saved before every GitHub project could start on every config carry these fields.
+    const saved = JSON.stringify({
+      id: "config-1",
+      label: "Boat small",
+      provider: "boat",
+      size: "small",
+      passGithubToken: false,
+      joinTailnet: false,
+      access: "public",
+      projectIds: ["project-1"],
+      repositories: ["OmarAlex24/Hello-World"],
+      envFiles: { "omaralex24/hello-world": [".env.local"] },
+      idleMinutes: 30,
+      maxRunningMinutes: 480,
+      createdAt: "2026-11-01T00:00:00.000Z",
+      updatedAt: "2026-11-01T00:00:00.000Z",
+    });
+    const config = decodeSavedConfig(saved);
+    expect(config.envFiles).toEqual({ "omaralex24/hello-world": [".env.local"] });
+    expect(config).not.toHaveProperty("projectIds");
+    expect(config).not.toHaveProperty("repositories");
   });
 });
 

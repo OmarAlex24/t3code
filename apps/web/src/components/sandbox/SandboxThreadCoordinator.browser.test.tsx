@@ -159,7 +159,6 @@ const config = (onSettle?: "ask" | "snapshot" | "delete") => ({
   passGithubToken: false,
   joinTailnet: false,
   access: "public",
-  projectIds: [],
   envFiles: {},
   idleMinutes: 30,
   maxRunningMinutes: 480,
@@ -223,6 +222,28 @@ describe("SandboxThreadCoordinator", () => {
       }),
     );
     expect(mocks.deleteSandbox).not.toHaveBeenCalled();
+  });
+
+  it("spaces the remember choice and the work check off the footer, like the app's dialogs", async () => {
+    setup("ask", { status: "dirty", uncommittedFiles: 2, unpushedCommits: 1 });
+    await using _screen = await render(<SandboxThreadCoordinator />);
+
+    // Content below a dialog's header ends 16px above the footer, as upstream's dialogs do.
+    const gapAboveFooter = (element: Element) => {
+      const footer = document.querySelector('[data-slot="alert-dialog-footer"]')!;
+      const content = document.createRange();
+      content.selectNodeContents(element);
+      return footer.getBoundingClientRect().top - content.getBoundingClientRect().bottom;
+    };
+    notifySandboxThreadSettled(threadRef);
+    const remember = page.getByText("Remember for Boat small");
+    await expect.element(remember).toBeVisible();
+    expect(gapAboveFooter(remember.element().closest("label")!)).toBeGreaterThanOrEqual(16);
+
+    await userEvent.click(page.getByRole("button", { name: "Delete sandbox…" }));
+    const status = page.getByText("2 uncommitted files and 1 unpushed commit would be lost.");
+    await expect.element(status).toBeVisible();
+    expect(gapAboveFooter(status.element())).toBeGreaterThanOrEqual(16);
   });
 
   it("deletes from the prompt only after a confirmation that shows the work check", async () => {
