@@ -42,6 +42,7 @@ import {
   type SandboxSession,
   skippedAttachmentsMessage,
   toolTitleOf,
+  TurnTracker,
 } from "./bridge.ts";
 import type { SandboxBridgeLink } from "./link.ts";
 
@@ -535,6 +536,8 @@ describe("forwarding a turn", () => {
             const asked = permissions[0]!;
             assert.strictEqual(asked.toolCall.kind, "execute");
             assert.include(asked.toolCall.title ?? "", "Sandbox bx_123");
+            // The host shows the request by its command, as the computer does.
+            assert.deepStrictEqual(asked.toolCall.rawInput, { command: "rm -rf build" });
             assert.deepStrictEqual(
               fake.commands.map((command) => command.type),
               ["runtime-request.respond"],
@@ -911,6 +914,39 @@ describe("mapping", () => {
       toolTitleOf({ type: "dynamic_tool", title: null, toolName: "t3_thread_read" } as never),
       "t3_thread_read",
     );
+  });
+
+  it("updates a command once its input arrives, and names the command for the host", () => {
+    const tracker = new TurnTracker("message-1" as MessageId, Option.none());
+    const command = (input: string | undefined) =>
+      event("turn-item.updated", {
+        id: "item-cmd",
+        type: "command_execution",
+        title: "Ran command",
+        ...(input === undefined ? {} : { input }),
+        status: "running",
+        ordinal: 3,
+      });
+    assert.deepStrictEqual(tracker.apply(command(undefined)), [
+      {
+        _tag: "tool",
+        id: "item-cmd",
+        title: "Ran command",
+        kind: "execute",
+        status: "in_progress",
+      },
+    ]);
+    assert.deepStrictEqual(tracker.apply(command("touch /tmp/x && rm /tmp/x")), [
+      {
+        _tag: "tool",
+        id: "item-cmd",
+        title: "touch /tmp/x && rm /tmp/x",
+        kind: "execute",
+        status: "in_progress",
+        command: "touch /tmp/x && rm /tmp/x",
+      },
+    ]);
+    assert.deepStrictEqual(tracker.apply(command("touch /tmp/x && rm /tmp/x")), []);
   });
 
   it("reads the decision back, and nothing when the host cancelled", () => {
