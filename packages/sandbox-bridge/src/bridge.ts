@@ -92,12 +92,13 @@ export const SANDBOX_SESSION_PREFIX = "sandbox:";
 const DRY_RUN_SESSION_PREFIX = "sandbox-dry-run:";
 const MODEL_OPTION_VALUE = "sandbox";
 
+/** Sandbox chats are made only where the sandbox configs live; other clients continue them. */
 export const NOT_LINKED_MESSAGE =
-  "This thread is not linked to a sandbox. Start it from a sandbox config in T3 Code on your Mac.";
+  "Sandbox chats start from T3 Code on your computer (Run on → Sandbox). After that you can keep the conversation going here.";
 export const SUPERVISED_NOTICE =
   "This thread must stay Supervised for the sandbox's approvals to reach you. Switch it back to Supervised; the request is waiting on the sandbox.";
 export const unreachableMessage = (link: SandboxBridgeLink) =>
-  `Sandbox ${link.sandboxId || link.label} is stopped or not answering. Resume it from T3 Code on your Mac, then send again.`;
+  `Sandbox ${link.sandboxId || link.label} is stopped or not answering. Resume it from T3 Code on your computer, then send again.`;
 export const waitingThought = (link: SandboxBridgeLink) =>
   `Resuming sandbox ${link.sandboxId || link.label}…`;
 

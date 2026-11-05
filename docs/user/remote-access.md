@@ -116,6 +116,10 @@ computer). The T3 Code app reaches it there through this computer, without pairi
 Sending a message forwards it to the sandbox, its answer streams back, and the sandbox's approvals
 and questions appear as usual. Threads launched this way start there, Supervised.
 
+A sandbox chat starts only from T3 Code on this computer (**Run on → Sandbox**), where the sandbox
+configs live; a new thread started from the phone gets a reply saying so. Once it has started, you
+can keep the conversation going from the phone.
+
 The small project is an empty folder, not the repository, so it offers no git actions, scripts,
 files, or terminal; a notice above the composer says so. The repository's files, diffs, and
 terminals are on the sandbox: **Open sandbox thread**, in that notice or in the sandbox menu in the
