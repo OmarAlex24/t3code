@@ -1,5 +1,4 @@
 import * as Cause from "effect/Cause";
-import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
@@ -18,10 +17,10 @@ export interface TailscaleOAuthClient {
 }
 
 /** A bounded reason that never carries a credential or a response body. */
-class TailscaleApiError extends Data.TaggedError("TailscaleApiError")<{
-  readonly detail: string;
-  readonly status?: number;
-}> {}
+class TailscaleApiError extends Schema.TaggedError<TailscaleApiError>()("TailscaleApiError", {
+  detail: Schema.String,
+  status: Schema.optional(Schema.Number),
+}) {}
 
 const TokenResponse = Schema.Struct({
   access_token: Schema.String,
