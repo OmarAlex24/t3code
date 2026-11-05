@@ -1,3 +1,4 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import {
   type EnvironmentId,
   type ProjectId,
@@ -53,6 +54,104 @@ export const isBridgedSandbox = (
   threads.some(
     (thread) => thread.environmentId === provisionerEnvironmentId && thread.id === sandbox.threadId,
   );
+
+/**
+ * Whether the ref is the sandbox's own copy of a conversation the host thread keeps. The bridge
+ * starts that copy with the host thread's id, so the two would list as one chat twice; the host
+ * thread is the one the phone sees. A thread from before the bridge has no host thread and is the
+ * only one, so it never counts.
+ */
+export const isBridgedSandboxCopy = (
+  sandbox: SandboxRecord,
+  threadRef: ScopedThreadRef,
+  threads: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly id: ThreadId }>,
+  provisionerEnvironmentId: EnvironmentId | null,
+) =>
+  sandbox.environmentId !== provisionerEnvironmentId &&
+  sandbox.environmentId === threadRef.environmentId &&
+  sandbox.threadId === threadRef.threadId &&
+  isBridgedSandbox(sandbox, threads, provisionerEnvironmentId);
+
+/** Each bridged sandbox copy by its thread key (`threadKey`), with the host thread it copies. */
+export const bridgedSandboxCopies = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  threads: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly id: ThreadId }>,
+  provisionerEnvironmentId: EnvironmentId | null,
+): ReadonlyMap<string, ScopedThreadRef> => {
+  const copies = new Map<string, ScopedThreadRef>();
+  if (provisionerEnvironmentId === null) return copies;
+  for (const sandbox of sandboxes) {
+    if (sandbox.environmentId === null || sandbox.threadId === undefined) continue;
+    const copyRef = { environmentId: sandbox.environmentId, threadId: sandbox.threadId };
+    if (isBridgedSandboxCopy(sandbox, copyRef, threads, provisionerEnvironmentId)) {
+      copies.set(threadKey(copyRef), {
+        environmentId: provisionerEnvironmentId,
+        threadId: sandbox.threadId,
+      });
+    }
+  }
+  return copies;
+};
+
+/** The host thread a bridged sandbox copy belongs to; undefined for any other thread. */
+export const bridgedSandboxCopyHost = (
+  copies: ReadonlyMap<string, ScopedThreadRef>,
+  threadRef: ScopedThreadRef,
+): ScopedThreadRef | undefined => copies.get(threadKey(threadRef));
+
+/**
+ * The thread keys lists leave out because another row stands for them: tasks shown under their
+ * parent (`delegatedUnderParent`), and bridged sandbox copies, shown as their host thread.
+ */
+export const withBridgedSandboxCopies = (
+  delegatedUnderParent: ReadonlySet<string>,
+  copies: ReadonlyMap<string, ScopedThreadRef>,
+): ReadonlySet<string> =>
+  copies.size === 0 ? delegatedUnderParent : new Set([...delegatedUnderParent, ...copies.keys()]);
+
+/**
+ * The copies whose title differs from their host thread's, with the title to give them, so the
+ * sandbox's copy follows the name the phone and the sidebar show.
+ */
+export const sandboxCopyTitleUpdates = (
+  copies: ReadonlyMap<string, ScopedThreadRef>,
+  threads: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly id: ThreadId;
+    readonly title: string;
+  }>,
+): ReadonlyArray<{
+  readonly copy: ScopedThreadRef;
+  readonly title: string;
+  readonly copyTitle: string;
+}> => {
+  if (copies.size === 0) return [];
+  const titleOf = new Map(
+    threads.map((thread) => [
+      threadKey({ environmentId: thread.environmentId, threadId: thread.id }),
+      thread.title,
+    ]),
+  );
+  return [...copies].flatMap(([copyKey, host]) => {
+    const copyTitle = titleOf.get(copyKey);
+    const hostTitle = titleOf.get(threadKey(host))?.trim();
+    // A copy keeps the host thread's id; only its environment differs.
+    const copy = threads.find(
+      (thread) =>
+        thread.id === host.threadId &&
+        threadKey({ environmentId: thread.environmentId, threadId: thread.id }) === copyKey,
+    );
+    return copy === undefined || !hostTitle || copyTitle === hostTitle
+      ? []
+      : [
+          {
+            copy: { environmentId: copy.environmentId, threadId: copy.id },
+            title: hostTitle,
+            copyTitle: copy.title,
+          },
+        ];
+  });
+};
 
 const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
 

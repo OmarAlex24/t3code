@@ -91,6 +91,10 @@ describe("SandboxThreadMenu", () => {
     );
 
     await userEvent.click(page.getByRole("button", { name: /Sandbox bx_46wr/u }));
+    // Says why there are two chats before it opens the other one.
+    await expect
+      .element(page.getByText("The sandbox keeps its own copy of this chat", { exact: false }))
+      .toBeVisible();
     await userEvent.click(page.getByRole("menuitem", { name: "Open sandbox thread" }));
     expect(mocks.navigate).toHaveBeenCalledWith({
       to: "/$environmentId/$threadId",
@@ -110,6 +114,9 @@ describe("SandboxThreadMenu", () => {
     await expect.element(page.getByRole("menuitem", { name: "Delete sandbox…" })).toBeVisible();
     await expect
       .element(page.getByRole("menuitem", { name: "Open sandbox thread" }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByText("The sandbox keeps its own copy of this chat", { exact: false }))
       .not.toBeInTheDocument();
   });
 

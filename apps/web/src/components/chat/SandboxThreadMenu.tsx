@@ -161,6 +161,11 @@ export function SandboxThreadMenu({ threadRef }: { readonly threadRef: ScopedThr
             {providerLabel} sandbox {short}
           </p>
           <p className="text-xs text-muted-foreground">{status}</p>
+          {sandboxThreadEnvironmentId === null ? null : (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              The sandbox keeps its own copy of this chat, with its terminal, files and git.
+            </p>
+          )}
           {nearRetention && retentionDays !== undefined && stoppedDays !== null ? (
             <p className="mt-1.5 text-xs text-warning-foreground">
               {retentionWarning(providerLabel, retentionDays, stoppedDays)}

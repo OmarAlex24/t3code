@@ -10,10 +10,10 @@ import type {
 import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
-import { useProjects } from "./entities";
+import { useProjects, useQuietThreadShells } from "./entities";
 import { useEnvironmentProviders, usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentQuery } from "./query";
-import { findThreadSandbox, sandboxBridgeReady } from "./sandboxThreads";
+import { bridgedSandboxCopies, findThreadSandbox, sandboxBridgeReady } from "./sandboxThreads";
 import { serverEnvironment } from "./server";
 
 const NO_SETTINGS = Atom.make<ServerSettings | null>(null);
@@ -72,6 +72,24 @@ export function useThreadSandbox(threadRef: ScopedThreadRef | null): SandboxReco
   return threadRef === null
     ? undefined
     : findThreadSandbox(list.data?.sandboxes ?? [], threadRef, provisionerEnvironmentId);
+}
+
+/**
+ * The sandboxes' own copies of conversations the host keeps, by thread key, each with its host
+ * thread. Thread lists show the host thread only; see `isBridgedSandboxCopy`.
+ */
+export function useBridgedSandboxCopies(): ReadonlyMap<string, ScopedThreadRef> {
+  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
+  const threads = useQuietThreadShells();
+  const list = useEnvironmentQuery(
+    provisionerEnvironmentId === null
+      ? null
+      : serverEnvironment.sandboxesList({
+          environmentId: provisionerEnvironmentId,
+          input: undefined,
+        }),
+  );
+  return bridgedSandboxCopies(list.data?.sandboxes ?? [], threads, provisionerEnvironmentId);
 }
 
 /** Whether a host project can send through the sandbox bridge yet; see `sandboxBridgeReady`. */

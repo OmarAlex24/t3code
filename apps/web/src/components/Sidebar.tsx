@@ -278,7 +278,13 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
-import { deleteSandboxThread, isSandboxThread } from "../state/sandboxThreads";
+import { useBridgedSandboxCopies } from "../state/sandboxes";
+import {
+  bridgedSandboxCopyHost,
+  deleteSandboxThread,
+  isSandboxThread,
+  withBridgedSandboxCopies,
+} from "../state/sandboxThreads";
 
 function sameSidebarProviderEntries(
   left: ReadonlyMap<string, SidebarProviderEntry>,
@@ -915,7 +921,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  const delegatedUnderParent = useDelegatedUnderParent();
+  // Sandbox copies list nowhere, like delegated tasks: their host thread's row stands for them.
+  const bridgedSandboxCopies = useBridgedSandboxCopies();
+  const delegatedUnderParent = withBridgedSandboxCopies(
+    useDelegatedUnderParent(),
+    bridgedSandboxCopies,
+  );
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -1109,10 +1120,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ? asLaunchingThread(thread)
             : thread,
         );
-  const routeRowThreadKey =
+  // A sandbox's own copy of a chat has no row; the host thread's row stands for it.
+  const routeRowThreadRef =
     routeThreadRef === null
       ? null
-      : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
+      : (bridgedSandboxCopyHost(bridgedSandboxCopies, routeThreadRef) ?? routeThreadRef);
+  const routeRowThreadKey =
+    routeRowThreadRef === null
+      ? null
+      : scopedThreadKey(resolveListedAncestorThreadRef(routeRowThreadRef, threads));
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   // The open draft's first send names its thread in place; a finalized draft reached by
   // navigation resolves through its redirect instead, and still reveals.
