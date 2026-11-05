@@ -4,6 +4,9 @@ import * as Schema from "effect/Schema";
 import {
   assessSandboxStart,
   describeSandboxTemplateNameProblem,
+  githubRepositoryOf,
+  sandboxConfigAllows,
+  tailscaleClientIdFromSecret,
   SandboxCreateInput,
   type SandboxProviderLimits,
   SandboxTemplateName,
@@ -81,5 +84,73 @@ describe("SandboxCreateInput", () => {
       repositoryUrl: "https://github.com/owner/repo",
     });
     expect(decoded).toEqual({ provider: "boat" });
+  });
+});
+
+describe("githubRepositoryOf", () => {
+  it("names a github.com repository the same way for every remote spelling", () => {
+    for (const remote of [
+      "https://github.com/OmarAlex24/Hello-World.git",
+      "https://x-access-token:ghp_secret@github.com/omaralex24/hello-world",
+      "git@github.com:OmarAlex24/Hello-World.git",
+      "ssh://git@github.com/OmarAlex24/Hello-World/",
+    ]) {
+      expect(githubRepositoryOf(remote)?.key).toBe("omaralex24/hello-world");
+    }
+    const parsed = githubRepositoryOf("https://ghp_secret@github.com/OmarAlex24/Hello-World.git");
+    // The clone URL never carries the credential from the remote.
+    expect(parsed?.cloneUrl).toBe("https://github.com/OmarAlex24/Hello-World.git");
+    expect(parsed?.label).toBe("OmarAlex24/Hello-World");
+  });
+
+  it("refuses remotes that are not on github.com", () => {
+    for (const remote of [
+      "https://gitlab.com/a/b.git",
+      "https://github.com.evil.test/a/b.git",
+      "git@github.example.com:a/b.git",
+      "/Users/me/repo",
+    ]) {
+      expect(githubRepositoryOf(remote)).toBeNull();
+    }
+  });
+});
+
+describe("sandboxConfigAllows", () => {
+  const repo = "omaralex24/hello-world";
+  it("allows any GitHub repository when the config names none", () => {
+    expect(sandboxConfigAllows({ projectIds: [] }, { repository: repo, hostProjectId: null })).toBe(
+      true,
+    );
+  });
+
+  it("matches repositories by identity, wherever the project lives", () => {
+    const config = { projectIds: [], repositories: ["OmarAlex24/Hello-World"] };
+    expect(sandboxConfigAllows(config, { repository: repo, hostProjectId: null })).toBe(true);
+    expect(
+      sandboxConfigAllows(config, { repository: "omaralex24/other", hostProjectId: null }),
+    ).toBe(false);
+  });
+
+  it("keeps a config saved with host project ids working for those projects", () => {
+    const config = { projectIds: ["project-1"] };
+    expect(sandboxConfigAllows(config, { repository: repo, hostProjectId: "project-1" })).toBe(
+      true,
+    );
+    expect(sandboxConfigAllows(config, { repository: repo, hostProjectId: null })).toBe(false);
+  });
+});
+
+describe("tailscaleClientIdFromSecret", () => {
+  it("reads the client ID out of an OAuth client secret", () => {
+    expect(tailscaleClientIdFromSecret("tskey-client-kAbC123CNTRL-SomeLongSecretPart")).toBe(
+      "kAbC123CNTRL",
+    );
+    expect(tailscaleClientIdFromSecret("  tskey-client-k1-a-b-c ")).toBe("k1");
+  });
+
+  it("returns null for anything else", () => {
+    for (const secret of ["", "tskey-auth-k1-abc", "tskey-client-", "secret"]) {
+      expect(tailscaleClientIdFromSecret(secret)).toBeNull();
+    }
   });
 });

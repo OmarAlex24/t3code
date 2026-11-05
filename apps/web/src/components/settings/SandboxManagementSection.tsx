@@ -1,13 +1,4 @@
-import {
-  CheckIcon,
-  ExternalLinkIcon,
-  LayersIcon,
-  PencilIcon,
-  PlayIcon,
-  PlusIcon,
-  SquareIcon,
-  Trash2Icon,
-} from "lucide-react";
+import { LayersIcon, PencilIcon, PlayIcon, PlusIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { useAtomValue } from "@effect/atom-react";
@@ -17,7 +8,6 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
-  DEFAULT_SANDBOX_TAILSCALE_TAG,
   type EnvironmentId,
   type SandboxEnvironmentConfig,
   type SandboxOrphan,
@@ -26,7 +16,6 @@ import {
 } from "@t3tools/contracts";
 
 import { environmentCatalog } from "~/connection/catalog";
-import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "~/hooks/useSettings";
 import { useNowMinute } from "~/hooks/useNowMinute";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { useThreadShells } from "~/state/entities";
@@ -37,7 +26,7 @@ import { useEnvironmentQuery } from "~/state/query";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { SettingsSection } from "./settingsLayout";
 import {
   describeSandboxFailure,
   SandboxQuotaLine,
@@ -45,19 +34,11 @@ import {
   SandboxStartConfirmation,
   useSandboxStartCheck,
 } from "./SandboxStartLimits";
-import { SandboxEnvironmentFields } from "./SandboxEnvironmentFields";
+import { SandboxConfigDialog } from "./SandboxConfigDialog";
+import { SandboxTailscaleRow } from "./SandboxTailscaleRow";
 import { SandboxProviderLogo } from "./SandboxProviderLogo";
 import { SandboxTemplateList, SaveSandboxTemplateDialog } from "./SandboxTemplates";
 import { Button } from "../ui/button";
-import {
-  Dialog,
-  DialogDescription,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "../ui/dialog";
-import { Input } from "../ui/input";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -194,7 +175,6 @@ export function SandboxManagementSection() {
         }),
   );
   const [editing, setEditing] = useState<SandboxEnvironmentConfig | "new" | null>(null);
-  const [editError, setEditError] = useState<string | null>(null);
   const sandboxes = list.data?.sandboxes ?? [];
   const orphans = list.data?.orphans ?? [];
   const configs = configsQuery.data?.configs ?? [];
@@ -237,7 +217,6 @@ export function SandboxManagementSection() {
           size="xs"
           variant="outline"
           onClick={() => {
-            setEditError(null);
             setEditing("new");
           }}
         >
@@ -269,7 +248,6 @@ export function SandboxManagementSection() {
               size="xs"
               variant="ghost-muted"
               onClick={() => {
-                setEditError(null);
                 setEditing(config);
               }}
             >
@@ -279,8 +257,8 @@ export function SandboxManagementSection() {
           </div>
           {members.length === 0 ? (
             <p className="px-3 py-3 text-xs text-muted-foreground sm:px-4">
-              No sandboxes. Pick Sandbox: {config.label} in the composer to start a thread on its
-              own machine.
+              No sandboxes. Choose {config.label} under Sandbox in the composer's Run on menu to
+              start a thread on its own machine.
             </p>
           ) : (
             members.map((sandbox) => row(sandbox, true))
@@ -323,33 +301,12 @@ export function SandboxManagementSection() {
           provider={provider}
         />
       ))}
-      <Dialog open={editing !== null} onOpenChange={(open) => (open ? null : setEditing(null))}>
-        <DialogPopup className="max-h-[80dvh] sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>
-              {editing === "new" ? "Add sandbox config" : "Edit sandbox config"}
-            </DialogTitle>
-            <DialogDescription>
-              Each thread started on a config gets its own machine, made this way.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel>
-            {editing === null ? null : (
-              <SandboxEnvironmentFields
-                key={editing === "new" ? "new" : editing.id}
-                environmentId={provisionerEnvironmentId}
-                {...(editing === "new" ? {} : { config: editing })}
-                error={editError}
-                onErrorChange={setEditError}
-                onDone={() => {
-                  setEditing(null);
-                  refresh();
-                }}
-              />
-            )}
-          </DialogPanel>
-        </DialogPopup>
-      </Dialog>
+      <SandboxConfigDialog
+        environmentId={provisionerEnvironmentId}
+        editing={editing}
+        onClose={() => setEditing(null)}
+        onSaved={refresh}
+      />
     </SettingsSection>
   );
 }
@@ -461,142 +418,6 @@ function DeleteSandboxButton({
       </TooltipTrigger>
       <TooltipPopup side="top">Delete sandbox</TooltipPopup>
     </Tooltip>
-  );
-}
-
-const TAILSCALE_OAUTH_DOCS = "https://tailscale.com/kb/1215/oauth-clients";
-
-// The secret arrives redacted, so a non-empty value only says that one is saved.
-function SandboxTailscaleRow({ environmentId }: { readonly environmentId: EnvironmentId }) {
-  const saved = useEnvironmentSettings(environmentId, (settings) => settings.sandboxTailscale);
-  const updateSettings = useUpdateEnvironmentSettings(environmentId);
-  const configured = saved.clientId !== "" && saved.clientSecret !== "";
-  const [editing, setEditing] = useState(false);
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [tag, setTag] = useState("");
-
-  // A failed save reports itself with a toast and leaves the saved value showing.
-  const persist = (next: { clientId: string; clientSecret: string; tag: string }) => {
-    updateSettings({ sandboxTailscale: next });
-    setEditing(false);
-    setClientSecret("");
-  };
-  const startEditing = () => {
-    setClientId(saved.clientId);
-    setTag(saved.tag === DEFAULT_SANDBOX_TAILSCALE_TAG ? "" : saved.tag);
-    setClientSecret("");
-    setEditing(true);
-  };
-
-  return (
-    <SettingsRow
-      id="sandbox-tailscale"
-      title="Tailscale"
-      description={
-        <>
-          Lets a sandbox join your tailnet to reach private endpoints. Each one gets a single-use,
-          ephemeral key from a Tailscale OAuth client and leaves the tailnet when deleted.{" "}
-          <a
-            href={TAILSCALE_OAUTH_DOCS}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-0.5 underline-offset-2 hover:underline"
-          >
-            OAuth clients
-            <ExternalLinkIcon aria-hidden className="size-3" />
-          </a>
-        </>
-      }
-      serverScoped
-      settingKeys={["sandboxTailscale"]}
-      control={
-        editing ? null : configured ? (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <CheckIcon aria-hidden className="size-3.5 text-success" />
-            <span className="truncate">{saved.tag}</span>
-            <span aria-hidden>·</span>
-            <Button variant="link" size="xs" onClick={startEditing}>
-              Replace
-            </Button>
-            <span aria-hidden>·</span>
-            <Button
-              variant="link"
-              size="xs"
-
-              onClick={() => persist({ clientId: "", clientSecret: "", tag: "" })}
-            >
-              Remove
-            </Button>
-          </div>
-        ) : (
-          <Button size="xs" variant="outline" onClick={startEditing}>
-            Set up
-          </Button>
-        )
-      }
-    >
-      {editing ? (
-        <form
-          className="grid gap-2 pt-2 sm:grid-cols-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            persist({
-              clientId: clientId.trim(),
-              clientSecret: clientSecret.trim(),
-              tag: tag.trim() === "" ? DEFAULT_SANDBOX_TAILSCALE_TAG : tag.trim(),
-            });
-          }}
-        >
-          <Input
-            aria-label="Tailscale OAuth client ID"
-            placeholder="OAuth client ID"
-            value={clientId}
-            onChange={(event) => setClientId(event.target.value)}
-
-            spellCheck={false}
-            autoComplete="off"
-          />
-          <Input
-            aria-label="Tailscale OAuth client secret"
-            type="password"
-            placeholder="Client secret"
-            value={clientSecret}
-            onChange={(event) => setClientSecret(event.target.value)}
-
-            spellCheck={false}
-            autoComplete="off"
-          />
-          <Input
-            aria-label="Tailscale tag"
-            placeholder={DEFAULT_SANDBOX_TAILSCALE_TAG}
-            value={tag}
-            onChange={(event) => setTag(event.target.value)}
-
-            spellCheck={false}
-          />
-          <div className="flex justify-end gap-2 sm:col-span-3">
-            <Button
-              type="button"
-              size="xs"
-              variant="ghost"
-
-              onClick={() => setEditing(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              size="xs"
-              variant="outline"
-              disabled={clientId.trim() === "" || clientSecret.trim() === ""}
-            >
-              Save
-            </Button>
-          </div>
-        </form>
-      ) : null}
-    </SettingsRow>
   );
 }
 

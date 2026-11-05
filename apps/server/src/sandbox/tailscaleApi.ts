@@ -23,7 +23,11 @@ class TailscaleApiError extends Data.TaggedError("TailscaleApiError")<{
   readonly status?: number;
 }> {}
 
-const TokenResponse = Schema.Struct({ access_token: Schema.String });
+const TokenResponse = Schema.Struct({
+  access_token: Schema.String,
+  /** Space-separated scopes the client was granted. */
+  scope: Schema.optional(Schema.String),
+});
 const KeyResponse = Schema.Struct({ key: Schema.String, id: Schema.optional(Schema.String) });
 
 const describeFailure = (action: string) => (error: unknown) => {
@@ -63,9 +67,9 @@ export const makeTailscaleApi = Effect.gen(function* () {
         Effect.mapError(describeFailure(action)),
       );
 
-  /** A one-hour API token from the OAuth client (client credentials grant). */
-  const accessToken = Effect.fn("TailscaleApi.accessToken")(function* (
-    oauth: TailscaleOAuthClient,
+  /** A one-hour API token from the OAuth client (client credentials grant), with its scopes. */
+  const signIn = Effect.fn("TailscaleApi.signIn")(function* (
+    oauth: Pick<TailscaleOAuthClient, "clientId" | "clientSecret">,
   ) {
     const body = yield* send(
       "signing in with the OAuth client",
@@ -78,8 +82,14 @@ export const makeTailscaleApi = Effect.gen(function* () {
       ),
       HttpClientResponse.schemaBodyJson(TokenResponse),
     );
-    return Redacted.make(body.access_token);
+    return {
+      token: Redacted.make(body.access_token),
+      scopes: (body.scope ?? "").split(/\s+/u).filter((scope) => scope !== ""),
+    };
   });
+
+  const accessToken = (oauth: TailscaleOAuthClient) =>
+    signIn(oauth).pipe(Effect.map((signedIn) => signedIn.token));
 
   /**
    * A single-use, pre-approved, ephemeral key for the client's tag. Ephemeral means Tailscale
@@ -132,5 +142,5 @@ export const makeTailscaleApi = Effect.gen(function* () {
     );
   });
 
-  return { accessToken, createAuthKey, deleteDevice };
+  return { signIn, accessToken, createAuthKey, deleteDevice };
 });

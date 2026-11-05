@@ -598,6 +598,51 @@ export const assessSandboxStart = (
   return { blocked: null, warnings };
 };
 
+const GITHUB_REMOTE =
+  /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/u;
+
+/**
+ * The github.com repository a remote points at, or null for any other host. `key` is the
+ * lower-case `owner/name` two spellings of one remote share; `cloneUrl` never carries the
+ * credential a remote URL may hold.
+ */
+export const githubRepositoryOf = (remoteUrl: string) => {
+  const match = GITHUB_REMOTE.exec(remoteUrl.trim());
+  if (match === null) return null;
+  const owner = match[1]!;
+  const name = match[2]!;
+  return {
+    owner,
+    name,
+    key: `${owner}/${name}`.toLowerCase(),
+    label: `${owner}/${name}`,
+    cloneUrl: `https://github.com/${owner}/${name}.git`,
+  };
+};
+
+/**
+ * Whether a config lets a project start a thread on it. Repositories match wherever the project
+ * lives, since the sandbox clones from GitHub; configs saved before that list projects on the host
+ * by id, which still match those projects.
+ */
+export const sandboxConfigAllows = (
+  config: {
+    readonly projectIds: ReadonlyArray<string>;
+    readonly repositories?: ReadonlyArray<string>;
+  },
+  project: { readonly repository: string; readonly hostProjectId: string | null },
+): boolean => {
+  const repositories = config.repositories ?? [];
+  if (repositories.length > 0) {
+    const key = project.repository.toLowerCase();
+    return repositories.some((repository) => repository.toLowerCase() === key);
+  }
+  if (config.projectIds.length > 0) {
+    return project.hostProjectId !== null && config.projectIds.includes(project.hostProjectId);
+  }
+  return true;
+};
+
 /**
  * How to make a sandbox for one thread. Saving a config creates no machine; each thread launched
  * on it gets its own sandbox, provisioned on the server that holds the provider key.
@@ -616,11 +661,20 @@ export const SandboxEnvironmentConfig = Schema.Struct({
   passGithubToken: Schema.Boolean,
   joinTailnet: Schema.Boolean,
   access: SandboxAccess,
-  /** Projects on this server a thread may launch from; empty allows any GitHub project. */
+  /**
+   * Projects on this server by id, from configs saved before `repositories`; read only while
+   * `repositories` is empty. New saves leave it empty.
+   */
   projectIds: Schema.Array(ProjectId),
   /**
-   * Git-ignored files copied from the project on this server into the clone, by project id. A
-   * project without an entry gets its env files (`.env*`, `.envrc`, `.dev.vars`).
+   * GitHub repositories (`owner/name`) a thread may launch from, wherever the project lives;
+   * empty, with no `projectIds`, allows any GitHub repository.
+   */
+  repositories: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  /**
+   * Git-ignored files copied into the clone from the project's copy on this server, by repository
+   * key (`owner/name`, lower case) or, for older configs, by project id. A project without an
+   * entry gets its env files (`.env*`, `.envrc`, `.dev.vars`).
    */
   envFiles: Schema.Record(Schema.String, Schema.Array(TrimmedNonEmptyString)),
   /** Minutes without activity before the sandbox stops. */
@@ -751,13 +805,20 @@ export const SandboxLaunchInput = Schema.Struct({
   /** The thread id the client allocated for the draft; the snapshot and record are keyed by it. */
   threadId: ThreadId,
   project: Schema.Struct({
+    /** The project's id on whichever environment it lives on; recorded, never looked up. */
     id: ProjectId,
     title: TrimmedNonEmptyString,
-    /** The project's directory on this server, where its env files are read. */
-    workspaceRoot: TrimmedNonEmptyString,
+    /** A github.com remote; the sandbox clones from it, so the project may live on any machine. */
     remoteUrl: TrimmedNonEmptyString,
     /** Branch to clone; omitted clones the default branch. */
     baseRef: Schema.optional(TrimmedNonEmptyString),
+    /**
+     * The same repository's project on this server, whose env files are copied. Absent when this
+     * server has no copy; the server checks it names one of its own projects.
+     */
+    hostCopy: Schema.optional(
+      Schema.Struct({ projectId: ProjectId, workspaceRoot: TrimmedNonEmptyString }),
+    ),
   }),
 });
 export type SandboxLaunchInput = typeof SandboxLaunchInput.Type;
@@ -819,6 +880,29 @@ export const SandboxTailscaleSettings = Schema.Struct({
   ),
 });
 export type SandboxTailscaleSettings = typeof SandboxTailscaleSettings.Type;
+
+/** A Tailscale OAuth client secret reads `tskey-client-<clientId>-<secret>`. */
+export const tailscaleClientIdFromSecret = (secret: string): string | null =>
+  /^tskey-client-([A-Za-z0-9]+)-\S+$/u.exec(secret.trim())?.[1] ?? null;
+
+/** The OAuth scopes T3 needs: minting device keys and removing the devices it made. */
+export const SANDBOX_TAILSCALE_SCOPES = ["auth_keys", "devices:core"] as const;
+
+export const SandboxTailscaleCheckInput = Schema.Struct({
+  clientSecret: TrimmedNonEmptyString,
+  /** Only needed when the secret does not carry it. */
+  clientId: Schema.optional(TrimmedNonEmptyString),
+});
+export type SandboxTailscaleCheckInput = typeof SandboxTailscaleCheckInput.Type;
+
+export const SandboxTailscaleCheckResult = Schema.Struct({
+  /** The ID to save with the secret; empty when it could not be read. */
+  clientId: TrimmedString,
+  scopes: Schema.Array(Schema.String),
+  /** Why the client cannot be used, for the user; null when it can. */
+  problem: Schema.NullOr(Schema.String),
+});
+export type SandboxTailscaleCheckResult = typeof SandboxTailscaleCheckResult.Type;
 
 export const SandboxServerSettingsFields = {
   // Sandbox provider API keys, only read by the server that provisions the sandbox.

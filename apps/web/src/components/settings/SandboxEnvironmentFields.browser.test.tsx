@@ -7,6 +7,7 @@ import { render } from "../../../test/render";
 
 const mocks = vi.hoisted(() => ({
   tailscaleClientId: "",
+  projects: [] as Array<Record<string, unknown>>,
   saveConfig: vi.fn(async (request: { input: { config: Record<string, unknown> } }) =>
     AsyncResult.success({ config: { id: "config-1", ...request.input.config } }),
   ),
@@ -27,6 +28,10 @@ vi.mock(import("~/hooks/useSettings"), async (original) => ({
         tag: "tag:t3-sandbox",
       },
     })) as never,
+}));
+vi.mock(import("~/state/entities"), async (original) => ({
+  ...(await original()),
+  useProjects: (() => mocks.projects) as never,
 }));
 vi.mock(import("~/state/session"), async (original) => ({
   ...(await original()),
@@ -117,8 +122,26 @@ vi.mock(import("~/state/query"), async (original) => ({
 
 import { SandboxEnvironmentFields } from "./SandboxEnvironmentFields";
 
-function setup(options: { tailscale?: boolean } = {}) {
+const HOST = "11111111-1111-4111-8111-111111111111";
+const REMOTE = "22222222-2222-4222-8222-222222222222";
+const project = (environmentId: string, id: string, remoteUrl: string) => ({
+  environmentId,
+  id,
+  title: id,
+  workspaceRoot: `/work/${id}`,
+  repositoryIdentity: {
+    canonicalKey: remoteUrl,
+    locator: { source: "git-remote", remoteName: "origin", remoteUrl },
+  },
+  scripts: [],
+  defaultModelSelection: null,
+  createdAt: "2026-11-01T00:00:00.000Z",
+  updatedAt: "2026-11-01T00:00:00.000Z",
+});
+
+function setup(options: { tailscale?: boolean; projects?: Array<Record<string, unknown>> } = {}) {
   mocks.tailscaleClientId = options.tailscale === true ? "kCLIENT" : "";
+  mocks.projects = options.projects ?? [];
   mocks.saveConfig.mockClear();
   mocks.deleteConfig.mockClear();
 }
@@ -152,11 +175,72 @@ describe("SandboxEnvironmentFields", () => {
       joinTailnet: false,
       access: "public",
       projectIds: [],
+      repositories: [],
       envFiles: {},
       idleMinutes: 30,
       maxRunningMinutes: 480,
     });
     expect(onDone).toHaveBeenCalledOnce();
+  });
+
+  it("lists every machine's GitHub projects once, by repository, and limits by repository", async () => {
+    // The user's projects live on a paired machine; this host has none of its own.
+    setup({
+      projects: [
+        project(REMOTE, "hello", "git@github.com:OmarAlex24/Hello-World.git"),
+        project(REMOTE, "hello-copy", "https://github.com/omaralex24/hello-world"),
+        project(REMOTE, "api", "https://github.com/OmarAlex24/api.git"),
+        project(REMOTE, "lab", "https://gitlab.com/omar/lab.git"),
+      ],
+    });
+    await using _screen = await render(fields());
+
+    await expect.element(page.getByText("OmarAlex24/Hello-World")).toBeVisible();
+    await expect.element(page.getByText("OmarAlex24/api")).toBeVisible();
+    await expect.element(page.getByText(/gitlab|omar\/lab/u)).not.toBeInTheDocument();
+    expect(page.getByRole("checkbox", { name: /Hello-World/u }).elements()).toHaveLength(1);
+
+    await userEvent.click(page.getByText("OmarAlex24/Hello-World"));
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toMatchObject({
+      projectIds: [],
+      repositories: ["omaralex24/hello-world"],
+    });
+  });
+
+  it("opens a config saved with host project ids as their repositories", async () => {
+    setup({ projects: [project(HOST, "hello-host", "https://github.com/octo/hello.git")] });
+    await using _screen = await render(
+      <SandboxEnvironmentFields
+        environmentId={EnvironmentId.make(HOST)}
+        config={{
+          id: "config-1",
+          label: "Boat small",
+          provider: "boat",
+          size: "small",
+          passGithubToken: false,
+          joinTailnet: false,
+          access: "public",
+          projectIds: ["hello-host" as never],
+          envFiles: { "hello-host": [".env.local"] },
+          idleMinutes: 30,
+          maxRunningMinutes: 240,
+          createdAt: "2026-11-01T00:00:00.000Z",
+          updatedAt: "2026-11-01T00:00:00.000Z",
+        }}
+        error={null}
+        onErrorChange={() => {}}
+        onDone={() => {}}
+      />,
+    );
+
+    await expect.element(page.getByRole("checkbox", { name: "octo/hello" })).toBeChecked();
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    expect(savedConfig()).toMatchObject({
+      projectIds: [],
+      repositories: ["octo/hello"],
+      envFiles: { "octo/hello": [".env.local"] },
+    });
   });
 
   it("sends the provider's settings fields, starting from the saved values", async () => {

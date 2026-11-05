@@ -37,27 +37,34 @@ repositories and push. Without it a sandbox can clone public repositories only. 
 installs git, the GitHub CLI, and Claude Code when the provider's image lacks them; sign Codex in
 from the sandbox's **Settings → Providers**.
 
-**Projects** limits which projects can start a thread on the config; with none picked, any project
-with a github.com remote can. Under **Advanced**:
+**Projects** limits which repositories can start a thread on the config. It lists the github.com
+repositories of projects on every connected machine, once each, so a project that lives only on a
+paired machine counts too: the sandbox clones from GitHub, not from that machine. With none picked,
+any project with a github.com remote can. Configs saved by older versions, which named projects on
+this server, keep working and switch to repositories the next time you save them. Under
+**Advanced**:
 
 - **Running limit** (8 hours by default) stops a sandbox that has run that long since its last
   start. Its disk stays, so **Resume** brings it back with the thread's files.
 - **Idle stop** (30 minutes by default) is saved for a later release. For now only the running
   limit stops sandboxes, along with the provider's own auto-stop.
-- **Files copied from this machine** chooses, per project, which git-ignored files go into the
-  clone. By default each sandbox gets the project's env files (`.env` files, `.envrc`,
-  `.dev.vars`). They are written into the clone with owner-only permissions and never appear in a
-  provider's command history.
+- **Files copied from this machine** chooses, per repository, which git-ignored files go into the
+  clone. They come from the repository's copy on the server that keeps the configs, so a project
+  open only on another machine gets none. By default each sandbox gets that copy's env files
+  (`.env` files, `.envrc`, `.dev.vars`). They are written into the clone with owner-only
+  permissions and never appear in a provider's command history.
 - **Reach it only through my tailnet** (with **Join my tailnet**) gives the sandbox no public URL.
   This app then connects over your tailnet, so the machine running it has to be on your tailnet
   too, and the hosted web app cannot reach it.
 
 ### Start a thread on a sandbox
 
-In a new thread, open the machine picker under the composer and choose **Sandbox: <config>**. The
-picker offers configs for projects that have a github.com remote and exist on the server that keeps
-the configs. Write your message and send it: the message waits in the composer while a card shows
-the sandbox being made.
+In a new thread, open the **Run on** picker under the composer. Below your machines, the
+**Sandbox** group lists the configs this project can start on, with the provider's logo; choose one.
+Any project with a github.com remote qualifies, on whichever connected machine it lives. With no
+config yet, the group offers **New sandbox config…**, which opens the same form as Settings. Write
+your message and send it: the message waits in the composer while a card shows the sandbox being
+made.
 
 1. **Check limits and access** reads the provider's limits, so a start it would refuse costs
    nothing.
@@ -160,7 +167,10 @@ when you resume it.
 2. Create an OAuth client under **Settings → Trust credentials** (OAuth clients) with two scopes,
    **Auth Keys** (write) and **Devices → Core** (write), and select `tag:t3-sandbox` for both.
 3. In T3 Code, open **Settings → Connections → Sandboxes → Tailscale**, choose **Set up**, and paste
-   the client ID and secret. The secret stays on this server; sandboxes never get it.
+   the client secret (`tskey-client-…`). T3 Code reads the client ID from it, signs in once, and
+   saves the client only if it holds both scopes; otherwise it says which one is missing. If your
+   secret has another form, enter the client ID under **Advanced**, where you can also change the
+   tag. The secret stays on this server; sandboxes never get it.
 4. In a sandbox config, keep **Join my tailnet** checked. It is on by default when Claude's
    endpoint has a private address.
 

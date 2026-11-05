@@ -1,13 +1,11 @@
 import { CheckIcon, ChevronRightIcon, CircleAlertIcon, ExternalLinkIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useRef, useState, type ReactNode } from "react";
-import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   AuthSettingsWriteScope,
   DEFAULT_SANDBOX_IDLE_MINUTES,
   DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
   type EnvironmentId,
-  type ProjectId,
   type SandboxCredentialEnvironment,
   type SandboxEnvironmentConfig,
   type SandboxProviderInfo,
@@ -38,6 +36,10 @@ import { useSandboxTemplates } from "./SandboxTemplates";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useProjects } from "~/state/entities";
+import {
+  repositoriesFromLegacyConfig,
+  sandboxRepositoryChoices,
+} from "~/state/sandboxRepositories";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
 import { readEnvironmentScope } from "~/state/session";
@@ -149,18 +151,6 @@ function MinutesField({
   );
 }
 
-/** Projects on the host a sandbox can clone: they have a GitHub remote to clone from. */
-const sandboxLaunchableProjects = (
-  projects: ReadonlyArray<EnvironmentProject>,
-  hostEnvironmentId: EnvironmentId,
-) =>
-  projects.filter(
-    (project) =>
-      project.environmentId === hostEnvironmentId &&
-      project.isScratch !== true &&
-      /github\.com[/:]/u.test(project.repositoryIdentity?.locator.remoteUrl ?? ""),
-  );
-
 const parseFileList = (text: string) =>
   text
     .split(/[\n,]/u)
@@ -234,10 +224,21 @@ export function SandboxEnvironmentFields({
   // Null until toggled, so it follows whether the server's Claude endpoint is private.
   const [joinTailnet, setJoinTailnet] = useState<boolean | null>(config?.joinTailnet ?? null);
   const [tailnetOnly, setTailnetOnly] = useState(config?.access === "tailnet");
-  const [projectIds, setProjectIds] = useState<ReadonlyArray<ProjectId>>(config?.projectIds ?? []);
+  const projects = useProjects();
+  // A config saved with host project ids opens as the repositories those projects clone.
+  const [initialAccess] = useState(() =>
+    config === undefined
+      ? { repositories: [], envFiles: {} }
+      : (config.repositories ?? []).length > 0
+        ? { repositories: config.repositories ?? [], envFiles: config.envFiles }
+        : repositoriesFromLegacyConfig(config, projects, environmentId),
+  );
+  const [repositories, setRepositories] = useState<ReadonlyArray<string>>(
+    initialAccess.repositories,
+  );
   const [envFiles, setEnvFiles] = useState<Readonly<Record<string, string>>>(() =>
     Object.fromEntries(
-      Object.entries(config?.envFiles ?? {}).map(([id, files]) => [id, files.join(", ")]),
+      Object.entries(initialAccess.envFiles).map(([key, files]) => [key, files.join(", ")]),
     ),
   );
   const [idleMinutes, setIdleMinutes] = useState(
@@ -290,7 +291,8 @@ export function SandboxEnvironmentFields({
       settings.sandboxTailscale.clientId !== "" && settings.sandboxTailscale.clientSecret !== "",
   );
   const joinsTailnet = tailscaleReady && (joinTailnet ?? host?.claude?.privateNetwork === true);
-  const projects = sandboxLaunchableProjects(useProjects(), environmentId);
+  // Any machine's project can start on a config: the sandbox clones its repository from GitHub.
+  const repositoryChoices = sandboxRepositoryChoices(projects, environmentId);
   const disabled =
     isSaving ||
     provider === undefined ||
@@ -337,7 +339,13 @@ export function SandboxEnvironmentFields({
           passGithubToken: passGithub && host?.github === true,
           joinTailnet: joinsTailnet,
           access: joinsTailnet && tailnetOnly ? "tailnet" : "public",
-          projectIds,
+          // Ids that named no repository stay until the list is edited, so access never widens
+          // just by opening and saving an older config.
+          projectIds:
+            repositories === initialAccess.repositories && repositories.length === 0
+              ? (config?.projectIds ?? [])
+              : [],
+          repositories,
           envFiles: Object.fromEntries(
             Object.entries(envFiles)
               .map(([id, text]) => [id, parseFileList(text)] as const)
@@ -405,7 +413,10 @@ export function SandboxEnvironmentFields({
       </div>
     );
 
-  const allowedProjects = projects.filter((project) => projectIds.includes(project.id));
+  // Env files come from the host's own copy, so only repositories open on it can pick them.
+  const allowedHostCopies = repositoryChoices.filter(
+    (choice) => choice.hostProject !== null && repositories.includes(choice.key),
+  );
 
   return (
     <div className="space-y-4">
@@ -670,33 +681,34 @@ export function SandboxEnvironmentFields({
 
           <div className="space-y-2">
             <FieldLabel>Projects</FieldLabel>
-            {projects.length === 0 ? (
+            {repositoryChoices.length === 0 ? (
               <p className="text-2xs leading-relaxed text-muted-foreground">
-                Any project with a GitHub remote can start a thread on this config.
+                Any project with a GitHub remote can start a thread on this config, on whichever
+                machine it is open.
               </p>
             ) : (
               <>
                 <p className="text-2xs leading-relaxed text-muted-foreground">
-                  {projectIds.length === 0
-                    ? "Any project with a GitHub remote can start a thread here. Pick projects to limit it."
-                    : "Only these projects can start a thread here."}
+                  {repositories.length === 0
+                    ? "Any project with a GitHub remote can start a thread here, on whichever machine it is open. Pick repositories to limit it."
+                    : "Only these repositories can start a thread here."}
                 </p>
                 <ul className="grid gap-1.5 sm:grid-cols-2">
-                  {projects.map((project) => (
-                    <li key={project.id}>
+                  {repositoryChoices.map((choice) => (
+                    <li key={choice.key}>
                       <label className="flex cursor-pointer items-center gap-2 text-xs">
                         <Checkbox
-                          checked={projectIds.includes(project.id)}
+                          checked={repositories.includes(choice.key)}
                           disabled={isSaving}
                           onCheckedChange={(checked) =>
-                            setProjectIds(
+                            setRepositories(
                               checked === true
-                                ? [...projectIds, project.id]
-                                : projectIds.filter((id) => id !== project.id),
+                                ? [...repositories, choice.key]
+                                : repositories.filter((key) => key !== choice.key),
                             )
                           }
                         />
-                        <span className="min-w-0 truncate">{project.title}</span>
+                        <span className="min-w-0 truncate">{choice.label}</span>
                       </label>
                     </li>
                   ))}
@@ -735,23 +747,24 @@ export function SandboxEnvironmentFields({
                   />
                 </div>
 
-                {allowedProjects.length === 0 ? (
+                {allowedHostCopies.length === 0 ? (
                   <p className="text-2xs leading-relaxed text-muted-foreground">
-                    Each sandbox gets a copy of the project's git-ignored env files on this machine
-                    (.env files, .envrc, .dev.vars). Pick projects above to choose other files.
+                    When the repository is also open on this machine, each sandbox gets a copy of
+                    its git-ignored env files (.env files, .envrc, .dev.vars). Pick repositories
+                    above to choose other files.
                   </p>
                 ) : (
                   <div className="space-y-2">
                     <FieldLabel>Files copied from this machine</FieldLabel>
-                    {allowedProjects.map((project) => (
-                      <label key={project.id} className="block">
+                    {allowedHostCopies.map((choice) => (
+                      <label key={choice.key} className="block">
                         <span className="mb-1 block text-2xs text-muted-foreground">
-                          {project.title}
+                          {choice.label}
                         </span>
                         <Input
-                          value={envFiles[project.id] ?? ""}
+                          value={envFiles[choice.key] ?? ""}
                           onChange={(event) =>
-                            setEnvFiles({ ...envFiles, [project.id]: event.target.value })
+                            setEnvFiles({ ...envFiles, [choice.key]: event.target.value })
                           }
                           placeholder=".env files, .envrc, .dev.vars"
                           disabled={isSaving}

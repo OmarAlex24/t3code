@@ -121,6 +121,10 @@ export function createSandboxEnvironmentAtoms<R, E>(
           registry.update(sandboxesListRevisionAtom(environmentId), (revision) => revision + 1),
         ),
     }),
+    sandboxesCheckTailscale: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandboxes:check-tailscale",
+      tag: WS_METHODS.sandboxesCheckTailscale,
+    }),
     sandboxesStop: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandboxes:stop",
       tag: WS_METHODS.sandboxesStop,

@@ -25,6 +25,7 @@ it("lets read-only clients see sandbox limits but keeps starting machines behind
     WS_METHODS.sandboxesRetryLaunch,
     WS_METHODS.sandboxesPairLaunch,
     WS_METHODS.sandboxesCompleteLaunch,
+    WS_METHODS.sandboxesCheckTailscale,
     WS_METHODS.sandboxesSaveTemplate,
     WS_METHODS.sandboxesDeleteTemplate,
     WS_METHODS.sandboxesStop,
