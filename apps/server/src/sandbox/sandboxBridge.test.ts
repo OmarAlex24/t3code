@@ -54,6 +54,11 @@ interface Harness {
   readonly events: Queue.Queue<OrchestrationV2DomainEvent>;
   readonly resumes: Queue.Queue<string>;
   readonly modeChanges: Queue.Queue<{ readonly threadId: ThreadId; readonly runtimeMode: string }>;
+  readonly deleted: Array<string>;
+  readonly dispatched: Array<{ readonly type: string; readonly runId?: string }>;
+  // The host thread as the orchestrator would read it.
+  hostThread: { readonly instanceId: string; readonly settledAt: string | null };
+  hostRuns: Array<{ readonly id: string; readonly status: string }>;
 }
 
 const makeHarness = Effect.gen(function* () {
@@ -68,6 +73,10 @@ const makeHarness = Effect.gen(function* () {
       readonly threadId: ThreadId;
       readonly runtimeMode: string;
     }>(),
+    deleted: [],
+    dispatched: [],
+    hostThread: { instanceId: SANDBOX_BRIDGE_INSTANCE_ID, settledAt: null },
+    hostRuns: [],
   };
   const provisionerService: Partial<SandboxProvisioner.SandboxProvisioner["Service"]> = {
     list: Effect.sync(() => ({ sandboxes: harness.records, orphans: [] })),
@@ -75,6 +84,11 @@ const makeHarness = Effect.gen(function* () {
       Effect.sync(() => {
         harness.linked.push(input);
         return record({ hostProjectId: input.hostProjectId });
+      }),
+    delete: (input) =>
+      Effect.sync(() => {
+        harness.deleted.push(input.sandboxId);
+        return { warnings: [] };
       }),
     resume: (input) =>
       Effect.sync(() => {
@@ -130,6 +144,25 @@ const makeHarness = Effect.gen(function* () {
   );
   const orchestrator = Layer.succeed(Orchestrator.OrchestratorV2, {
     streamDomainEvents: Stream.fromQueue(harness.events),
+    getThreadRecords: () =>
+      Effect.sync(() => ({
+        thread: {
+          modelSelection: { instanceId: harness.hostThread.instanceId, model: "sandbox" },
+          settledAt: harness.hostThread.settledAt,
+          settledOverride: null,
+          deletedAt: null,
+        },
+        runs: harness.hostRuns,
+      })),
+    dispatch: (command: { readonly type: string; readonly runId?: string }) =>
+      Effect.sync(() => {
+        harness.dispatched.push(
+          command.runId === undefined
+            ? { type: command.type }
+            : { type: command.type, runId: command.runId },
+        );
+        return { sequence: 1 };
+      }),
   } as unknown as Orchestrator.OrchestratorV2["Service"]);
   const remote = Layer.succeed(SandboxBridge.SandboxThreadRemote, {
     setModes: (threadId, modes) =>
@@ -304,6 +337,45 @@ describe("SandboxBridge", () => {
           modeSet(SANDBOX_BRIDGE_INSTANCE_ID, "auto"),
         ]);
         expect(yield* Queue.take(harness.modeChanges)).toEqual({ threadId, runtimeMode: "auto" });
+      }),
+    ),
+  );
+
+  it.effect("settles a deleted sandbox's host thread and cancels what was queued for it", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        harness.records.push(record({ hostProjectId: ProjectId.make("project-host") }));
+        harness.hostRuns = [
+          { id: "run-done", status: "completed" },
+          { id: "run-queued", status: "queued" },
+        ];
+        const bridge = yield* SandboxBridge.SandboxBridge;
+        yield* bridge.deleteSandbox({
+          provider: "boat",
+          sandboxId: "bx_1",
+          instanceId: "sandbox-1",
+        });
+        expect(harness.deleted).toEqual(["bx_1"]);
+        expect(harness.dispatched).toEqual([
+          { type: "queued-run.cancel", runId: "run-queued" },
+          { type: "thread.settle" },
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("leaves the thread alone for a sandbox the bridge never linked", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        harness.records.push(record());
+        const bridge = yield* SandboxBridge.SandboxBridge;
+        yield* bridge.deleteSandbox({
+          provider: "boat",
+          sandboxId: "bx_1",
+          instanceId: "sandbox-1",
+        });
+        expect(harness.deleted).toEqual(["bx_1"]);
+        expect(harness.dispatched).toEqual([]);
       }),
     ),
   );
