@@ -65,6 +65,8 @@ export const SandboxProviderInfo = Schema.Struct({
     stopResume: Schema.Boolean,
     credentialEnvironments: Schema.Boolean,
     templates: Schema.Boolean,
+    /** The provider can give one sandbox's agent a key scoped to that sandbox and its forks. */
+    agentProviderAccess: Schema.Boolean,
   }),
 });
 export type SandboxProviderInfo = typeof SandboxProviderInfo.Type;
@@ -213,6 +215,11 @@ export const SandboxCreateInput = Schema.Struct({
   passGithubToken: Schema.optional(Schema.Boolean),
   /** Joins the sandbox to this server's tailnet as an ephemeral, tagged node. */
   joinTailnet: Schema.optional(Schema.Boolean),
+  /**
+   * Signs the provider's CLI in on the sandbox with a key scoped to it: the agent can fork it,
+   * host its ports, and delete only the forks it made. Never combined with `environment`.
+   */
+  agentProviderAccess: Schema.optional(Schema.Boolean),
   /** `tailnet` publishes no public URL; clients reach the sandbox at its Tailscale address. */
   access: Schema.optional(SandboxAccess),
 });
@@ -311,6 +318,18 @@ export const SandboxRecord = Schema.Struct({
   ),
   /** The tailnet device T3 joined the sandbox as, removed when the sandbox is deleted. */
   tailscale: Schema.optionalKey(Schema.Struct({ deviceId: TrimmedString })),
+  /**
+   * The provider environment made for this sandbox alone, so its forks can be found, and the
+   * scoped key its agent signs in with. Deleting the sandbox revokes the key, deletes its forks
+   * and then the environment. `keyId` is absent once the key is revoked or never got in.
+   */
+  agentProviderAccess: Schema.optionalKey(
+    Schema.Struct({
+      environmentId: TrimmedString,
+      environmentName: TrimmedString,
+      keyId: Schema.optionalKey(TrimmedString),
+    }),
+  ),
   /** Provider settings the sandbox was created with; they win over the current ones for it. */
   providerSettings: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   /** Machine cost this calendar month at list price, when the provider reports it. */
@@ -319,13 +338,17 @@ export const SandboxRecord = Schema.Struct({
 });
 export type SandboxRecord = typeof SandboxRecord.Type;
 
-/** A provider sandbox tagged by this server that no record tracks. Listed, never deleted. */
+/**
+ * A provider sandbox no record tracks: one tagged by this server, or a fork an agent made of a
+ * sandbox it runs on (`forkOf` names that sandbox's record). Listed, never deleted by the sweep.
+ */
 export const SandboxOrphan = Schema.Struct({
   provider: SandboxProviderKind,
   sandboxId: TrimmedString,
   name: TrimmedString,
   instanceId: Schema.optionalKey(TrimmedString),
   createdAt: Schema.optionalKey(TrimmedString),
+  forkOf: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type SandboxOrphan = typeof SandboxOrphan.Type;
 
@@ -454,6 +477,8 @@ export const SandboxProviderErrorCode = Schema.Literals([
   "template_saving",
   /** Claude's endpoint is only on a private network, and no Tailscale client is saved to join. */
   "tailscale_required",
+  /** The account key cannot mint the scoped key a sandbox's agent would sign in with. */
+  "scoped_keys_unavailable",
   "unknown",
 ]);
 export type SandboxProviderErrorCode = typeof SandboxProviderErrorCode.Type;
@@ -664,6 +689,8 @@ export const SandboxEnvironmentConfig = Schema.Struct({
   claude: Schema.optionalKey(Schema.Struct({ baseUrl: TrimmedNonEmptyString })),
   passGithubToken: Schema.Boolean,
   joinTailnet: Schema.Boolean,
+  /** Lets the agent use the provider's CLI on its own sandbox; see `SandboxCreateInput`. */
+  agentProviderAccess: Schema.optionalKey(Schema.Boolean),
   access: SandboxAccess,
   /**
    * Projects on this server by id, from configs saved before `repositories`; read only while
