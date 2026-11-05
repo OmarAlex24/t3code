@@ -11,6 +11,8 @@ interface ResolveServerEnvironmentLabelInput {
   readonly cwdBaseName: string;
   /** Explicit label file directory. Provisioned sandboxes write `environment-label` here. */
   readonly baseDir?: string;
+  /** The name a renamed desktop build (such as t3code-diy's side-by-side app) gives itself. */
+  readonly displayName?: string | undefined;
 }
 
 const ServerEnvironmentLabelCommandProbe = Schema.Literals([
@@ -211,6 +213,11 @@ export const resolveServerEnvironmentLabel = Effect.fn("resolveServerEnvironment
     if (configuredLabel) {
       return configuredLabel;
     }
+  }
+
+  const displayName = normalizeLabel(input.displayName);
+  if (displayName) {
+    return displayName;
   }
 
   const friendlyHostLabel = yield* resolveFriendlyHostLabel();
