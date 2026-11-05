@@ -367,6 +367,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   shouldRefocusComposerOnWindowFocus,
   hasCompactableConversation,
+  waitingMessageCanResend,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
@@ -3117,18 +3118,20 @@ export default function ChatView(props: ChatViewProps) {
     void onComposerSendStable();
   };
   const resendAfterWorkLocallyStable = useStableCallback(resendAfterWorkLocally);
-  const workLocallyResendReady =
-    workLocallyResendDraftId !== null &&
-    workLocallyResendDraftId === draftId &&
-    isLocalDraftThread &&
-    !isSendBusy &&
-    !isRevertingCheckpoint &&
-    !threadDetailLoading &&
-    clientSettingsHydrated &&
-    !needsLoadBalancing &&
-    !activeEnvironmentUnavailable &&
-    !activePendingUserInput &&
-    !feedbackUploading;
+  const workLocallyResendReady = waitingMessageCanResend({
+    waitingDraftId: workLocallyResendDraftId,
+    draftId,
+    isLocalDraftThread,
+    canOperateThread,
+    isSendBusy,
+    isRevertingCheckpoint,
+    threadDetailLoading,
+    clientSettingsHydrated,
+    needsLoadBalancing,
+    activeEnvironmentUnavailable,
+    hasPendingUserInput: Boolean(activePendingUserInput),
+    feedbackUploading,
+  });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- switches the draft to local mode, then resends the waiting message once sending is idle
   useEffect(() => {
     if (
