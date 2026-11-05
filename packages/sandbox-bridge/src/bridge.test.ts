@@ -325,7 +325,17 @@ describe("the ACP side", () => {
         assert.isTrue(session.sessionId.startsWith("sandbox-dry-run:"));
         const result = yield* say(acp, session.sessionId, "hello");
         assert.strictEqual(result.stopReason, "end_turn");
-        assert.deepStrictEqual(messages(updates), [NOT_LINKED_MESSAGE]);
+        // A plain reply, not an error, and no thinking left running.
+        assert.deepStrictEqual(messages(updates), [
+          "Sandbox chats start from T3 Code on your computer (Run on → Sandbox). After that you can keep the conversation going here.",
+        ]);
+        assert.strictEqual(NOT_LINKED_MESSAGE, messages(updates)[0]);
+        assert.deepStrictEqual(messages(updates, "agent_thought_chunk"), []);
+        assert.deepStrictEqual(updates.at(-1)?.update, {
+          sessionUpdate: "state_update",
+          state: "idle",
+          stopReason: "end_turn",
+        });
       }),
     ),
   );
@@ -606,6 +616,7 @@ describe("forwarding a turn", () => {
             "Resuming sandbox bx_123…",
           ]);
           assert.match(messages(updates).join(""), /bx_123 is stopped or not answering/u);
+          assert.notMatch(messages(updates).join(""), /\bMac\b/u);
         }),
     ),
   );
