@@ -137,6 +137,14 @@ export function createSandboxEnvironmentAtoms<R, E>(
       label: "environment-data:sandboxes:check-work",
       tag: WS_METHODS.sandboxesCheckWork,
     }),
+    sandboxesLinkHostThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandboxes:link-host-thread",
+      tag: WS_METHODS.sandboxesLinkHostThread,
+      onSuccess: ({ environmentId }, registry) =>
+        Effect.sync(() =>
+          registry.update(sandboxesListRevisionAtom(environmentId), (revision) => revision + 1),
+        ),
+    }),
     sandboxesSaveTemplate: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandboxes:save-template",
       tag: WS_METHODS.sandboxesSaveTemplate,

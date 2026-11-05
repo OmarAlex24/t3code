@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import {
+  isSandboxHostProjectRoot,
   assessSandboxStart,
   describeSandboxTemplateNameProblem,
   githubRepositoryOf,
@@ -152,5 +153,17 @@ describe("tailscaleClientIdFromSecret", () => {
     for (const secret of ["", "tskey-auth-k1-abc", "tskey-client-", "secret"]) {
       expect(tailscaleClientIdFromSecret(secret)).toBeNull();
     }
+  });
+});
+
+describe("isSandboxHostProjectRoot", () => {
+  it("recognises a lightweight sandbox project's folder and nothing else", () => {
+    expect(isSandboxHostProjectRoot("/Users/me/.t3/userdata/sandbox-projects/octo/hello")).toBe(
+      true,
+    );
+    expect(isSandboxHostProjectRoot("C:\\t3\\sandbox-projects\\octo\\hello\\")).toBe(true);
+    expect(isSandboxHostProjectRoot("/Users/me/code/hello")).toBe(false);
+    expect(isSandboxHostProjectRoot("/x/sandbox-projects/octo")).toBe(false);
+    expect(isSandboxHostProjectRoot("/x/sandbox-projects/octo/hello/src")).toBe(false);
   });
 });

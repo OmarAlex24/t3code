@@ -1,11 +1,22 @@
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId, SandboxRecord, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProjectId,
+  SandboxRecord,
+  ScopedThreadRef,
+  ServerSettings,
+  ThreadId,
+} from "@t3tools/contracts";
+import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
-import { usePrimaryEnvironmentId } from "./environments";
+import { useProjects } from "./entities";
+import { useEnvironmentProviders, usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentQuery } from "./query";
-import { findThreadSandbox } from "./sandboxThreads";
+import { findThreadSandbox, sandboxBridgeReady } from "./sandboxThreads";
 import { serverEnvironment } from "./server";
+
+const NO_SETTINGS = Atom.make<ServerSettings | null>(null);
 
 /**
  * Hosted web has no primary. The catalog keeps save order, so the first enabled saved environment
@@ -44,7 +55,10 @@ export function useSandboxThreadEnvironmentIds(): ReadonlyMap<EnvironmentId, Thr
   );
 }
 
-/** The sandbox a thread runs on, from the provisioning server's list; undefined for any other. */
+/**
+ * The sandbox a thread runs on, from the provisioning server's list: the sandbox's own thread or
+ * the host thread the bridge drives. Undefined for any other thread.
+ */
 export function useThreadSandbox(threadRef: ScopedThreadRef | null): SandboxRecord | undefined {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const list = useEnvironmentQuery(
@@ -55,5 +69,29 @@ export function useThreadSandbox(threadRef: ScopedThreadRef | null): SandboxReco
           input: undefined,
         }),
   );
-  return threadRef === null ? undefined : findThreadSandbox(list.data?.sandboxes ?? [], threadRef);
+  return threadRef === null
+    ? undefined
+    : findThreadSandbox(list.data?.sandboxes ?? [], threadRef, provisionerEnvironmentId);
+}
+
+/** Whether a host project can send through the sandbox bridge yet; see `sandboxBridgeReady`. */
+export function useSandboxBridgeReady(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  model: string | null,
+): boolean {
+  const providersByEnvironment = useEnvironmentProviders();
+  const settings = useAtomValue(
+    environmentId === null ? NO_SETTINGS : serverEnvironment.settingsValueAtom(environmentId),
+  );
+  const projects = useProjects();
+  if (environmentId === null || projectId === null || model === null) return false;
+  return sandboxBridgeReady({
+    providers: providersByEnvironment.get(environmentId) ?? [],
+    settings,
+    projects,
+    environmentId,
+    projectId,
+    model,
+  });
 }

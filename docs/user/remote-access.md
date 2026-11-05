@@ -76,9 +76,14 @@ made.
 5. **Start T3 Code**.
 6. **Clone repository** from GitHub into `~/work/<repo>` and add it as a project there.
 7. **Copy env files**.
-8. **Connect and start thread** pairs this app with the sandbox and moves the thread onto it.
+8. **Connect and start thread** pairs this app with the sandbox and starts the thread on this
+   computer, under the **Sandboxes** provider, so your phone can follow it (see
+   [Drive a sandbox thread from your phone](#drive-a-sandbox-thread-from-your-phone)). The message
+   waits until this computer shows that provider in the project, usually a few seconds. If this
+   computer cannot take the thread, the thread starts on the sandbox itself, as it did before, and
+   a notice says your phone cannot drive it.
 
-Once connected, the thread starts on the sandbox with your message. A failure in steps 1 to 5
+Once connected, the thread starts with your message. A failure in steps 1 to 5
 deletes the machine, and **Start a new sandbox** tries again from scratch. A failed clone or
 connection keeps the machine, so **Retry** runs just that step again, and **Discard sandbox**
 deletes it. A setup step that fails, such as a GitHub sign-in, or an env file that could not be
@@ -103,31 +108,58 @@ row recommends deleting it. T3 Code never deletes a sandbox you did not ask it t
 launch was cut short when this server stopped, which it deletes once it is running again. A row
 also says when the thread it belonged to was deleted.
 
+### Drive a sandbox thread from your phone
+
+A sandbox thread also appears on this computer under the **Sandboxes** provider, in the project it
+came from (or a small project named after the repository when the repository is not on this
+computer). The T3 Code app reaches it there through this computer, without pairing with the sandbox.
+Sending a message forwards it to the sandbox, its answer streams back, and the sandbox's approvals
+and questions appear as usual. Threads launched this way start there, Supervised.
+
+The small project is an empty folder, not the repository, so it offers no git actions, scripts,
+files, or terminal; a notice above the composer says so. The repository's files, diffs, and
+terminals are on the sandbox: **Open sandbox thread**, in that notice or in the sandbox menu in the
+thread's header, opens the same thread on the sandbox.
+
+- Keep the thread **Supervised**. In another mode the sandbox's approvals cannot reach you: the
+  request waits on the sandbox and the thread says so.
+- A stopped sandbox is resumed when you send; the first answer can take a few minutes.
+- Attachments and images are not forwarded yet.
+- The thread under **Sandboxes** shows only what was sent through it; messages sent to the sandbox
+  directly appear on the sandbox's own thread.
+- The **Sandboxes** provider shows only in projects that hold a sandbox thread.
+
 ### Settle or delete a sandbox chat
 
-A sandbox thread's conversation is stored on its sandbox, so deleting the sandbox deletes the
-conversation too. Every prompt that can delete one says so.
+A thread that runs through the **Sandboxes** provider keeps its conversation on this computer, so
+deleting its sandbox keeps the conversation. What goes is the sandbox's disk: work not committed
+and pushed from it is lost, and the thread needs a new sandbox to continue. A sandbox thread started
+before this, or one that could not start on this computer, is stored only on its sandbox, so
+deleting the sandbox deletes the conversation too. Every prompt that can delete a sandbox says
+which case it is.
 
 **When a chat is settled**, in the sandbox config, says what settling a thread does to its sandbox:
 
 - **Ask me** (the default) asks each time: **Keep snapshot** or **Delete sandbox…**. Tick
   **Remember for** the config's name to make that choice the config's setting.
 - **Keep a snapshot** stops the sandbox and keeps its disk. The provider bills for the stopped disk
-  (Boat keeps it for 14 days). Sending a message in the thread, or un-settling it, resumes the
-  sandbox and then sends.
+  (Boat keeps it for 14 days). Sending a message in the thread resumes the sandbox, from any
+  device; the first answer can take a few minutes. Un-settling the thread resumes it too.
 - **Delete the sandbox** checks the clone for uncommitted files and commits not on a remote. With
-  nothing to lose, it deletes the sandbox and a notice says the conversation went with it. With work
-  to lose, or when the sandbox does not answer within about 10 seconds ("Couldn't check for unpushed
+  nothing to lose, it deletes the sandbox and a notice says what went with it. With work to lose,
+  or when the sandbox does not answer within about 10 seconds ("Couldn't check for unpushed
   work"), it asks first. Copied env files count as uncommitted when the repository does not ignore
   them.
 
 Only settling from this app counts; a thread the sandbox settles on its own leaves the sandbox as
 it is. Deleting a sandbox thread asks first, names the sandbox ("Also deletes sandbox bx_46wr on
-Boat"), and shows the same check. A stopped sandbox is not started just to check, so its prompt
-says the check could not run.
+Boat"), and shows the same check. Deleting a thread that runs through the **Sandboxes** provider
+also deletes the sandbox's copy of it. A stopped sandbox is not started just to check, so its
+prompt says the check could not run.
 
 The thread's header shows its sandbox: its state, **Stop and keep its disk** or **Resume**,
-**Open in Sandboxes list**, and **Delete sandbox…**. A warning icon there means the provider will
+**Open sandbox thread** (for a thread under the **Sandboxes** provider), **Open in Sandboxes
+list**, and **Delete sandbox…**. A warning icon there means the provider will
 soon drop the stopped disk.
 
 **Not tracked by T3 Code** lists sandboxes that carry this server's tag but have no record, for

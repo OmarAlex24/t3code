@@ -22,6 +22,7 @@ import {
   SandboxLifecycleInput,
   SandboxLimitsInput,
   SandboxLimitsResult,
+  SandboxLinkHostThreadResult,
   SandboxListResult,
   SandboxProviderError,
   SandboxProvidersResult,
@@ -60,6 +61,7 @@ export const SANDBOX_WS_METHODS = {
   sandboxesPairLaunch: "sandboxes.pairLaunch",
   sandboxesCompleteLaunch: "sandboxes.completeLaunch",
   sandboxesCheckTailscale: "sandboxes.checkTailscale",
+  sandboxesLinkHostThread: "sandboxes.linkHostThread",
 } as const;
 
 const SandboxFailure = Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]);
@@ -199,6 +201,13 @@ const WsSandboxesCheckTailscaleRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCheckT
   error: EnvironmentAuthorizationError,
 });
 
+// Readies the sandbox bridge for a launched thread so the phone can drive it through this server.
+const WsSandboxesLinkHostThreadRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesLinkHostThread, {
+  payload: SandboxLaunchThreadInput,
+  success: SandboxLinkHostThreadResult,
+  error: SandboxFailure,
+});
+
 export const SandboxRpcs = [
   WsSandboxesProvidersRpc,
   WsSandboxesEnvironmentsRpc,
@@ -222,6 +231,7 @@ export const SandboxRpcs = [
   WsSandboxesPairLaunchRpc,
   WsSandboxesCompleteLaunchRpc,
   WsSandboxesCheckTailscaleRpc,
+  WsSandboxesLinkHostThreadRpc,
 ] as const;
 
 // Each of these spends the saved provider key, changes billable machines, or hands out a pairing
@@ -242,4 +252,5 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesPairLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesCompleteLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesCheckTailscale]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesLinkHostThread]: AuthSettingsWriteScope,
 } as const;

@@ -75,6 +75,7 @@ import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 import { HttpClient, HttpClientRequest } from "effect/http";
 
@@ -112,6 +113,16 @@ import {
   writeFileScript,
 } from "./sandboxSetup.ts";
 import { makePairingKey, pairScript, type PairReport, readPairReport } from "./sandboxPairing.ts";
+import {
+  type BridgeCredentialReport,
+  bridgeCredentialScript,
+  readBridgeCredential,
+} from "./sandboxBridgeCredential.ts";
+import {
+  bridgeLinkSecretName,
+  type SandboxBridgeLink,
+  SandboxBridgeLinkJson,
+} from "@t3tools/sandbox-bridge/link";
 import { makeSandboxLaunchTracker } from "./sandboxLaunches.ts";
 import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
 import {
@@ -305,6 +316,22 @@ const PAIR_FAILURES: Record<Exclude<PairReport, { _tag: "token" }>["reason"], st
   unreadable: "The sandbox did not return a pairing code.",
 };
 
+const BRIDGE_FAILURES: Record<
+  Exclude<BridgeCredentialReport, { _tag: "issued" }>["reason"],
+  string
+> = {
+  seal: "The sandbox has neither the openssl CLI nor Node.js, which T3 Code needs to receive the bridge's credential safely.",
+  issue: "t3 auth session issue failed on the sandbox.",
+  token: "The sandbox did not return a credential for the bridge.",
+  unreadable: "The sandbox did not return a credential for the bridge.",
+};
+
+const decodeBridgeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
+const encodeBridgeLink = Schema.encodeEffect(SandboxBridgeLinkJson);
+
+// A bridge credential this close to its expiry is replaced the next time it is linked or resumed.
+const BRIDGE_RENEW_BEFORE_MS = 30 * 24 * 60 * 60 * 1000;
+
 // An empty value is an unset field, which drivers see as absent.
 const withSettings = (
   config: SandboxProviderConfig,
@@ -486,6 +513,14 @@ export class SandboxProvisioner extends Context.Service<
     ) => Effect.Effect<SandboxTailscaleCheckResult>;
     /** Stops sandboxes past their running limit and syncs every other record with its provider. */
     readonly sweep: Effect.Effect<void>;
+    /**
+     * Readies the host's sandbox bridge for a launched thread: keeps (or mints) the bearer it uses
+     * on the sandbox and records the host project the thread is served from.
+     */
+    readonly linkBridge: (input: {
+      readonly threadId: ThreadId;
+      readonly hostProjectId: ProjectId;
+    }) => Effect.Effect<SandboxRecord, SandboxProviderError>;
   }
 >()("t3/sandbox/SandboxProvisioner") {}
 
@@ -1431,6 +1466,103 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const runOnRecord =
+    (record: SandboxRecord) => (script: string | SandboxScript, timeoutSeconds: number) => {
+      const driver = findDriver(record.provider);
+      return recordConfig(driver, record).pipe(
+        Effect.flatMap((config) =>
+          onHttp(
+            driver.execute({
+              config,
+              sandboxId: record.sandboxId,
+              timeoutSeconds,
+              ...asScript(script),
+            }),
+          ),
+        ),
+      );
+    };
+
+  /**
+   * Writes the link the host's sandbox bridge reads for `record`'s thread. The bearer it carries is
+   * minted on the sandbox only when there is none, its secret is gone, or it is near expiry; the
+   * link itself is rewritten every time, since a resumed sandbox can come back at a new address.
+   */
+  const ensureBridge = Effect.fn("SandboxProvisioner.ensureBridge")(function* (
+    record: SandboxRecord,
+    run: Machine["run"],
+  ) {
+    const failed = (detail: string, cause?: unknown) =>
+      new SandboxProviderError({
+        provider: record.provider,
+        stage: "pair",
+        detail,
+        ...(cause === undefined ? {} : { cause }),
+      });
+    if (record.threadId === undefined || record.sandboxProjectId === undefined) {
+      return yield* failed("This sandbox was not launched for a thread.");
+    }
+    const secret = bridgeLinkSecretName(record.threadId);
+    const stored =
+      record.bridge === undefined
+        ? Option.none<SandboxBridgeLink>()
+        : yield* secrets.get(secret).pipe(
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.succeedNone,
+                onSome: (bytes) =>
+                  decodeBridgeLink(new TextDecoder().decode(bytes)).pipe(Effect.asSome),
+              }),
+            ),
+            Effect.orElseSucceed(Option.none<SandboxBridgeLink>),
+          );
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const fresh =
+      record.bridge !== undefined &&
+      Option.isSome(stored) &&
+      Date.parse(record.bridge.expiresAt) - now > BRIDGE_RENEW_BEFORE_MS;
+    let token: string;
+    let bridge: NonNullable<SandboxRecord["bridge"]>;
+    if (fresh && Option.isSome(stored) && record.bridge !== undefined) {
+      token = stored.value.token;
+      bridge = record.bridge;
+    } else {
+      const key = yield* makePairingKey;
+      const minted = yield* run(
+        bridgeCredentialScript(key.publicKeyPem, record.bridge?.sessionId),
+        60,
+      );
+      const report = readBridgeCredential(minted.stdout, key.privateKey);
+      if (report._tag === "failed") {
+        const status = report.exitCode === undefined ? "" : ` It exited with ${report.exitCode}.`;
+        return yield* failed(
+          `${BRIDGE_FAILURES[report.reason]}${status}`,
+          report.stderr === undefined ? undefined : new Error(report.stderr),
+        );
+      }
+      token = report.token;
+      bridge = { sessionId: report.sessionId, secret, expiresAt: report.expiresAt };
+    }
+    const link: SandboxBridgeLink = {
+      threadId: record.threadId,
+      instanceId: record.instanceId,
+      sandboxId: record.sandboxId,
+      label: record.label,
+      httpBaseUrl: record.httpBaseUrl,
+      sandboxProjectId: record.sandboxProjectId,
+      token,
+    };
+    const encoded = yield* encodeBridgeLink(link).pipe(Effect.orDie);
+    yield* secrets
+      .set(secret, new TextEncoder().encode(encoded))
+      .pipe(
+        Effect.mapError((cause) =>
+          failed("Could not save the sandbox bridge's credential on this server.", cause),
+        ),
+      );
+    return bridge;
+  });
+
   // Fiber bookkeeping for one provisioning attempt: the sweep skips its record while it runs.
   const tracked = Effect.fn("SandboxProvisioner.tracked")(function* <A, E>(
     instanceId: string,
@@ -1711,12 +1843,19 @@ const make = Effect.gen(function* () {
           "repo",
           cloneProject(machine, input.project),
         );
-        yield* machine.save({ repoDir: cloned.directory });
+        const repository = githubRepositoryOf(input.project.remoteUrl);
+        yield* machine.save({
+          repoDir: cloned.directory,
+          // The host's sandbox bridge creates the thread in this project on the sandbox.
+          sandboxProjectId: cloned.projectId,
+          ...(repository === null ? {} : { repository: repository.label }),
+        });
         yield* reporter.stage("repo", "done", cloned.directory.replace(/^.*\/work\//u, "~/work/"));
 
         yield* reporter.stage("env-files", "running");
         const hostCopy = yield* verifiedHostCopy(input.project);
-        const repositoryKey = githubRepositoryOf(input.project.remoteUrl)?.key;
+        if (hostCopy !== null) yield* machine.save({ hostProjectId: hostCopy.projectId });
+        const repositoryKey = repository?.key;
         const copied =
           hostCopy === null
             ? { copied: 0, failed: [] as ReadonlyArray<string> }
@@ -1746,6 +1885,13 @@ const make = Effect.gen(function* () {
         yield* tracker.update(threadId, { awaitingHandoff: true });
         yield* Deferred.await(handoff);
         yield* machine.save({ state: "running" });
+        // Only the host's bridge (and so the phone) needs this; the client's own pairing is done.
+        yield* ensureBridge(machine.record(), machine.run).pipe(
+          Effect.flatMap((bridge) => machine.save({ bridge })),
+          Effect.catch((error) =>
+            reporter.warn(`Phones cannot drive this thread yet: ${error.detail}`),
+          ),
+        );
         yield* tracker.finish(threadId, "done");
       }).pipe(
         Effect.onExit((exit) =>
@@ -2093,6 +2239,40 @@ const make = Effect.gen(function* () {
 
   const remove = (input: SandboxDeleteInput) => removeSandbox(input, true);
 
+  const linkBridge = Effect.fn("SandboxProvisioner.linkBridge")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly hostProjectId: ProjectId;
+  }) {
+    const starting = runningLaunch(input.threadId);
+    if (starting !== null) {
+      return yield* new SandboxProviderError({
+        provider: starting.config.provider,
+        stage: "pair",
+        detail: "This thread's sandbox is still starting.",
+      });
+    }
+    const all = yield* records.list.pipe(Effect.orDie);
+    const record = all.find(
+      (candidate) => candidate.threadId === input.threadId && candidate.state !== "deleted",
+    );
+    if (record === undefined) {
+      return yield* new SandboxProviderError({
+        provider: "boat",
+        stage: "pair",
+        detail: "No sandbox belongs to this thread.",
+      });
+    }
+    const bridge = yield* ensureBridge(record, runOnRecord(record));
+    const updated: SandboxRecord = {
+      ...record,
+      hostProjectId: input.hostProjectId,
+      bridge,
+      updatedAt: yield* nowIso,
+    };
+    yield* records.put(updated).pipe(Effect.orDie);
+    return updated;
+  });
+
   const removeSandbox = Effect.fn("SandboxProvisioner.delete")(function* (
     input: SandboxDeleteInput,
     deleteForks: boolean,
@@ -2131,6 +2311,10 @@ const make = Effect.gen(function* () {
     }
     const environmentWarning = agent === null ? null : yield* agent.finish();
     if (instanceId !== undefined) yield* records.remove(instanceId).pipe(Effect.orDie);
+    // The bearer dies with the machine; only this server's copy is left to clear.
+    if (Option.isSome(record) && record.value.bridge !== undefined) {
+      yield* secrets.remove(record.value.bridge.secret).pipe(Effect.ignore);
+    }
     yield* Ref.update(orphans, (current) =>
       current.filter((orphan) => orphan.sandboxId !== input.sandboxId),
     );
@@ -2332,10 +2516,27 @@ const make = Effect.gen(function* () {
       ...(rejoined.tailscale === undefined ? {} : { tailscale: rejoined.tailscale }),
     };
     yield* records.put(updated).pipe(Effect.orDie);
+    // The bridge reads the sandbox's address from its link, and its bearer may be near expiry.
+    const bridged =
+      updated.bridge === undefined
+        ? { record: updated, warning: null }
+        : yield* ensureBridge(updated, runOnRecord(updated)).pipe(
+            Effect.map((bridge) => ({ record: { ...updated, bridge }, warning: null })),
+            Effect.catch((error) =>
+              Effect.succeed({
+                record: updated,
+                warning: `Phones may not reach this thread: ${error.detail}`,
+              }),
+            ),
+          );
+    if (bridged.record !== updated) yield* records.put(bridged.record).pipe(Effect.orDie);
+    const warnings = [rejoined.warning, bridged.warning].filter(
+      (warning): warning is string => warning !== null,
+    );
     return {
-      sandbox: updated,
-      httpBaseUrl: updated.httpBaseUrl,
-      ...(rejoined.warning === null ? {} : { warnings: [rejoined.warning] }),
+      sandbox: bridged.record,
+      httpBaseUrl: bridged.record.httpBaseUrl,
+      ...(warnings.length === 0 ? {} : { warnings }),
     } satisfies SandboxResumeResult;
   });
 
@@ -2713,6 +2914,7 @@ const make = Effect.gen(function* () {
     completeLaunch,
     checkTailscale,
     sweep,
+    linkBridge,
   });
 });
 

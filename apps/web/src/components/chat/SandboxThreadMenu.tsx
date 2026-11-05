@@ -5,6 +5,7 @@ import {
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  CloudIcon,
   ExternalLinkIcon,
   PlayIcon,
   SquareIcon,
@@ -20,6 +21,7 @@ import {
   deleteThreadSandbox,
   ensureSandboxThreadRunning,
   findThreadSandbox,
+  isHostThreadRef,
   retentionWarning,
   shortSandboxId,
   stoppedDiskAge,
@@ -55,7 +57,9 @@ const days = (count: number) => `${count} ${count === 1 ? "day" : "days"}`;
 
 /**
  * The thread's own sandbox, from its header: what state it is in, stop or resume it, delete it,
- * or find it in the Sandboxes list. Renders nothing for a thread that has no sandbox.
+ * or find it in the Sandboxes list. On the host thread the bridge drives, it also opens the
+ * sandbox's own thread, where its files, diffs and terminals are. Renders nothing for a thread
+ * that has no sandbox.
  */
 export function SandboxThreadMenu({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
@@ -79,7 +83,11 @@ export function SandboxThreadMenu({ threadRef }: { readonly threadRef: ScopedThr
   const navigate = useNavigate();
   const minute = useNowMinute();
   const [pending, setPending] = useState(false);
-  const sandbox = findThreadSandbox(list.data?.sandboxes ?? [], threadRef);
+  const sandbox = findThreadSandbox(
+    list.data?.sandboxes ?? [],
+    threadRef,
+    provisionerEnvironmentId,
+  );
   if (sandbox === undefined || provisionerEnvironmentId === null) return null;
   const provider = providersQuery.data?.providers.find(
     (candidate) => candidate.kind === sandbox.provider,
@@ -93,6 +101,9 @@ export function SandboxThreadMenu({ threadRef }: { readonly threadRef: ScopedThr
   );
   const canStopResume = provider?.capabilities.stopResume ?? true;
   const short = shortSandboxId(sandbox.sandboxId);
+  const sandboxThreadEnvironmentId = isHostThreadRef(sandbox, threadRef)
+    ? sandbox.environmentId
+    : null;
   const status =
     sandbox.state === "stopped" && stoppedDays !== null
       ? `Stopped ${stoppedDays === 0 ? "today" : `${days(stoppedDays)} ago`}`
@@ -170,6 +181,22 @@ export function SandboxThreadMenu({ threadRef }: { readonly threadRef: ScopedThr
               Resume
             </MenuItem>
           ) : null}
+          {sandboxThreadEnvironmentId === null ? null : (
+            <MenuItem
+              onClick={() =>
+                void navigate({
+                  to: "/$environmentId/$threadId",
+                  params: {
+                    environmentId: sandboxThreadEnvironmentId,
+                    threadId: threadRef.threadId,
+                  },
+                })
+              }
+            >
+              <CloudIcon aria-hidden className="size-3.5" />
+              Open sandbox thread
+            </MenuItem>
+          )}
           <MenuItem
             onClick={() => void navigate({ to: "/settings/connections", hash: "sandboxes" })}
           >

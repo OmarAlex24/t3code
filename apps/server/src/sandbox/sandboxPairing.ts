@@ -34,12 +34,11 @@ const NODE_SEAL = `const c = require("node:crypto"), f = require("node:fs");
 process.stdout.write(c.publicEncrypt({ key: f.readFileSync(process.argv[1]), padding: c.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, f.readFileSync(process.argv[2])).toString("base64"));`;
 
 /**
- * Mints a 30-minute pairing token and prints only `T3_PAIR_TOKEN: <sealed>`, or `T3_PAIR_ERROR:`
- * with a reason (and, for a failed `t3 pair`, its exit status and sealed stderr tail). Exits 0.
+ * The shell both sandbox scripts start with: a private temp dir holding the public key, and
+ * `seal FILE`, which leaves FILE sealed to that key in `$sealed` (one RSA block, about 190 bytes).
  */
-export const pairScript = (publicKeyPem: string) => `export PATH="$HOME/.local/bin:$PATH"
+export const sealPreamble = (publicKeyPem: string) => `export PATH="$HOME/.local/bin:$PATH"
 umask 077
-report() { printf 'T3_PAIR_%s: %s\\n' "$1" "$2"; }
 dir="$(mktemp -d)" || exit 1
 trap 'rm -rf "$dir"' EXIT
 cat >"$dir/key.pem" <<'T3_PAIR_KEY'
@@ -54,7 +53,14 @@ seal() {
     sealed="$(node -e '${NODE_SEAL}' "$dir/key.pem" "$1" 2>/dev/null)" || sealed=""
   fi
   [ -n "$sealed" ]
-}
+}`;
+
+/**
+ * Mints a 30-minute pairing token and prints only `T3_PAIR_TOKEN: <sealed>`, or `T3_PAIR_ERROR:`
+ * with a reason (and, for a failed `t3 pair`, its exit status and sealed stderr tail). Exits 0.
+ */
+export const pairScript = (publicKeyPem: string) => `${sealPreamble(publicKeyPem)}
+report() { printf 'T3_PAIR_%s: %s\\n' "$1" "$2"; }
 printf 'probe' >"$dir/probe"
 if ! seal "$dir/probe"; then
   report ERROR seal
@@ -92,7 +98,7 @@ export type PairReport =
       readonly stderr?: string;
     };
 
-const unseal = (sealed: string, privateKey: NodeCrypto.KeyObject): string | null => {
+export const unseal = (sealed: string, privateKey: NodeCrypto.KeyObject): string | null => {
   try {
     return NodeCrypto.privateDecrypt(
       { key: privateKey, ...OAEP },

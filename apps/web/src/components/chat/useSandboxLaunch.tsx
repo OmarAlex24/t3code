@@ -7,6 +7,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   AuthSettingsWriteScope,
   type EnvironmentId,
+  type ModelSelection,
   type ProjectId,
   sandboxConfigAllows,
   type SandboxEnvironmentConfig,
@@ -29,6 +30,7 @@ import {
   useSandboxComposerStore,
 } from "../../state/sandboxComposer";
 import {
+  useSandboxBridgeReady,
   useSandboxProvisionerEnvironmentId,
   useSandboxThreadEnvironmentIds,
 } from "../../state/sandboxes";
@@ -45,14 +47,17 @@ import { SandboxSetupCard } from "./SandboxSetupCard";
 const EMPTY_CONFIGS: ReadonlyArray<SandboxEnvironmentConfig> = [];
 // A paired sandbox reports its projects shortly after it connects; past this the handoff gives up.
 const PROJECT_WAIT_MS = 90_000;
+// Linking turns the Sandboxes provider on for the host project, and the host probes it after. A
+// send before that would go to another provider, so past this the message goes to the sandbox.
+const BRIDGE_READY_WAIT_MS = 60_000;
 
 const failureText = (result: Parameters<typeof squashAtomCommandFailure>[0], title: string) =>
   describeSandboxFailure(squashAtomCommandFailure(result), title).description;
 
 /**
- * Starting a draft on a sandbox config: the picker options, the send that launches a machine
- * instead of sending, the card that follows the launch, and the move onto the sandbox once it is
- * paired. The draft keeps its thread id, so the thread starts on the sandbox under the same id.
+ * Starting a draft on a sandbox config: picker options, the send that launches a machine, its
+ * card, and the handoff. The draft keeps its thread id and moves to a host thread the sandbox
+ * bridge drives, so the phone can follow it; failing that, onto the sandbox's own project.
  */
 export function useSandboxLaunch(input: {
   readonly draftId: DraftId | null;
@@ -61,7 +66,7 @@ export function useSandboxLaunch(input: {
   readonly activeProject: EnvironmentProject | null;
   readonly logicalProjectEnvironments: ReadonlyArray<EnvironmentOption>;
   readonly envLocked: boolean;
-  /** Sends the waiting message once the draft is on the sandbox. */
+  /** Sends the waiting message once the draft is on the host thread or the sandbox. */
   readonly onHandedOff: () => void;
 }) {
   const { draftId, threadId, activeEnvironmentId, activeProject, envLocked } = input;
@@ -76,6 +81,8 @@ export function useSandboxLaunch(input: {
   const projects = useProjects();
   const { environments } = useEnvironments();
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
+  const setDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
+  const setDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const selectedConfigId = useSandboxComposerStore((state) =>
     draftId === null ? undefined : state.selections[draftId],
   );
@@ -91,6 +98,9 @@ export function useSandboxLaunch(input: {
     reportFailure: false,
   });
   const completeLaunch = useAtomCommand(serverEnvironment.sandboxesCompleteLaunch, {
+    reportFailure: false,
+  });
+  const linkHostThread = useAtomCommand(serverEnvironment.sandboxesLinkHostThread, {
     reportFailure: false,
   });
   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
@@ -280,25 +290,86 @@ export function useSandboxLaunch(input: {
         environment.connection.phase === "connected",
     );
 
-  const finishHandoff = useStableCallback(async () => {
-    if (activeLaunch === null || handoff?.target == null || draftId === null) return;
-    // The draft moves onto the sandbox's project; its thread id stays, so the thread starts there.
+  // The host thread the message waits for, between a successful link and the provider being ready.
+  const [linked, setLinked] = useState<{
+    readonly hostProjectId: ProjectId;
+    readonly modelSelection: ModelSelection;
+    readonly sandboxTarget: {
+      readonly environmentId: EnvironmentId;
+      readonly projectId: ProjectId;
+    };
+    readonly startedAt: number;
+  } | null>(null);
+  const finishingRef = useRef(false);
+  const bridgeReady = useSandboxBridgeReady(
+    linked === null ? null : (activeLaunch?.hostEnvironmentId ?? null),
+    linked?.hostProjectId ?? null,
+    linked?.modelSelection.model ?? null,
+  );
+
+  const endLaunch = () => {
+    finishingRef.current = false;
+    pairingRef.current = false;
+    setLinked(null);
+    setHandoff(null);
+    setLaunch(null);
+    if (draftId !== null) select(draftId, null);
+    input.onHandedOff();
+  };
+
+  // Before the bridge every sandbox thread lived on its sandbox; that still works, minus the phone.
+  const sendOnSandbox = useStableCallback(
+    (
+      target: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId },
+      detail: string,
+    ) => {
+      if (draftId === null) return;
+      setDraftThreadContext(draftId, {
+        projectRef: scopeProjectRef(target.environmentId, target.projectId),
+        environmentSelection: "manual",
+        loadBalancedEnvironmentId: null,
+        envMode: "local",
+        branch: null,
+        worktreePath: null,
+      });
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Your phone cannot drive this thread",
+          description: `It runs on the sandbox and works here as usual. ${detail}`,
+        }),
+      );
+      endLaunch();
+    },
+  );
+
+  const sendOnHost = useStableCallback(() => {
+    if (activeLaunch === null || linked === null || draftId === null) return;
+    // Supervised, so the sandbox's approvals reach whoever drives the thread, the phone included.
     setDraftThreadContext(draftId, {
-      projectRef: scopeProjectRef(handoff.target.environmentId, handoff.target.projectId),
+      projectRef: scopeProjectRef(activeLaunch.hostEnvironmentId, linked.hostProjectId),
       environmentSelection: "manual",
       loadBalancedEnvironmentId: null,
       envMode: "local",
       branch: null,
       worktreePath: null,
+      runtimeMode: "approval-required",
     });
-    select(draftId, null);
-    const completed = await completeLaunch({
+    setDraftModelSelection(draftId, linked.modelSelection, { explicit: true });
+    setDraftRuntimeMode(draftId, "approval-required");
+    endLaunch();
+  });
+
+  const finishHandoff = useStableCallback(async () => {
+    if (activeLaunch === null || handoff?.target == null || draftId === null) return;
+    if (finishingRef.current) return;
+    finishingRef.current = true;
+    const sandboxTarget = handoff.target;
+    const target = {
       environmentId: activeLaunch.hostEnvironmentId,
       input: { threadId: activeLaunch.threadId },
-    });
-    pairingRef.current = false;
-    setHandoff(null);
-    setLaunch(null);
+    };
+    const completed = await completeLaunch(target);
     if (completed._tag === "Failure" && !isAtomCommandInterrupted(completed)) {
       toastManager.add(
         stackedThreadToast({
@@ -308,7 +379,18 @@ export function useSandboxLaunch(input: {
         }),
       );
     }
-    input.onHandedOff();
+    // completeLaunch waits for the host to finish the launch, so the link never finds it starting.
+    const link = completed._tag === "Success" ? await linkHostThread(target) : completed;
+    if (link._tag === "Failure") {
+      sendOnSandbox(sandboxTarget, failureText(link, "The host could not link this thread"));
+      return;
+    }
+    setLinked({
+      hostProjectId: link.value.hostProjectId,
+      modelSelection: link.value.modelSelection,
+      sandboxTarget,
+      startedAt: Date.now(),
+    });
   });
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the draft once the paired sandbox reports the cloned project
@@ -316,6 +398,26 @@ export function useSandboxLaunch(input: {
     if (handoffProject === null || !handoffEnvironmentConnected) return;
     void finishHandoff();
   }, [finishHandoff, handoffEnvironmentConnected, handoffProject]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends on the host thread once the host lists the Sandboxes provider as ready for its project
+  useEffect(() => {
+    if (linked === null || !bridgeReady) return;
+    sendOnHost();
+  }, [bridgeReady, linked, sendOnHost]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- falls back to the sandbox when the host never readies the Sandboxes provider
+  useEffect(() => {
+    if (linked === null) return;
+    const timer = window.setTimeout(
+      () =>
+        sendOnSandbox(
+          linked.sandboxTarget,
+          "The Sandboxes provider did not get ready on this computer.",
+        ),
+      Math.max(0, linked.startedAt + BRIDGE_READY_WAIT_MS - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [linked, sendOnSandbox]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- gives up on a paired sandbox that never reports its project
   useEffect(() => {
@@ -402,6 +504,8 @@ export function useSandboxLaunch(input: {
       input: { threadId: activeLaunch.threadId },
     });
     pairingRef.current = false;
+    finishingRef.current = false;
+    setLinked(null);
     setHandoff(null);
     setLocalError(null);
     setLaunch(null);
