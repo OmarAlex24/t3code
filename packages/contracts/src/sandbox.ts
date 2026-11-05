@@ -318,6 +318,8 @@ export const SandboxRecord = Schema.Struct({
   ),
   /** The tailnet device T3 joined the sandbox as, removed when the sandbox is deleted. */
   tailscale: Schema.optionalKey(Schema.Struct({ deviceId: TrimmedString })),
+  /** Where the thread's repository was cloned, so a delete can check it for unpushed work. */
+  repoDir: Schema.optionalKey(TrimmedString),
   /**
    * The provider environment made for this sandbox alone, so its forks can be found, and the
    * scoped key its agent signs in with. Deleting the sandbox revokes the key, deletes its forks
@@ -442,6 +444,18 @@ export const SandboxStopResult = Schema.Struct({
   sandbox: SandboxRecord,
 });
 export type SandboxStopResult = typeof SandboxStopResult.Type;
+
+/**
+ * Whether a thread's sandbox holds work that deleting it would lose: changed or untracked files,
+ * and commits not on any remote. `unknown` says why it could not tell, such as a stopped sandbox.
+ */
+export const SandboxCheckWorkResult = Schema.Struct({
+  status: Schema.Literals(["clean", "dirty", "unknown"]),
+  uncommittedFiles: Schema.Int,
+  unpushedCommits: Schema.Int,
+  detail: Schema.optionalKey(TrimmedString),
+});
+export type SandboxCheckWorkResult = typeof SandboxCheckWorkResult.Type;
 
 export const SandboxResumeResult = Schema.Struct({
   sandbox: SandboxRecord,
@@ -672,6 +686,9 @@ export const sandboxConfigAllows = (
   return true;
 };
 
+export const SandboxSettleAction = Schema.Literals(["ask", "snapshot", "delete"]);
+export type SandboxSettleAction = typeof SandboxSettleAction.Type;
+
 /**
  * How to make a sandbox for one thread. Saving a config creates no machine; each thread launched
  * on it gets its own sandbox, provisioned on the server that holds the provider key.
@@ -691,6 +708,11 @@ export const SandboxEnvironmentConfig = Schema.Struct({
   joinTailnet: Schema.Boolean,
   /** Lets the agent use the provider's CLI on its own sandbox; see `SandboxCreateInput`. */
   agentProviderAccess: Schema.optionalKey(Schema.Boolean),
+  /**
+   * What settling a chat does to its sandbox: `ask` (the default when absent), `snapshot` stops
+   * it and keeps its disk, `delete` deletes it and the conversation it holds.
+   */
+  onSettle: Schema.optionalKey(SandboxSettleAction),
   access: SandboxAccess,
   /**
    * Projects on this server by id, from configs saved before `repositories`; read only while

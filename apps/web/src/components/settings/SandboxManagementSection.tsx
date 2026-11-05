@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { Fragment, useState } from "react";
+import { retentionWarning, shortSandboxId, stoppedDiskAge } from "~/state/sandboxThreads";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
@@ -98,12 +99,6 @@ const STATE_DOT: Record<
   deleted: { dot: "bg-muted-foreground/40", meta: "deleted outside T3 Code" },
 };
 
-// Enough of the provider's id to tell two sandboxes with one thread title apart; hover shows it all.
-const shortSandboxId = (sandboxId: string) => {
-  const separator = sandboxId.indexOf("_");
-  return separator === -1 ? sandboxId.slice(0, 7) : sandboxId.slice(0, separator + 5);
-};
-
 // Rows sit straight in the group with the insets of every settings row and a hairline between them.
 const ROW_CLASSNAME = "@container/sandbox-row px-3 py-3 sm:px-4";
 // Under its sandbox, past that row's status dot.
@@ -137,9 +132,6 @@ const GROUP_CLASSNAME = "divide-y divide-border/50";
 
 const formatCost = (dollars: number) =>
   dollars < 0.01 ? "<$0.01 this month" : `$${dollars.toFixed(2)} this month`;
-
-// A stopped disk this close to the provider's limit gets a warning that recommends deleting it.
-const RETENTION_WARNING_DAYS = 3;
 
 /** Per-thread sandboxes under their config, in the order the configs were made. */
 const groupByConfig = (
@@ -526,12 +518,11 @@ function SandboxRow({
     sandbox.state === "stopped"
       ? minutesSince(sandbox.stoppedAt ?? sandbox.updatedAt, nowMillis)
       : null;
-  const retentionDays = provider?.diskRetentionDays;
-  const stoppedDays = stoppedMinutes === null ? null : Math.floor(stoppedMinutes / DAY_MINUTES);
-  const nearRetention =
-    retentionDays !== undefined &&
-    stoppedDays !== null &&
-    stoppedDays >= retentionDays - RETENTION_WARNING_DAYS;
+  const { retentionDays, stoppedDays, nearRetention } = stoppedDiskAge(
+    sandbox,
+    provider,
+    nowMillis,
+  );
   // Until providers load, keep the controls; the server refuses what the driver cannot do.
   const canStopResume = provider?.capabilities.stopResume ?? true;
   const canStop = canStopResume && (sandbox.state === "running" || sandbox.state === "error");
@@ -683,11 +674,9 @@ function SandboxRow({
               Its thread was deleted. Delete the sandbox unless you still need its disk.
             </p>
           ) : null}
-          {nearRetention ? (
+          {nearRetention && retentionDays !== undefined && stoppedDays !== null ? (
             <p className={warningClassName}>
-              {provider?.label ?? sandbox.provider} keeps a stopped disk for {retentionDays} days;
-              this one has been stopped {stoppedDays} {stoppedDays === 1 ? "day" : "days"}. Delete
-              it unless you need what is on it. T3 Code never deletes it for you.
+              {retentionWarning(provider?.label ?? sandbox.provider, retentionDays, stoppedDays)}
             </p>
           ) : null}
           {startCheck.limits === null ? null : (

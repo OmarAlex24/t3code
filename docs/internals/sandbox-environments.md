@@ -278,7 +278,8 @@ sandbox runs since its last start (`runningSince`); a resume starts the count ag
 once a minute and calls the driver's `stop` on a sandbox past its limit; a failed stop is logged and
 retried on the next sweep. `idleStopMinutes` is stored for a later idle stop and does nothing yet.
 A stop sets `stoppedAt`, which the Sandboxes list shows as the disk's age against the provider's
-`diskRetentionDays`. Nothing deletes a stopped sandbox automatically.
+`diskRetentionDays`. Nothing deletes a stopped sandbox automatically, and a config's `onSettle: delete`
+deletes only after a clean work check.
 
 The provider's own auto-stop is only a backstop for when T3 is offline, and it must never destroy
 what T3's stop would keep. Boat's auto-stop is set to the running limit on create and resume, and a
@@ -312,6 +313,24 @@ each record with `agentProviderAccess` and reports the sandboxes in it that no r
 failure keeps the forks the last sweep found.
 
 Templates are saved only from a sandbox with no thread: saving deletes the source machine.
+
+### Settling and deleting a thread's sandbox
+
+The thread lives on the sandbox's own server, which this host never hears from, so settle,
+resume-on-send, and thread delete start in the client. `SandboxThreadCoordinator` (mounted once at
+the root) registers handlers in `state/sandboxThreads.ts`. `useThreadActions.settleThread` calls
+`notifySandboxThreadSettled`, which applies the config's `onSettle` (`ask` when unset). Settles the
+sandbox's server makes on its own are not hooked, since this host is not told about them.
+`unsettleThread` and the composer's send on a stopped sandbox call `ensureSandboxThreadRunning`:
+resume, then wait for the environment to connect (4 minutes at most), then send.
+
+Thread delete runs `deleteSandboxThread`. After the user confirms, it deletes the thread while the
+sandbox's server still answers, then deletes the sandbox and forgets its environment. Every delete
+first runs `sandboxes.checkWork`: `git status --porcelain` and
+`git rev-list --count HEAD --not --remotes` in the record's `repoDir`, run with a 10-second command
+timeout inside a 15-second limit. A stopped sandbox, a record without `repoDir` (launched before
+the field existed), or a timeout returns `unknown`, and the client then always asks. A remembered
+`delete` skips the prompt only when the check comes back `clean`.
 
 `stop` and `resume` are optional on the driver. A provider without them still provisions and
 connects; the settings UI hides the controls and the RPC returns a configuration error instead of

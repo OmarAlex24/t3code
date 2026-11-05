@@ -150,7 +150,7 @@ export const layerTest = (
         baseUrl: string,
       ) {
         const hostname = hostnameOf(baseUrl);
-        return hostname !== null && resolvesOnlyToPrivateNetwork([hostname]);
+        return yield* Effect.succeed(hostname !== null && resolvesOnlyToPrivateNetwork([hostname]));
       }),
       endpointTailnetAddress: Effect.fn("SandboxHostAccess.endpointTailnetAddress")(function* (
         baseUrl: string,

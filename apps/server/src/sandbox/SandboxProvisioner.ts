@@ -8,6 +8,7 @@ import {
   WS_METHODS,
   type EnvironmentId,
   type SandboxAccess,
+  type SandboxCheckWorkResult,
   type SandboxConfigsResult,
   type SandboxCreateInput,
   type SandboxCreateResult,
@@ -97,6 +98,7 @@ import {
   parseMissingTools,
   parseRepositoryReport,
   parseTailscaleReport,
+  parseWorkCheck,
   repositoryScript,
   type SandboxScript,
   type SandboxTool,
@@ -106,6 +108,7 @@ import {
   tailscaleProxyEnv,
   tailscaleScript,
   tailscaleScrub,
+  workCheckScript,
   writeFileScript,
 } from "./sandboxSetup.ts";
 import { makePairingKey, pairScript, type PairReport, readPairReport } from "./sandboxPairing.ts";
@@ -252,6 +255,9 @@ const TOOL_LABELS: Record<SandboxTool, string> = {
   gh: "The GitHub CLI",
   claude: "Claude Code",
 };
+
+// Long enough for git on a large clone, short enough that a delete never waits on a stuck machine.
+const WORK_CHECK_SECONDS = 10;
 
 const tailnetHostname = (label: string) => `t3-sandbox-${labelSlug(label)}`;
 
@@ -429,6 +435,9 @@ export class SandboxProvisioner extends Context.Service<
     readonly resume: (
       input: SandboxLifecycleInput,
     ) => Effect.Effect<SandboxResumeResult, SandboxProviderError>;
+    readonly checkWork: (
+      input: SandboxLifecycleInput,
+    ) => Effect.Effect<SandboxCheckWorkResult, SandboxProviderError>;
     readonly templates: (
       input: SandboxTemplatesInput,
     ) => Effect.Effect<SandboxTemplatesResult, SandboxProviderError>;
@@ -1702,6 +1711,7 @@ const make = Effect.gen(function* () {
           "repo",
           cloneProject(machine, input.project),
         );
+        yield* machine.save({ repoDir: cloned.directory });
         yield* reporter.stage("repo", "done", cloned.directory.replace(/^.*\/work\//u, "~/work/"));
 
         yield* reporter.stage("env-files", "running");
@@ -2183,6 +2193,49 @@ const make = Effect.gen(function* () {
     return { sandbox: updated } satisfies SandboxStopResult;
   });
 
+  // A short check before a delete. A stopped sandbox is not woken for it: on Boat a command
+  // restores the machine, which counts as a start.
+  const checkWork = Effect.fn("SandboxProvisioner.checkWork")(function* (
+    input: SandboxLifecycleInput,
+  ) {
+    const record = yield* readRecord(input.instanceId);
+    const unknown = (detail: string): SandboxCheckWorkResult => ({
+      status: "unknown",
+      uncommittedFiles: 0,
+      unpushedCommits: 0,
+      detail,
+    });
+    if (record.state !== "running") {
+      return unknown("The sandbox is not running, so its work could not be checked.");
+    }
+    if (record.repoDir === undefined) {
+      return unknown("T3 Code does not know where this sandbox's repository is.");
+    }
+    const driver = findDriver(record.provider);
+    const config = yield* recordConfig(driver, record);
+    const report = yield* onHttp(
+      driver.execute({
+        config,
+        sandboxId: record.sandboxId,
+        command: workCheckScript(record.repoDir),
+        timeoutSeconds: WORK_CHECK_SECONDS,
+      }),
+    ).pipe(
+      Effect.map((result) => parseWorkCheck(result.stdout)),
+      Effect.timeoutOrElse({
+        duration: `${WORK_CHECK_SECONDS + 5} seconds`,
+        orElse: () => Effect.succeed(null),
+      }),
+      Effect.orElseSucceed(() => null),
+    );
+    if (report === null) return unknown("The sandbox did not answer in time.");
+    return {
+      status: report.files === 0 && report.commits === 0 ? "clean" : "dirty",
+      uncommittedFiles: report.files,
+      unpushedCommits: report.commits,
+    } satisfies SandboxCheckWorkResult;
+  });
+
   const resume = Effect.fn("SandboxProvisioner.resume")(function* (input: SandboxLifecycleInput) {
     const record = yield* readRecord(input.instanceId);
     const driver = findDriver(record.provider);
@@ -2645,6 +2698,7 @@ const make = Effect.gen(function* () {
     list,
     stop,
     resume,
+    checkWork,
     templates,
     saveTemplate,
     deleteTemplate,
@@ -2697,6 +2751,7 @@ export const rpcHandlers = Effect.gen(function* () {
     [WS_METHODS.sandboxesList]: () => sandboxes.list,
     [WS_METHODS.sandboxesStop]: (input: SandboxLifecycleInput) => sandboxes.stop(input),
     [WS_METHODS.sandboxesResume]: (input: SandboxLifecycleInput) => sandboxes.resume(input),
+    [WS_METHODS.sandboxesCheckWork]: (input: SandboxLifecycleInput) => sandboxes.checkWork(input),
     [WS_METHODS.sandboxesTemplates]: (input: SandboxTemplatesInput) => sandboxes.templates(input),
     [WS_METHODS.sandboxesSaveTemplate]: (input: SandboxSaveTemplateInput) =>
       sandboxes.saveTemplate(input),
