@@ -604,7 +604,7 @@ function SandboxThreadPrompt({
             </AlertDialogDescription>
           </AlertDialogHeader>
           {rememberLabel === null ? null : (
-            <label className="flex cursor-pointer items-center gap-2 px-6 text-sm text-muted-foreground">
+            <label className="flex cursor-pointer items-center gap-2 px-6 pb-4 text-sm text-muted-foreground">
               <Checkbox
                 checked={rememberChoice}
                 onCheckedChange={(checked) => setRememberChoice(checked === true)}
@@ -638,8 +638,8 @@ function SandboxThreadPrompt({
             role="status"
             className={
               prompt.work === null || prompt.work.status === "clean"
-                ? "flex items-center gap-2 px-6 text-sm text-muted-foreground"
-                : "flex items-center gap-2 px-6 text-sm text-warning-foreground"
+                ? "flex items-center gap-2 px-6 pb-4 text-sm text-muted-foreground"
+                : "flex items-center gap-2 px-6 pb-4 text-sm text-warning-foreground"
             }
           >
             {prompt.work === null ? (

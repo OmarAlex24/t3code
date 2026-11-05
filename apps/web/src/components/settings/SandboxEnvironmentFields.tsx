@@ -37,10 +37,7 @@ import { useSandboxTemplates } from "./SandboxTemplates";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useProjects } from "~/state/entities";
-import {
-  repositoriesFromLegacyConfig,
-  sandboxRepositoryChoices,
-} from "~/state/sandboxRepositories";
+import { hostCopyOf, sandboxRepositoryOf } from "~/state/sandboxRepositories";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
 import { readEnvironmentScope } from "~/state/session";
@@ -130,6 +127,44 @@ const settleHint = (
   }
   return `Asks whether to keep a snapshot or delete the sandbox. ${kept}`;
 };
+
+const SETTLE_SUMMARY: Record<SandboxSettleAction, string | null> = {
+  ask: null,
+  snapshot: "keeps a snapshot when settled",
+  delete: "deleted when settled",
+};
+
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** One line under the name and machine: what each sandbox gets, or what needs fixing first. */
+function ConfigSummary({
+  attention,
+  parts,
+}: {
+  attention: string | null;
+  parts: ReadonlyArray<string>;
+}) {
+  return attention === null ? (
+    <p
+      data-testid="sandbox-config-summary"
+      className="flex items-start gap-1.5 text-xs leading-relaxed text-muted-foreground"
+    >
+      <CheckIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-success" />
+      <span className="min-w-0">
+        {parts.length === 0 ? "Shares nothing from this machine" : capitalize(parts.join(" · "))}
+      </span>
+    </p>
+  ) : (
+    <p
+      data-testid="sandbox-config-summary"
+      role="status"
+      className="flex items-start gap-1.5 text-xs leading-relaxed text-warning-foreground"
+    >
+      <CircleAlertIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+      <span className="min-w-0">{attention}</span>
+    </p>
+  );
+}
 
 function MinutesField({
   label,
@@ -256,22 +291,13 @@ export function SandboxEnvironmentFields({
   const [joinTailnet, setJoinTailnet] = useState(config?.joinTailnet ?? false);
   const [tailnetOnly, setTailnetOnly] = useState(config?.access === "tailnet");
   const projects = useProjects();
-  // A config saved with host project ids opens as the repositories those projects clone.
-  const [initialAccess] = useState(() =>
-    config === undefined
-      ? { repositories: [], envFiles: {} }
-      : (config.repositories ?? []).length > 0
-        ? { repositories: config.repositories ?? [], envFiles: config.envFiles }
-        : repositoriesFromLegacyConfig(config, projects, environmentId),
-  );
-  const [repositories, setRepositories] = useState<ReadonlyArray<string>>(
-    initialAccess.repositories,
-  );
+  // Files picked for a repository before; any other repository on this machine gets its env files.
   const [envFiles, setEnvFiles] = useState<Readonly<Record<string, string>>>(() =>
     Object.fromEntries(
-      Object.entries(initialAccess.envFiles).map(([key, files]) => [key, files.join(", ")]),
+      Object.entries(config?.envFiles ?? {}).map(([key, files]) => [key, files.join(", ")]),
     ),
   );
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [idleMinutes, setIdleMinutes] = useState(
     config?.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES,
   );
@@ -330,8 +356,6 @@ export function SandboxEnvironmentFields({
   // Forks of a sandbox share its environment, so a credential environment rules this out.
   const canGiveAgentAccess =
     provider?.capabilities.agentProviderAccess === true && credentialEnvironment === "";
-  // Any machine's project can start on a config: the sandbox clones its repository from GitHub.
-  const repositoryChoices = sandboxRepositoryChoices(projects, environmentId);
   const disabled =
     isSaving ||
     provider === undefined ||
@@ -345,6 +369,39 @@ export function SandboxEnvironmentFields({
   const optionalSettingsFields = settingsFields.filter((field) => field.optional);
   const settingValue = (id: string) => settingsDraft[id] ?? provider?.settings?.[id] ?? "";
   const showsKeyInput = provider !== undefined && (!provider.configured || replacingKey);
+
+  // Everything here is set under Advanced, so a problem in it has to show while Advanced is closed.
+  const attention =
+    sendsClaude && claudeEndpoint === ""
+      ? "Enter a Claude endpoint"
+      : sendsClaude && privateClaude && !tailscaleReady
+        ? `${claudeHost} is private, so sandboxes need Tailscale to reach Claude`
+        : passesCredentials && !allowCredentials
+          ? `Confirm the credentials the ${provider?.label ?? ""} environment passes`
+          : null;
+  const summaryParts = [
+    sendsClaude ? `Claude via ${claudeHost}` : null,
+    joinsTailnet
+      ? tailnetOnly
+        ? "reached only through your tailnet"
+        : "joins your tailnet"
+      : null,
+    passGithub && host?.github === true ? "GitHub signed in" : null,
+    agentProviderAccess && canGiveAgentAccess && provider !== undefined
+      ? `agent can use ${provider.label}`
+      : null,
+    selectedCredentialEnvironment === undefined
+      ? null
+      : `${selectedCredentialEnvironment.name} environment`,
+    SETTLE_SUMMARY[onSettle],
+  ].filter((part): part is string => part !== null);
+  // Opens Advanced each time a new problem shows up, such as once the server's endpoint loads;
+  // closing it again stays the user's call.
+  const [shownAttention, setShownAttention] = useState<string | null>(null);
+  if (attention !== shownAttention) {
+    setShownAttention(attention);
+    if (attention !== null) setAdvancedOpen(true);
+  }
 
   const setSaving = (saving: boolean) => {
     setIsSaving(saving);
@@ -381,13 +438,6 @@ export function SandboxEnvironmentFields({
           // A tailnet-only sandbox has to ask to join; otherwise the launch decides.
           joinTailnet: tailscaleReady && (joinTailnet || (autoJoinsTailnet && tailnetOnly)),
           access: joinsTailnet && tailnetOnly ? "tailnet" : "public",
-          // Ids that named no repository stay until the list is edited, so access never widens
-          // just by opening and saving an older config.
-          projectIds:
-            repositories === initialAccess.repositories && repositories.length === 0
-              ? (config?.projectIds ?? [])
-              : [],
-          repositories,
           envFiles: Object.fromEntries(
             Object.entries(envFiles)
               .map(([id, text]) => [id, parseFileList(text)] as const)
@@ -408,6 +458,8 @@ export function SandboxEnvironmentFields({
     });
     setSaving(false);
     if (result._tag === "Failure") {
+      // Most refusals are about a choice under Advanced.
+      if (!isAtomCommandInterrupted(result)) setAdvancedOpen(true);
       reportFailure(result, "Could not save the sandbox config");
       return;
     }
@@ -455,10 +507,14 @@ export function SandboxEnvironmentFields({
       </div>
     );
 
-  // Env files come from the host's own copy, so only repositories open on it can pick them.
-  const allowedHostCopies = repositoryChoices.filter(
-    (choice) => choice.hostProject !== null && repositories.includes(choice.key),
-  );
+  // Keyed by repository, or by a project on this machine for configs saved before that.
+  const envFilesLabel = (key: string) => {
+    const project =
+      projects.find(
+        (candidate) => candidate.environmentId === environmentId && candidate.id === key,
+      ) ?? hostCopyOf(projects, environmentId, key);
+    return project === null ? key : (sandboxRepositoryOf(project)?.label ?? project.title);
+  };
 
   return (
     <div className="space-y-4">
@@ -622,200 +678,164 @@ export function SandboxEnvironmentFields({
 
           {settingsFieldInputs(requiredSettingsFields)}
 
-          <div className="space-y-3">
-            {host?.claude === undefined ? null : (
-              <div className="space-y-2">
-                <OptIn
-                  checked={useClaude}
-                  disabled={isSaving}
-                  onCheckedChange={setUseClaude}
-                  title="Use this machine's Claude setup"
-                >
-                  {host.claude.key === "hub"
-                    ? "Adds a key for each sandbox on your CLIProxyAPI hub. Deleting the sandbox removes its key."
-                    : "Copies this machine's Claude token to each sandbox. Deleting a sandbox does not revoke it."}
-                </OptIn>
-                {/* Judged by the server for its own endpoint only; an edited URL is checked live. */}
-                {!host.claude.privateNetwork ||
-                claudeEndpoint !== host.claude.baseUrl ||
-                tailscaleReady ? null : (
-                  <p className="flex flex-wrap items-start gap-x-1.5 ps-6.5 text-2xs leading-relaxed text-warning-foreground">
-                    <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
-                    <span className="min-w-0 flex-1">
-                      Resolves to a private address, so a sandbox has to join your tailnet to reach
-                      it.
-                      {!provider.configured ? null : (
-                        <>
-                          {" "}
-                          <button
-                            type="button"
-                            className="font-medium underline underline-offset-2 hover:text-foreground"
-                            onClick={() => {
-                              onDone();
-                              void navigate({
-                                to: "/settings/connections",
-                                hash: "sandbox-tailscale",
-                              });
-                            }}
-                          >
-                            Set up Tailscale
-                          </button>
-                        </>
-                      )}
-                    </span>
-                  </p>
-                )}
-                {useClaude ? (
-                  <label className="block ps-6.5">
-                    <FieldLabel>Claude endpoint</FieldLabel>
-                    <Input
-                      type="url"
-                      value={claudeBaseUrl ?? host.claude.baseUrl}
-                      onChange={(event) => setClaudeBaseUrl(event.target.value)}
-                      disabled={isSaving}
-                      spellCheck={false}
-                    />
-                  </label>
-                ) : null}
-              </div>
-            )}
-            {tailscaleReady ? (
-              <div className="space-y-2">
-                {autoJoinsTailnet ? (
-                  <div className="flex items-start gap-2.5 text-xs">
-                    <CheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-success" />
-                    <div className="space-y-0.5">
-                      <p className="font-medium text-foreground">
-                        Joins your tailnet automatically because {claudeHost} is private.
-                      </p>
-                      <p className="text-2xs leading-relaxed text-muted-foreground">
-                        Each sandbox joins as an ephemeral, tagged Tailscale device. Deleting the
-                        sandbox removes the device.
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <OptIn
-                    checked={joinTailnet}
-                    disabled={isSaving}
-                    onCheckedChange={setJoinTailnet}
-                    title="Join my tailnet"
-                  >
-                    Each sandbox joins as an ephemeral, tagged Tailscale device so it can reach
-                    private endpoints. Deleting the sandbox removes the device.
-                  </OptIn>
-                )}
-                {joinsTailnet ? (
-                  <div className="ps-6.5">
-                    <OptIn
-                      checked={tailnetOnly}
-                      disabled={isSaving}
-                      onCheckedChange={setTailnetOnly}
-                      title="Reach it only through my tailnet"
-                    >
-                      No public URL. This app connects over the tailnet, so the machine running it
-                      has to be on your tailnet too.
-                    </OptIn>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            <OptIn
-              checked={passGithub && host?.github === true}
-              disabled={isSaving || host?.github !== true}
-              onCheckedChange={setPassGithub}
-              title="Sign GitHub in with this machine's token"
-            >
-              {host?.github === true
-                ? "Each sandbox can then clone private repositories and push with gh and git."
-                : "This machine has no GitHub token to share, so sandboxes can clone public repositories only."}
-            </OptIn>
-            {provider.capabilities.agentProviderAccess ? (
-              <OptIn
-                checked={agentProviderAccess && canGiveAgentAccess}
-                disabled={isSaving || !canGiveAgentAccess}
-                onCheckedChange={setAgentProviderAccess}
-                title={`Let the agent use ${provider.label}`}
-              >
-                {canGiveAgentAccess
-                  ? "The agent can fork its own sandbox, host its ports, and delete only the forks it made. Forks bill like new sandboxes."
-                  : `Needs No credentials as the ${provider.label} environment under Advanced, so forks never receive its secrets.`}
-              </OptIn>
-            ) : null}
-          </div>
+          <ConfigSummary attention={attention} parts={summaryParts} />
 
-          <div className="space-y-2">
-            <label className="block">
-              <FieldLabel>When a chat is settled</FieldLabel>
-              <Select
-                value={onSettle}
-                disabled={isSaving}
-                onValueChange={(value) => {
-                  if (value !== null) setOnSettle(value);
-                }}
-              >
-                <SelectTrigger aria-label="When a chat is settled" size="default">
-                  <SelectValue>{SETTLE_LABELS[onSettle]}</SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  <SelectItem value="ask">{SETTLE_LABELS.ask}</SelectItem>
-                  {provider.capabilities.stopResume ? (
-                    <SelectItem value="snapshot">{SETTLE_LABELS.snapshot}</SelectItem>
-                  ) : null}
-                  <SelectItem value="delete">{SETTLE_LABELS.delete}</SelectItem>
-                </SelectPopup>
-              </Select>
-            </label>
-            <p className="text-2xs leading-relaxed text-muted-foreground">
-              {settleHint(onSettle, provider.label, provider.diskRetentionDays)}
-            </p>
-          </div>
-
-          <div className="space-y-2">
-            <FieldLabel>Projects</FieldLabel>
-            {repositoryChoices.length === 0 ? (
-              <p className="text-2xs leading-relaxed text-muted-foreground">
-                Any project with a GitHub remote can start a thread on this config, on whichever
-                machine it is open.
-              </p>
-            ) : (
-              <>
-                <p className="text-2xs leading-relaxed text-muted-foreground">
-                  {repositories.length === 0
-                    ? "Any project with a GitHub remote can start a thread here, on whichever machine it is open. Pick repositories to limit it."
-                    : "Only these repositories can start a thread here."}
-                </p>
-                <ul className="grid gap-1.5 sm:grid-cols-2">
-                  {repositoryChoices.map((choice) => (
-                    <li key={choice.key}>
-                      <label className="flex cursor-pointer items-center gap-2 text-xs">
-                        <Checkbox
-                          checked={repositories.includes(choice.key)}
-                          disabled={isSaving}
-                          onCheckedChange={(checked) =>
-                            setRepositories(
-                              checked === true
-                                ? [...repositories, choice.key]
-                                : repositories.filter((key) => key !== choice.key),
-                            )
-                          }
-                        />
-                        <span className="min-w-0 truncate">{choice.label}</span>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </div>
-
-          <Collapsible>
+          <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
             <CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground data-panel-open:[&_svg]:rotate-90">
               <ChevronRightIcon aria-hidden className="size-3.5 transition-transform" />
               Advanced
             </CollapsibleTrigger>
             <CollapsiblePanel>
               <div className="space-y-4 pt-3">
+                <div className="space-y-3">
+                  {host?.claude === undefined ? null : (
+                    <div className="space-y-2">
+                      <OptIn
+                        checked={useClaude}
+                        disabled={isSaving}
+                        onCheckedChange={setUseClaude}
+                        title="Use this machine's Claude setup"
+                      >
+                        {host.claude.key === "hub"
+                          ? "Adds a key for each sandbox on your CLIProxyAPI hub. Deleting the sandbox removes its key."
+                          : "Copies this machine's Claude token to each sandbox. Deleting a sandbox does not revoke it."}
+                      </OptIn>
+                      {/* Judged by the server for its own endpoint only; an edited URL is checked live. */}
+                      {!host.claude.privateNetwork ||
+                      claudeEndpoint !== host.claude.baseUrl ||
+                      tailscaleReady ? null : (
+                        <p className="flex flex-wrap items-start gap-x-1.5 ps-6.5 text-2xs leading-relaxed text-warning-foreground">
+                          <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
+                          <span className="min-w-0 flex-1">
+                            Resolves to a private address, so a sandbox has to join your tailnet to
+                            reach it.
+                            {!provider.configured ? null : (
+                              <>
+                                {" "}
+                                <button
+                                  type="button"
+                                  className="font-medium underline underline-offset-2 hover:text-foreground"
+                                  onClick={() => {
+                                    onDone();
+                                    void navigate({
+                                      to: "/settings/connections",
+                                      hash: "sandbox-tailscale",
+                                    });
+                                  }}
+                                >
+                                  Set up Tailscale
+                                </button>
+                              </>
+                            )}
+                          </span>
+                        </p>
+                      )}
+                      {useClaude ? (
+                        <label className="block ps-6.5">
+                          <FieldLabel>Claude endpoint</FieldLabel>
+                          <Input
+                            type="url"
+                            value={claudeBaseUrl ?? host.claude.baseUrl}
+                            onChange={(event) => setClaudeBaseUrl(event.target.value)}
+                            disabled={isSaving}
+                            spellCheck={false}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+                  )}
+                  {tailscaleReady ? (
+                    <div className="space-y-2">
+                      {autoJoinsTailnet ? (
+                        <div className="flex items-start gap-2.5 text-xs">
+                          <CheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-success" />
+                          <div className="space-y-0.5">
+                            <p className="font-medium text-foreground">
+                              Joins your tailnet automatically because {claudeHost} is private.
+                            </p>
+                            <p className="text-2xs leading-relaxed text-muted-foreground">
+                              Each sandbox joins as an ephemeral, tagged Tailscale device. Deleting
+                              the sandbox removes the device.
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <OptIn
+                          checked={joinTailnet}
+                          disabled={isSaving}
+                          onCheckedChange={setJoinTailnet}
+                          title="Join my tailnet"
+                        >
+                          Each sandbox joins as an ephemeral, tagged Tailscale device so it can
+                          reach private endpoints. Deleting the sandbox removes the device.
+                        </OptIn>
+                      )}
+                      {joinsTailnet ? (
+                        <div className="ps-6.5">
+                          <OptIn
+                            checked={tailnetOnly}
+                            disabled={isSaving}
+                            onCheckedChange={setTailnetOnly}
+                            title="Reach it only through my tailnet"
+                          >
+                            No public URL. This app connects over the tailnet, so the machine
+                            running it has to be on your tailnet too.
+                          </OptIn>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <OptIn
+                    checked={passGithub && host?.github === true}
+                    disabled={isSaving || host?.github !== true}
+                    onCheckedChange={setPassGithub}
+                    title="Sign GitHub in with this machine's token"
+                  >
+                    {host?.github === true
+                      ? "Each sandbox can then clone private repositories and push with gh and git."
+                      : "This machine has no GitHub token to share, so sandboxes can clone public repositories only."}
+                  </OptIn>
+                  {provider.capabilities.agentProviderAccess ? (
+                    <OptIn
+                      checked={agentProviderAccess && canGiveAgentAccess}
+                      disabled={isSaving || !canGiveAgentAccess}
+                      onCheckedChange={setAgentProviderAccess}
+                      title={`Let the agent use ${provider.label}`}
+                    >
+                      {canGiveAgentAccess
+                        ? "The agent can fork its own sandbox, host its ports, and delete only the forks it made. Forks bill like new sandboxes."
+                        : `Needs No credentials as the ${provider.label} environment below, so forks never receive its secrets.`}
+                    </OptIn>
+                  ) : null}
+                </div>
+
+                <div className="space-y-2">
+                  <label className="block">
+                    <FieldLabel>When a chat is settled</FieldLabel>
+                    <Select
+                      value={onSettle}
+                      disabled={isSaving}
+                      onValueChange={(value) => {
+                        if (value !== null) setOnSettle(value);
+                      }}
+                    >
+                      <SelectTrigger aria-label="When a chat is settled" size="default">
+                        <SelectValue>{SETTLE_LABELS[onSettle]}</SelectValue>
+                      </SelectTrigger>
+                      <SelectPopup>
+                        <SelectItem value="ask">{SETTLE_LABELS.ask}</SelectItem>
+                        {provider.capabilities.stopResume ? (
+                          <SelectItem value="snapshot">{SETTLE_LABELS.snapshot}</SelectItem>
+                        ) : null}
+                        <SelectItem value="delete">{SETTLE_LABELS.delete}</SelectItem>
+                      </SelectPopup>
+                    </Select>
+                  </label>
+                  <p className="text-2xs leading-relaxed text-muted-foreground">
+                    {settleHint(onSettle, provider.label, provider.diskRetentionDays)}
+                  </p>
+                </div>
+
                 {settingsFieldInputs(optionalSettingsFields)}
 
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -839,37 +859,37 @@ export function SandboxEnvironmentFields({
                   />
                 </div>
 
-                {allowedHostCopies.length === 0 ? (
+                <div className="space-y-2">
                   <p className="text-2xs leading-relaxed text-muted-foreground">
-                    When the repository is also open on this machine, each sandbox gets a copy of
-                    its git-ignored env files (.env files, .envrc, .dev.vars). Pick repositories
-                    above to choose other files.
+                    When a project is also open on this machine, each sandbox gets a copy of its
+                    git-ignored env files (.env files, .envrc, .dev.vars).
                   </p>
-                ) : (
-                  <div className="space-y-2">
-                    <FieldLabel>Files copied from this machine</FieldLabel>
-                    {allowedHostCopies.map((choice) => (
-                      <label key={choice.key} className="block">
-                        <span className="mb-1 block text-2xs text-muted-foreground">
-                          {choice.label}
-                        </span>
-                        <Input
-                          value={envFiles[choice.key] ?? ""}
-                          onChange={(event) =>
-                            setEnvFiles({ ...envFiles, [choice.key]: event.target.value })
-                          }
-                          placeholder=".env files, .envrc, .dev.vars"
-                          disabled={isSaving}
-                          spellCheck={false}
-                        />
-                      </label>
-                    ))}
-                    <p className="text-2xs leading-relaxed text-muted-foreground">
-                      Paths relative to the project, separated by commas. Leave empty for the env
-                      files.
-                    </p>
-                  </div>
-                )}
+                  {Object.keys(envFiles).length === 0 ? null : (
+                    <>
+                      <FieldLabel>Files copied from this machine</FieldLabel>
+                      {Object.keys(envFiles).map((key) => (
+                        <label key={key} className="block">
+                          <span className="mb-1 block text-2xs text-muted-foreground">
+                            {envFilesLabel(key)}
+                          </span>
+                          <Input
+                            value={envFiles[key] ?? ""}
+                            onChange={(event) =>
+                              setEnvFiles({ ...envFiles, [key]: event.target.value })
+                            }
+                            placeholder=".env files, .envrc, .dev.vars"
+                            disabled={isSaving}
+                            spellCheck={false}
+                          />
+                        </label>
+                      ))}
+                      <p className="text-2xs leading-relaxed text-muted-foreground">
+                        Paths relative to the project, separated by commas. Leave empty for the env
+                        files.
+                      </p>
+                    </>
+                  )}
+                </div>
 
                 {provider.capabilities.credentialEnvironments ? (
                   <div className="space-y-2">
