@@ -9,7 +9,6 @@ import {
   type EnvironmentId,
   type ModelSelection,
   type ProjectId,
-  sandboxConfigAllows,
   type SandboxEnvironmentConfig,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -124,14 +123,8 @@ export function useSandboxLaunch(input: {
       : hostCopyOf(projects, hostEnvironmentId, repository.key);
   const launchable =
     draftId !== null && !envLocked && hostEnvironmentId !== null && repository !== null;
-  const usableConfigs = launchable
-    ? configs.filter((config) =>
-        sandboxConfigAllows(config, {
-          repository: repository.key,
-          hostProjectId: hostProject?.id ?? null,
-        }),
-      )
-    : EMPTY_CONFIGS;
+  // Every config can start any GitHub project, wherever it is open.
+  const usableConfigs = launchable ? configs : EMPTY_CONFIGS;
   const options: ReadonlyArray<EnvironmentOption> = usableConfigs.map((config) => ({
     environmentId: sandboxOptionId(config.id),
     projectId: null,
