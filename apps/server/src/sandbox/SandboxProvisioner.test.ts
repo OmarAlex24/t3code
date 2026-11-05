@@ -4783,7 +4783,6 @@ describe("SandboxProvisioner per-thread launches", () => {
     passGithubToken: false,
     joinTailnet: false,
     access: "public",
-    projectIds: [],
     envFiles: {},
     idleMinutes: 30,
     maxRunningMinutes: 480,
@@ -5869,14 +5868,14 @@ describe("SandboxProvisioner per-thread launches", () => {
     }),
   );
 
-  it.effect("launches a project that lives only on another machine, matched by repository", () => {
+  it.effect("launches a project that lives only on another machine", () => {
     const fake = boatFake();
     const repository = memoryRepository();
     const configs = memoryConfigs();
     return Effect.gen(function* () {
       const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
       const { config } = yield* provisioner.saveConfig({
-        config: { ...configInput, repositories: ["octo/hello"] },
+        config: configInput,
         apiKey: "boat_test",
       });
       const { instanceId } = yield* provisioner.launch({
@@ -5935,35 +5934,12 @@ describe("SandboxProvisioner per-thread launches", () => {
     );
   });
 
-  it.effect("refuses a launch the config does not allow before anything bills", () => {
+  it.effect("refuses a launch it cannot start before anything bills", () => {
     const fake = boatFake();
     const configs = memoryConfigs();
     return Effect.gen(function* () {
       const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
-      const { config } = yield* provisioner.saveConfig({
-        config: { ...configInput, projectIds: [ProjectId.make("project-other")] },
-        apiKey: "boat_test",
-      });
-      const notAllowed = yield* provisioner
-        .launch({ configId: config.id, threadId, project })
-        .pipe(Effect.flip);
-      expect(notAllowed.detail).toBe("Boat small is not set up for this project.");
-      // A config saved with host project ids keeps matching those, and only those.
-      const legacy = yield* provisioner.saveConfig({
-        config: { ...configInput, projectIds: [projectId] },
-      });
-      const remoteOnLegacy = yield* provisioner
-        .launch({ configId: legacy.config.id, threadId, project: remoteProject })
-        .pipe(Effect.flip);
-      expect(remoteOnLegacy.detail).toBe("Boat small is not set up for this project.");
-      const otherRepository = yield* provisioner.saveConfig({
-        config: { ...configInput, repositories: ["octo/other"] },
-      });
-      const wrongRepository = yield* provisioner
-        .launch({ configId: otherRepository.config.id, threadId, project: remoteProject })
-        .pipe(Effect.flip);
-      expect(wrongRepository.detail).toBe("Boat small is not set up for this project.");
-      const open = yield* provisioner.saveConfig({ config: configInput });
+      const open = yield* provisioner.saveConfig({ config: configInput, apiKey: "boat_test" });
       const notGithub = yield* provisioner
         .launch({
           configId: open.config.id,
