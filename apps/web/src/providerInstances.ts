@@ -2,6 +2,7 @@ import { pipe } from "effect/Function";
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
+  isInternalProviderInstance,
   resolveProjectProviderInstanceEnabled,
   type ModelSelection,
   type ProjectId,
@@ -221,9 +222,11 @@ export function resolveSelectableProviderInstanceEntry(
       return requested;
     }
   }
+  // A fallback never lands on an internal instance; only a thread already on one asks for it.
+  const fallbacks = entries.filter((entry) => !isInternalProviderInstance(entry.instanceId));
   return (
-    entries.find(isProviderInstancePickerReady) ??
-    entries.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status !== "error")
+    fallbacks.find(isProviderInstancePickerReady) ??
+    fallbacks.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status !== "error")
   );
 }
 
