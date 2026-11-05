@@ -4,12 +4,13 @@ import { AuthSourceControlWriteScope, resolveEnvironmentMachineKind } from "@t3t
 
 import type { EnvironmentOption } from "../components/BranchToolbar.logic";
 import { useEnvironments } from "../state/environments";
+import { useSandboxEnvironmentIds } from "../state/sandboxes";
 import { useEnvironmentsWithScope } from "../state/session";
 
 export type AddProjectTarget = Pick<EnvironmentOption, "environmentId" | "label" | "machine">;
 
 /**
- * Connected machines that do not have the project yet and can clone it.
+ * Connected machines that do not have the project yet and can clone it, leaving out sandboxes.
  * `projectEnvironments` is the project's current machine list, from
  * `useLogicalProjectEnvironments`. Projects without a git remote get none.
  */
@@ -19,6 +20,7 @@ export function useAddProjectTargets(
 ): readonly AddProjectTarget[] {
   const { environments } = useEnvironments();
   const canClone = useEnvironmentsWithScope(environments, AuthSourceControlWriteScope);
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
   if (!project?.repositoryIdentity?.locator.remoteUrl) return [];
   const hasProject = new Set([
     project.environmentId,
@@ -28,6 +30,7 @@ export function useAddProjectTargets(
     .filter(
       (environment) =>
         !hasProject.has(environment.environmentId) &&
+        !sandboxEnvironmentIds.has(environment.environmentId) &&
         canClone.has(environment.environmentId) &&
         canCreateProjectInEnvironment(environment.connection.phase) &&
         environment.serverConfig !== null,
