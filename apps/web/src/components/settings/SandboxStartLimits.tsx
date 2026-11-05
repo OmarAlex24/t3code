@@ -30,6 +30,7 @@ const FAILURE_TITLES: Record<SandboxProviderErrorCode, string | null> = {
   templates_unavailable: "Templates not available",
   template_saving: "Template still saving",
   tailscale_required: "Tailscale needs setting up",
+  scoped_keys_unavailable: "Key can't make scoped keys",
   unknown: null,
 };
 

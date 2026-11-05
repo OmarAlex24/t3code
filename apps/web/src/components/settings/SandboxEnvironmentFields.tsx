@@ -221,6 +221,9 @@ export function SandboxEnvironmentFields({
     config?.claude?.baseUrl ?? null,
   );
   const [passGithub, setPassGithub] = useState(config?.passGithubToken ?? false);
+  const [agentProviderAccess, setAgentProviderAccess] = useState(
+    config?.agentProviderAccess ?? false,
+  );
   // Null until toggled, so it follows whether the server's Claude endpoint is private.
   // Stored off means automatic: a launch joins anyway while Claude's endpoint is private.
   const [joinTailnet, setJoinTailnet] = useState(config?.joinTailnet ?? false);
@@ -297,6 +300,9 @@ export function SandboxEnvironmentFields({
   const claudeHost = URL.parse(claudeEndpoint)?.host ?? claudeEndpoint;
   const autoJoinsTailnet = tailscaleReady && privateClaude;
   const joinsTailnet = tailscaleReady && (joinTailnet || autoJoinsTailnet);
+  // Forks of a sandbox share its environment, so a credential environment rules this out.
+  const canGiveAgentAccess =
+    provider?.capabilities.agentProviderAccess === true && credentialEnvironment === "";
   // Any machine's project can start on a config: the sandbox clones its repository from GitHub.
   const repositoryChoices = sandboxRepositoryChoices(projects, environmentId);
   const disabled =
@@ -343,6 +349,7 @@ export function SandboxEnvironmentFields({
           ...(credentialEnvironment === "" ? {} : { credentialEnvironment }),
           ...(sendsClaude ? { claude: { baseUrl: claudeEndpoint } } : {}),
           passGithubToken: passGithub && host?.github === true,
+          ...(agentProviderAccess && canGiveAgentAccess ? { agentProviderAccess: true } : {}),
           // A tailnet-only sandbox has to ask to join; otherwise the launch decides.
           joinTailnet: tailscaleReady && (joinTailnet || (autoJoinsTailnet && tailnetOnly)),
           access: joinsTailnet && tailnetOnly ? "tailnet" : "public",
@@ -695,6 +702,18 @@ export function SandboxEnvironmentFields({
                 ? "Each sandbox can then clone private repositories and push with gh and git."
                 : "This machine has no GitHub token to share, so sandboxes can clone public repositories only."}
             </OptIn>
+            {provider.capabilities.agentProviderAccess ? (
+              <OptIn
+                checked={agentProviderAccess && canGiveAgentAccess}
+                disabled={isSaving || !canGiveAgentAccess}
+                onCheckedChange={setAgentProviderAccess}
+                title={`Let the agent use ${provider.label}`}
+              >
+                {canGiveAgentAccess
+                  ? "The agent can fork its own sandbox, host its ports, and delete only the forks it made. Forks bill like new sandboxes."
+                  : `Needs No credentials as the ${provider.label} environment under Advanced, so forks never receive its secrets.`}
+              </OptIn>
+            ) : null}
           </div>
 
           <div className="space-y-2">
