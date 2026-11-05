@@ -1,6 +1,7 @@
 import type {
   EnvironmentId,
   EnvironmentMachineKind,
+  SandboxProviderKind,
   VcsRef,
   ProjectId,
   WorktreeSubmodules,
@@ -19,7 +20,15 @@ export interface EnvironmentOption {
   label: string;
   isPrimary: boolean;
   machine: EnvironmentMachineKind;
+  /** Set on a sandbox config: a thread started there gets its own machine from this provider. */
+  sandboxProvider?: SandboxProviderKind;
 }
+
+/** The "Run on" menu lists machines first and sandbox configs in their own group below. */
+export const splitRunOnOptions = (options: readonly EnvironmentOption[]) => ({
+  machines: options.filter((option) => option.sandboxProvider === undefined),
+  sandboxes: options.filter((option) => option.sandboxProvider !== undefined),
+});
 
 /** "Add to another machine" stays muted until hovered: easy to find, quieter than the machines. */
 export const ADD_TO_MACHINE_LABEL_CLASS =

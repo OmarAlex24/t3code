@@ -1229,8 +1229,9 @@ export default function ChatView(props: ChatViewProps) {
       ? logicalProjectEnvironments
       : [...logicalProjectEnvironments, ...sandboxLaunch.options];
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
-  // Sandbox configs make the picker useful even for a project on one machine.
-  const canPickEnvironment = pickerEnvironments.length > 1;
+  // Sandbox configs, or the offer to make one, make the picker useful for a project on one machine.
+  const canPickEnvironment =
+    pickerEnvironments.length > 1 || sandboxLaunch.onNewConfig !== undefined;
   const canAutoBalanceEnvironments = hasMultipleEnvironments && !activeProjectIsScratch;
   const activeEnvironmentOption =
     logicalProjectEnvironments.find(
@@ -3844,6 +3845,7 @@ export default function ChatView(props: ChatViewProps) {
                                   }
                                   availableEnvironments={pickerEnvironments}
                                   pickedEnvironmentId={sandboxLaunch.pickedEnvironmentId}
+                                  onNewSandboxConfig={sandboxLaunch.onNewConfig}
                                   {...(isServerThread
                                     ? {}
                                     : {
@@ -3934,6 +3936,7 @@ export default function ChatView(props: ChatViewProps) {
                   envLocked={envLocked}
                   availableEnvironments={pickerEnvironments}
                   pickedEnvironmentId={sandboxLaunch.pickedEnvironmentId}
+                  onNewSandboxConfig={sandboxLaunch.onNewConfig}
                   autoEnvironmentLabel={autoEnvironmentLabel}
                   onAutoEnvironment={
                     draftId &&
@@ -3975,6 +3978,7 @@ export default function ChatView(props: ChatViewProps) {
                   }}
                 />
 
+                {sandboxLaunch.configDialog}
                 <PullRequestThreadDialogHost
                   threadKey={activeThreadKey}
                   environmentId={activeThread.environmentId}
