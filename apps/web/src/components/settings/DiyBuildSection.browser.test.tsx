@@ -216,6 +216,13 @@ it("lists only the effort levels claude --effort takes, and none of the chat's o
   await expect
     .element(page.getByRole("radio", { name: "Extra High" }))
     .toHaveAttribute("aria-checked", "true");
+  // Back to the model's Default level, which is written as that level.
+  await page.getByRole("radio", { name: /Medium/ }).click();
+  expect(onChange).toHaveBeenLastCalledWith({
+    provider: "claude",
+    model: "opus-5-5",
+    effort: "medium",
+  });
 });
 
 it("switches provider and model from the rail, keeping the effort only where the model has it", async () => {
