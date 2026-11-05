@@ -99,9 +99,36 @@ connection in this app. Work you have not pushed is lost with it.
 That list follows the provider: a sandbox you stop or delete in the provider's dashboard shows up as
 stopped or deleted within a minute. A stopped sandbox shows how long its disk has been kept. Boat
 keeps a stopped sandbox's disk for 14 days and then shows it as expired; three days before that the
-row recommends deleting it. T3 Code never deletes a sandbox for you, except one whose launch was cut
-short when this server stopped, which it deletes once it is running again. A row also says when the
-thread it belonged to was deleted.
+row recommends deleting it. T3 Code never deletes a sandbox you did not ask it to, except one whose
+launch was cut short when this server stopped, which it deletes once it is running again. A row
+also says when the thread it belonged to was deleted.
+
+### Settle or delete a sandbox chat
+
+A sandbox thread's conversation is stored on its sandbox, so deleting the sandbox deletes the
+conversation too. Every prompt that can delete one says so.
+
+**When a chat is settled**, in the sandbox config, says what settling a thread does to its sandbox:
+
+- **Ask me** (the default) asks each time: **Keep snapshot** or **Delete sandbox…**. Tick
+  **Remember for** the config's name to make that choice the config's setting.
+- **Keep a snapshot** stops the sandbox and keeps its disk. The provider bills for the stopped disk
+  (Boat keeps it for 14 days). Sending a message in the thread, or un-settling it, resumes the
+  sandbox and then sends.
+- **Delete the sandbox** checks the clone for uncommitted files and commits not on a remote. With
+  nothing to lose, it deletes the sandbox and a notice says the conversation went with it. With work
+  to lose, or when the sandbox does not answer within about 10 seconds ("Couldn't check for unpushed
+  work"), it asks first. Copied env files count as uncommitted when the repository does not ignore
+  them.
+
+Only settling from this app counts; a thread the sandbox settles on its own leaves the sandbox as
+it is. Deleting a sandbox thread asks first, names the sandbox ("Also deletes sandbox bx_46wr on
+Boat"), and shows the same check. A stopped sandbox is not started just to check, so its prompt
+says the check could not run.
+
+The thread's header shows its sandbox: its state, **Stop and keep its disk** or **Resume**,
+**Open in Sandboxes list**, and **Delete sandbox…**. A warning icon there means the provider will
+soon drop the stopped disk.
 
 **Not tracked by T3 Code** lists sandboxes that carry this server's tag but have no record, for
 example after a crash. They may still bill; delete the ones you do not need. Only Boat reports

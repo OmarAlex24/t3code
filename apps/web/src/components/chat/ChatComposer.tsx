@@ -2107,7 +2107,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       submitAfterDictation(() => submitComposerRef.current(dispatchMode, submissionIntent));
       return false;
     }
-    if (submissionBlocked || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
+    if (
+      submissionBlocked ||
+      // `canOperateThread` alone is true for a stopped sandbox, whose session cannot be read until
+      // the send resumes it; the send checks the scope again once it runs.
+      (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) && !canOperateThread)
+    ) {
       event?.preventDefault();
       return false;
     }
