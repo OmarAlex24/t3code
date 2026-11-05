@@ -89,6 +89,9 @@ import { ThreadTokenUsageSnapshot } from "./providerRuntime.ts";
 export const OrchestrationV2Actor = Schema.Literals(["user", "agent", "system"]);
 export type OrchestrationV2Actor = typeof OrchestrationV2Actor.Type;
 
+/** How the server's own follow-up begins after a restart or a lifted usage limit cut a turn short. */
+export const CONTINUE_AFTER_INTERRUPTION_PROMPT = "Continue where you left off.";
+
 export const OrchestrationV2CreationSource = Schema.Literals([
   "web",
   "mobile",
