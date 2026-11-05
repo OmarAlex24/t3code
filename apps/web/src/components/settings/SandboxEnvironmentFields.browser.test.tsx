@@ -1,5 +1,6 @@
+import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, type SandboxEnvironmentConfig } from "@t3tools/contracts";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -161,6 +162,38 @@ const fields = (onDone: () => void = () => {}) => (
   />
 );
 
+const saved = (overrides: Partial<SandboxEnvironmentConfig> = {}): SandboxEnvironmentConfig => ({
+  id: "config-1",
+  label: "Boat small",
+  provider: "boat",
+  size: "small",
+  passGithubToken: false,
+  joinTailnet: false,
+  access: "public",
+  envFiles: {},
+  idleMinutes: 30,
+  maxRunningMinutes: 240,
+  createdAt: "2026-11-01T00:00:00.000Z",
+  updatedAt: "2026-11-01T00:00:00.000Z",
+  ...overrides,
+});
+
+const editing = (
+  config: SandboxEnvironmentConfig,
+  onErrorChange: (error: string | null) => void = () => {},
+) => (
+  <SandboxEnvironmentFields
+    environmentId={EnvironmentId.make(HOST)}
+    config={config}
+    error={null}
+    onErrorChange={onErrorChange}
+    onDone={() => {}}
+  />
+);
+
+const advanced = () => page.getByRole("button", { name: "Advanced" });
+const summary = () => page.getByTestId("sandbox-config-summary");
+
 describe("SandboxEnvironmentFields", () => {
   it("saves a config without making a machine, with the running limit it shows", async () => {
     setup();
@@ -176,8 +209,6 @@ describe("SandboxEnvironmentFields", () => {
       passGithubToken: false,
       joinTailnet: false,
       access: "public",
-      projectIds: [],
-      repositories: [],
       envFiles: {},
       idleMinutes: 30,
       maxRunningMinutes: 480,
@@ -185,64 +216,122 @@ describe("SandboxEnvironmentFields", () => {
     expect(onDone).toHaveBeenCalledOnce();
   });
 
-  it("lists every machine's GitHub projects once, by repository, and limits by repository", async () => {
-    // The user's projects live on a paired machine; this host has none of its own.
+  it("shows the name, the machine and a summary, with the rest under a closed Advanced", async () => {
     setup({
-      projects: [
-        project(REMOTE, "hello", "git@github.com:OmarAlex24/Hello-World.git"),
-        project(REMOTE, "hello-copy", "https://github.com/omaralex24/hello-world"),
-        project(REMOTE, "api", "https://github.com/OmarAlex24/api.git"),
-        project(REMOTE, "lab", "https://gitlab.com/omar/lab.git"),
-      ],
+      projects: [project(REMOTE, "hello", "git@github.com:OmarAlex24/Hello-World.git")],
     });
     await using _screen = await render(fields());
 
-    await expect.element(page.getByText("OmarAlex24/Hello-World")).toBeVisible();
-    await expect.element(page.getByText("OmarAlex24/api")).toBeVisible();
-    await expect.element(page.getByText(/gitlab|omar\/lab/u)).not.toBeInTheDocument();
-    expect(page.getByRole("checkbox", { name: /Hello-World/u }).elements()).toHaveLength(1);
+    await expect.element(page.getByRole("textbox", { name: "Name" })).toBeVisible();
+    await expect
+      .element(page.getByRole("combobox", { name: "Sandbox machine size" }))
+      .toBeVisible();
+    await expect.element(summary()).toHaveTextContent("Shares nothing from this machine");
+    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
+    await expect.element(page.getByText("Use this machine's Claude setup")).not.toBeInTheDocument();
+    await expect.element(page.getByText("When a chat is settled")).not.toBeInTheDocument();
+    // Every GitHub project can start on every config, so there is nothing to pick.
+    await expect.element(page.getByText("Projects", { exact: true })).not.toBeInTheDocument();
+    await expect.element(page.getByText("OmarAlex24/Hello-World")).not.toBeInTheDocument();
 
-    await userEvent.click(page.getByText("OmarAlex24/Hello-World"));
-    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
-    expect(savedConfig()).toMatchObject({
-      projectIds: [],
-      repositories: ["omaralex24/hello-world"],
-    });
+    await userEvent.click(advanced());
+    await expect.element(page.getByText("Use this machine's Claude setup")).toBeVisible();
+    await expect.element(page.getByText("When a chat is settled")).toBeVisible();
+    await expect.element(page.getByText("Projects", { exact: true })).not.toBeInTheDocument();
   });
 
-  it("opens a config saved with host project ids as their repositories", async () => {
-    setup({ projects: [project(HOST, "hello-host", "https://github.com/octo/hello.git")] });
+  it("sums up what a saved config's sandboxes get from this machine", async () => {
+    setup({ tailscale: true });
     await using _screen = await render(
-      <SandboxEnvironmentFields
-        environmentId={EnvironmentId.make(HOST)}
-        config={{
-          id: "config-1",
-          label: "Boat small",
-          provider: "boat",
-          size: "small",
-          passGithubToken: false,
-          joinTailnet: false,
-          access: "public",
-          projectIds: ["hello-host" as never],
-          envFiles: { "hello-host": [".env.local"] },
-          idleMinutes: 30,
-          maxRunningMinutes: 240,
-          createdAt: "2026-11-01T00:00:00.000Z",
-          updatedAt: "2026-11-01T00:00:00.000Z",
-        }}
-        error={null}
-        onErrorChange={() => {}}
-        onDone={() => {}}
-      />,
+      editing(
+        saved({
+          claude: { baseUrl: "https://hub.example.test" },
+          passGithubToken: true,
+          agentProviderAccess: true,
+          onSettle: "snapshot",
+        }),
+      ),
     );
 
-    await expect.element(page.getByRole("checkbox", { name: "octo/hello" })).toBeChecked();
+    await expect
+      .element(summary())
+      .toHaveTextContent(
+        "Claude via hub.example.test · joins your tailnet · GitHub signed in · agent can use Boat · keeps a snapshot when settled",
+      );
+    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("opens Advanced and says why when a private Claude endpoint has no Tailscale", async () => {
+    setup();
+    await using _screen = await render(
+      editing(saved({ claude: { baseUrl: "https://hub.example.test" } })),
+    );
+
+    await expect
+      .element(summary())
+      .toHaveTextContent(
+        "hub.example.test is private, so sandboxes need Tailscale to reach Claude",
+      );
+    await expect.element(advanced()).toHaveAttribute("aria-expanded", "true");
+    await expect.element(page.getByText(/Resolves to a private address/u)).toBeVisible();
+    // It stays the user's to close.
+    await userEvent.click(advanced());
+    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("names a field under Advanced that needs input even after Advanced closes", async () => {
+    setup({ tailscale: true });
+    await using _screen = await render(
+      editing(saved({ claude: { baseUrl: "https://hub.example.test" } })),
+    );
+
+    await userEvent.click(advanced());
+    await userEvent.fill(page.getByRole("textbox", { name: "Claude endpoint" }), "");
+    await expect.element(summary()).toHaveTextContent("Enter a Claude endpoint");
+    await userEvent.click(advanced());
+    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
+    await expect.element(summary()).toHaveTextContent("Enter a Claude endpoint");
+    await expect.element(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  });
+
+  it("opens Advanced when saving fails", async () => {
+    setup();
+    mocks.saveConfig.mockResolvedValueOnce(
+      AsyncResult.failure(
+        Cause.fail(new Error("A tailnet-only sandbox has to join your tailnet.")),
+      ) as never,
+    );
+    const onErrorChange = vi.fn();
+    await using _screen = await render(editing(saved(), onErrorChange));
+
+    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(page.getByRole("button", { name: "Save changes" }));
-    expect(savedConfig()).toMatchObject({
-      projectIds: [],
+    expect(onErrorChange).toHaveBeenLastCalledWith(
+      "A tailnet-only sandbox has to join your tailnet.",
+    );
+    await expect.element(advanced()).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps a saved config's env files and drops the repositories it was once limited to", async () => {
+    setup({ projects: [project(HOST, "hello-host", "https://github.com/octo/hello.git")] });
+    // Saved when a config could be limited to some repositories; those fields no longer exist.
+    const legacy = {
+      ...saved({ envFiles: { "octo/hello": [".env.local"] } }),
+      projectIds: ["hello-host"],
       repositories: ["octo/hello"],
-      envFiles: { "octo/hello": [".env.local"] },
-    });
+    } as SandboxEnvironmentConfig;
+    await using _screen = await render(editing(legacy));
+
+    await userEvent.click(advanced());
+    await expect.element(page.getByText("Projects", { exact: true })).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("textbox", { name: "octo/hello" }))
+      .toHaveValue(".env.local");
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    const config = savedConfig();
+    expect(config).toMatchObject({ envFiles: { "octo/hello": [".env.local"] } });
+    expect(config).not.toHaveProperty("projectIds");
+    expect(config).not.toHaveProperty("repositories");
   });
 
   it("sends the provider's settings fields, starting from the saved values", async () => {
@@ -250,7 +339,7 @@ describe("SandboxEnvironmentFields", () => {
     await using _screen = await render(fields());
 
     await userEvent.click(page.getByRole("button", { name: /^Vercel/u }));
-    await userEvent.click(page.getByRole("button", { name: "Advanced" }));
+    await userEvent.click(advanced());
     await userEvent.fill(page.getByRole("textbox", { name: "Team (optional)" }), "acme");
     await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
     expect(mocks.saveConfig).toHaveBeenCalledWith(
@@ -267,6 +356,7 @@ describe("SandboxEnvironmentFields", () => {
     setup();
     await using _screen = await render(fields());
 
+    await userEvent.click(advanced());
     await userEvent.click(page.getByText("Use this machine's Claude setup"));
     const privateWarning = page.getByText(/Resolves to a private address/u);
     await expect.element(privateWarning).toBeVisible();
@@ -287,6 +377,7 @@ describe("SandboxEnvironmentFields", () => {
     setup();
     await using _screen = await render(fields());
 
+    await userEvent.click(advanced());
     await expect
       .element(page.getByText(/delete only the forks it made. Forks bill like new sandboxes./u))
       .toBeVisible();
@@ -303,6 +394,7 @@ describe("SandboxEnvironmentFields", () => {
     setup({ tailscale: true });
     await using _screen = await render(fields());
 
+    await userEvent.click(advanced());
     await userEvent.click(page.getByText("Use this machine's Claude setup"));
     // Decided at each launch, so there is nothing to tick.
     await expect
@@ -322,6 +414,7 @@ describe("SandboxEnvironmentFields", () => {
     setup({ tailscale: true });
     await using _screen = await render(fields());
 
+    await userEvent.click(advanced());
     await userEvent.click(page.getByText("Use this machine's Claude setup"));
     await userEvent.click(page.getByText("Reach it only through my tailnet"));
     await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
@@ -332,6 +425,7 @@ describe("SandboxEnvironmentFields", () => {
     setup({ tailscale: true });
     await using _screen = await render(fields());
 
+    await userEvent.click(advanced());
     const join = page.getByRole("checkbox", { name: /Join my tailnet/u });
     await expect.element(join).not.toBeChecked();
     await userEvent.click(page.getByText("Join my tailnet"));
@@ -345,21 +439,7 @@ describe("SandboxEnvironmentFields", () => {
     await using _screen = await render(
       <SandboxEnvironmentFields
         environmentId={EnvironmentId.make("11111111-1111-4111-8111-111111111111")}
-        config={{
-          id: "config-1",
-          label: "Boat small",
-          provider: "boat",
-          size: "small",
-          passGithubToken: false,
-          joinTailnet: false,
-          access: "public",
-          projectIds: [],
-          envFiles: {},
-          idleMinutes: 30,
-          maxRunningMinutes: 240,
-          createdAt: "2026-11-01T00:00:00.000Z",
-          updatedAt: "2026-11-01T00:00:00.000Z",
-        }}
+        config={saved()}
         error={null}
         onErrorChange={() => {}}
         onDone={onDone}
