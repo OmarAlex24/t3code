@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   type ProviderAuthState,
   type ServerProvider,
   type UnifiedSettings,
@@ -282,6 +283,34 @@ describe("EnvironmentProviderSettings routing", () => {
       },
       {},
     );
+  });
+
+  it("leaves out the internal sandbox bridge instance", async () => {
+    await setup();
+    const bridgeId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
+    state.settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [customId]: {
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          displayName: "Work",
+        },
+        [bridgeId]: {
+          driver: ProviderDriverKind.make("acpRegistry"),
+          enabled: true,
+          displayName: "Sandboxes",
+          config: { source: "local", commandPath: "/t3", commandArgs: ["sandbox-bridge"] },
+        },
+      },
+    };
+    await setProviders([
+      provider(),
+      { ...provider(), instanceId: bridgeId, driver: ProviderDriverKind.make("acpRegistry") },
+    ]);
+    await using _screen = await render(panel());
+    await expect.element(page.getByRole("switch", { name: "Enable Work" }).first()).toBeVisible();
+    await expect.element(page.getByText("Sandboxes")).not.toBeInTheDocument();
   });
 
   it("routes explicit ACP browser authentication consent to the selected environment", async () => {

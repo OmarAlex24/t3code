@@ -4,12 +4,13 @@ import {
   shouldShowInstanceBadge,
 } from "@t3tools/client-runtime/state/provider-instance-display";
 
-import type {
-  ModelCapabilities,
-  ModelSelection,
-  ProjectId,
-  RuntimeMode,
-  ServerConfig as T3ServerConfig,
+import {
+  isInternalProviderInstance,
+  type ModelCapabilities,
+  type ModelSelection,
+  type ProjectId,
+  type RuntimeMode,
+  type ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
 import {
   disallowedProviderMessage,
@@ -350,6 +351,9 @@ export function buildModelOptions(
   for (const provider of config?.providers ?? []) {
     if (
       !matchesLockedProvider(provider) ||
+      // The sandbox bridge and its like only list for a thread already running on one.
+      (isInternalProviderInstance(provider.instanceId) &&
+        provider.instanceId !== providerInstanceId) ||
       isDriverDisallowed(config, provider.driver) ||
       !isProviderEnabledForProject(config, provider, projectId) ||
       !provider.installed ||
