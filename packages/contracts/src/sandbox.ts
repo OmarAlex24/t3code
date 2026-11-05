@@ -82,6 +82,8 @@ export const SandboxHostAccess = Schema.Struct({
       key: Schema.Literals(["hub", "copy"]),
       /** The base URL resolves only to private addresses, so a cloud sandbox likely can't reach it. */
       privateNetwork: Schema.Boolean,
+      /** The base URL's Tailscale address, when it resolves to one. */
+      tailnetAddress: Schema.optionalKey(TrimmedString),
     }),
   ),
   /** This server has a GitHub token for github.com it could forward. */
@@ -450,6 +452,8 @@ export const SandboxProviderErrorCode = Schema.Literals([
   "not_found",
   "templates_unavailable",
   "template_saving",
+  /** Claude's endpoint is only on a private network, and no Tailscale client is saved to join. */
+  "tailscale_required",
   "unknown",
 ]);
 export type SandboxProviderErrorCode = typeof SandboxProviderErrorCode.Type;
@@ -775,8 +779,10 @@ export type SandboxSetupStage = typeof SandboxSetupStage.Type;
 /**
  * What a failed launch can do next. `relaunch`: nothing was kept, so retry starts over.
  * `retry`: the machine is kept, so retry runs the failed stage again; cancel deletes it.
+ * `set-up-tailscale`: nothing was kept, and a new sandbox would fail the same way until Tailscale
+ * is set up for it to join the tailnet.
  */
-export const SandboxSetupRecovery = Schema.Literals(["relaunch", "retry"]);
+export const SandboxSetupRecovery = Schema.Literals(["relaunch", "retry", "set-up-tailscale"]);
 export type SandboxSetupRecovery = typeof SandboxSetupRecovery.Type;
 
 /** One thread's sandbox launch, streamed from the server provisioning it. */
@@ -886,12 +892,17 @@ export const tailscaleClientIdFromSecret = (secret: string): string | null =>
   /^tskey-client-([A-Za-z0-9]+)-\S+$/u.exec(secret.trim())?.[1] ?? null;
 
 /** The OAuth scopes T3 needs: minting device keys and removing the devices it made. */
-export const SANDBOX_TAILSCALE_SCOPES = ["auth_keys", "devices:core"] as const;
+export const SANDBOX_TAILSCALE_SCOPES = [
+  { id: "devices:core", label: "Devices → Core" },
+  { id: "auth_keys", label: "Keys → Auth Keys" },
+] as const;
 
 export const SandboxTailscaleCheckInput = Schema.Struct({
   clientSecret: TrimmedNonEmptyString,
   /** Only needed when the secret does not carry it. */
   clientId: Schema.optional(TrimmedNonEmptyString),
+  /** The tag sandboxes join with; the default tag when omitted. */
+  tag: Schema.optional(TrimmedNonEmptyString),
 });
 export type SandboxTailscaleCheckInput = typeof SandboxTailscaleCheckInput.Type;
 

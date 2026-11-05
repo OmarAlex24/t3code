@@ -612,24 +612,38 @@ const make = Effect.gen(function* () {
           "This does not look like a Tailscale OAuth client secret (tskey-client-…). If yours has another form, enter its client ID under Advanced.",
       } satisfies SandboxTailscaleCheckResult;
     }
+    const tag = input.tag ?? DEFAULT_SANDBOX_TAILSCALE_TAG;
     const signedIn = yield* tailscaleApi
-      .signIn({ clientId, clientSecret: Redacted.make(input.clientSecret) })
+      .signIn({ clientId, clientSecret: Redacted.make(input.clientSecret) }, [tag])
       .pipe(Effect.result);
     if (signedIn._tag === "Failure") {
-      return { clientId, scopes: [], problem: signedIn.failure.detail };
+      // The steps refer to the setup guide in the Tailscale card.
+      const problem =
+        signedIn.failure.status === 400
+          ? `Tailscale won't give this client ${tag}. Add the tag to tagOwners in your policy file (step 1), then make an OAuth client with it selected for both scopes (step 2).`
+          : signedIn.failure.status === 401
+            ? "Tailscale did not accept this secret. Copy it again, or make a new OAuth client (step 2)."
+            : signedIn.failure.detail;
+      return { clientId, scopes: [], problem };
     }
     const { scopes } = signedIn.success;
-    // `all` is the older scope that covers every other.
-    const missing = scopes.includes("all")
-      ? []
-      : SANDBOX_TAILSCALE_SCOPES.filter((scope) => !scopes.includes(scope));
+    // `all` is the older scope that covers every other, and `devices` the older `devices:core`.
+    const granted = (id: string) =>
+      scopes.includes("all") ||
+      scopes.includes(id) ||
+      (id === "devices:core" && scopes.includes("devices"));
+    // Named the way Tailscale's Scopes step shows them; Read alone cannot mint keys.
+    const missing = SANDBOX_TAILSCALE_SCOPES.filter((scope) => !granted(scope.id)).map(
+      (scope) =>
+        `${scope.label}: Write${scopes.includes(`${scope.id}:read`) ? " (it has Read)" : ""}`,
+    );
     return {
       clientId,
       scopes,
       problem:
         missing.length === 0
           ? null
-          : `This OAuth client is missing the ${missing.join(" and ")} ${missing.length === 1 ? "scope" : "scopes"}. Give it write access to Auth Keys and Devices Core for the tag, then try again.`,
+          : `Missing ${missing.join(" and ")} for ${tag}. Make an OAuth client that has ${missing.length === 1 ? "it" : "them"} (step 2) and paste its secret.`,
     } satisfies SandboxTailscaleCheckResult;
   });
 
@@ -757,11 +771,13 @@ const make = Effect.gen(function* () {
     if (claude.baseUrl === undefined || (hub === undefined && claude.authToken === undefined)) {
       return { github, tailscale } satisfies SandboxHostAccessFacts;
     }
+    const tailnetAddress = yield* hostAccess.endpointTailnetAddress(claude.baseUrl);
     return {
       claude: {
         baseUrl: claude.baseUrl,
         key: hub === undefined ? "copy" : "hub",
         privateNetwork: yield* hostAccess.endpointIsPrivate(claude.baseUrl),
+        ...(tailnetAddress === null ? {} : { tailnetAddress }),
       },
       github,
       tailscale,
@@ -1031,6 +1047,11 @@ const make = Effect.gen(function* () {
       readonly owned: Owned;
       readonly report: Reporter;
       readonly extras: RecordExtras;
+      /**
+       * Fails instead of warning when the sandbox cannot reach Claude's endpoint: a thread handed
+       * a sandbox like that would sit on Thinking while Claude retries.
+       */
+      readonly requireClaudeReach?: boolean;
     },
   ) {
     const { driver, config, label, size, input, claude, githubToken, tailnet } = prepared;
@@ -1171,12 +1192,13 @@ const make = Effect.gen(function* () {
       claudeWritten === "ready" && missing("claude") ? "failed" : claudeWritten;
     // A private endpoint (a tailnet or LAN address) passes every check on this machine and then
     // times out in the sandbox. The hub key stays: fixing the network makes it work as is.
+    let unreachableClaude: string | null = null;
     const claudeState: SandboxSetupState =
       claude === undefined || claudeInstalled !== "ready"
         ? claudeInstalled
         : yield* run(
             endpointReachScript(claude.baseUrl, viaProxy ? TAILSCALE_PROXY_URL : undefined),
-            30,
+            60,
           ).pipe(
             Effect.map((result) => parseEndpointReach(result.stdout)),
             Effect.orElseSucceed(() => null),
@@ -1184,15 +1206,14 @@ const make = Effect.gen(function* () {
               reach !== "unreachable"
                 ? Effect.succeed<SandboxSetupState>("ready")
                 : hostAccess.endpointIsPrivate(claude.baseUrl).pipe(
-                    Effect.flatMap((isPrivate) =>
-                      warn(
-                        unreachableEndpointWarning(
-                          claude.baseUrl,
-                          isPrivate,
-                          tailnetJoined === null ? undefined : tailnet?.client.tag,
-                        ),
-                      ),
-                    ),
+                    Effect.flatMap((isPrivate) => {
+                      unreachableClaude = unreachableEndpointWarning(
+                        claude.baseUrl,
+                        isPrivate,
+                        tailnetJoined === null ? undefined : tailnet?.client.tag,
+                      );
+                      return warn(unreachableClaude);
+                    }),
                     Effect.as<SandboxSetupState>("failed"),
                   ),
             ),
@@ -1210,6 +1231,13 @@ const make = Effect.gen(function* () {
                 ).pipe(Effect.as<SandboxSetupState>("failed")),
               ),
             );
+    if (context.requireClaudeReach === true && unreachableClaude !== null) {
+      return yield* new SandboxProviderError({
+        provider: input.provider,
+        stage: "start",
+        detail: unreachableClaude,
+      });
+    }
     // A tailnet-only sandbox has no other address, so without the join nothing can reach it.
     const tailnetIp = tailnetJoined?.ip;
     if (prepared.access === "tailnet" && tailnetIp === undefined) {
@@ -1329,6 +1357,28 @@ const make = Effect.gen(function* () {
     return yield* Fiber.join(fiber);
   });
 
+  /**
+   * Whether a launch joins the tailnet: when its config asks to, and on its own when Claude's
+   * endpoint only resolves to private or tailnet addresses, since Claude there could not reach it
+   * otherwise. Decided at each launch, so a config saved before Tailscale was set up still works.
+   * Refused before anything bills when the endpoint is private and there is no Tailscale to join.
+   */
+  const launchJoinsTailnet = Effect.fn("SandboxProvisioner.launchJoinsTailnet")(function* (
+    config: SandboxEnvironmentConfig,
+  ) {
+    if (config.joinTailnet || config.access === "tailnet") return true;
+    const baseUrl = config.claude?.baseUrl;
+    if (baseUrl === undefined || !(yield* hostAccess.endpointIsPrivate(baseUrl))) return false;
+    if (tailscaleClient(yield* settings.getSettings.pipe(Effect.orDie)) !== undefined) return true;
+    const host = URL.parse(baseUrl)?.host ?? baseUrl;
+    return yield* new SandboxProviderError({
+      provider: config.provider,
+      stage: "config",
+      code: "tailscale_required",
+      detail: `The sandbox can't reach ${host}, which only your private network or tailnet reaches. Set up Tailscale under Sandboxes in Settings → Connections so sandboxes can join your tailnet.`,
+    });
+  });
+
   // One thread's launch: its fiber, and the signals the client sends it.
   interface Launch {
     readonly input: SandboxLaunchInput;
@@ -1348,6 +1398,7 @@ const make = Effect.gen(function* () {
   const createInputFor = (
     config: SandboxEnvironmentConfig,
     project: SandboxLaunchInput["project"],
+    joinTailnet: boolean,
   ): SandboxCreateInput => ({
     provider: config.provider,
     label: `${project.title} on ${config.label}`,
@@ -1360,7 +1411,7 @@ const make = Effect.gen(function* () {
       : { environment: config.credentialEnvironment, allowCredentials: true }),
     ...(config.claude === undefined ? {} : { agentAccess: { claude: config.claude } }),
     ...(config.passGithubToken ? { passGithubToken: true } : {}),
-    ...(config.joinTailnet ? { joinTailnet: true } : {}),
+    ...(joinTailnet ? { joinTailnet: true } : {}),
   });
 
   const copyEnvFiles = Effect.fn("SandboxProvisioner.copyEnvFiles")(function* (
@@ -1513,7 +1564,8 @@ const make = Effect.gen(function* () {
     });
     const run = Effect.gen(function* () {
       yield* reporter.stage("preflight", "running");
-      const prepared = yield* prepare(createInputFor(config, input.project));
+      const joinTailnet = yield* launchJoinsTailnet(config);
+      const prepared = yield* prepare(createInputFor(config, input.project, joinTailnet));
       yield* reporter.stage("preflight", "done");
       const owned: Owned = {};
       yield* Effect.gen(function* () {
@@ -1521,6 +1573,7 @@ const make = Effect.gen(function* () {
           instanceId,
           owned,
           report: reporter,
+          requireClaudeReach: true,
           extras: {
             configId: config.id,
             threadId,
@@ -1586,7 +1639,14 @@ const make = Effect.gen(function* () {
                   onNone: () => "The sandbox could not be set up.",
                   onSome: (error) => error.detail,
                 }),
-                recovery: "relaunch",
+                // A refusal that a new sandbox would hit again points at its fix instead.
+                recovery: Option.match(Exit.findErrorOption(exit), {
+                  onNone: () => "relaunch" as const,
+                  onSome: (error) =>
+                    error.code === "tailscale_required"
+                      ? ("set-up-tailscale" as const)
+                      : ("relaunch" as const),
+                }),
               }),
       ),
     );
@@ -1708,8 +1768,16 @@ const make = Effect.gen(function* () {
     const snapshot = yield* tracker.get(input.threadId);
     const current = launches.get(input.threadId);
     if (snapshot === null || snapshot.phase !== "failed" || current === undefined) return;
-    if (snapshot.recovery === "relaunch") {
-      yield* startLaunch(current.input, current.config);
+    if (snapshot.recovery === "relaunch" || snapshot.recovery === "set-up-tailscale") {
+      // A new sandbox follows the config as saved now, which may have changed since.
+      const saved = yield* configStore.get(current.config.id).pipe(Effect.orDie);
+      if (Option.isNone(saved)) {
+        return yield* launchConfigError(
+          "This sandbox config no longer exists.",
+          current.config.provider,
+        );
+      }
+      yield* startLaunch(current.input, saved.value);
       return;
     }
     // The machine is kept; a failed pairing goes back to waiting for the client to pair again.

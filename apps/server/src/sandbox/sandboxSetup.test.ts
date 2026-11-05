@@ -154,6 +154,28 @@ describe("endpointReachScript", () => {
       }),
     ),
   );
+
+  // A sandbox that just joined the tailnet can take a few seconds to get a route to the endpoint.
+  it.live("tries again before calling an endpoint unreachable", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.makeDirectory(`${home}/bin`);
+        yield* fs.writeFileString(
+          `${home}/bin/curl`,
+          `#!/bin/sh
+echo x >>"$HOME/curl.calls"
+[ "$(wc -l <"$HOME/curl.calls")" -ge 2 ] && printf 200 || printf 000`,
+        );
+        yield* fs.chmod(`${home}/bin/curl`, 0o755);
+        const output = yield* runIn(
+          home,
+          `PATH="$HOME/bin:$PATH"\n${endpointReachScript("https://100.92.23.53")}`,
+        );
+        expect(parseEndpointReach(output)).toBe("reachable");
+      }),
+    ),
+  );
 });
 
 // Stand-ins for sudo and Tailscale's binaries, so the scripts run without root. The daemon never

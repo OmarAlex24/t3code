@@ -4114,6 +4114,8 @@ describe("sandbox agent access", () => {
       const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
       // The form warns before anything is created when the endpoint is only on a private network.
       expect((yield* provisioner.providers).host.claude?.privateNetwork).toBe(true);
+      // The Tailscale setup prefills its access rule with this address.
+      expect((yield* provisioner.providers).host.claude?.tailnetAddress).toBe("100.92.23.53");
 
       const create = (baseUrl: string) =>
         provisioner.create({
@@ -4668,6 +4670,8 @@ describe("Tailscale OAuth client check", () => {
         problem: null,
       });
       expect(String(requests[0]?.body)).toContain("client_id=kABC123CNTRL");
+      // Asks for the tag too, so a tag the client may not use fails here and not at launch.
+      expect(String(requests[0]?.body)).toContain("tags=tag%3At3-sandbox");
     }).pipe(
       Effect.provide(testLayer),
       Effect.provideService(
@@ -4681,7 +4685,7 @@ describe("Tailscale OAuth client check", () => {
     Effect.gen(function* () {
       const check = (
         answer: { readonly status?: number; readonly scope?: string },
-        input: { readonly clientSecret: string; readonly clientId?: string },
+        input: { readonly clientSecret: string; readonly clientId?: string; readonly tag?: string },
       ) =>
         Effect.gen(function* () {
           const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
@@ -4691,11 +4695,26 @@ describe("Tailscale OAuth client check", () => {
           Effect.provideService(HttpClient.HttpClient, tokenClient([], answer)),
         );
       const secret = "tskey-client-kABC-rest";
+      // Named the way Tailscale's Scopes step shows them.
       expect((yield* check({ scope: "auth_keys" }, { clientSecret: secret })).problem).toBe(
-        "This OAuth client is missing the devices:core scope. Give it write access to Auth Keys and Devices Core for the tag, then try again.",
+        "Missing Devices → Core: Write for tag:t3-sandbox. Make an OAuth client that has it (step 2) and paste its secret.",
       );
-      expect((yield* check({ status: 401 }, { clientSecret: secret })).problem).toContain(
-        "HTTP 401",
+      expect(
+        (yield* check({ scope: "dns:read" }, { clientSecret: secret, tag: "tag:ci" })).problem,
+      ).toBe(
+        "Missing Devices → Core: Write and Keys → Auth Keys: Write for tag:ci. Make an OAuth client that has them (step 2) and paste its secret.",
+      );
+      expect(
+        (yield* check({ scope: "devices:core auth_keys:read" }, { clientSecret: secret })).problem,
+      ).toBe(
+        "Missing Keys → Auth Keys: Write (it has Read) for tag:t3-sandbox. Make an OAuth client that has it (step 2) and paste its secret.",
+      );
+      // Tailscale answers 400 when the client may not use the requested tag.
+      expect((yield* check({ status: 400 }, { clientSecret: secret })).problem).toBe(
+        "Tailscale won't give this client tag:t3-sandbox. Add the tag to tagOwners in your policy file (step 1), then make an OAuth client with it selected for both scopes (step 2).",
+      );
+      expect((yield* check({ status: 401 }, { clientSecret: secret })).problem).toBe(
+        "Tailscale did not accept this secret. Copy it again, or make a new OAuth client (step 2).",
       );
       expect((yield* check({ scope: "all" }, { clientSecret: secret })).problem).toBeNull();
       expect((yield* check({}, { clientSecret: "not-a-client-secret" })).problem).toBe(
@@ -4757,6 +4776,8 @@ describe("SandboxProvisioner per-thread launches", () => {
       /** Commands containing this text wait on the deferred before answering. */
       readonly holding?: { readonly text: string; readonly until: Deferred.Deferred<void> };
       readonly listed?: BoatFake["listed"];
+      /** What the sandbox gets back from Claude's endpoint; `000` means it never connected. */
+      readonly endpointStatus?: string;
     } = {},
   ): BoatFake => {
     const requests: Array<string> = [];
@@ -4768,12 +4789,22 @@ describe("SandboxProvisioner per-thread launches", () => {
     const client = HttpClient.make((request) => {
       const query = UrlParams.toString(request.urlParams);
       requests.push(`${request.method} ${request.url}${query === "" ? "" : `?${query}`}`);
+      // Tailscale's token request is form-encoded; every other body is JSON.
       const body =
-        request.body._tag === "Uint8Array"
+        request.body._tag === "Uint8Array" && !request.url.endsWith("/oauth/token")
           ? JSON.parse(new TextDecoder().decode(request.body.body))
           : undefined;
       if (body !== undefined) bodies.push({ url: request.url, body });
       if (request.url.endsWith("/limits")) return respond(request, { ok: false }, 401);
+      if (request.url === "https://api.tailscale.com/api/v2/oauth/token") {
+        return respond(request, { access_token: "tskey-api-A", token_type: "Bearer" });
+      }
+      if (request.url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+        return respond(request, { id: "k1", key: "tskey-auth-kONCE-key" });
+      }
+      if (request.url.startsWith("https://api.tailscale.com/api/v2/device/")) {
+        return respond(request, {});
+      }
       if (request.url.endsWith("/.well-known/t3/environment")) return respond(request, descriptor);
       if (request.url.endsWith("/files")) return respond(request, { ok: true });
       if (request.url.endsWith("/commands")) {
@@ -4788,7 +4819,11 @@ describe("SandboxProvisioner per-thread launches", () => {
           }
           const stdout = command.includes("git clone")
             ? "T3_REPO_DIR: /home/boat/work/hello\nT3_REPO_PROJECT: project-remote\n"
-            : pairOr(bodyTextOf(request), pairToken, "");
+            : options.endpointStatus !== undefined && command.includes("T3_ENDPOINT_STATUS")
+              ? `T3_ENDPOINT_STATUS:${options.endpointStatus}\n`
+              : command.includes("T3_TAILSCALE_")
+                ? "T3_TAILSCALE_DAEMON: nohup\nT3_TAILSCALE_MODE: kernel\nT3_TAILSCALE_STATE: Running\nT3_TAILSCALE_NODE: nNODE1CNTRL\n"
+                : pairOr(bodyTextOf(request), pairToken, "");
           return respond(request, { exitCode: 0, stdout, stderr: "" });
         });
         return options.holding !== undefined && command.includes(options.holding.text)
@@ -4947,6 +4982,137 @@ describe("SandboxProvisioner per-thread launches", () => {
         provisionerLayer({}, repository.layer, {
           configs: configs.layer,
           workspace: { ".env": "API_TOKEN=shh", "build/output.log": "ignored" },
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  // This server's Claude talks to an endpoint only its tailnet reaches.
+  const privateClaude = {
+    claude: { baseUrl: "https://100.92.23.53", authToken: Redacted.make("host-claude-token") },
+  };
+  const tailscaleSettings = {
+    sandboxTailscale: { clientId: "kCLIENT", clientSecret: "tskey-client-kCLIENT-x", tag: "" },
+  } as const;
+
+  it.effect("joins the tailnet on its own when Claude's endpoint is private", () => {
+    const fake = boatFake();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // Saved before Tailscale was set up, so it does not ask to join.
+      const { config } = yield* provisioner.saveConfig({
+        config: { ...configInput, joinTailnet: false, claude: { baseUrl: "https://100.92.23.53" } },
+        apiKey: "boat_test",
+      });
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(fake.requests).toContain("POST https://api.tailscale.com/api/v2/tailnet/-/keys");
+      expect(fake.commands.some((command) => command.includes("--auth-key="))).toBe(true);
+    }).pipe(
+      Effect.provide(
+        provisionerLayer(tailscaleSettings, discardingRepository, {
+          configs: configs.layer,
+          host: privateClaude,
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("stays off the tailnet when Claude's endpoint is public", () => {
+    const fake = boatFake();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: { ...configInput, claude: { baseUrl: "https://api.example.test" } },
+        apiKey: "boat_test",
+      });
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(fake.requests.some((request) => request.includes("api.tailscale.com"))).toBe(false);
+    }).pipe(
+      Effect.provide(
+        provisionerLayer(tailscaleSettings, discardingRepository, {
+          configs: configs.layer,
+          host: {
+            claude: { baseUrl: "https://api.example.test", authToken: Redacted.make("t") },
+          },
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect(
+    "refuses before anything bills when the endpoint is private and Tailscale is not set up",
+    () => {
+      const fake = boatFake();
+      const configs = memoryConfigs();
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const { config } = yield* provisioner.saveConfig({
+          config: { ...configInput, claude: { baseUrl: "https://100.92.23.53" } },
+          apiKey: "boat_test",
+        });
+        yield* provisioner.launch({ configId: config.id, threadId, project });
+        const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
+        expect(failed.error).toBe(
+          "The sandbox can't reach 100.92.23.53, which only your private network or tailnet reaches. Set up Tailscale under Sandboxes in Settings → Connections so sandboxes can join your tailnet.",
+        );
+        // The card points at the Tailscale setup rather than starting the same sandbox again.
+        expect(failed.recovery).toBe("set-up-tailscale");
+        expect(stageOf(failed, "preflight")?.status).toBe("failed");
+        expect(stageOf(failed, "create")?.status).toBe("pending");
+        expect(fake.requests.filter((request) => request.startsWith("POST"))).toEqual([]);
+
+        // Starting again reads the config as it is now.
+        yield* provisioner.saveConfig({
+          config: { ...config, claude: { baseUrl: "https://api.example.test" } },
+        });
+        yield* provisioner.retryLaunch({ threadId });
+        yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer({}, discardingRepository, {
+            configs: configs.layer,
+            host: privateClaude,
+          }),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
+
+  it.effect("fails setup instead of handing off when the sandbox cannot reach Claude", () => {
+    const fake = boatFake({ endpointStatus: "000" });
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: { ...configInput, claude: { baseUrl: "https://api.example.test" } },
+        apiKey: "boat_test",
+      });
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      // A thread on this sandbox would sit on Thinking while Claude retries forever.
+      const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
+      expect(failed.awaitingHandoff).toBe(false);
+      expect(stageOf(failed, "credentials")?.status).toBe("failed");
+      expect(stageOf(failed, "pair")?.status).toBe("pending");
+      expect(failed.error).toBe(
+        "The sandbox cannot reach api.example.test. Check that it accepts connections from the internet, or use another endpoint.",
+      );
+      expect(failed.recovery).toBe("relaunch");
+      expect(deletes(fake)).toHaveLength(1);
+      expect(repository.records.size).toBe(0);
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: configs.layer,
+          host: { claude: { baseUrl: "https://api.example.test", authToken: Redacted.make("t") } },
         }),
       ),
       Effect.provideService(HttpClient.HttpClient, fake.client),

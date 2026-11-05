@@ -12,6 +12,7 @@ import {
   type SandboxEnvironmentConfig,
   type ThreadId,
 } from "@t3tools/contracts";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
@@ -93,6 +94,7 @@ export function useSandboxLaunch(input: {
     reportFailure: false,
   });
   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
+  const navigate = useNavigate();
 
   // The machine picker hides other threads' sandboxes: each belongs to its own thread.
   const keptEnvironments = input.logicalProjectEnvironments.filter((environment) =>
@@ -429,6 +431,9 @@ export function useSandboxLaunch(input: {
         onCancel={dismiss}
         onRetry={retry}
         onDismiss={dismiss}
+        onSetUpTailscale={() => {
+          void navigate({ to: "/settings/connections", hash: "sandbox-tailscale" });
+        }}
       />
     );
 

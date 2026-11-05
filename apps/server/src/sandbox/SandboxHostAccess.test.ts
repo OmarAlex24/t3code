@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolvesOnlyToPrivateNetwork } from "./SandboxHostAccess.ts";
+import { resolvesOnlyToPrivateNetwork, tailnetAddressOf } from "./SandboxHostAccess.ts";
 
 describe("resolvesOnlyToPrivateNetwork", () => {
   it.each([
@@ -25,5 +25,20 @@ describe("resolvesOnlyToPrivateNetwork", () => {
     [[], false],
   ] as const)("%j -> %s", (addresses, expected) => {
     expect(resolvesOnlyToPrivateNetwork(addresses)).toBe(expected);
+  });
+});
+
+describe("tailnetAddressOf", () => {
+  it.each([
+    [["100.92.23.53"], "100.92.23.53"],
+    [["104.16.132.229", "100.92.23.53"], "100.92.23.53"],
+    [["fd7a:115c:a1e0::1"], "fd7a:115c:a1e0::1"],
+    // An IPv4 address is what a policy file's grant most often names.
+    [["fd7a:115c:a1e0::1", "100.92.23.53"], "100.92.23.53"],
+    [["100.128.0.1"], null],
+    [["192.168.1.10"], null],
+    [[], null],
+  ] as const)("%j -> %s", (addresses, expected) => {
+    expect(tailnetAddressOf(addresses)).toBe(expected);
   });
 });

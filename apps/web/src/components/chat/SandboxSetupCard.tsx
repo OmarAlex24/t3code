@@ -1,5 +1,5 @@
 import { sandboxSetupStageLabel, type SandboxSetupSnapshot } from "@t3tools/contracts";
-import { RotateCwIcon, XIcon } from "lucide-react";
+import { NetworkIcon, RotateCwIcon, XIcon } from "lucide-react";
 
 import { Button } from "~/components/ui/button";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
@@ -35,6 +35,7 @@ export function SandboxSetupCard({
   onCancel,
   onRetry,
   onDismiss,
+  onSetUpTailscale,
 }: {
   readonly snapshot: SandboxSetupSnapshot;
   /** The host handed the sandbox over and this client is pairing with it. */
@@ -44,6 +45,8 @@ export function SandboxSetupCard({
   readonly onCancel: () => void;
   readonly onRetry: () => void;
   readonly onDismiss: () => void;
+  /** Goes to the Tailscale setup, for a refusal only a tailnet join can fix. */
+  readonly onSetUpTailscale: () => void;
 }) {
   const running = snapshot.phase === "running";
   const failed = snapshot.phase === "failed" || localError !== null;
@@ -136,12 +139,16 @@ export function SandboxSetupCard({
       {failed && error ? <p className="mt-1 ml-8 text-xs text-muted-foreground">{error}</p> : null}
 
       <div className="mt-0.5 ml-[calc(--spacing(6)+2px-(--spacing(2)-1px))] flex flex-wrap items-center gap-0.5">
+        {failed && localError === null && snapshot.recovery === "set-up-tailscale" ? (
+          <Button type="button" size="xs" variant="ghost-muted" onClick={onSetUpTailscale}>
+            <NetworkIcon aria-hidden />
+            Set up Tailscale
+          </Button>
+        ) : null}
         {failed ? (
           <Button type="button" size="xs" variant="ghost-muted" onClick={onRetry}>
             <RotateCwIcon aria-hidden />
-            {snapshot.recovery === "relaunch" && localError === null
-              ? "Start a new sandbox"
-              : "Retry"}
+            {snapshot.recovery !== "retry" && localError === null ? "Start a new sandbox" : "Retry"}
           </Button>
         ) : null}
         {running ? (

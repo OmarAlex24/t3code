@@ -281,20 +281,44 @@ describe("SandboxEnvironmentFields", () => {
     });
   });
 
-  it("joins the tailnet by default when Claude's endpoint is private, and can stay off the internet", async () => {
+  it("joins the tailnet on its own when Claude's endpoint is private", async () => {
+    setup({ tailscale: true });
+    await using _screen = await render(fields());
+
+    await userEvent.click(page.getByText("Use this machine's Claude setup"));
+    // Decided at each launch, so there is nothing to tick.
+    await expect
+      .element(
+        page.getByText("Joins your tailnet automatically because hub.example.test is private."),
+      )
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("checkbox", { name: /Join my tailnet/u }))
+      .not.toBeInTheDocument();
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    // Stored off means automatic: the launch joins while the endpoint stays private.
+    expect(savedConfig()).toMatchObject({ joinTailnet: false, access: "public" });
+  });
+
+  it("can keep a sandbox that joins on its own off the internet", async () => {
+    setup({ tailscale: true });
+    await using _screen = await render(fields());
+
+    await userEvent.click(page.getByText("Use this machine's Claude setup"));
+    await userEvent.click(page.getByText("Reach it only through my tailnet"));
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toMatchObject({ joinTailnet: true, access: "tailnet" });
+  });
+
+  it("offers to join the tailnet when Claude's endpoint is not a private one", async () => {
     setup({ tailscale: true });
     await using _screen = await render(fields());
 
     const join = page.getByRole("checkbox", { name: /Join my tailnet/u });
-    await expect.element(join).toBeChecked();
-    await expect.element(page.getByText(/reached through your tailnet/u)).toBeVisible();
-    // Opting out brings the warning back.
+    await expect.element(join).not.toBeChecked();
     await userEvent.click(page.getByText("Join my tailnet"));
-    await expect.element(page.getByText(/unless it joins your tailnet/u)).toBeVisible();
-    await userEvent.click(page.getByText("Join my tailnet"));
-    await userEvent.click(page.getByText("Reach it only through my tailnet"));
     await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
-    expect(savedConfig()).toMatchObject({ joinTailnet: true, access: "tailnet" });
+    expect(savedConfig()).toMatchObject({ joinTailnet: true, access: "public" });
   });
 
   it("edits a saved config in place and deletes it after a confirmation", async () => {
