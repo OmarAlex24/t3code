@@ -127,6 +127,7 @@ import {
   ensureSandboxThreadRunning,
   notifySandboxThreadSettled,
 } from "~/state/sandboxThreads";
+import { toastManager } from "../ui/toast";
 import { SandboxThreadCoordinator } from "./SandboxThreadCoordinator";
 
 const threadRef = {
@@ -325,34 +326,66 @@ describe("SandboxThreadCoordinator", () => {
   });
 
   describe("a thread the sandbox bridge drives from the host", () => {
-    it("says on settle that the conversation stays here and only the disk can be lost", async () => {
+    it("says on settle that the chat is kept and only the disk can be lost", async () => {
       setup("ask", undefined, { bridged: true });
       await using _screen = await render(<SandboxThreadCoordinator />);
 
       notifySandboxThreadSettled(hostRef);
       await expect.element(page.getByText("Keep this chat's sandbox?")).toBeVisible();
       await expect
-        .element(page.getByText(/Deleting the sandbox keeps this conversation here/u))
+        .element(
+          page.getByText(
+            /If you delete the sandbox, the chat is kept, under Settled; only work on its disk/u,
+          ),
+        )
         .toBeVisible();
       await expect
         .element(page.getByText(/Deleting the sandbox deletes this conversation too/u))
         .not.toBeInTheDocument();
     });
 
-    it("deletes the sandbox from the header menu and keeps the conversation", async () => {
+    it("deletes the sandbox from the header menu and keeps the chat, in the same words", async () => {
       setup("ask", { status: "dirty", uncommittedFiles: 1, unpushedCommits: 0 }, { bridged: true });
+      const toast = vi.spyOn(toastManager, "add");
       await using _screen = await render(<SandboxThreadCoordinator />);
 
-      const done = deleteThreadSandbox(hostRef);
+      const done = deleteThreadSandbox(threadRef);
       await expect.element(page.getByText("Delete sandbox bx_46wr?")).toBeVisible();
       await expect
-        .element(page.getByText(/The conversation stays in this thread on this computer/u))
+        .element(
+          page.getByText(/The chat is kept, under Settled; only work on the sandbox's disk/u),
+        )
         .toBeVisible();
       await expect.element(page.getByText("1 uncommitted file would be lost.")).toBeVisible();
       await userEvent.click(page.getByRole("button", { name: "Delete sandbox", exact: true }));
       await done;
       expect(mocks.deleteSandbox).toHaveBeenCalledOnce();
       expect(mocks.deleteSandboxThread).not.toHaveBeenCalled();
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Deleted sandbox bx_46wr",
+          description: "The chat is kept, under Settled.",
+        }),
+      );
+      toast.mockRestore();
+    });
+
+    it("deleting the sandbox's thread also deletes the host's mirror and the sandbox", async () => {
+      setup("ask", undefined, { bridged: true });
+      await using _screen = await render(<SandboxThreadCoordinator />);
+
+      const deleteThread = vi.fn(async () => ({ _tag: "Success" }));
+      const done = deleteSandboxThread(threadRef, deleteThread);
+      await expect
+        .element(page.getByText(/Also deletes sandbox bx_46wr on Boat, with its disk/u))
+        .toBeVisible();
+      await userEvent.click(page.getByRole("button", { name: "Delete thread and sandbox" }));
+      await done;
+      expect(deleteThread).toHaveBeenCalledOnce();
+      expect(mocks.deleteSandboxThread).toHaveBeenCalledWith(
+        expect.objectContaining({ environmentId: HOST_ENV, input: { threadId: "thread-1" } }),
+      );
+      expect(mocks.deleteSandbox).toHaveBeenCalledOnce();
     });
 
     it("deleting the host thread also deletes the sandbox's copy and the sandbox", async () => {
