@@ -189,17 +189,13 @@ import { cn } from "~/lib/utils";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { useBridgedSandboxCopies, useThreadSandbox } from "../state/sandboxes";
+import { useSandboxHostMirrors, useThreadSandbox } from "../state/sandboxes";
 import {
-  bridgedSandboxCopyHost,
   ensureSandboxThreadRunning,
   isHostThreadRef,
+  sandboxMirrorTarget,
   shortSandboxId,
 } from "../state/sandboxThreads";
-import {
-  sandboxCopyBannerItem,
-  sandboxPlaceholderBannerItem,
-} from "./chat/sandboxPlaceholderBanner";
 import { SandboxProviderLogo } from "./settings/SandboxProviderLogo";
 import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
@@ -995,12 +991,22 @@ export default function ChatView(props: ChatViewProps) {
     activeSandbox !== undefined &&
     activeThreadRef !== null &&
     isHostThreadRef(activeSandbox, activeThreadRef);
-  // The sandbox's own copy of a chat the host keeps; its notice links back to the host thread.
-  const bridgedSandboxCopies = useBridgedSandboxCopies();
-  const activeSandboxCopyHost =
-    activeThreadRef === null
-      ? undefined
-      : bridgedSandboxCopyHost(bridgedSandboxCopies, activeThreadRef);
+  // The host's mirror of a sandbox thread is for the phone; here the sandbox's own thread opens.
+  const sandboxHostMirrors = useSandboxHostMirrors();
+  const activeMirrorTarget =
+    activeThreadRef === null ? undefined : sandboxMirrorTarget(sandboxHostMirrors, activeThreadRef);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the route off the host's mirror, which this app never shows, to the sandbox thread
+  useEffect(() => {
+    if (activeMirrorTarget === undefined) return;
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: {
+        environmentId: activeMirrorTarget.environmentId,
+        threadId: activeMirrorTarget.threadId,
+      },
+      replace: true,
+    });
+  }, [activeMirrorTarget, navigate]);
   const activeSandboxStopped = activeSandbox?.state === "stopped";
   // A legacy sandbox thread's server is off on purpose, so the session cannot be read and the
   // connection never comes up until a send or un-settle resumes it from this client.
@@ -2689,44 +2695,6 @@ export default function ChatView(props: ChatViewProps) {
             },
           ]
         : [];
-    const sandboxThreadEnvironmentId = activeSandboxOnHost ? activeSandbox.environmentId : null;
-    const sandboxPlaceholderItems: ComposerBannerStackItem[] =
-      activeProject !== null && activeProjectIsSandboxPlaceholder
-        ? [
-            sandboxPlaceholderBannerItem({
-              projectId: activeProject.id,
-              projectTitle: activeProject.title,
-              sandboxShortId: activeSandbox ? shortSandboxId(activeSandbox.sandboxId) : null,
-              onOpenSandboxThread:
-                sandboxThreadEnvironmentId === null || activeThreadRef === null
-                  ? null
-                  : () =>
-                      void navigate({
-                        to: "/$environmentId/$threadId",
-                        params: {
-                          environmentId: sandboxThreadEnvironmentId,
-                          threadId: activeThreadRef.threadId,
-                        },
-                      }),
-            }),
-          ]
-        : [];
-    const sandboxCopyItems: ComposerBannerStackItem[] =
-      activeSandboxCopyHost === undefined || activeSandbox === undefined
-        ? []
-        : [
-            sandboxCopyBannerItem({
-              sandboxShortId: shortSandboxId(activeSandbox.sandboxId),
-              onOpenMainChat: () =>
-                void navigate({
-                  to: "/$environmentId/$threadId",
-                  params: {
-                    environmentId: activeSandboxCopyHost.environmentId,
-                    threadId: activeSandboxCopyHost.threadId,
-                  },
-                }),
-            }),
-          ];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
@@ -2737,8 +2705,6 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...freshSessionItems,
         ...sandboxItems,
-        ...sandboxPlaceholderItems,
-        ...sandboxCopyItems,
         ...systemComposerBannerItems,
       ];
     }
@@ -2751,8 +2717,6 @@ export default function ChatView(props: ChatViewProps) {
       ...projectCloneItems,
       ...freshSessionItems,
       ...sandboxItems,
-      ...sandboxPlaceholderItems,
-      ...sandboxCopyItems,
       ...systemComposerBannerItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
