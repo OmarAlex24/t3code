@@ -222,7 +222,8 @@ export function SandboxEnvironmentFields({
   );
   const [passGithub, setPassGithub] = useState(config?.passGithubToken ?? false);
   // Null until toggled, so it follows whether the server's Claude endpoint is private.
-  const [joinTailnet, setJoinTailnet] = useState<boolean | null>(config?.joinTailnet ?? null);
+  // Stored off means automatic: a launch joins anyway while Claude's endpoint is private.
+  const [joinTailnet, setJoinTailnet] = useState(config?.joinTailnet ?? false);
   const [tailnetOnly, setTailnetOnly] = useState(config?.access === "tailnet");
   const projects = useProjects();
   // A config saved with host project ids opens as the repositories those projects clone.
@@ -290,7 +291,12 @@ export function SandboxEnvironmentFields({
     (settings) =>
       settings.sandboxTailscale.clientId !== "" && settings.sandboxTailscale.clientSecret !== "",
   );
-  const joinsTailnet = tailscaleReady && (joinTailnet ?? host?.claude?.privateNetwork === true);
+  // The server judged only its own endpoint; each launch judges the saved one again.
+  const privateClaude =
+    sendsClaude && host?.claude?.privateNetwork === true && claudeEndpoint === host.claude.baseUrl;
+  const claudeHost = URL.parse(claudeEndpoint)?.host ?? claudeEndpoint;
+  const autoJoinsTailnet = tailscaleReady && privateClaude;
+  const joinsTailnet = tailscaleReady && (joinTailnet || autoJoinsTailnet);
   // Any machine's project can start on a config: the sandbox clones its repository from GitHub.
   const repositoryChoices = sandboxRepositoryChoices(projects, environmentId);
   const disabled =
@@ -337,7 +343,8 @@ export function SandboxEnvironmentFields({
           ...(credentialEnvironment === "" ? {} : { credentialEnvironment }),
           ...(sendsClaude ? { claude: { baseUrl: claudeEndpoint } } : {}),
           passGithubToken: passGithub && host?.github === true,
-          joinTailnet: joinsTailnet,
+          // A tailnet-only sandbox has to ask to join; otherwise the launch decides.
+          joinTailnet: tailscaleReady && (joinTailnet || (autoJoinsTailnet && tailnetOnly)),
           access: joinsTailnet && tailnetOnly ? "tailnet" : "public",
           // Ids that named no repository stay until the list is edited, so access never widens
           // just by opening and saving an older config.
@@ -595,18 +602,14 @@ export function SandboxEnvironmentFields({
                 </OptIn>
                 {/* Judged by the server for its own endpoint only; an edited URL is checked live. */}
                 {!host.claude.privateNetwork ||
-                claudeEndpoint !== host.claude.baseUrl ? null : joinsTailnet ? (
-                  <p className="flex items-start gap-1.5 ps-6.5 text-2xs leading-relaxed text-muted-foreground">
-                    <CheckIcon aria-hidden className="mt-px size-3 shrink-0 text-success" />
-                    Private address, reached through your tailnet.
-                  </p>
-                ) : (
+                claudeEndpoint !== host.claude.baseUrl ||
+                tailscaleReady ? null : (
                   <p className="flex flex-wrap items-start gap-x-1.5 ps-6.5 text-2xs leading-relaxed text-warning-foreground">
                     <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
                     <span className="min-w-0 flex-1">
-                      Resolves to a private address; a cloud sandbox can't reach it
-                      {tailscaleReady ? " unless it joins your tailnet." : "."}
-                      {tailscaleReady || !provider.configured ? null : (
+                      Resolves to a private address, so a sandbox has to join your tailnet to reach
+                      it.
+                      {!provider.configured ? null : (
                         <>
                           {" "}
                           <button
@@ -643,15 +646,30 @@ export function SandboxEnvironmentFields({
             )}
             {tailscaleReady ? (
               <div className="space-y-2">
-                <OptIn
-                  checked={joinsTailnet}
-                  disabled={isSaving}
-                  onCheckedChange={setJoinTailnet}
-                  title="Join my tailnet"
-                >
-                  Each sandbox joins as an ephemeral, tagged Tailscale device so it can reach
-                  private endpoints. Deleting the sandbox removes the device.
-                </OptIn>
+                {autoJoinsTailnet ? (
+                  <div className="flex items-start gap-2.5 text-xs">
+                    <CheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-success" />
+                    <div className="space-y-0.5">
+                      <p className="font-medium text-foreground">
+                        Joins your tailnet automatically because {claudeHost} is private.
+                      </p>
+                      <p className="text-2xs leading-relaxed text-muted-foreground">
+                        Each sandbox joins as an ephemeral, tagged Tailscale device. Deleting the
+                        sandbox removes the device.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <OptIn
+                    checked={joinTailnet}
+                    disabled={isSaving}
+                    onCheckedChange={setJoinTailnet}
+                    title="Join my tailnet"
+                  >
+                    Each sandbox joins as an ephemeral, tagged Tailscale device so it can reach
+                    private endpoints. Deleting the sandbox removes the device.
+                  </OptIn>
+                )}
                 {joinsTailnet ? (
                   <div className="ps-6.5">
                     <OptIn
