@@ -8,6 +8,12 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import {
+  providerInstanceEntriesFor,
+  resolveProjectDefaultProviderModelSelection,
+  resolveSelectableProviderInstanceEntry,
+} from "../providerInstances";
+
 import { findThreadSandbox, sandboxBridgeReady } from "./sandboxThreads";
 
 const HOST = EnvironmentId.make("host");
@@ -106,5 +112,45 @@ describe("sandboxBridgeReady", () => {
     expect(sandboxBridgeReady({ ...base, settings: settings(false) })).toBe(false);
     expect(sandboxBridgeReady({ ...base, settings: null })).toBe(false);
     expect(sandboxBridgeReady({ ...base, projects: [] })).toBe(false);
+  });
+});
+
+describe("the sandbox bridge as an internal provider instance", () => {
+  const projectId = ProjectId.make("project-host");
+  const provider = (instanceId: string, driver: string, slug: string) =>
+    ({
+      instanceId,
+      driver,
+      enabled: true,
+      installed: true,
+      status: "ready",
+      models: [{ slug, name: slug, isCustom: false, capabilities: null }],
+    }) as unknown as ServerProvider;
+  // The bridge listed first, as it would be if the server reported it before anything else.
+  const providers = [
+    provider("sandboxes", "acpRegistry", "sandbox"),
+    provider("claudeAgent", "claudeAgent", "opus"),
+  ];
+  const settings = {
+    providerInstances: { sandboxes: { driver: "acpRegistry", enabled: false } },
+    projectSettingsOverrides: {
+      [projectId]: { providerInstances: { sandboxes: { enabled: true } } },
+    },
+  } as unknown as ServerSettings;
+  const entries = providerInstanceEntriesFor(providers, settings, projectId);
+
+  it("still resolves for a thread that asks for it", () => {
+    expect(resolveSelectableProviderInstanceEntry(entries, "sandboxes" as never)?.instanceId).toBe(
+      "sandboxes",
+    );
+  });
+
+  it("is never what a new thread in a host project falls back to", () => {
+    expect(resolveSelectableProviderInstanceEntry(entries, undefined)?.instanceId).toBe(
+      "claudeAgent",
+    );
+    expect(
+      resolveProjectDefaultProviderModelSelection(providers, settings as never, projectId),
+    ).toEqual({ instanceId: "claudeAgent", model: "opus" });
   });
 });
