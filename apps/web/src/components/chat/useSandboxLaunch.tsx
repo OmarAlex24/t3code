@@ -4,11 +4,13 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type {
-  EnvironmentId,
-  ProjectId,
-  SandboxEnvironmentConfig,
-  ThreadId,
+import {
+  AuthSettingsWriteScope,
+  type EnvironmentId,
+  type ProjectId,
+  sandboxConfigAllows,
+  type SandboxEnvironmentConfig,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -29,9 +31,12 @@ import {
   useSandboxProvisionerEnvironmentId,
   useSandboxThreadEnvironmentIds,
 } from "../../state/sandboxes";
+import { hostCopyOf, sandboxRepositoryOf } from "../../state/sandboxRepositories";
 import { serverEnvironment } from "../../state/server";
+import { readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { EnvironmentOption } from "../BranchToolbar.logic";
+import { SandboxConfigDialog } from "../settings/SandboxConfigDialog";
 import { describeSandboxFailure } from "../settings/SandboxStartLimits";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SandboxSetupCard } from "./SandboxSetupCard";
@@ -98,38 +103,39 @@ export function useSandboxLaunch(input: {
     keptEnvironments.length === input.logicalProjectEnvironments.length
       ? input.logicalProjectEnvironments
       : keptEnvironments;
-  // A sandbox clones the project from GitHub, using the copy on the host for its env files.
-  const hostEntry = logicalProjectEnvironments.find(
-    (environment) => environment.environmentId === hostEnvironmentId,
-  );
+  // A sandbox clones the project from GitHub, so it can start from a project on any machine; the
+  // same repository's copy on the host, when there is one, supplies its env files.
+  const repository = activeProject === null ? null : sandboxRepositoryOf(activeProject);
   const hostProject =
-    hostEntry === undefined || hostEntry.projectId === null
+    repository === null || hostEnvironmentId === null
       ? null
-      : (projects.find(
-          (project) =>
-            project.environmentId === hostEnvironmentId && project.id === hostEntry.projectId,
-        ) ?? null);
-  const remoteUrl = hostProject?.repositoryIdentity?.locator.remoteUrl ?? null;
+      : hostCopyOf(projects, hostEnvironmentId, repository.key);
   const launchable =
-    draftId !== null &&
-    !envLocked &&
-    activeProject !== null &&
-    activeProject.isScratch !== true &&
-    hostProject !== null &&
-    remoteUrl !== null &&
-    /github\.com[/:]/u.test(remoteUrl);
+    draftId !== null && !envLocked && hostEnvironmentId !== null && repository !== null;
   const usableConfigs = launchable
-    ? configs.filter(
-        (config) => config.projectIds.length === 0 || config.projectIds.includes(hostProject.id),
+    ? configs.filter((config) =>
+        sandboxConfigAllows(config, {
+          repository: repository.key,
+          hostProjectId: hostProject?.id ?? null,
+        }),
       )
     : EMPTY_CONFIGS;
   const options: ReadonlyArray<EnvironmentOption> = usableConfigs.map((config) => ({
     environmentId: sandboxOptionId(config.id),
     projectId: null,
-    label: `Sandbox: ${config.label}`,
+    label: config.label,
     isPrimary: false,
     machine: "cloud",
+    sandboxProvider: config.provider,
   }));
+  // With no config yet, the picker offers to make one; saving it needs settings access.
+  const [creatingConfig, setCreatingConfig] = useState(false);
+  const offersNewConfig =
+    launchable &&
+    configsQuery.data !== undefined &&
+    configs.length === 0 &&
+    hostEnvironmentId !== null &&
+    readEnvironmentScope(hostEnvironmentId, AuthSettingsWriteScope);
   const selectedConfig = usableConfigs.find((config) => config.id === selectedConfigId) ?? null;
 
   // A new draft for the project can land on another thread's sandbox, since it holds a copy of the
@@ -139,21 +145,31 @@ export function useSandboxLaunch(input: {
     activeEnvironmentId,
     threadId,
   );
-  const hostProjectId = hostEntry?.projectId ?? null;
+  // Back to the host's copy, or else to the project's own machine, such as a paired remote.
+  const homeEntry =
+    hostProject !== null && hostEnvironmentId !== null
+      ? { environmentId: hostEnvironmentId, projectId: hostProject.id }
+      : logicalProjectEnvironments.find(
+          (environment) =>
+            environment.projectId !== null &&
+            !sandboxThreadEnvironmentIds.has(environment.environmentId),
+        );
+  const homeEnvironmentId = homeEntry?.environmentId ?? null;
+  const homeProjectId = homeEntry?.projectId ?? null;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves an unsent draft off a sandbox that belongs to another thread
   useEffect(() => {
-    if (!onForeignSandbox || envLocked || draftId === null || hostEnvironmentId === null) return;
-    if (hostProjectId === null) return;
+    if (!onForeignSandbox || envLocked || draftId === null) return;
+    if (homeEnvironmentId === null || homeProjectId === null) return;
     setDraftThreadContext(draftId, {
-      projectRef: scopeProjectRef(hostEnvironmentId, hostProjectId),
+      projectRef: scopeProjectRef(homeEnvironmentId, homeProjectId),
       environmentSelection: "manual",
       loadBalancedEnvironmentId: null,
     });
   }, [
     draftId,
     envLocked,
-    hostEnvironmentId,
-    hostProjectId,
+    homeEnvironmentId,
+    homeProjectId,
     onForeignSandbox,
     setDraftThreadContext,
   ]);
@@ -324,7 +340,14 @@ export function useSandboxLaunch(input: {
   /** Starts the launch instead of sending; true while the message has to wait for it. */
   const interceptSend = (): boolean => {
     if (activeLaunch !== null) return true;
-    if (selectedConfig === null || !launchable || threadId === null || draftId === null) {
+    if (
+      selectedConfig === null ||
+      !launchable ||
+      repository === null ||
+      activeProject === null ||
+      threadId === null ||
+      draftId === null
+    ) {
       return false;
     }
     const host = hostEnvironmentId!;
@@ -339,10 +362,15 @@ export function useSandboxLaunch(input: {
         configId: selectedConfig.id,
         threadId,
         project: {
-          id: hostProject.id,
-          title: hostProject.title,
-          workspaceRoot: hostProject.workspaceRoot,
-          remoteUrl: remoteUrl!,
+          id: activeProject.id,
+          title: activeProject.title,
+          // Credential-free; the host checks it again before cloning.
+          remoteUrl: repository.cloneUrl,
+          ...(hostProject === null
+            ? {}
+            : {
+                hostCopy: { projectId: hostProject.id, workspaceRoot: hostProject.workspaceRoot },
+              }),
         },
       },
     }).then((result) => {
@@ -404,10 +432,22 @@ export function useSandboxLaunch(input: {
       />
     );
 
+  const configDialog: ReactNode =
+    hostEnvironmentId === null ? null : (
+      <SandboxConfigDialog
+        environmentId={hostEnvironmentId}
+        editing={creatingConfig ? "new" : null}
+        onClose={() => setCreatingConfig(false)}
+      />
+    );
+
   return {
     /** Real machines for this project, without other threads' sandboxes. */
     logicalProjectEnvironments,
     options,
+    /** Opens the config dialog from the picker while no config exists yet. */
+    onNewConfig: offersNewConfig ? () => setCreatingConfig(true) : undefined,
+    configDialog,
     pickedEnvironmentId: selectedConfig === null ? null : sandboxOptionId(selectedConfig.id),
     onEnvironmentChange,
     interceptSend,
