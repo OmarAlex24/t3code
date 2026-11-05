@@ -8,6 +8,7 @@ import {
   withMessageContext,
   deriveAvailableRevertTurnCounts,
   deriveThreadPendingBackgroundTasks,
+  waitingMessageCanResend,
 } from "./ChatView.logic";
 import {
   isThreadEnvironmentLocked,
@@ -1415,5 +1416,37 @@ describe("Open in for the host environment", () => {
         }),
       ).toBe(visible);
     }
+  });
+});
+
+describe("waitingMessageCanResend", () => {
+  const ready = {
+    waitingDraftId: "draft-1",
+    draftId: "draft-1",
+    isLocalDraftThread: true,
+    canOperateThread: true,
+    isSendBusy: false,
+    isRevertingCheckpoint: false,
+    threadDetailLoading: false,
+    clientSettingsHydrated: true,
+    needsLoadBalancing: false,
+    activeEnvironmentUnavailable: false,
+    hasPendingProgress: false,
+    feedbackUploading: false,
+  };
+
+  it("resends once the draft is idle", () => {
+    expect(waitingMessageCanResend(ready)).toBe(true);
+  });
+
+  // A sandbox paired a moment ago can show its project before its session grants this app any
+  // scope; a send then would be dropped while the message no longer waits.
+  it("waits until the draft's machine lets this app start threads", () => {
+    expect(waitingMessageCanResend({ ...ready, canOperateThread: false })).toBe(false);
+  });
+
+  it("waits only for its own draft", () => {
+    expect(waitingMessageCanResend({ ...ready, draftId: "draft-2" })).toBe(false);
+    expect(waitingMessageCanResend({ ...ready, waitingDraftId: null })).toBe(false);
   });
 });
