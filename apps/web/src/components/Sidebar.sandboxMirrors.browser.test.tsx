@@ -139,7 +139,7 @@ const sandbox = (fields: Partial<SandboxRecord>): SandboxRecord => ({
 });
 
 describe("sandbox chats in the sidebar", () => {
-  it("lists a bridged chat once, as its host thread, and keeps a chat from before the bridge", async () => {
+  it("lists a sandbox chat once, as the sandbox's own thread, and keeps one from before the bridge", async () => {
     using stack = new DisposableStack();
     const previousSettings = getClientSettings();
     stack.defer(() => __setClientSettingsForTests(previousSettings));
@@ -173,8 +173,9 @@ describe("sandbox chats in the sidebar", () => {
       </SidebarProvider>,
     );
 
-    await expect.element(page.getByText("Greeting from boat.dev").first()).toBeVisible();
+    await expect.element(page.getByText("say high from boat.dev:)").first()).toBeVisible();
     await expect.element(page.getByText("An older sandbox chat").first()).toBeVisible();
-    await expect.element(page.getByText("say high from boat.dev:)")).not.toBeInTheDocument();
+    // The host's mirror is for the phone, and its project holds nothing else.
+    await expect.element(page.getByText("Greeting from boat.dev")).not.toBeInTheDocument();
   });
 });
