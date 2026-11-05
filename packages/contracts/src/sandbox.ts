@@ -346,6 +346,11 @@ export const SandboxRecord = Schema.Struct({
   bridge: Schema.optionalKey(
     Schema.Struct({ sessionId: TrimmedString, secret: TrimmedString, expiresAt: TrimmedString }),
   ),
+  /**
+   * When T3 found this sandbox's launch with nothing left to finish it (the server stopped
+   * mid-launch). The machine is kept for the user to delete; a new launch on its thread replaces it.
+   */
+  abandonedAt: Schema.optionalKey(TrimmedString),
   /** Provider settings the sandbox was created with; they win over the current ones for it. */
   providerSettings: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   /** Machine cost this calendar month at list price, when the provider reports it. */
