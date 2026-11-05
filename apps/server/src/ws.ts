@@ -257,7 +257,7 @@ import * as SourceControlProviderRegistry from "./sourceControl/SourceControlPro
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
-import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
+import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
 import * as DiyKit from "./diy/DiyKit.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
@@ -2006,7 +2006,7 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
-      const sandboxHandlers = yield* SandboxProvisioner.rpcHandlers;
+      const sandboxHandlers = yield* SandboxBridge.rpcHandlers;
       const diyHandlers = yield* DiyKit.rpcHandlers(currentSession);
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>

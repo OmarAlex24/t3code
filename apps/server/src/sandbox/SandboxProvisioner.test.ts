@@ -53,6 +53,7 @@ import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { layerHttpClient, requestJson } from "./SandboxProvider.ts";
+import { bridgeLinkSecretName } from "@t3tools/sandbox-bridge/link";
 import { boatDriver } from "./providers/boat.ts";
 import { celestoDriver } from "./providers/celesto.ts";
 import { daytonaDriver } from "./providers/daytona.ts";
@@ -333,6 +334,29 @@ const pairOr = (command: string, token: string, otherwise: string) => {
     Buffer.from(token),
   );
   return `T3_PAIR_TOKEN: ${sealed.toString("base64")}\n`;
+};
+
+// What the bridge credential script prints once it has minted `token`: its id and expiry in clear
+// and the token sealed, in order, to the key in the command.
+const bridgeOutput = (
+  command: string,
+  minted: { readonly sessionId: string; readonly token: string; readonly expiresAt: string },
+) => {
+  const key = /-----BEGIN PUBLIC KEY-----[\s\S]+?-----END PUBLIC KEY-----/u.exec(command)?.[0];
+  if (key === undefined) return "T3_BRIDGE_ERROR: seal\n";
+  const parts = (minted.token.match(/.{1,180}/gu) ?? []).map((part) =>
+    NodeCrypto.publicEncrypt(
+      { key, padding: NodeCrypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+      Buffer.from(part),
+    ).toString("base64"),
+  );
+  return [
+    `T3_BRIDGE_SESSION: ${minted.sessionId}`,
+    `T3_BRIDGE_EXPIRES: ${minted.expiresAt}`,
+    ...parts.map((part) => `T3_BRIDGE_PART: ${part}`),
+    "T3_BRIDGE_END",
+    "",
+  ].join("\n");
 };
 
 // Runs a provider's command with this machine's sh, as the sandbox would, against a `t3` that
@@ -4750,6 +4774,8 @@ describe("SandboxProvisioner per-thread launches", () => {
     remoteUrl: "https://github.com/Octo/Hello.git",
   };
   const pairToken = "PAIRLAUNCH42";
+  // Longer than one sealed block, like a real bearer token.
+  const bridgeToken = `t3b_${"BRIDGE7Q2".repeat(40)}`;
   const configInput = {
     label: "Boat small",
     provider: "boat",
@@ -4819,8 +4845,11 @@ describe("SandboxProvisioner per-thread launches", () => {
       readonly inEnvironments?: BoatFake["inEnvironments"];
       /** What the work check prints; a clean clone by default. */
       readonly work?: string;
+      /** When the bridge credentials the sandbox mints expire. */
+      readonly bridgeExpiresAt?: string;
     } = {},
   ): BoatFake => {
+    let minted = 0;
     const requests: Array<string> = [];
     const commands: Array<string> = [];
     const bodies: Array<{ readonly url: string; readonly body: unknown }> = [];
@@ -4919,11 +4948,17 @@ describe("SandboxProvisioner per-thread launches", () => {
             ? "T3_REPO_DIR: /home/boat/work/hello\nT3_REPO_PROJECT: project-remote\n"
             : options.endpointStatus !== undefined && command.includes("T3_ENDPOINT_STATUS")
               ? `T3_ENDPOINT_STATUS:${options.endpointStatus}\n`
-              : command.includes("T3_WORK:")
-                ? `${options.work ?? "T3_WORK:0:0"}\n`
-                : command.includes("T3_TAILSCALE_")
-                  ? "T3_TAILSCALE_DAEMON: nohup\nT3_TAILSCALE_MODE: kernel\nT3_TAILSCALE_STATE: Running\nT3_TAILSCALE_NODE: nNODE1CNTRL\n"
-                  : pairOr(bodyTextOf(request), pairToken, "");
+              : command.includes("auth session issue")
+                ? bridgeOutput(command, {
+                    sessionId: `bridge-session-${++minted}`,
+                    token: bridgeToken,
+                    expiresAt: options.bridgeExpiresAt ?? "2027-11-05T00:00:00.000Z",
+                  })
+                : command.includes("T3_WORK:")
+                  ? `${options.work ?? "T3_WORK:0:0"}\n`
+                  : command.includes("T3_TAILSCALE_")
+                    ? "T3_TAILSCALE_DAEMON: nohup\nT3_TAILSCALE_MODE: kernel\nT3_TAILSCALE_STATE: Running\nT3_TAILSCALE_NODE: nNODE1CNTRL\n"
+                    : pairOr(bodyTextOf(request), pairToken, "");
           return respond(request, { exitCode: 0, stdout, stderr: "" });
         });
         return options.holding !== undefined && command.includes(options.holding.text)
@@ -5090,6 +5125,163 @@ describe("SandboxProvisioner per-thread launches", () => {
         provisionerLayer({}, repository.layer, {
           configs: configs.layer,
           workspace: { ".env": "API_TOKEN=shh", "build/output.log": "ignored" },
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  const bridgeIssues = (fake: BoatFake) =>
+    fake.commands.filter((command) => command.includes("auth session issue"));
+
+  const bridgeLinkOf = (secrets: ReturnType<typeof memorySecrets>) => {
+    const stored = secrets.values.get(bridgeLinkSecretName(threadId));
+    return stored === undefined ? undefined : JSON.parse(new TextDecoder().decode(stored));
+  };
+
+  const launchedThread = Effect.gen(function* () {
+    const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+    const { config } = yield* provisioner.saveConfig({ config: configInput, apiKey: "boat_test" });
+    const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+    yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+    yield* provisioner.pairLaunch({ threadId });
+    yield* provisioner.completeLaunch({ threadId });
+    return { provisioner, instanceId };
+  });
+
+  it.effect(
+    "mints the sandbox bridge's credential at launch and keeps its token in the secret store",
+    () => {
+      const fake = boatFake();
+      const repository = memoryRepository();
+      const secrets = memorySecrets();
+      return Effect.gen(function* () {
+        const { instanceId } = yield* launchedThread;
+        const record = repository.records.get(instanceId)!;
+        expect(record).toMatchObject({
+          sandboxProjectId: "project-remote",
+          repository: "octo/hello",
+          hostProjectId: projectId,
+          bridge: {
+            sessionId: "bridge-session-1",
+            secret: bridgeLinkSecretName(threadId),
+            expiresAt: "2027-11-05T00:00:00.000Z",
+          },
+        });
+        expect(JSON.stringify(record)).not.toContain(bridgeToken);
+        expect(bridgeLinkOf(secrets)).toEqual({
+          threadId,
+          instanceId,
+          sandboxId: boatSandboxId,
+          label: "hello on Boat small",
+          httpBaseUrl: "https://boat.example/t3",
+          sandboxProjectId: "project-remote",
+          token: bridgeToken,
+        });
+        // Scoped to what the bridge drives, and never in a command's text.
+        expect(bridgeIssues(fake)).toHaveLength(1);
+        expect(bridgeIssues(fake)[0]).toContain(
+          "--scope orchestration:read --scope orchestration:operate --ttl 365d --label t3-sandbox-bridge",
+        );
+        expect(fake.commands.some((command) => command.includes(bridgeToken))).toBe(false);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer({}, repository.layer, {
+            configs: memoryConfigs().layer,
+            secrets: secrets.layer,
+          }),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
+
+  it.effect("links a host project to the sandbox, reusing a credential that is still fresh", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    const secrets = memorySecrets();
+    return Effect.gen(function* () {
+      const { provisioner, instanceId } = yield* launchedThread;
+      const hostProjectId = ProjectId.make("project-lightweight");
+      const linked = yield* provisioner.linkBridge({ threadId, hostProjectId });
+      expect(linked).toMatchObject({ instanceId, hostProjectId });
+      expect(repository.records.get(instanceId)?.hostProjectId).toBe(hostProjectId);
+      expect(bridgeIssues(fake)).toHaveLength(1);
+      expect(bridgeLinkOf(secrets)?.token).toBe(bridgeToken);
+
+      const unknown = yield* provisioner
+        .linkBridge({ threadId: ThreadId.make("thread-elsewhere"), hostProjectId })
+        .pipe(Effect.flip);
+      expect(unknown.detail).toBe("No sandbox belongs to this thread.");
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: memoryConfigs().layer,
+          secrets: secrets.layer,
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("re-mints a bridge credential near its expiry, revoking the old one", () => {
+    // The test clock starts at the epoch, so this one has days left.
+    const fake = boatFake({ bridgeExpiresAt: "1970-01-10T00:00:00.000Z" });
+    const repository = memoryRepository();
+    const secrets = memorySecrets();
+    return Effect.gen(function* () {
+      const { provisioner, instanceId } = yield* launchedThread;
+      yield* provisioner.linkBridge({ threadId, hostProjectId: projectId });
+      expect(bridgeIssues(fake)).toHaveLength(2);
+      expect(bridgeIssues(fake)[1]).toContain("t3 auth session revoke bridge-session-1");
+      expect(repository.records.get(instanceId)?.bridge?.sessionId).toBe("bridge-session-2");
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: memoryConfigs().layer,
+          secrets: secrets.layer,
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("refreshes the bridge's link on resume and renews a credential near expiry", () => {
+    const fake = boatFake({ bridgeExpiresAt: "1970-01-10T00:00:00.000Z" });
+    const repository = memoryRepository();
+    const secrets = memorySecrets();
+    return Effect.gen(function* () {
+      const { provisioner, instanceId } = yield* launchedThread;
+      yield* provisioner.stop({ instanceId });
+      const resumed = yield* provisioner.resume({ instanceId });
+      expect(resumed.sandbox.bridge?.sessionId).toBe("bridge-session-2");
+      expect(repository.records.get(instanceId)?.bridge?.sessionId).toBe("bridge-session-2");
+      expect(bridgeLinkOf(secrets)?.httpBaseUrl).toBe(resumed.httpBaseUrl);
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: memoryConfigs().layer,
+          secrets: secrets.layer,
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("removes the bridge's credential with its sandbox", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    const secrets = memorySecrets();
+    return Effect.gen(function* () {
+      const { provisioner, instanceId } = yield* launchedThread;
+      expect(bridgeLinkOf(secrets)).toBeDefined();
+      yield* provisioner.delete({ provider: "boat", instanceId, sandboxId: boatSandboxId });
+      expect(bridgeLinkOf(secrets)).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: memoryConfigs().layer,
+          secrets: secrets.layer,
         }),
       ),
       Effect.provideService(HttpClient.HttpClient, fake.client),

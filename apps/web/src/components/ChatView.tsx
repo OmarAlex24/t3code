@@ -59,6 +59,7 @@ import {
   type AssistantCitation,
   type ChatFileAttachment,
   isProviderNativeSubagentThread,
+  isSandboxHostProjectRoot,
   orchestrationV2WorktreePending,
   type EnvironmentId,
   type MessageId,
@@ -188,7 +189,12 @@ import { isModelPickerOpen } from "../modelPickerVisibility";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { useThreadSandbox } from "../state/sandboxes";
-import { ensureSandboxThreadRunning, shortSandboxId } from "../state/sandboxThreads";
+import {
+  ensureSandboxThreadRunning,
+  isHostThreadRef,
+  shortSandboxId,
+} from "../state/sandboxThreads";
+import { sandboxPlaceholderBannerItem } from "./chat/sandboxPlaceholderBanner";
 import { SandboxProviderLogo } from "./settings/SandboxProviderLogo";
 import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
@@ -982,9 +988,16 @@ export default function ChatView(props: ChatViewProps) {
   const activeThreadRef = useActiveThreadRef(activeThread);
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const activeSandbox = useThreadSandbox(activeThreadRef);
-  // Its server is off on purpose, so the session cannot be read and the connection never comes up
-  // until a send or un-settle resumes it.
+  // The host thread the sandbox bridge drives: its own server stays up, and the host resumes the
+  // sandbox when a turn starts, so it sends like any other thread.
+  const activeSandboxOnHost =
+    activeSandbox !== undefined &&
+    activeThreadRef !== null &&
+    isHostThreadRef(activeSandbox, activeThreadRef);
   const activeSandboxStopped = activeSandbox?.state === "stopped";
+  // A legacy sandbox thread's server is off on purpose, so the session cannot be read and the
+  // connection never comes up until a send or un-settle resumes it from this client.
+  const legacySandboxStopped = activeSandboxStopped && !activeSandboxOnHost;
   const [sandboxResendPending, setSandboxResendPending] = useState(false);
   const activeEnvironmentServerBrowser = useEnvironmentSupportsServerBrowser(
     activeThreadRef?.environmentId ?? null,
@@ -1105,12 +1118,19 @@ export default function ChatView(props: ChatViewProps) {
       ? scopeProjectRef(activeThreadEnvironmentId, activeThreadProjectId)
       : null;
   const activeProject = useProject(activeProjectRef);
+  // T3 made this project's folder only to hold sandbox threads: it is empty, not the repository, so
+  // nothing here offers git, scripts, files or a terminal on it.
+  const activeProjectIsSandboxPlaceholder =
+    activeProject !== null && isSandboxHostProjectRoot(activeProject.workspaceRoot);
   const activeProjectSettings = resolveProjectSettings(
     settings,
     activeProject?.id ?? null,
     activeProject ?? undefined,
   );
-  const activeProjectScripts = activeProject ? resolveProjectScripts(settings, activeProject) : [];
+  const activeProjectScripts =
+    activeProject && !activeProjectIsSandboxPlaceholder
+      ? resolveProjectScripts(settings, activeProject)
+      : [];
   const { projectCloneBannerItem, projectCloneSendBlockReason } =
     useProjectCloneBanner(activeProjectRef);
   const activeProjectDefaultModelSelection =
@@ -1302,7 +1322,7 @@ export default function ChatView(props: ChatViewProps) {
   const systemComposerBannerItems = useSystemComposerBanners({
     activeEnvironment,
     activeEnvironmentUnavailable,
-    activeEnvironmentUnavailableState: activeSandboxStopped
+    activeEnvironmentUnavailableState: legacySandboxStopped
       ? null
       : activeEnvironmentUnavailableState,
     activeThreadEnvironmentId: activeThread?.environmentId ?? null,
@@ -1636,12 +1656,13 @@ export default function ChatView(props: ChatViewProps) {
     turnDiffSummaries.at(-1)?.completedAt ?? null,
   );
 
-  const gitCwd = activeProject
-    ? projectScriptCwd({
-        project: { cwd: activeProject.workspaceRoot },
-        worktreePath: activeThread?.worktreePath ?? null,
-      })
-    : null;
+  const gitCwd =
+    activeProject && !activeProjectIsSandboxPlaceholder
+      ? projectScriptCwd({
+          project: { cwd: activeProject.workspaceRoot },
+          worktreePath: activeThread?.worktreePath ?? null,
+        })
+      : null;
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
     gitStatusCwd === null
@@ -1664,12 +1685,14 @@ export default function ChatView(props: ChatViewProps) {
     DEFAULT_RESOLVED_KEYBINDINGS;
   const availableEditors = useAtomValue(primaryServerAvailableEditorsAtom);
   const remoteOpenState = useRemoteOpenState(activeThread?.environmentId ?? environmentId);
-  const showOpenInPicker = shouldShowOpenInPicker({
-    activeProjectName: activeProject?.title,
-    activeThreadEnvironmentId: activeThread?.environmentId ?? environmentId,
-    primaryEnvironmentId,
-    remoteOpenMode: remoteOpenState.mode,
-  });
+  const showOpenInPicker =
+    !activeProjectIsSandboxPlaceholder &&
+    shouldShowOpenInPicker({
+      activeProjectName: activeProject?.title,
+      activeThreadEnvironmentId: activeThread?.environmentId ?? environmentId,
+      primaryEnvironmentId,
+      remoteOpenMode: remoteOpenState.mode,
+    });
   useOpenFavoriteEditorShortcut({
     enabled: showOpenInPicker && !backgroundThread,
     environmentId: activeThread?.environmentId ?? environmentId,
@@ -1740,7 +1763,9 @@ export default function ChatView(props: ChatViewProps) {
       rememberCheckoutIsRepo(environmentId, gitStatusCwd, liveIsGitRepo);
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
-  const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  const isGitRepo =
+    !activeProjectIsSandboxPlaceholder &&
+    (liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true);
   // Provider-native subagents cannot take messages; approvals and questions go to the top-level parent.
   const showProviderSubagentBar = isProviderSubagent;
   const composerMounted = !showProviderSubagentBar;
@@ -2652,8 +2677,32 @@ export default function ChatView(props: ChatViewProps) {
                 : `Sandbox ${shortSandboxId(activeSandbox.sandboxId)} is stopped`,
               description: sandboxResendPending
                 ? "Your message sends once it is running again."
-                : "Its disk is kept. Sending a message resumes it.",
+                : activeSandboxOnHost
+                  ? "Its disk is kept. Sending a message resumes it; the first answer can take a few minutes."
+                  : "Its disk is kept. Sending a message resumes it.",
             },
+          ]
+        : [];
+    const sandboxThreadEnvironmentId = activeSandboxOnHost ? activeSandbox.environmentId : null;
+    const sandboxPlaceholderItems: ComposerBannerStackItem[] =
+      activeProject !== null && activeProjectIsSandboxPlaceholder
+        ? [
+            sandboxPlaceholderBannerItem({
+              projectId: activeProject.id,
+              projectTitle: activeProject.title,
+              sandboxShortId: activeSandbox ? shortSandboxId(activeSandbox.sandboxId) : null,
+              onOpenSandboxThread:
+                sandboxThreadEnvironmentId === null || activeThreadRef === null
+                  ? null
+                  : () =>
+                      void navigate({
+                        to: "/$environmentId/$threadId",
+                        params: {
+                          environmentId: sandboxThreadEnvironmentId,
+                          threadId: activeThreadRef.threadId,
+                        },
+                      }),
+            }),
           ]
         : [];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -2664,6 +2713,7 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...sandboxItems,
+        ...sandboxPlaceholderItems,
         ...systemComposerBannerItems,
       ];
     }
@@ -2674,6 +2724,7 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...sandboxItems,
+      ...sandboxPlaceholderItems,
       ...systemComposerBannerItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
@@ -2996,7 +3047,7 @@ export default function ChatView(props: ChatViewProps) {
     isRevertingCheckpoint,
     threadDetailLoading,
     activeEnvironmentUnavailable,
-    sendResumesSandbox: activeSandboxStopped ? resumeSandboxAndSend : null,
+    sendResumesSandbox: legacySandboxStopped ? resumeSandboxAndSend : null,
     isSendBusy,
     sendQueuesBehindSetup,
     isDraftHeroState,
@@ -3341,7 +3392,7 @@ export default function ChatView(props: ChatViewProps) {
     />
   ) : null;
   const panelToggleControlProps = {
-    terminalAvailable: activeProject !== null,
+    terminalAvailable: activeProject !== null && !activeProjectIsSandboxPlaceholder,
     terminalOpen: terminalUiState.terminalOpen,
     terminalShortcutLabel: shortcutLabelForCommand(keybindings, "terminal.toggle"),
     threadPanelOpen,
@@ -3677,7 +3728,7 @@ export default function ChatView(props: ChatViewProps) {
                           ) : null}
                           {!composerMounted ? null : (
                             <ChatComposer
-                              canOperateThread={canOperateThread || activeSandboxStopped}
+                              canOperateThread={canOperateThread || legacySandboxStopped}
                               reportedModelSelection={reportedModelSelection}
                               multipleModelSelections={multipleModelSelections}
                               supportsMultipleModels={
@@ -3718,7 +3769,7 @@ export default function ChatView(props: ChatViewProps) {
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}
                               sendDisabledReason={
-                                !canOperateThread && !activeSandboxStopped
+                                !canOperateThread && !legacySandboxStopped
                                   ? "This connection cannot change threads."
                                   : isEnvironmentChanging
                                     ? "Preparing machine"
@@ -3751,7 +3802,7 @@ export default function ChatView(props: ChatViewProps) {
                                   : undefined
                               }
                               environmentUnavailable={
-                                activeSandboxStopped ? null : activeEnvironmentUnavailableState
+                                legacySandboxStopped ? null : activeEnvironmentUnavailableState
                               }
                               activePendingApproval={activePendingApproval}
                               pendingApprovals={pendingApprovals}
@@ -3957,7 +4008,11 @@ export default function ChatView(props: ChatViewProps) {
                   isServerThread={isServerThread}
                   {...(draftId ? { draftId } : {})}
                   activeProjectName={activeProject?.title}
-                  activeProjectScripts={activeProject ? activeProjectScripts : undefined}
+                  activeProjectScripts={
+                    activeProject && !activeProjectIsSandboxPlaceholder
+                      ? activeProjectScripts
+                      : undefined
+                  }
                   preferredScriptId={
                     activeProject ? (lastInvokedScriptByProjectId[activeProject.id] ?? null) : null
                   }
@@ -4098,9 +4153,11 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
           browserAvailable={canOperatePreview && browserAvailable}
-          terminalAvailable={activeProject !== null && canOperateTerminal}
+          terminalAvailable={
+            activeProject !== null && !activeProjectIsSandboxPlaceholder && canOperateTerminal
+          }
           diffAvailable={isServerThread && isGitRepo}
-          filesAvailable={activeProject !== null}
+          filesAvailable={activeProject !== null && !activeProjectIsSandboxPlaceholder}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
           deviceAvailable={activeThreadRef !== null}
