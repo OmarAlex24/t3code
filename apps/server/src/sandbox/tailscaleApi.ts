@@ -70,6 +70,8 @@ export const makeTailscaleApi = Effect.gen(function* () {
   /** A one-hour API token from the OAuth client (client credentials grant), with its scopes. */
   const signIn = Effect.fn("TailscaleApi.signIn")(function* (
     oauth: Pick<TailscaleOAuthClient, "clientId" | "clientSecret">,
+    /** Also asks for these tags; Tailscale answers 400 when the client may not use one. */
+    tags?: ReadonlyArray<string>,
   ) {
     const body = yield* send(
       "signing in with the OAuth client",
@@ -78,6 +80,7 @@ export const makeTailscaleApi = Effect.gen(function* () {
           grant_type: "client_credentials",
           client_id: oauth.clientId,
           client_secret: Redacted.value(oauth.clientSecret),
+          ...(tags === undefined || tags.length === 0 ? {} : { tags: tags.join(" ") }),
         }),
       ),
       HttpClientResponse.schemaBodyJson(TokenResponse),
