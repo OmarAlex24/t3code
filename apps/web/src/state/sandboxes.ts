@@ -56,6 +56,19 @@ export function useSandboxThreadEnvironmentIds(): ReadonlyMap<EnvironmentId, Thr
 }
 
 /**
+ * Every environment that is a sandbox, launching ones included. They are a thread's machine, not one
+ * the user keeps, so places that pick a machine to keep a project on leave them out.
+ */
+export function useSandboxEnvironmentIds(): ReadonlySet<EnvironmentId> {
+  const sandboxes = useSandboxRecords();
+  return new Set(
+    sandboxes.flatMap((sandbox) =>
+      sandbox.environmentId === null || sandbox.state === "deleted" ? [] : [sandbox.environmentId],
+    ),
+  );
+}
+
+/**
  * The sandbox a thread runs on, from the provisioning server's list: the sandbox's own thread or
  * the host thread the bridge drives. Undefined for any other thread.
  */
