@@ -185,22 +185,36 @@ export function useSandboxLaunch(input: {
     readonly threadId: ThreadId;
     readonly hostEnvironmentId: EnvironmentId;
   } | null>(null);
-  const activeLaunch = launch !== null && launch.draftId === draftId ? launch : null;
+  // A draft follows its thread's launch on the host, so one started before the user left the
+  // thread shows its card again, and finishes, when they come back.
   const snapshotQuery = useEnvironmentQuery(
-    activeLaunch === null
+    draftId === null || threadId === null || hostEnvironmentId === null
       ? null
       : serverEnvironment.sandboxesLaunchState({
-          environmentId: activeLaunch.hostEnvironmentId,
-          input: { threadId: activeLaunch.threadId },
+          environmentId: hostEnvironmentId,
+          input: { threadId },
         }),
   );
-  const snapshot =
+  const hostSnapshot =
     snapshotQuery.data !== undefined &&
     snapshotQuery.data !== null &&
-    activeLaunch !== null &&
-    snapshotQuery.data.threadId === activeLaunch.threadId
+    snapshotQuery.data.threadId === threadId
       ? snapshotQuery.data
       : null;
+  // A launch this view dismissed or handed off, until the host's snapshot says so too.
+  const [releasedInstanceId, setReleasedInstanceId] = useState<string | null>(null);
+  const localLaunch = launch !== null && launch.draftId === draftId ? launch : null;
+  const adoptable =
+    hostSnapshot !== null &&
+    hostSnapshot.instanceId !== releasedInstanceId &&
+    (hostSnapshot.phase === "running" || hostSnapshot.phase === "failed");
+  const activeLaunch =
+    localLaunch ??
+    (adoptable && draftId !== null && threadId !== null && hostEnvironmentId !== null
+      ? { draftId, threadId, hostEnvironmentId }
+      : null);
+  const snapshot =
+    activeLaunch !== null && hostSnapshot?.threadId === activeLaunch.threadId ? hostSnapshot : null;
 
   // The handoff runs once per pairing attempt: a retry clears it so the next attempt can pair.
   const [handoff, setHandoff] = useState<{
@@ -301,6 +315,7 @@ export function useSandboxLaunch(input: {
   );
 
   const endLaunch = () => {
+    if (snapshot !== null) setReleasedInstanceId(snapshot.instanceId);
     finishingRef.current = false;
     pairingRef.current = false;
     setLinked(null);
@@ -434,11 +449,9 @@ export function useSandboxLaunch(input: {
     return configId !== null;
   };
 
-  /** Starts the launch instead of sending; true while the message has to wait for it. */
-  const interceptSend = (): boolean => {
-    if (activeLaunch !== null) return true;
+  /** Starts a launch on `configId`; false when this view cannot launch one. */
+  const startLaunch = (configId: string): boolean => {
     if (
-      selectedConfig === null ||
       !launchable ||
       repository === null ||
       activeProject === null ||
@@ -456,7 +469,7 @@ export function useSandboxLaunch(input: {
     void launchSandbox({
       environmentId: host,
       input: {
-        configId: selectedConfig.id,
+        configId,
         threadId,
         project: {
           id: activeProject.id,
@@ -490,8 +503,17 @@ export function useSandboxLaunch(input: {
     return true;
   };
 
+  /** Starts the launch instead of sending; true while the message has to wait for it. */
+  const interceptSend = (): boolean => {
+    // A launch already under way, this view's or one it picked up, holds the message.
+    if (activeLaunch !== null) return true;
+    if (selectedConfig === null) return false;
+    return startLaunch(selectedConfig.id);
+  };
+
   const dismiss = useStableCallback(() => {
     if (activeLaunch === null) return;
+    if (snapshot !== null) setReleasedInstanceId(snapshot.instanceId);
     void cancelLaunch({
       environmentId: activeLaunch.hostEnvironmentId,
       input: { threadId: activeLaunch.threadId },
@@ -508,9 +530,11 @@ export function useSandboxLaunch(input: {
     if (activeLaunch === null) return;
     pairingRef.current = false;
     setHandoff(null);
-    const hostFailed = snapshot?.phase === "failed";
+    const hostFailed = snapshot !== null && snapshot.phase === "failed";
     setLocalError(null);
-    // A client-side failure retries the pairing; the host only hears about its own failures.
+    // A client-side failure retries the pairing; the host only hears about its own failures. A new
+    // sandbox starts like any launch, so it works after the host lost the one that failed.
+    if (hostFailed && snapshot.recovery !== "retry" && startLaunch(snapshot.configId)) return;
     if (hostFailed) {
       void retryLaunch({
         environmentId: activeLaunch.hostEnvironmentId,
