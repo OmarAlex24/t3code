@@ -25,12 +25,12 @@ import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useSandboxProvisionerEnvironmentId } from "~/state/sandboxes";
 import {
-  bridgedSandboxCopies,
+  sandboxHostMirrors,
   findThreadSandbox,
   isBridgedSandbox,
   isHostThreadRef,
   registerSandboxThreadHandlers,
-  sandboxCopyTitleUpdates,
+  sandboxMirrorTitleUpdates,
   shortSandboxId,
 } from "~/state/sandboxThreads";
 import { serverEnvironment } from "~/state/server";
@@ -202,25 +202,25 @@ export function SandboxThreadCoordinator() {
     }
   });
 
-  // The rename last sent for each sandbox copy, as its title then and the title it was given, so
-  // shell ticks before it lands, or a refused rename, do not send it again. The sandbox naming
-  // the copy itself afterwards changes the pair, and the copy follows the host again.
-  const sentCopyTitles = useRef(new Map<string, string>());
-  const copyTitleUpdates = sandboxCopyTitleUpdates(
-    bridgedSandboxCopies(sandboxes, threads, provisionerEnvironmentId),
+  // The rename last sent for each host mirror, as its title then and the title it was given, so
+  // shell ticks before it lands, or a refused rename, do not send it again. The phone renaming the
+  // mirror afterwards changes the pair, and the mirror follows the sandbox's thread again.
+  const sentMirrorTitles = useRef(new Map<string, string>());
+  const mirrorTitleUpdates = sandboxMirrorTitleUpdates(
+    sandboxHostMirrors(sandboxes, threads, provisionerEnvironmentId),
     threads,
-  ).filter(({ copy }) => isConnected(copy.environmentId));
+  ).filter(({ mirror }) => isConnected(mirror.environmentId));
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- renames a sandbox's copy of a chat on its own server to follow the host thread's title
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- renames the host's mirror of a sandbox thread to follow the sandbox thread's title
   useEffect(() => {
-    for (const { copy, title, copyTitle } of copyTitleUpdates) {
-      const key = scopedThreadKey(copy);
-      const rename = `${copyTitle}\u0000${title}`;
-      if (sentCopyTitles.current.get(key) === rename) continue;
-      sentCopyTitles.current.set(key, rename);
+    for (const { mirror, title, mirrorTitle } of mirrorTitleUpdates) {
+      const key = scopedThreadKey(mirror);
+      const rename = `${mirrorTitle}\u0000${title}`;
+      if (sentMirrorTitles.current.get(key) === rename) continue;
+      sentMirrorTitles.current.set(key, rename);
       void renameRemoteThread({
-        environmentId: copy.environmentId,
-        input: { threadId: copy.threadId, title },
+        environmentId: mirror.environmentId,
+        input: { threadId: mirror.threadId, title },
       });
     }
   });

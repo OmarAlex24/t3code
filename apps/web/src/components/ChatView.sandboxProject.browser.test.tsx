@@ -72,12 +72,8 @@ it("a sandbox thread's placeholder project offers no git or terminal on its empt
   await using _app = await render(<AppRoot router={router} />, { router: false });
   await expect.element(page.getByText("Answer 0 for thread-bridged.").first()).toBeVisible();
 
-  await expect.element(page.getByText("No checkout on this computer")).toBeVisible();
-  await expect
-    .element(page.getByText(/Files, diffs and terminals are on sandbox bx_46wr/u))
-    .toBeVisible();
-  await expect
-    .element(page.getByRole("button", { name: "Open sandbox thread" }).first())
-    .toBeVisible();
+  // The sandbox's thread is not listed here, so the host's copy is the conversation: no bar about
+  // the checkout, just no git or terminal on the empty folder.
+  await expect.element(page.getByText("No checkout on this computer")).not.toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Toggle terminal drawer" })).toBeDisabled();
 });

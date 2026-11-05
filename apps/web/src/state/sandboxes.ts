@@ -13,7 +13,7 @@ import { environmentCatalog } from "../connection/catalog";
 import { useProjects, useQuietThreadShells } from "./entities";
 import { useEnvironmentProviders, usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentQuery } from "./query";
-import { bridgedSandboxCopies, findThreadSandbox, sandboxBridgeReady } from "./sandboxThreads";
+import { findThreadSandbox, sandboxBridgeReady, sandboxHostMirrors } from "./sandboxThreads";
 import { serverEnvironment } from "./server";
 
 const NO_SETTINGS = Atom.make<ServerSettings | null>(null);
@@ -74,13 +74,19 @@ export function useThreadSandbox(threadRef: ScopedThreadRef | null): SandboxReco
     : findThreadSandbox(list.data?.sandboxes ?? [], threadRef, provisionerEnvironmentId);
 }
 
-/**
- * The sandboxes' own copies of conversations the host keeps, by thread key, each with its host
- * thread. Thread lists show the host thread only; see `isBridgedSandboxCopy`.
- */
-export function useBridgedSandboxCopies(): ReadonlyMap<string, ScopedThreadRef> {
+/** The host's mirrors of sandbox threads, by thread key; see `sandboxHostMirrors`. */
+export function useSandboxHostMirrors(): ReadonlyMap<string, ScopedThreadRef> {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const threads = useQuietThreadShells();
+  const sandboxes = useSandboxRecords();
+  return sandboxHostMirrors(sandboxes, threads, provisionerEnvironmentId);
+}
+
+const NO_SANDBOXES: ReadonlyArray<SandboxRecord> = [];
+
+/** The provisioning server's sandbox records. */
+export function useSandboxRecords(): ReadonlyArray<SandboxRecord> {
+  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const list = useEnvironmentQuery(
     provisionerEnvironmentId === null
       ? null
@@ -89,7 +95,7 @@ export function useBridgedSandboxCopies(): ReadonlyMap<string, ScopedThreadRef> 
           input: undefined,
         }),
   );
-  return bridgedSandboxCopies(list.data?.sandboxes ?? [], threads, provisionerEnvironmentId);
+  return list.data?.sandboxes ?? NO_SANDBOXES;
 }
 
 /** Whether a host project can send through the sandbox bridge yet; see `sandboxBridgeReady`. */

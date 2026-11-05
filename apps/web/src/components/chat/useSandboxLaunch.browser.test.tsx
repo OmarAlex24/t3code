@@ -3,7 +3,6 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   EnvironmentId,
   ProjectId,
-  ProviderInstanceId,
   SANDBOX_SETUP_STAGE_ORDER,
   type SandboxSetupSnapshot,
   ThreadId,
@@ -267,7 +266,7 @@ function setup() {
 }
 
 describe("useSandboxLaunch handoff", () => {
-  it("links a host thread and sends there once the Sandboxes provider is ready", async () => {
+  it("links a host thread, then sends on the sandbox once the host can follow it", async () => {
     setup();
     mocks.linkHostThread.mockResolvedValue(AsyncResult.success(linked));
     await using _screen = await render(<Harness />);
@@ -289,13 +288,11 @@ describe("useSandboxLaunch handoff", () => {
     mocks.state.bridgeReady = true;
     mocks.state.bump();
     await vi.waitFor(() => expect(onHandedOff).toHaveBeenCalledOnce());
-    expect(draftProjectRef()).toEqual({ environmentId: HOST_ENV, projectId: "project-host" });
+    // The message goes to the sandbox's own thread, with the model the user picked; the host
+    // thread only mirrors it for the phone.
+    expect(draftProjectRef()).toEqual({ environmentId: SANDBOX_ENV, projectId: "project-sandbox" });
     const composer = useComposerDraftStore.getState().getComposerDraft(draftId);
-    expect(composer?.activeProvider).toBe("sandboxes");
-    expect(composer?.modelSelectionByProvider[ProviderInstanceId.make("sandboxes")]?.model).toBe(
-      "sandbox",
-    );
-    expect(composer?.runtimeMode).toBe("approval-required");
+    expect(composer?.activeProvider).not.toBe("sandboxes");
   });
 
   it("sends on the sandbox, with a warning, when the host thread cannot be linked", async () => {
@@ -341,9 +338,9 @@ describe("useSandboxLaunch handoff", () => {
     expect(mocks.launch).toHaveBeenCalledOnce();
     mocks.state.bridgeReady = true;
     mocks.state.bump();
-    // The message the user sent before leaving goes out on the host thread.
+    // The message the user sent before leaving goes out on the sandbox's thread.
     await vi.waitFor(() => expect(onHandedOff).toHaveBeenCalledOnce());
-    expect(draftProjectRef()).toEqual({ environmentId: HOST_ENV, projectId: "project-host" });
+    expect(draftProjectRef()).toEqual({ environmentId: SANDBOX_ENV, projectId: "project-sandbox" });
   });
 
   it("follows a launch already starting when the user sends again", async () => {

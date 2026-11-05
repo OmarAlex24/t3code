@@ -376,20 +376,20 @@ describe("SandboxThreadCoordinator", () => {
       expect(mocks.deleteSandbox).toHaveBeenCalledOnce();
     });
 
-    it("gives the sandbox's copy the host thread's title, once", async () => {
-      setup("ask", undefined, { bridged: true, hostTitle: "Greeting from boat.dev" });
+    it("gives the host's mirror the sandbox thread's title, once", async () => {
+      setup("ask", undefined, { bridged: true, hostTitle: "New thread" });
       await using screen = await render(<SandboxThreadCoordinator />);
 
       await expect.poll(() => mocks.renameThread.mock.calls.length).toBe(1);
       expect(mocks.renameThread).toHaveBeenCalledWith({
-        environmentId: SANDBOX_ENV,
-        input: { threadId: "thread-1", title: "Greeting from boat.dev" },
+        environmentId: HOST_ENV,
+        input: { threadId: "thread-1", title: "Fix the login bug" },
       });
       await screen.rerender(<SandboxThreadCoordinator />);
       expect(mocks.renameThread).toHaveBeenCalledOnce();
     });
 
-    it("leaves a copy alone when its title already matches", async () => {
+    it("leaves a mirror alone when its title already matches", async () => {
       setup("ask", undefined, { bridged: true });
       await using _screen = await render(<SandboxThreadCoordinator />);
       expect(mocks.renameThread).not.toHaveBeenCalled();

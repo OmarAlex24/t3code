@@ -55,102 +55,117 @@ export const isBridgedSandbox = (
     (thread) => thread.environmentId === provisionerEnvironmentId && thread.id === sandbox.threadId,
   );
 
-/**
- * Whether the ref is the sandbox's own copy of a conversation the host thread keeps. The bridge
- * starts that copy with the host thread's id, so the two would list as one chat twice; the host
- * thread is the one the phone sees. A thread from before the bridge has no host thread and is the
- * only one, so it never counts.
- */
-export const isBridgedSandboxCopy = (
-  sandbox: SandboxRecord,
-  threadRef: ScopedThreadRef,
-  threads: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly id: ThreadId }>,
-  provisionerEnvironmentId: EnvironmentId | null,
-) =>
-  sandbox.environmentId !== provisionerEnvironmentId &&
-  sandbox.environmentId === threadRef.environmentId &&
-  sandbox.threadId === threadRef.threadId &&
-  isBridgedSandbox(sandbox, threads, provisionerEnvironmentId);
+type ThreadEntry = { readonly environmentId: EnvironmentId; readonly id: ThreadId };
 
-/** Each bridged sandbox copy by its thread key (`threadKey`), with the host thread it copies. */
-export const bridgedSandboxCopies = (
+const listed = (threads: ReadonlyArray<ThreadEntry>, ref: ScopedThreadRef) =>
+  threads.some(
+    (thread) => thread.environmentId === ref.environmentId && thread.id === ref.threadId,
+  );
+
+/**
+ * The host's mirrors of sandbox threads, by the mirror's thread key, each with the sandbox's own
+ * thread. The bridge drives a mirror with the sandbox thread's id so the phone can follow it; this
+ * app shows the sandbox's thread instead, the one with the real model, files and terminal. Without
+ * that thread listed here (a sandbox gone or not connected), the mirror is the conversation.
+ */
+export const sandboxHostMirrors = (
   sandboxes: ReadonlyArray<SandboxRecord>,
-  threads: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly id: ThreadId }>,
+  threads: ReadonlyArray<ThreadEntry>,
   provisionerEnvironmentId: EnvironmentId | null,
 ): ReadonlyMap<string, ScopedThreadRef> => {
-  const copies = new Map<string, ScopedThreadRef>();
-  if (provisionerEnvironmentId === null) return copies;
+  const mirrors = new Map<string, ScopedThreadRef>();
+  if (provisionerEnvironmentId === null) return mirrors;
   for (const sandbox of sandboxes) {
-    if (sandbox.environmentId === null || sandbox.threadId === undefined) continue;
-    const copyRef = { environmentId: sandbox.environmentId, threadId: sandbox.threadId };
-    if (isBridgedSandboxCopy(sandbox, copyRef, threads, provisionerEnvironmentId)) {
-      copies.set(threadKey(copyRef), {
-        environmentId: provisionerEnvironmentId,
-        threadId: sandbox.threadId,
-      });
+    if (
+      sandbox.environmentId === null ||
+      sandbox.environmentId === provisionerEnvironmentId ||
+      sandbox.threadId === undefined ||
+      sandbox.hostProjectId === undefined ||
+      sandbox.state === "deleted"
+    ) {
+      continue;
     }
+    const real = { environmentId: sandbox.environmentId, threadId: sandbox.threadId };
+    const mirror = { environmentId: provisionerEnvironmentId, threadId: sandbox.threadId };
+    if (listed(threads, real) && listed(threads, mirror)) mirrors.set(threadKey(mirror), real);
   }
-  return copies;
+  return mirrors;
 };
 
-/** The host thread a bridged sandbox copy belongs to; undefined for any other thread. */
-export const bridgedSandboxCopyHost = (
-  copies: ReadonlyMap<string, ScopedThreadRef>,
+/** The sandbox thread a host mirror stands for; undefined for any other thread. */
+export const sandboxMirrorTarget = (
+  mirrors: ReadonlyMap<string, ScopedThreadRef>,
   threadRef: ScopedThreadRef,
-): ScopedThreadRef | undefined => copies.get(threadKey(threadRef));
+): ScopedThreadRef | undefined => mirrors.get(threadKey(threadRef));
 
 /**
  * The thread keys lists leave out because another row stands for them: tasks shown under their
- * parent (`delegatedUnderParent`), and bridged sandbox copies, shown as their host thread.
+ * parent (`delegatedUnderParent`), and host mirrors, shown as their sandbox thread.
  */
-export const withBridgedSandboxCopies = (
+export const withSandboxHostMirrors = (
   delegatedUnderParent: ReadonlySet<string>,
-  copies: ReadonlyMap<string, ScopedThreadRef>,
+  mirrors: ReadonlyMap<string, ScopedThreadRef>,
 ): ReadonlySet<string> =>
-  copies.size === 0 ? delegatedUnderParent : new Set([...delegatedUnderParent, ...copies.keys()]);
+  mirrors.size === 0 ? delegatedUnderParent : new Set([...delegatedUnderParent, ...mirrors.keys()]);
 
 /**
- * The copies whose title differs from their host thread's, with the title to give them, so the
- * sandbox's copy follows the name the phone and the sidebar show.
+ * The mirrors whose title differs from their sandbox thread's, with the title to give them, so the
+ * phone shows the name the sandbox's thread got.
  */
-export const sandboxCopyTitleUpdates = (
-  copies: ReadonlyMap<string, ScopedThreadRef>,
-  threads: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly id: ThreadId;
-    readonly title: string;
-  }>,
+export const sandboxMirrorTitleUpdates = (
+  mirrors: ReadonlyMap<string, ScopedThreadRef>,
+  threads: ReadonlyArray<ThreadEntry & { readonly title: string }>,
 ): ReadonlyArray<{
-  readonly copy: ScopedThreadRef;
+  readonly mirror: ScopedThreadRef;
   readonly title: string;
-  readonly copyTitle: string;
+  readonly mirrorTitle: string;
 }> => {
-  if (copies.size === 0) return [];
-  const titleOf = new Map(
+  if (mirrors.size === 0) return [];
+  const byKey = new Map(
     threads.map((thread) => [
       threadKey({ environmentId: thread.environmentId, threadId: thread.id }),
-      thread.title,
+      thread,
     ]),
   );
-  return [...copies].flatMap(([copyKey, host]) => {
-    const copyTitle = titleOf.get(copyKey);
-    const hostTitle = titleOf.get(threadKey(host))?.trim();
-    // A copy keeps the host thread's id; only its environment differs.
-    const copy = threads.find(
-      (thread) =>
-        thread.id === host.threadId &&
-        threadKey({ environmentId: thread.environmentId, threadId: thread.id }) === copyKey,
-    );
-    return copy === undefined || !hostTitle || copyTitle === hostTitle
+  return [...mirrors].flatMap(([mirrorKey, real]) => {
+    const mirror = byKey.get(mirrorKey);
+    const title = byKey.get(threadKey(real))?.title.trim();
+    return mirror === undefined || !title || mirror.title === title
       ? []
       : [
           {
-            copy: { environmentId: copy.environmentId, threadId: copy.id },
-            title: hostTitle,
-            copyTitle: copy.title,
+            mirror: { environmentId: mirror.environmentId, threadId: mirror.id },
+            title,
+            mirrorTitle: mirror.title,
           },
         ];
   });
+};
+
+/**
+ * Where a send on a sandbox thread is mirrored for the phone: the host thread with its id, in the
+ * host project the launch linked. Null for a thread with no linked sandbox.
+ */
+export const sandboxMirrorOf = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  threadRef: ScopedThreadRef,
+  provisionerEnvironmentId: EnvironmentId | null,
+): { readonly mirror: ScopedThreadRef; readonly hostProjectId: ProjectId } | null => {
+  if (provisionerEnvironmentId === null || threadRef.environmentId === provisionerEnvironmentId) {
+    return null;
+  }
+  const sandbox = sandboxes.find(
+    (candidate) =>
+      candidate.environmentId === threadRef.environmentId &&
+      candidate.threadId === threadRef.threadId &&
+      candidate.state !== "deleted",
+  );
+  return sandbox?.hostProjectId === undefined
+    ? null
+    : {
+        mirror: { environmentId: provisionerEnvironmentId, threadId: threadRef.threadId },
+        hostProjectId: sandbox.hostProjectId,
+      };
 };
 
 const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
