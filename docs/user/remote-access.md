@@ -28,10 +28,10 @@ setup** appears when Claude here talks to a custom endpoint, and points Claude i
 the same one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
 each sandbox gets its own key on the hub, which T3 Code removes when you delete the sandbox;
 otherwise this machine's Claude token is copied, and it stays valid after the sandbox is gone. The
-sandbox must be able to reach that endpoint: one that only answers on your tailnet or local
-network works here but not in a cloud sandbox, so let the sandbox
-[join your tailnet](#private-endpoints-tailscale) or expose the endpoint publicly (for example with
-Tailscale Funnel or Cloudflare Tunnel). The form warns when it can tell.
+sandbox must be able to reach that endpoint. When it only answers on your tailnet or local network,
+each sandbox [joins your tailnet](#private-endpoints-tailscale) on its own once Tailscale is set
+up; without Tailscale, T3 Code refuses to start the sandbox and points you to its setup. You can
+also expose the endpoint publicly instead (for example with Tailscale Funnel or Cloudflare Tunnel).
 **Sign GitHub in with this machine's token** lets `gh` and `git` in each sandbox clone private
 repositories and push. Without it a sandbox can clone public repositories only. T3 Code also
 installs git, the GitHub CLI, and Claude Code when the provider's image lacks them; sign Codex in
@@ -53,7 +53,7 @@ this server, keep working and switch to repositories the next time you save them
   open only on another machine gets none. By default each sandbox gets that copy's env files
   (`.env` files, `.envrc`, `.dev.vars`). They are written into the clone with owner-only
   permissions and never appear in a provider's command history.
-- **Reach it only through my tailnet** (with **Join my tailnet**) gives the sandbox no public URL.
+- **Reach it only through my tailnet** (when the sandbox joins your tailnet) gives it no public URL.
   This app then connects over your tailnet, so the machine running it has to be on your tailnet
   too, and the hosted web app cannot reach it.
 
@@ -149,30 +149,49 @@ tagged `tag:t3-sandbox`, with a single-use key; deleting the sandbox removes the
 that stays stopped for more than about an hour drops off the tailnet and rejoins as a new device
 when you resume it.
 
-1. In the Tailscale admin console, add the tag and let it reach only the endpoint. In the tailnet
-   policy file, with your endpoint's tailnet address as the destination:
+**Settings → Connections → Sandboxes → Tailscale → Set up** walks through the same three steps,
+with the policy snippet filled in for this server's Claude endpoint.
 
-   ```json
+1. Add the tag and an access rule. Open the
+   [policy file](https://login.tailscale.com/admin/acls/file) and merge in:
+
+   ```jsonc
    "tagOwners": {
-     "tag:t3-sandbox": ["autogroup:admin"]
+     "tag:t3-sandbox": ["autogroup:admin"],
    },
    "grants": [
-     { "src": ["tag:t3-sandbox"], "dst": ["100.x.y.z"], "ip": ["tcp:443"] }
-   ]
+     // Sandboxes reach the Claude endpoint and nothing else.
+     { "src": ["tag:t3-sandbox"], "dst": ["100.x.y.z"], "ip": ["tcp:443"] },
+     // Replace the default allow-all grant ("src": ["*"]) with this one:
+     // { "src": ["autogroup:member"], "dst": ["*"], "ip": ["*"] },
+   ],
    ```
 
-   If the policy still has the default grant that lets every device reach every other one, the
-   sandbox can reach your whole tailnet; narrow that grant first.
+   Use your endpoint's tailnet IP for `100.x.y.z`, and its port if it is not 443. Tailscale's
+   default grant lets every device reach every other, sandboxes included, so narrow it to the
+   commented one.
 
-2. Create an OAuth client under **Settings → Trust credentials** (OAuth clients) with two scopes,
-   **Auth Keys** (write) and **Devices → Core** (write), and select `tag:t3-sandbox` for both.
-3. In T3 Code, open **Settings → Connections → Sandboxes → Tailscale**, choose **Set up**, and paste
-   the client secret (`tskey-client-…`). T3 Code reads the client ID from it, signs in once, and
-   saves the client only if it holds both scopes; otherwise it says which one is missing. If your
-   secret has another form, enter the client ID under **Advanced**, where you can also change the
-   tag. The secret stays on this server; sandboxes never get it.
-4. In a sandbox config, keep **Join my tailnet** checked. It is on by default when Claude's
-   endpoint has a private address.
+2. Create the OAuth client. Open
+   [Trust credentials](https://login.tailscale.com/admin/settings/trust-credentials), then:
+   1. Select **Credential**, then **OAuth**.
+   2. Under **Scopes**, choose **Custom scopes**.
+   3. Expand **Devices** and set **Core** to **Write**.
+   4. Expand **Keys** and set **Auth Keys** to **Write**.
+   5. Pick `tag:t3-sandbox` as the tag for both.
+   6. Select **Generate credential** and copy the secret. Tailscale shows it only once.
+3. Paste the secret (`tskey-client-…`) into the Tailscale card and save. T3 Code reads the client
+   ID from it and signs in once, asking for the tag, before saving. When something is missing it
+   says what, for example `Missing Keys → Auth Keys: Write for tag:t3-sandbox`, or that Tailscale
+   won't give the client the tag, which means the tag is not in `tagOwners` yet (step 1) or was not
+   selected on the client. If your secret has another form, enter the client ID under
+   **Advanced**, where you can also change the tag. The secret stays on this server; sandboxes
+   never get it.
+
+A sandbox joins your tailnet on its own whenever Claude's endpoint resolves to a private or tailnet
+address. That is decided each time a sandbox starts, so configs saved before Tailscale was set up
+work too. For other endpoints, check **Join my tailnet** in the config to join anyway. If the
+sandbox still cannot reach Claude after it starts, T3 Code stops the setup and deletes the sandbox
+rather than starting a thread that would wait forever.
 
 Most sandboxes get a full Tailscale connection. One that cannot create a network device runs
 Tailscale in userspace instead: T3 Code then points Claude at Tailscale's local proxy, and other

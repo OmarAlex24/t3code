@@ -3,7 +3,12 @@ import * as NodeDnsPromises from "node:dns/promises";
 
 import { ClaudeSettings, defaultInstanceIdForDriver, ProviderDriverKind } from "@t3tools/contracts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { isPrivateNetworkHost, normalizeHostname } from "@t3tools/shared/hostClassification";
+import {
+  isPrivateNetworkHost,
+  isSharedAddressSpaceHost,
+  isTailnetHost,
+  normalizeHostname,
+} from "@t3tools/shared/hostClassification";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -33,6 +38,8 @@ export class SandboxHostAccess extends Context.Service<
     readonly githubToken: Effect.Effect<Option.Option<Redacted.Redacted<string>>>;
     /** The endpoint resolves only to private addresses, so a cloud sandbox likely cannot reach it. */
     readonly endpointIsPrivate: (baseUrl: string) => Effect.Effect<boolean>;
+    /** The endpoint's Tailscale address, for an access rule that lets sandboxes reach it. */
+    readonly endpointTailnetAddress: (baseUrl: string) => Effect.Effect<string | null>;
   }
 >()("t3/sandbox/SandboxHostAccess") {}
 
@@ -43,6 +50,12 @@ export class SandboxHostAccess extends Context.Service<
  */
 export const resolvesOnlyToPrivateNetwork = (addresses: ReadonlyArray<string>): boolean =>
   addresses.length > 0 && addresses.every((address) => isPrivateNetworkHost(address));
+
+/** The first Tailscale address (100.64.0.0/10, then fd7a:115c:a1e0::/48), or null. */
+export const tailnetAddressOf = (addresses: ReadonlyArray<string>): string | null =>
+  addresses.find((address) => isSharedAddressSpaceHost(address)) ??
+  addresses.find((address) => address.includes(":") && isTailnetHost(address)) ??
+  null;
 
 const hostnameOf = (baseUrl: string) => {
   const url = URL.parse(baseUrl);
@@ -93,23 +106,31 @@ const make = Effect.gen(function* () {
       ? Effect.succeed(Option.none<Redacted.Redacted<string>>())
       : credentialToken("github.com");
 
-  const endpointIsPrivate = Effect.fn("SandboxHostAccess.endpointIsPrivate")(function* (
-    baseUrl: string,
-  ) {
+  const addressesOf = Effect.fn("SandboxHostAccess.addressesOf")(function* (baseUrl: string) {
     const hostname = hostnameOf(baseUrl);
-    if (hostname === null) return false;
+    if (hostname === null) return [];
     // An IP literal resolves to itself.
-    const addresses = yield* Effect.tryPromise(() =>
+    return yield* Effect.tryPromise(() =>
       NodeDnsPromises.lookup(hostname, { all: true, verbatim: true }),
     ).pipe(
       Effect.timeout(Duration.seconds(3)),
       Effect.map((entries) => entries.map((entry) => entry.address)),
       Effect.orElseSucceed((): ReadonlyArray<string> => []),
     );
-    return resolvesOnlyToPrivateNetwork(addresses);
   });
 
-  return SandboxHostAccess.of({ claude, githubToken, endpointIsPrivate });
+  const endpointIsPrivate = Effect.fn("SandboxHostAccess.endpointIsPrivate")(function* (
+    baseUrl: string,
+  ) {
+    return resolvesOnlyToPrivateNetwork(yield* addressesOf(baseUrl));
+  });
+  const endpointTailnetAddress = Effect.fn("SandboxHostAccess.endpointTailnetAddress")(function* (
+    baseUrl: string,
+  ) {
+    return tailnetAddressOf(yield* addressesOf(baseUrl));
+  });
+
+  return SandboxHostAccess.of({ claude, githubToken, endpointIsPrivate, endpointTailnetAddress });
 });
 
 export const layer = Layer.effect(SandboxHostAccess, make);
@@ -130,6 +151,12 @@ export const layerTest = (
       ) {
         const hostname = hostnameOf(baseUrl);
         return hostname !== null && resolvesOnlyToPrivateNetwork([hostname]);
+      }),
+      endpointTailnetAddress: Effect.fn("SandboxHostAccess.endpointTailnetAddress")(function* (
+        baseUrl: string,
+      ) {
+        const hostname = hostnameOf(baseUrl);
+        return yield* Effect.succeed(hostname === null ? null : tailnetAddressOf([hostname]));
       }),
     }),
   );
