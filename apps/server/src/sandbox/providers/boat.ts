@@ -5,16 +5,20 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Random from "effect/Random";
-import { HttpClientRequest } from "effect/http";
+import * as Redacted from "effect/Redacted";
+import { HttpClient, HttpClientRequest } from "effect/http";
 import * as Schema from "effect/Schema";
 
 import {
+  AGENT_ENVIRONMENT_PREFIX,
+  type AgentEnvironment,
   authorize,
   commandRequestSeconds,
   type CreatedSandbox,
   jsonBody,
   mayHaveCreated,
   requestJson,
+  type SandboxAgentAccess,
   type SandboxProviderDriver,
   type SandboxProviderStatus,
   type SandboxUsage,
@@ -72,6 +76,8 @@ const BoatSandboxList = Schema.Struct({
       state: Schema.optionalKey(Schema.String),
       createdAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
       labels: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Schema.String))),
+      /** The environment's name. */
+      environment: Schema.optionalKey(Schema.NullOr(Schema.String)),
     }),
   ),
 });
@@ -300,6 +306,36 @@ const BoatEnvironments = Schema.Struct({
   environments: Schema.Array(BoatEnvironment),
 });
 
+const BoatAgentEnvironments = Schema.Struct({
+  environments: Schema.Array(Schema.Struct({ ...BoatEnvironment.fields, id: Schema.String })),
+});
+
+const BoatScopedKey = Schema.Struct({
+  secret: Schema.String,
+  apiKey: Schema.Struct({
+    id: Schema.String,
+    // `"*"` when a key reaches every sandbox, which a sandbox's own key must never do.
+    scope: Schema.Struct({ sandboxes: Schema.Unknown, environments: Schema.Unknown }),
+  }),
+});
+
+// What the agent's key may do. Forking makes a sandbox, so it needs `sandbox.create` in the
+// sandbox's own environment; `sandbox.delete-own` reaches only the forks the key made.
+const AGENT_KEY_ACTIONS = [
+  "sandbox.create",
+  "sandbox.read",
+  "sandbox.stop",
+  "sandbox.fork",
+  "sandbox.delete-own",
+  "exec",
+  "file.read",
+  "file.write",
+  "host",
+] as const;
+
+// No account has this sandbox, so an admin key gets `api_key_sandbox_forbidden` and makes nothing.
+const SCOPED_KEY_PROBE_SANDBOX = "bx_t3probe0";
+
 const info = {
   kind: "boat",
   label: "Boat",
@@ -367,6 +403,271 @@ const writeFile = (apiKey: string, sandboxId: string, path: string, content: str
     }),
   }).pipe(Effect.asVoid);
 
+const bodyCode = (body: unknown) =>
+  typeof body === "object" && body !== null && "code" in body && typeof body.code === "string"
+    ? body.code
+    : undefined;
+
+const scopedKeyId = (body: unknown) => {
+  if (typeof body !== "object" || body === null || !("apiKey" in body)) return undefined;
+  const { apiKey } = body;
+  return typeof apiKey === "object" && apiKey !== null && "id" in apiKey
+    ? typeof apiKey.id === "string"
+      ? apiKey.id
+      : undefined
+    : undefined;
+};
+
+const revokeScopedKey = (apiKey: string, keyId: string) =>
+  requestJson({
+    provider: "boat",
+    stage: "delete",
+    schema: Schema.Unknown,
+    request: authorize(
+      HttpClientRequest.delete(`${BOAT_API_BASE}/api-keys/${encodeURIComponent(keyId)}`),
+      apiKey,
+    ),
+  }).pipe(
+    Effect.asVoid,
+    Effect.catchIf(
+      (error) => error.code === "not_found",
+      () => Effect.void,
+    ),
+  );
+
+const deleteEnvironment = (apiKey: string, environmentId: string) =>
+  requestJson({
+    provider: "boat",
+    stage: "delete",
+    schema: Schema.Unknown,
+    request: authorize(
+      HttpClientRequest.delete(
+        `${BOAT_API_BASE}/environments/${encodeURIComponent(environmentId)}`,
+      ),
+      apiKey,
+    ),
+  }).pipe(
+    Effect.asVoid,
+    Effect.catchIf(
+      (error) => error.code === "not_found",
+      () => Effect.void,
+    ),
+  );
+
+const listAgentEnvironments = (apiKey: string) =>
+  requestJson({
+    provider: "boat",
+    stage: "create",
+    schema: BoatAgentEnvironments,
+    request: authorize(HttpClientRequest.get(`${BOAT_API_BASE}/environments`), apiKey),
+  });
+
+const agentAccess: SandboxAgentAccess = {
+  check: Effect.fn("Boat.checkAgentAccess")(function* (input) {
+    const client = yield* HttpClient.HttpClient;
+    const failed = (detail: string, code?: "scoped_keys_unavailable") =>
+      new SandboxProviderError({
+        provider: "boat",
+        stage: "config",
+        detail,
+        ...(code === undefined ? {} : { code }),
+      });
+    const response = yield* client
+      .execute(
+        jsonBody(
+          authorize(
+            HttpClientRequest.post(`${BOAT_API_BASE}/api-keys/scoped`),
+            input.config.apiKey,
+          ),
+          {
+            name: "t3-sandbox-check",
+            ttl: "60s",
+            actions: ["sandbox.read"],
+            sandboxIds: [SCOPED_KEY_PROBE_SANDBOX],
+          },
+        ),
+      )
+      .pipe(
+        Effect.mapError(() => failed("Boat could not be reached to check its key.")),
+        Effect.timeoutOrElse({
+          duration: "30 seconds",
+          orElse: () => Effect.fail(failed("Boat did not answer when T3 Code checked its key.")),
+        }),
+      );
+    const body: unknown = yield* response.json.pipe(Effect.orElseSucceed(() => null));
+    // Only a key that may mint scoped keys gets as far as checking the sandbox it names.
+    if (response.status === 403 && bodyCode(body) === "api_key_sandbox_forbidden") return;
+    if (response.status >= 200 && response.status < 300) {
+      const keyId = scopedKeyId(body);
+      if (keyId !== undefined)
+        yield* revokeScopedKey(input.config.apiKey, keyId).pipe(Effect.ignore);
+      return;
+    }
+    if (response.status === 401 || response.status === 403) {
+      return yield* failed(
+        "Your Boat key can't create scoped keys; use an admin key or turn off Let the agent use Boat.",
+        "scoped_keys_unavailable",
+      );
+    }
+    return yield* failed(`Boat answered HTTP ${response.status} when T3 Code checked its key.`);
+  }),
+  createEnvironment: Effect.fn("Boat.createAgentEnvironment")(function* (input) {
+    const { apiKey } = input.config;
+    // The answer lists every environment; the name, unique per sandbox, finds the new one.
+    const created = yield* requestJson({
+      provider: "boat",
+      stage: "create",
+      schema: BoatAgentEnvironments,
+      request: jsonBody(
+        authorize(HttpClientRequest.post(`${BOAT_API_BASE}/environments`), apiKey),
+        {
+          name: input.name,
+        },
+      ),
+    });
+    const found = created.environments.find((environment) => environment.name === input.name);
+    if (found === undefined) {
+      return yield* new SandboxProviderError({
+        provider: "boat",
+        stage: "create",
+        detail: "Boat did not return the environment T3 Code made for this sandbox.",
+      });
+    }
+    // A new environment passes the account's GitHub token, secrets and agent logins. It is
+    // locked down and read back before any sandbox starts in it.
+    const locked = Effect.gen(function* () {
+      yield* requestJson({
+        provider: "boat",
+        stage: "create",
+        schema: Schema.Unknown,
+        request: jsonBody(
+          authorize(
+            HttpClientRequest.put(`${BOAT_API_BASE}/environments/${encodeURIComponent(found.id)}`),
+            apiKey,
+          ),
+          {
+            safeForThirdParties: true,
+            passGithub: false,
+            passSecrets: false,
+            passSandboxCredentials: false,
+            passAgentsCredentials: false,
+          },
+        ),
+      });
+      const current = (yield* listAgentEnvironments(apiKey)).environments.find(
+        (environment) => environment.id === found.id,
+      );
+      const closed =
+        current !== undefined &&
+        current.safeForThirdParties &&
+        !current.passGithub &&
+        !current.passSecrets &&
+        !current.passSandboxCredentials &&
+        !current.passAgentsCredentials &&
+        !current.proxyAiCredentials;
+      if (!closed) {
+        return yield* new SandboxProviderError({
+          provider: "boat",
+          stage: "create",
+          detail:
+            "Boat kept passing credentials to the environment made for this sandbox, so T3 Code deleted it.",
+        });
+      }
+    });
+    yield* locked.pipe(
+      Effect.tapError(() => deleteEnvironment(apiKey, found.id).pipe(Effect.ignore)),
+    );
+    return { id: found.id, name: found.name } satisfies AgentEnvironment;
+  }),
+  deleteEnvironment: (input) => deleteEnvironment(input.config.apiKey, input.environmentId),
+  mintKey: Effect.fn("Boat.mintAgentKey")(function* (input) {
+    const { apiKey } = input.config;
+    // An empty list would scope the key to every sandbox on the account.
+    if (input.sandboxId.trim() === "" || input.environmentId.trim() === "") {
+      return yield* new SandboxProviderError({
+        provider: "boat",
+        stage: "install",
+        detail: "T3 Code has no sandbox to scope the agent's key to.",
+      });
+    }
+    const minted = yield* requestJson({
+      provider: "boat",
+      stage: "install",
+      schema: BoatScopedKey,
+      request: jsonBody(
+        authorize(HttpClientRequest.post(`${BOAT_API_BASE}/api-keys/scoped`), apiKey),
+        {
+          name: input.name,
+          ttl: `${input.ttlMinutes}m`,
+          actions: AGENT_KEY_ACTIONS,
+          sandboxIds: [input.sandboxId],
+          environmentIds: [input.environmentId],
+        },
+      ),
+    });
+    const { sandboxes, environments } = minted.apiKey.scope;
+    const scoped =
+      Array.isArray(sandboxes) &&
+      sandboxes.length === 1 &&
+      sandboxes[0] === input.sandboxId &&
+      Array.isArray(environments) &&
+      environments.length === 1 &&
+      environments[0] === input.environmentId;
+    if (!scoped) {
+      yield* revokeScopedKey(apiKey, minted.apiKey.id).pipe(Effect.ignore);
+      return yield* new SandboxProviderError({
+        provider: "boat",
+        stage: "install",
+        detail: "Boat made the agent's key wider than this sandbox, so T3 Code revoked it.",
+      });
+    }
+    return { id: minted.apiKey.id, secret: Redacted.make(minted.secret) };
+  }),
+  revokeKey: (input) => revokeScopedKey(input.config.apiKey, input.keyId),
+  listSandboxes: Effect.fn("Boat.listAgentSandboxes")(function* (input) {
+    const listed = yield* requestJson({
+      provider: "boat",
+      stage: "config",
+      schema: BoatSandboxList,
+      request: authorize(
+        HttpClientRequest.get(`${BOAT_API_BASE}/sandboxes`).pipe(
+          HttpClientRequest.setUrlParams({ environment: input.environmentName, limit: "200" }),
+        ),
+        input.config.apiKey,
+      ),
+    });
+    const live = listed.sandboxes.filter((sandbox) => sandbox.state !== "cancelled");
+    // Without each sandbox's environment, a fork could be missed and its environment deleted.
+    if (live.some((sandbox) => typeof sandbox.environment !== "string")) {
+      return yield* new SandboxProviderError({
+        provider: "boat",
+        stage: "config",
+        detail: "Boat did not say which environment its sandboxes are in.",
+      });
+    }
+    return live
+      .filter((sandbox) => sandbox.environment === input.environmentName)
+      .map((sandbox) => ({
+        id: sandbox.id,
+        name: sandbox.name ?? sandbox.id,
+        createdAt: sandbox.createdAt ?? undefined,
+      }));
+  }),
+  // `boat login` keeps the key in its own config, readable by the sandbox's user only.
+  loginScript: (secret) => ({
+    secrets: { T3_BOAT_KEY: secret },
+    command: `set -eu
+umask 077
+export PATH="$HOME/.ascii/bin:$HOME/.local/bin:$PATH"
+if ! command -v boat >/dev/null 2>&1; then
+  echo "The boat CLI is not installed." >&2
+  exit 3
+fi
+printf '%s' "$T3_BOAT_KEY" | boat login --key-stdin --json >/dev/null
+boat info self --json >/dev/null`,
+  }),
+};
+
 export const boatDriver: SandboxProviderDriver = {
   info,
   defaultSize: "default",
@@ -421,6 +722,7 @@ export const boatDriver: SandboxProviderDriver = {
       ...(url === undefined ? {} : { publicUrl: url }),
     } satisfies CreatedSandbox;
   }),
+  agentAccess,
   limits: (input) =>
     requestJson({
       provider: "boat",
@@ -438,7 +740,10 @@ export const boatDriver: SandboxProviderDriver = {
         input.config.apiKey,
       ),
     });
-    return listed.environments;
+    // The ones T3 makes for a sandbox's agent pass no credentials and belong to that sandbox.
+    return listed.environments.filter(
+      (environment) => !environment.name.startsWith(AGENT_ENVIRONMENT_PREFIX),
+    );
   }),
   execute: Effect.fn("Boat.execute")(function* (input) {
     const { apiKey } = input.config;
