@@ -16,6 +16,8 @@ import {
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MODEL,
   SANDBOX_HOST_PROJECTS_FOLDER,
+  type SandboxDeleteInput,
+  type SandboxDeleteResult,
   type SandboxLaunchThreadInput,
   type SandboxLinkHostThreadResult,
   SandboxProviderError,
@@ -192,6 +194,13 @@ export class SandboxBridge extends Context.Service<
     readonly linkHostThread: (
       input: SandboxLaunchThreadInput,
     ) => Effect.Effect<SandboxLinkHostThreadResult, SandboxProviderError>;
+    /**
+     * Deletes a sandbox through the provisioner. Its host thread keeps the conversation: messages
+     * still queued for the sandbox are cancelled and the thread is settled.
+     */
+    readonly deleteSandbox: (
+      input: SandboxDeleteInput,
+    ) => Effect.Effect<SandboxDeleteResult, SandboxProviderError>;
   }
 >()("t3/sandbox/sandboxBridge") {}
 
@@ -384,7 +393,52 @@ const make = Effect.gen(function* () {
     }),
   );
 
-  return SandboxBridge.of({ linkHostThread });
+  // The host thread outlives its sandbox as an ordinary thread: nothing queued for the sandbox
+  // can run any more, and the chat is done.
+  const releaseHostThread = Effect.fn("SandboxBridge.releaseHostThread")(function* (
+    threadId: ThreadId,
+  ) {
+    const { thread, runs } = yield* orchestrator.getThreadRecords(threadId, ["runs"]);
+    if (thread.deletedAt !== null || thread.modelSelection.instanceId !== instanceId) return;
+    const id = yield* random.uuidV4().pipe(Effect.orDie);
+    for (const run of runs) {
+      if (run.status !== "queued") continue;
+      yield* orchestrator.dispatch({
+        type: "queued-run.cancel",
+        commandId: CommandId.make(`sandbox-deleted-cancel:${id}:${run.id}`),
+        threadId,
+        runId: run.id,
+      });
+    }
+    if (thread.settledAt !== null || thread.settledOverride === "settled") return;
+    yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make(`sandbox-deleted-settle:${id}`),
+      threadId,
+    });
+  });
+
+  const deleteSandbox = Effect.fn("SandboxBridge.deleteSandbox")(function* (
+    input: SandboxDeleteInput,
+  ) {
+    const { sandboxes } = yield* provisioner.list;
+    const record = sandboxes.find((candidate) =>
+      input.instanceId === undefined
+        ? candidate.sandboxId === input.sandboxId
+        : candidate.instanceId === input.instanceId,
+    );
+    const result = yield* provisioner.delete(input);
+    if (record?.threadId !== undefined && record.hostProjectId !== undefined) {
+      yield* releaseHostThread(record.threadId).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not settle a deleted sandbox's host thread", { cause }),
+        ),
+      );
+    }
+    return result;
+  });
+
+  return SandboxBridge.of({ linkHostThread, deleteSandbox });
 });
 
 export const layer = Layer.effect(SandboxBridge, make);
@@ -399,5 +453,6 @@ export const rpcHandlers = Effect.gen(function* () {
     ...provisionerHandlers,
     [WS_METHODS.sandboxesLinkHostThread]: (input: SandboxLaunchThreadInput) =>
       bridge.linkHostThread(input),
+    [WS_METHODS.sandboxesDelete]: (input: SandboxDeleteInput) => bridge.deleteSandbox(input),
   };
 });
