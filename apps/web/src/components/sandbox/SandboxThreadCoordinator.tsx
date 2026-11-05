@@ -106,12 +106,13 @@ const deleteDescription = (
     } The conversation lives on the sandbox, so it is deleted too.`;
   }
   if (prompt.reason !== "thread") {
-    return `This deletes the machine and its disk on ${providerLabel}. The conversation stays in this thread on this computer; work only on the sandbox's disk is lost.`;
+    return `This deletes the machine and its disk on ${providerLabel}. ${CHAT_KEPT}; only work on the sandbox's disk is lost.`;
   }
-  return isHostThreadRef(prompt.sandbox, prompt.threadRef)
-    ? `Also deletes sandbox ${short} on ${providerLabel}, with its disk and its copy of this thread.`
-    : `Also deletes sandbox ${short} on ${providerLabel}. The conversation stays in the thread on this computer.`;
+  return `Also deletes sandbox ${short} on ${providerLabel}, with its disk.`;
 };
+
+// What happens to a bridged chat when its sandbox goes, said the same way in every dialog and toast.
+const CHAT_KEPT = "The chat is kept, under Settled";
 
 /**
  * Settling, resuming and deleting a thread's own sandbox. Mounted once; the thread actions reach
@@ -279,15 +280,27 @@ export function SandboxThreadCoordinator() {
     );
   };
 
-  // The host thread and the sandbox's thread share an id, so a bridged sandbox's delete leaves
-  // only a page showing the sandbox's thread, unless the host thread was deleted too.
+  // The sandbox's thread goes with the sandbox. A kept host thread, which shares its id, takes its
+  // place once the sandbox's environment is gone and the host thread is no longer its mirror.
   const leaveThread = (sandbox: SandboxRecord, threadRef: ScopedThreadRef, hostKept: boolean) => {
     const path = window.location.pathname;
     if (!path.includes(threadRef.threadId)) return;
-    if (hostKept && (sandbox.environmentId === null || !path.includes(sandbox.environmentId))) {
+    if (!hostKept) {
+      void navigate({ to: "/" });
       return;
     }
-    void navigate({ to: "/" });
+    if (
+      provisionerEnvironmentId === null ||
+      sandbox.environmentId === null ||
+      !path.includes(sandbox.environmentId)
+    ) {
+      return;
+    }
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: provisionerEnvironmentId, threadId: threadRef.threadId },
+      replace: true,
+    });
   };
 
   // A legacy thread's conversation lives on the sandbox, so it goes with it; the toast says so.
@@ -312,12 +325,14 @@ export function SandboxThreadCoordinator() {
       return false;
     }
     const hostKept = options.bridged && !options.hostThreadDeleted;
-    // A kept host thread can still be un-settled; a thread that is gone cannot.
-    if (!hostKept) ThreadUndo.invalidate("settle", scopedThreadKey(threadRef));
-    leaveThread(sandbox, threadRef, hostKept);
+    // A kept host thread can still be un-settled; the sandbox's thread, gone with it, cannot.
+    if (!hostKept || !isHostThreadRef(sandbox, threadRef)) {
+      ThreadUndo.invalidate("settle", scopedThreadKey(threadRef));
+    }
     if (sandbox.environmentId !== null && entries.has(sandbox.environmentId)) {
       await removeEnvironment(sandbox.environmentId);
     }
+    leaveThread(sandbox, threadRef, hostKept);
     toastManager.add(
       stackedThreadToast({
         type: "success",
@@ -325,7 +340,7 @@ export function SandboxThreadCoordinator() {
         description: !options.bridged
           ? `The conversation was on sandbox ${shortSandboxId(sandbox.sandboxId)}, so it is gone too.`
           : hostKept
-            ? "The conversation stays in this thread. Its next message needs a new sandbox."
+            ? `${CHAT_KEPT}.`
             : `The thread and sandbox ${shortSandboxId(sandbox.sandboxId)} are gone.`,
       }),
     );
@@ -414,17 +429,18 @@ export function SandboxThreadCoordinator() {
         return;
       }
     }
-    const hostThreadDeleted = prompt.reason === "thread" && isHostThreadRef(sandbox, threadRef);
-    // The sandbox's copy of a deleted host thread goes too while its server answers; the sandbox
-    // delete below would take it anyway, but this leaves no stray thread if that delete fails.
-    if (
-      hostThreadDeleted &&
-      sandbox.environmentId !== null &&
-      sandbox.threadId !== undefined &&
-      isConnected(sandbox.environmentId)
-    ) {
+    // Deleting a bridged chat deletes both of its threads: the one shown here and the other side,
+    // the host's mirror or the sandbox's own thread. The sandbox delete below would take the
+    // sandbox's thread anyway, but this leaves no stray thread if that delete fails.
+    const hostThreadDeleted = prompt.reason === "thread" && prompt.bridged;
+    const otherSide = !hostThreadDeleted
+      ? null
+      : isHostThreadRef(sandbox, threadRef)
+        ? sandbox.environmentId
+        : provisionerEnvironmentId;
+    if (otherSide !== null && sandbox.threadId !== undefined && isConnected(otherSide)) {
       await deleteRemoteThread({
-        environmentId: sandbox.environmentId,
+        environmentId: otherSide,
         input: { threadId: sandbox.threadId },
       });
     }
@@ -627,7 +643,7 @@ function SandboxThreadPrompt({
                 ? ` ${providerLabel} bills for the stopped disk.`
                 : ` ${providerLabel} keeps a stopped disk for ${retentionDays} days and bills for it.`}{" "}
               {prompt.bridged
-                ? "Deleting the sandbox keeps this conversation here; work only on its disk is lost."
+                ? "If you delete the sandbox, the chat is kept, under Settled; only work on its disk is lost."
                 : "Deleting the sandbox deletes this conversation too."}
             </AlertDialogDescription>
           </AlertDialogHeader>

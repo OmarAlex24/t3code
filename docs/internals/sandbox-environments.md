@@ -429,6 +429,13 @@ timeout inside a 15-second limit. A stopped sandbox, a record without `repoDir` 
 the field existed), or a timeout returns `unknown`, and the client then always asks. A remembered
 `delete` skips the prompt only when the check comes back `clean`.
 
+A bridged chat keeps its conversation in the host thread. Deleting only its sandbox (from the
+header menu, or from the settle prompt) goes through `SandboxBridge.deleteSandbox`, which deletes
+the sandbox and then cancels the host thread's queued messages and settles it, so the chat is kept
+under Settled on every client and is no longer a mirror. The client lands on that host thread once
+the sandbox's environment is gone. Deleting the chat itself deletes both of its threads and the
+sandbox. Dialogs and toasts say "The chat is kept, under Settled" the same way.
+
 `stop` and `resume` are optional on the driver. A provider without them still provisions and
 connects; the settings UI hides the controls and the RPC returns a configuration error instead of
 inventing a lifecycle the provider does not have.
