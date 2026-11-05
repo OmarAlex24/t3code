@@ -331,6 +331,17 @@ const encodeBridgeLink = Schema.encodeEffect(SandboxBridgeLinkJson);
 // A bridge credential this close to its expiry is replaced the next time it is linked or resumed.
 const BRIDGE_RENEW_BEFORE_MS = 30 * 24 * 60 * 60 * 1000;
 
+// How long a launch waits on its client, to pair and start the thread or to retry a failed stage,
+// before it gives up and releases the machine. Every pairing or retry starts the wait again.
+const LAUNCH_CLIENT_WAIT = "10 minutes";
+const LAUNCH_CLIENT_TIMEOUT =
+  "Nothing connected to this sandbox for 10 minutes, so T3 Code deleted it. Start a new sandbox to try again.";
+const LAUNCH_DELETED_OUTSIDE =
+  "The sandbox was deleted outside T3 Code before it finished starting. Start a new sandbox to try again.";
+// A record left `provisioning` with no launch to finish it: T3 Code stopped mid-launch.
+const LAUNCH_ABANDONED =
+  "T3 Code stopped before this sandbox finished starting. Start a new sandbox to replace it, or delete it under Settings → Connections → Sandboxes.";
+
 // An empty value is an unset field, which drivers see as absent.
 const withSettings = (
   config: SandboxProviderConfig,
@@ -1102,7 +1113,14 @@ const make = Effect.gen(function* () {
                       config: owned.sandbox.config,
                       sandboxId: owned.sandbox.id,
                     }),
-                  ).pipe(Effect.exit),
+                  ).pipe(
+                    // Deleted outside T3 Code: it is gone all the same.
+                    Effect.catchIf(
+                      (error) => error.code === "not_found",
+                      () => Effect.void,
+                    ),
+                    Effect.exit,
+                  ),
                 );
           if (
             destroyed &&
@@ -1642,8 +1660,38 @@ const make = Effect.gen(function* () {
     readonly retries: Queue.Queue<void>;
     readonly handoff: Deferred.Deferred<void>;
     ready: { readonly machine: Machine; readonly projectId: ProjectId } | null;
+    /** Bumped by each pairing or retry, so the client wait starts over. */
+    activity: number;
+    /** Set when T3 stops the launch for a reason the card shows; a plain cancel leaves it null. */
+    stopReason: string | null;
   }
   const launches = new Map<ThreadId, Launch>();
+
+  // Waits on the client, starting over while it pairs or retries; past the wait the launch fails
+  // and releases what it made, so a client that never comes back leaves nothing billing.
+  const awaitClient = Effect.fn("SandboxProvisioner.awaitClient")(function* <A>(
+    launch: Launch,
+    wait: Effect.Effect<A>,
+  ) {
+    while (true) {
+      const seen = launch.activity;
+      const result = yield* Effect.timeoutOption(wait, LAUNCH_CLIENT_WAIT);
+      if (Option.isSome(result)) return result.value;
+      if (launch.activity === seen) {
+        return yield* new SandboxProviderError({
+          provider: launch.config.provider,
+          stage: "pair",
+          detail: LAUNCH_CLIENT_TIMEOUT,
+        });
+      }
+    }
+  });
+
+  const stopLaunch = (launch: Launch, reason: string | null) =>
+    Effect.suspend(() => {
+      launch.stopReason = reason;
+      return Fiber.interrupt(launch.fiber);
+    });
 
   const launchConfigError = (detail: string, provider: SandboxProviderKind = "boat") =>
     new SandboxProviderError({ provider, stage: "config", detail });
@@ -1776,7 +1824,7 @@ const make = Effect.gen(function* () {
   // Runs `effect` until it succeeds; each failure keeps the machine and waits for a retry. A cancel
   // interrupts the wait like any other stage.
   const untilRetried = Effect.fn("SandboxProvisioner.untilRetried")(function* <A, R>(
-    launch: Pick<Launch, "retries">,
+    launch: Launch,
     threadId: ThreadId,
     stage: SandboxSetupStageId,
     effect: Effect.Effect<A, SandboxProviderError, R>,
@@ -1791,7 +1839,7 @@ const make = Effect.gen(function* () {
         error: result.failure.detail,
         recovery: "retry",
       });
-      yield* Queue.take(launch.retries);
+      yield* awaitClient(launch, Queue.take(launch.retries));
       yield* tracker.update(threadId, { phase: "running", error: null, recovery: null });
     }
   });
@@ -1882,7 +1930,7 @@ const make = Effect.gen(function* () {
         launch.ready = { machine, projectId: cloned.projectId };
         yield* reporter.stage("pair", "running", null);
         yield* tracker.update(threadId, { awaitingHandoff: true });
-        yield* Deferred.await(handoff);
+        yield* awaitClient(launch, Deferred.await(handoff));
         yield* machine.save({ state: "running" });
         // Only the host's bridge (and so the phone) needs this; the client's own pairing is done.
         yield* ensureBridge(machine.record(), machine.run).pipe(
@@ -1902,7 +1950,12 @@ const make = Effect.gen(function* () {
         Exit.isSuccess(exit)
           ? Effect.void
           : Exit.hasInterrupts(exit)
-            ? tracker.finish(threadId, "cancelled")
+            ? state.launch?.stopReason == null
+              ? tracker.finish(threadId, "cancelled")
+              : tracker.finish(threadId, "failed", {
+                  error: state.launch.stopReason,
+                  recovery: "relaunch",
+                })
             : tracker.finish(threadId, "failed", {
                 error: Option.match(Exit.findErrorOption(exit), {
                   onNone: () => "The sandbox could not be set up.",
@@ -1920,7 +1973,17 @@ const make = Effect.gen(function* () {
       ),
     );
     const fiber = yield* tracked(instanceId, run);
-    const launch: Launch = { input, config, instanceId, fiber, retries, handoff, ready: null };
+    const launch: Launch = {
+      input,
+      config,
+      instanceId,
+      fiber,
+      retries,
+      handoff,
+      ready: null,
+      activity: 0,
+      stopReason: null,
+    };
     state.launch = launch;
     launches.set(threadId, launch);
     return { instanceId } satisfies SandboxLaunchResult;
@@ -1943,13 +2006,60 @@ const make = Effect.gen(function* () {
       : null;
   });
 
-  const launch = Effect.fn("SandboxProvisioner.launch")(function* (input: SandboxLaunchInput) {
-    const current = launches.get(input.threadId);
-    if (current !== undefined && current.fiber.pollUnsafe() === undefined) {
-      return yield* launchConfigError(
-        "A sandbox is already starting for this thread.",
-        current.config.provider,
+  // What the provider says of a record's machine; null when it cannot say or does not answer.
+  const providerStatus = Effect.fn("SandboxProvisioner.providerStatus")(function* (
+    record: SandboxRecord,
+  ) {
+    const driver = findDriver(record.provider);
+    if (driver.status === undefined) return null;
+    const config = yield* recordConfig(driver, record).pipe(Effect.option);
+    if (Option.isNone(config)) return null;
+    return yield* onHttp(driver.status({ config: config.value, sandboxId: record.sandboxId })).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("sandbox status check failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+  });
+
+  // A thread has one sandbox, so a new launch replaces what an earlier, unfinished one left.
+  const releaseAbandoned = Effect.fn("SandboxProvisioner.releaseAbandoned")(function* (
+    threadId: ThreadId,
+  ) {
+    const all = yield* records.list.pipe(Effect.orDie);
+    for (const record of all) {
+      if (record.threadId !== threadId || liveInstances.has(record.instanceId)) continue;
+      if (record.state !== "provisioning" && record.abandonedAt === undefined) continue;
+      yield* removeSandbox(
+        { provider: record.provider, sandboxId: record.sandboxId, instanceId: record.instanceId },
+        false,
+      ).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("abandoned sandbox cleanup failed", {
+            instanceId: record.instanceId,
+            sandboxId: record.sandboxId,
+            cause,
+          }),
+        ),
       );
+    }
+  });
+
+  const launch = Effect.fn("SandboxProvisioner.launch")(function* (input: SandboxLaunchInput) {
+    const current = runningLaunch(input.threadId);
+    if (current !== null) {
+      // A send while the thread's sandbox starts follows that launch instead of failing; one that
+      // failed, or whose machine the provider no longer has, gives way to a new one.
+      const snapshot = yield* tracker.get(input.threadId);
+      const record = yield* records.get(current.instanceId).pipe(Effect.orDie);
+      const gone = Option.isSome(record) && (yield* providerStatus(record.value)) === "deleted";
+      if (snapshot?.phase !== "failed" && !gone) {
+        return { instanceId: current.instanceId } satisfies SandboxLaunchResult;
+      }
+      yield* stopLaunch(current, gone ? LAUNCH_DELETED_OUTSIDE : null);
     }
     const found = yield* configStore.get(input.configId).pipe(Effect.orDie);
     if (Option.isNone(found)) {
@@ -1963,6 +2073,7 @@ const make = Effect.gen(function* () {
         config.provider,
       );
     }
+    yield* releaseAbandoned(input.threadId);
     return yield* startLaunch(input, config);
   });
 
@@ -1985,6 +2096,7 @@ const make = Effect.gen(function* () {
     if (current === null || current.ready === null) {
       return yield* notReady(current?.config.provider ?? "boat");
     }
+    current.activity += 1;
     const { machine, projectId } = current.ready;
     const pairingCode = yield* pairMachine(machine).pipe(
       Effect.tapError((error) =>
@@ -2036,6 +2148,7 @@ const make = Effect.gen(function* () {
       yield* startLaunch(current.input, saved.value);
       return;
     }
+    current.activity += 1;
     // The machine is kept; a failed pairing goes back to waiting for the client to pair again.
     if (current.ready !== null) {
       yield* tracker.stage(input.threadId, "pair", "running", null);
@@ -2723,6 +2836,10 @@ const make = Effect.gen(function* () {
             ),
           );
     const state = reconcileState(record.state, status);
+    // An abandoned launch's machine that is gone leaves only its keys, which go with the record.
+    if (state === "deleted" && record.abandonedAt !== undefined) {
+      return yield* releaseRecord(record);
+    }
     if (state !== record.state) {
       yield* putIfUnchanged(record, withState(withCost, state, nowText));
     } else if (
@@ -2808,31 +2925,73 @@ const make = Effect.gen(function* () {
     yield* Ref.set(orphans, found);
   });
 
+  // Releases a record's machine, hub key, tailnet device and scoped key. Forks are the user's to
+  // delete, never the sweep's.
+  const releaseRecord = (record: SandboxRecord) =>
+    removeSandbox(
+      { provider: record.provider, sandboxId: record.sandboxId, instanceId: record.instanceId },
+      false,
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("abandoned sandbox cleanup failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }),
+      ),
+    );
+
+  // A machine still up after its launch was lost is the user's call: it shows as failed, with
+  // Delete in the list and a new launch on its card.
+  const abandonLaunch = Effect.fn("SandboxProvisioner.abandonLaunch")(function* (
+    record: SandboxRecord,
+    now: string,
+  ) {
+    yield* putIfUnchanged(record, { ...withState(record, "error", now), abandonedAt: now });
+    const { threadId, configId } = record;
+    if (threadId === undefined || configId === undefined) return;
+    if ((yield* tracker.get(threadId)) !== null) return;
+    yield* tracker.begin({
+      threadId,
+      instanceId: record.instanceId,
+      configId,
+      label: record.label,
+      provider: record.provider,
+    });
+    yield* tracker.finish(threadId, "failed", { error: LAUNCH_ABANDONED, recovery: "relaunch" });
+  });
+
+  const sweepProvisioning = Effect.fn("SandboxProvisioner.sweepProvisioning")(function* (
+    record: SandboxRecord,
+    now: string,
+  ) {
+    // An unreachable provider says nothing about the machine, so the record waits for a later sweep.
+    const status = yield* providerStatus(record);
+    if (status === null) return;
+    const live = [...launches.values()].find(
+      (candidate) =>
+        candidate.instanceId === record.instanceId && candidate.fiber.pollUnsafe() === undefined,
+    );
+    if (live !== undefined || liveInstances.has(record.instanceId)) {
+      // Deleted at the provider mid-launch: stopping the launch releases everything it made.
+      if (status !== "deleted") return;
+      if (live !== undefined) yield* stopLaunch(live, LAUNCH_DELETED_OUTSIDE);
+      else yield* Fiber.interrupt(liveInstances.get(record.instanceId)!);
+      return;
+    }
+    // A launch lost with its server (a restart mid-launch) has nobody left to finish it.
+    if (status === "deleted") return yield* releaseRecord(record);
+    yield* abandonLaunch(record, now);
+  });
+
   const sweep = Effect.gen(function* () {
     const now = yield* DateTime.now;
     const all = yield* records.list.pipe(Effect.orDie);
-    // A provisioning record whose launch is gone (the server restarted mid-launch) has nobody left
-    // to finish or clean it up, so the sweep deletes its machine.
-    for (const record of all) {
-      if (record.state !== "provisioning" || liveInstances.has(record.instanceId)) continue;
-      // Forks are the user's to delete, never the sweep's.
-      yield* removeSandbox(
-        {
-          provider: record.provider,
-          sandboxId: record.sandboxId,
-          instanceId: record.instanceId,
-        },
-        false,
-      ).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("abandoned sandbox cleanup failed", {
-            instanceId: record.instanceId,
-            sandboxId: record.sandboxId,
-            cause,
-          }),
-        ),
-      );
-    }
+    yield* Effect.forEach(
+      all.filter((record) => record.state === "provisioning"),
+      (record) => sweepProvisioning(record, DateTime.formatIso(now)),
+      { concurrency: 4, discard: true },
+    );
     const live = all.filter(
       (record) => record.state !== "deleted" && record.state !== "provisioning",
     );
