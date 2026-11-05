@@ -10,18 +10,22 @@ import {
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowRightIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon } from "lucide-react";
 import * as Schema from "effect/Schema";
-import { type ReactNode, useState } from "react";
+import { AsyncResult } from "effect/reactivity";
+import { type ReactNode, useRef, useState } from "react";
 
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { useClientSettings, useEnvironmentSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
-import { providerInstanceEntriesFor } from "../../providerInstances";
+import { type ProviderInstanceEntry, providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironmentProviders, usePrimaryEnvironmentId } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { ComposerEffortColumn, describeComposerEffort } from "../chat/ComposerModelEffort";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
+import type { ModelEsque } from "../chat/providerIconUtils";
+import type { TraitsSelectionInput } from "../chat/TraitsPicker";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Spinner } from "../ui/spinner";
@@ -32,6 +36,9 @@ import {
   describeLastRun,
   nextRunLabel,
   repositoryName,
+  resolverActiveEntry,
+  resolverEffortDescriptor,
+  resolverPickerModels,
 } from "./DiyBuildSection.logic";
 import { SETTINGS_PICKER_TRIGGER_CLASSNAME, SettingsRow, SettingsSection } from "./settingsLayout";
 
@@ -223,6 +230,18 @@ export function DiyLogText({
   );
 }
 
+/** What the kit runs: `effort` is undefined when the kit predates RESOLVER_EFFORT. */
+export interface DiyResolverSelection {
+  readonly provider: DiyResolverProvider;
+  readonly model: string;
+  readonly effort?: string | undefined;
+}
+
+const sameSelection = (left: DiyResolverSelection, right: DiyResolverSelection) =>
+  left.provider === right.provider &&
+  left.model === right.model &&
+  (left.effort ?? "") === (right.effort ?? "");
+
 /** Claude and Codex instances the user already has in T3 Code; the kit runs no other provider. */
 function ResolverPicker({
   environmentId,
@@ -239,65 +258,170 @@ function ResolverPicker({
     "Could not change the resolver",
   );
   const canChange = useAtomValue(serverEnvironment.diySetResolver.permissionAtom(environmentId));
-  const [saving, setSaving] = useState(false);
+  // A pick shows at once and stays until the kit's status agrees, or the write fails.
+  const [pending, setPending] = useState<DiyResolverSelection | null>(null);
+  // One `config set` at a time, so a model pick and the effort right after it land in that order.
+  const writes = useRef<Promise<unknown>>(Promise.resolve());
+  const saved: DiyResolverSelection = {
+    provider: status.resolver.provider === "codex" ? "codex" : "claude",
+    model: status.resolver.model,
+    effort: status.resolver.effort,
+  };
+  if (pending !== null && sameSelection(pending, saved)) setPending(null);
   const entries = providerInstanceEntriesFor(providers, settings, null).filter(
     (entry) => DIY_RESOLVER_DRIVERS.has(entry.driverKind) && entry.enabled,
   );
-  const current = status.resolver.provider === "codex" ? "codex" : "claude";
-  const active =
-    entries.find(
-      (entry) => DIY_RESOLVER_DRIVERS.get(entry.driverKind) === current && entry.isDefault,
-    ) ?? entries.find((entry) => DIY_RESOLVER_DRIVERS.get(entry.driverKind) === current);
+  const selection = pending ?? saved;
+
+  const handleChange = (next: DiyResolverSelection) => {
+    if (!DIY_RESOLVER_MODEL_PATTERN.test(next.model)) {
+      toastManager.add({
+        type: "error",
+        title: "Could not change the resolver",
+        description: `t3code-diy can't pass the model name "${next.model}" to ${RESOLVER_NAMES[next.provider]}.`,
+      });
+      return;
+    }
+    setPending(next);
+    writes.current = writes.current.then(async () => {
+      const result = await setResolver({
+        environmentId,
+        input: {
+          provider: next.provider,
+          model: next.model,
+          ...(next.effort === undefined ? {} : { effort: next.effort }),
+        },
+      });
+      if (AsyncResult.isFailure(result)) {
+        setPending((current) => (current === next ? null : current));
+      }
+    });
+  };
+
+  return (
+    <DiyResolverPicker
+      environmentId={environmentId}
+      selection={selection}
+      entries={entries}
+      modelOptionsByInstance={getCustomModelOptionsByInstance(
+        settings,
+        providers.filter((provider) =>
+          entries.some((entry) => entry.instanceId === provider.instanceId),
+        ),
+        resolverActiveEntry(entries, selection.provider)?.instanceId ?? null,
+        selection.model,
+      )}
+      disabled={!canChange}
+      onOpenProviderSetup={(instanceId) => {
+        void navigate({ to: "/settings/providers", search: { environmentId, instanceId } });
+      }}
+      onChange={handleChange}
+    />
+  );
+}
+
+/**
+ * The composer's model picker with its effort column, held to what the kit can run: Claude and
+ * Codex instances, and only the effort levels their CLIs take headless. No footer, so no speed or
+ * access controls; the resolver always runs with the kit's own permissions.
+ */
+export function DiyResolverPicker({
+  environmentId,
+  selection,
+  entries,
+  modelOptionsByInstance,
+  disabled,
+  onOpenProviderSetup,
+  onChange,
+}: {
+  readonly environmentId: EnvironmentId | null;
+  readonly selection: DiyResolverSelection;
+  /** Enabled Claude and Codex instances. */
+  readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
+  readonly disabled: boolean;
+  readonly onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
+  readonly onChange: (next: DiyResolverSelection) => void;
+}) {
+  const effortDisplay = useClientSettings((settings) => settings.effortDisplay);
+  const current = selection.provider;
+  const active = resolverActiveEntry(entries, current);
 
   if (active === undefined) {
+    const details = [selection.model, selection.effort && `${selection.effort} effort`].filter(
+      Boolean,
+    );
     return (
       <span className="text-sm text-muted-foreground">
         {RESOLVER_NAMES[current]}
-        {status.resolver.model ? ` (${status.resolver.model})` : ""}. Add Claude or Codex in
-        Providers to change it here.
+        {details.length > 0 ? ` (${details.join(", ")})` : ""}. Add Claude or Codex in Providers to
+        change it here.
       </span>
     );
   }
 
-  const handleChange = async (instanceId: ProviderInstanceId, model: string) => {
+  // A kit without RESOLVER_EFFORT gets the plain picker; there is nothing to set the effort on.
+  const effortKnown = selection.effort !== undefined;
+  const levels = resolverEffortDescriptor(
+    current,
+    active.driverKind,
+    active.models,
+    selection.model,
+  );
+  const traits: TraitsSelectionInput | null = effortKnown
+    ? {
+        provider: active.driverKind,
+        instanceId: active.instanceId,
+        models: resolverPickerModels(current, active.models),
+        model: selection.model,
+        // Empty effort is the CLI's default, which the column shows as the model's Default level.
+        modelOptions:
+          levels && selection.effort ? [{ id: levels.id, value: selection.effort }] : [],
+        allowPromptInjectedEffort: false,
+        planModeEnabled: false,
+        onModelOptionsChange: (options) => {
+          const effort = options?.find((option) => option.id === levels?.id)?.value;
+          if (typeof effort === "string" && effort !== selection.effort) {
+            onChange({ ...selection, effort });
+          }
+        },
+      }
+    : null;
+  const effort = describeComposerEffort(traits, effortDisplay, "sm");
+
+  const handleModelChange = (instanceId: ProviderInstanceId, model: string) => {
     const entry = entries.find((candidate) => candidate.instanceId === instanceId);
     const provider = entry ? DIY_RESOLVER_DRIVERS.get(entry.driverKind) : undefined;
-    if (provider === undefined) return;
-    if (!DIY_RESOLVER_MODEL_PATTERN.test(model)) {
-      toastManager.add({
-        type: "error",
-        title: "Could not change the resolver",
-        description: `t3code-diy can't pass the model name "${model}" to ${RESOLVER_NAMES[provider]}.`,
-      });
-      return;
-    }
-    setSaving(true);
-    await setResolver({ environmentId, input: { provider, model } });
-    setSaving(false);
+    if (entry === undefined || provider === undefined) return;
+    // The effort carries over when the new model has that level too; otherwise the CLI's default.
+    const keepsEffort =
+      resolverEffortDescriptor(provider, entry.driverKind, entry.models, model)?.options.some(
+        (option) => option.id === selection.effort,
+      ) === true;
+    onChange({
+      provider,
+      model,
+      ...(effortKnown ? { effort: keepsEffort ? selection.effort : "" } : {}),
+    });
   };
 
   return (
     <ProviderModelPicker
       environmentId={environmentId}
       activeInstanceId={active.instanceId}
-      model={status.resolver.model}
+      model={selection.model}
       lockedProvider={null}
       instanceEntries={entries}
-      modelOptionsByInstance={getCustomModelOptionsByInstance(
-        settings,
-        providers.filter((provider) =>
-          entries.some((entry) => entry.instanceId === provider.instanceId),
-        ),
-        active.instanceId,
-        status.resolver.model,
-      )}
+      modelOptionsByInstance={modelOptionsByInstance}
       triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
       triggerAriaLabel="Conflict resolver"
-      disabled={!canChange || saving}
-      onOpenProviderSetup={(instanceId) => {
-        void navigate({ to: "/settings/providers", search: { environmentId, instanceId } });
-      }}
-      onInstanceModelChange={(instanceId, model) => void handleChange(instanceId, model)}
+      triggerSuffix={effort.suffix}
+      triggerDetail={effort.detail}
+      disabled={disabled}
+      popupAlign="end"
+      {...(onOpenProviderSetup ? { onOpenProviderSetup } : {})}
+      onInstanceModelChange={handleModelChange}
+      {...(traits ? { effortColumn: <ComposerEffortColumn traits={traits} /> } : {})}
     />
   );
 }
