@@ -30,6 +30,8 @@ import {
   SandboxSaveTemplateInput,
   SandboxSaveTemplateResult,
   SandboxStopResult,
+  SandboxTailscaleCheckInput,
+  SandboxTailscaleCheckResult,
   SandboxTemplatesInput,
   SandboxTemplatesResult,
 } from "./sandbox.ts";
@@ -55,6 +57,7 @@ export const SANDBOX_WS_METHODS = {
   sandboxesRetryLaunch: "sandboxes.retryLaunch",
   sandboxesPairLaunch: "sandboxes.pairLaunch",
   sandboxesCompleteLaunch: "sandboxes.completeLaunch",
+  sandboxesCheckTailscale: "sandboxes.checkTailscale",
 } as const;
 
 const SandboxFailure = Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]);
@@ -180,6 +183,13 @@ const WsSandboxesCompleteLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesComple
   error: SandboxFailure,
 });
 
+// The secret only signs in; nothing is saved, so a wrong one changes nothing.
+const WsSandboxesCheckTailscaleRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCheckTailscale, {
+  payload: SandboxTailscaleCheckInput,
+  success: SandboxTailscaleCheckResult,
+  error: EnvironmentAuthorizationError,
+});
+
 export const SandboxRpcs = [
   WsSandboxesProvidersRpc,
   WsSandboxesEnvironmentsRpc,
@@ -201,6 +211,7 @@ export const SandboxRpcs = [
   WsSandboxesRetryLaunchRpc,
   WsSandboxesPairLaunchRpc,
   WsSandboxesCompleteLaunchRpc,
+  WsSandboxesCheckTailscaleRpc,
 ] as const;
 
 // Each of these spends the saved provider key, changes billable machines, or hands out a pairing
@@ -219,4 +230,5 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesRetryLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesPairLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesCompleteLaunch]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesCheckTailscale]: AuthSettingsWriteScope,
 } as const;
