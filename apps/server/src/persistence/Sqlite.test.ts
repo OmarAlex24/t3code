@@ -19,6 +19,7 @@ import { vi } from "vite-plus/test";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerOwnership from "../serverOwnership.ts";
+import { runAllMigrations } from "./ForkMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
 
@@ -192,10 +193,11 @@ const ownT3Home = Effect.fn(function* () {
   );
 });
 
+// Upstream's migrations through the given id, or every migration (this fork's too) without one.
 const migrateTo = (toMigrationInclusive?: number) =>
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig.ServerConfig;
-    yield* runMigrations({ toMigrationInclusive }).pipe(
+    yield* runAllMigrations({ toMigrationInclusive }).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
     );
   });
@@ -226,6 +228,24 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("layerCliConfig",
       );
 
       assert.equal(yield* latestRecordedMigrationId, recorded);
+      assert.equal(opened._tag, "Failure");
+      if (opened._tag === "Failure") {
+        assert.instanceOf(opened.failure, SqlitePersistence.ServerOwnsDatabaseError);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerT3Home)),
+  );
+
+  it.effect("does not run this fork's pending migrations in a T3 home a running server owns", () =>
+    Effect.gen(function* () {
+      const { dbPath } = yield* ServerConfig.ServerConfig;
+      // Upstream's list is current, so only the fork's own migrations are pending.
+      yield* runMigrations().pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+      yield* ownT3Home();
+
+      const opened = yield* Effect.void.pipe(
+        Effect.provide(SqlitePersistence.layerCliConfig),
+        Effect.result,
+      );
       assert.equal(opened._tag, "Failure");
       if (opened._tag === "Failure") {
         assert.instanceOf(opened.failure, SqlitePersistence.ServerOwnsDatabaseError);
