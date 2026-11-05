@@ -532,7 +532,14 @@ function SandboxRow({
     environmentId,
     provider: canResume ? provider : undefined,
   });
-  const attention = ATTENTION[sandbox.state];
+  // A launch T3 Code lost mid-way left this machine; the thread can start a new one in its place.
+  const attention =
+    sandbox.abandonedAt !== undefined && sandbox.state === "error"
+      ? {
+          variant: "error" as const,
+          line: "T3 Code stopped before this sandbox finished starting. Delete it, or start its thread again to replace it.",
+        }
+      : ATTENTION[sandbox.state];
   // Saving a template deletes its source, so a thread's machine is never offered.
   const canSaveTemplate =
     provider !== undefined &&

@@ -4439,6 +4439,100 @@ describe("sandbox agent access", () => {
       Effect.provideService(HttpClient.HttpClient, client),
     );
   });
+  // The record a launch left behind when its client went away and the user deleted the machine
+  // in Boat: the same keys, a hub key and a tailnet device, and no environment yet.
+  it.effect("releases the hub key and tailnet device of a stuck launch Boat no longer has", () => {
+    const requests: Array<{ method: string; url: string; body: unknown; auth?: string }> = [];
+    const secrets = memorySecrets();
+    const hubKeySecret = "sandbox-hub-key-stuck";
+    secrets.values.set(
+      hubKeySecret,
+      new TextEncoder().encode("t3-sandbox-horizon-stack-on-boat-sandbox-76f4aaaaaaaaaaaa"),
+    );
+    const sourceId = "cliproxy-hub.example";
+    const stuck: SandboxRecord = {
+      instanceId: "32cf0d98-b444-490d-acfd-2371814b0067",
+      environmentId: null,
+      configId: "config-boat",
+      threadId: ThreadId.make("60df7491-7d8d-420a-a222-3df81fa717ba"),
+      projectId: ProjectId.make("project-horizon"),
+      projectTitle: "horizon-stack",
+      provider: "boat",
+      sandboxId: "bx_2t2p26af",
+      label: "horizon-stack on Boat sandbox",
+      size: "small",
+      state: "provisioning",
+      createdAt: "2026-11-05T18:36:53.520Z",
+      updatedAt: "2026-11-05T18:37:16.000Z",
+      httpBaseUrl: "",
+      access: "public",
+      runningSince: "2026-11-05T18:36:53.520Z",
+      maxRunningMinutes: 480,
+      claudeHubKey: { sourceId, secret: hubKeySecret },
+      tailscale: { deviceId: "nWgD5jiZMW11CNTRL" },
+    };
+    expect(Object.keys(stuck).toSorted()).toEqual(
+      [
+        "instanceId",
+        "environmentId",
+        "configId",
+        "threadId",
+        "projectId",
+        "projectTitle",
+        "provider",
+        "sandboxId",
+        "label",
+        "size",
+        "state",
+        "createdAt",
+        "updatedAt",
+        "httpBaseUrl",
+        "access",
+        "runningSince",
+        "maxRunningMinutes",
+        "claudeHubKey",
+        "tailscale",
+      ].toSorted(),
+    );
+    const repository = memoryRepository([stuck]);
+    const client = recording(requests, (request) => {
+      if (request.url.includes("/sandboxes/bx_2t2p26af")) {
+        return Response.json({ code: "not_found" }, { status: 404 });
+      }
+      if (request.url === "https://api.tailscale.com/api/v2/oauth/token") {
+        return Response.json({ access_token: TS_ACCESS_TOKEN, token_type: "Bearer" });
+      }
+      return Response.json({ ok: true });
+    });
+    const settings = {
+      sandboxProviders: { boat: { apiKey: "boat_test" } },
+      usageLimitSources: { [sourceId]: hubSettings.usageLimitSources.hub },
+      sandboxTailscale: tailnetSettings.sandboxTailscale,
+    } as const;
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // What the server does as it starts, with no launch left to finish this one.
+      yield* provisioner.sweep;
+      const deletes = requests
+        .filter((request) => request.method === "DELETE")
+        .map((request) => request.url);
+      expect(deletes).toEqual(
+        expect.arrayContaining([
+          "https://boat.dev/api/v1/sandboxes/bx_2t2p26af",
+          "https://hub.test/v0/management/api-keys?value=t3-sandbox-horizon-stack-on-boat-sandbox-76f4aaaaaaaaaaaa",
+          "https://api.tailscale.com/api/v2/device/nWgD5jiZMW11CNTRL",
+        ]),
+      );
+      expect(deletes).toHaveLength(3);
+      expect(repository.records.size).toBe(0);
+      expect(secrets.values.has(hubKeySecret)).toBe(false);
+      expect((yield* provisioner.list).sandboxes).toEqual([]);
+    }).pipe(
+      Effect.provide(provisionerLayer(settings, repository.layer, { secrets: secrets.layer })),
+      Effect.provideService(HttpClient.HttpClient, client),
+    );
+  });
+
   it.effect(
     "joins the tailnet with a single-use ephemeral key and removes the device when deleted",
     () => {
@@ -4800,6 +4894,8 @@ describe("SandboxProvisioner per-thread launches", () => {
     readonly keys: Set<string>;
     /** Every sandbox with its environment, as Boat lists them by environment. */
     readonly inEnvironments: Array<{ id: string; name: string; environment: string }>;
+    /** Boat's state per sandbox id, which a test can change mid-launch. */
+    readonly states: Record<string, string>;
     readonly client: HttpClient.HttpClient;
   }
 
@@ -4846,8 +4942,11 @@ describe("SandboxProvisioner per-thread launches", () => {
       readonly work?: string;
       /** When the bridge credentials the sandbox mints expire. */
       readonly bridgeExpiresAt?: string;
+      /** Boat's state per sandbox id; `gone` answers 404, as Boat does once it is deleted. */
+      readonly states?: Record<string, string>;
     } = {},
   ): BoatFake => {
+    const states = options.states ?? {};
     let minted = 0;
     const requests: Array<string> = [];
     const commands: Array<string> = [];
@@ -4964,6 +5063,12 @@ describe("SandboxProvisioner per-thread launches", () => {
           ? Deferred.await(options.holding.until).pipe(Effect.andThen(answer))
           : answer;
       }
+      if (
+        request.url.includes("/sandboxes/") &&
+        states[request.url.split("/").at(-1)!] === "gone"
+      ) {
+        return respond(request, { code: "not_found" }, 404);
+      }
       if (request.method === "DELETE" && request.url.includes("/sandboxes/")) {
         const id = request.url.split("/").at(-1);
         const index = listed.findIndex((sandbox) => sandbox.id === id);
@@ -4983,12 +5088,24 @@ describe("SandboxProvisioner per-thread launches", () => {
           label.startsWith("t3.code/host=") ? { sandboxes: listed } : { sandboxes: [] },
         );
       }
-      if (request.method === "GET" && request.url.endsWith(`/sandboxes/${boatSandboxId}`)) {
-        return respond(request, { sandbox: { id: boatSandboxId, state: "ready", error: null } });
+      if (request.method === "GET" && /\/sandboxes\/[^/]+$/u.test(request.url)) {
+        const id = request.url.split("/").at(-1)!;
+        const state = states[id] ?? (id === boatSandboxId ? "ready" : undefined);
+        if (state !== undefined) return respond(request, { sandbox: { id, state, error: null } });
       }
       return Effect.succeed(boatResponse(request));
     });
-    return { requests, commands, bodies, listed, environments, keys, inEnvironments, client };
+    return {
+      requests,
+      commands,
+      bodies,
+      listed,
+      environments,
+      keys,
+      inEnvironments,
+      states,
+      client,
+    };
   };
 
   const snapshotWhere = (
@@ -5714,7 +5831,7 @@ describe("SandboxProvisioner per-thread launches", () => {
     }),
   );
 
-  it.effect("deletes an abandoned launch but leaves its forks and their environment", () => {
+  it.effect("releases an abandoned launch Boat no longer has but leaves its forks", () => {
     const abandoned: SandboxRecord = {
       instanceId: "abandoned",
       environmentId: null,
@@ -5736,6 +5853,7 @@ describe("SandboxProvisioner per-thread launches", () => {
     };
     const repository = memoryRepository([abandoned]);
     const fake = boatFake({
+      states: { bx_abandon: "gone" },
       inEnvironments: [
         { id: "bx_abandon", name: "hello", environment: "t3-sandbox-hello-on-boat-small-0badc0de" },
         {
@@ -5868,6 +5986,275 @@ describe("SandboxProvisioner per-thread launches", () => {
     }),
   );
 
+  // A launch held at install, so a test can act on it while it is still starting.
+  const heldLaunch = (fake: BoatFake) =>
+    Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+      yield* snapshotWhere(
+        provisioner,
+        (snapshot) => stageOf(snapshot, "install")?.status === "running",
+      );
+      return { provisioner, config, instanceId, fake };
+    });
+
+  const sandboxCreates = (fake: BoatFake) =>
+    fake.requests.filter((request) => request === "POST https://boat.dev/api/v1/sandboxes");
+
+  it.effect("follows a launch already starting instead of refusing a second send", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "t3.codes/install.sh", until } });
+      const repository = memoryRepository();
+      yield* Effect.gen(function* () {
+        const { provisioner, config, instanceId } = yield* heldLaunch(fake);
+        // The user left the thread mid-launch and sent again on it.
+        const again = yield* provisioner.launch({ configId: config.id, threadId, project });
+        expect(again.instanceId).toBe(instanceId);
+        expect(sandboxCreates(fake)).toHaveLength(1);
+
+        yield* Deferred.succeed(until, undefined);
+        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        expect(waiting.instanceId).toBe(instanceId);
+        yield* provisioner.pairLaunch({ threadId });
+        yield* provisioner.completeLaunch({ threadId });
+        expect(repository.records.get(instanceId)?.state).toBe("running");
+        expect(deletes(fake)).toEqual([]);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, repository.layer)),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
+  it.effect("replaces a starting launch whose sandbox was deleted outside T3 Code", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "t3.codes/install.sh", until } });
+      const repository = memoryRepository();
+      yield* Effect.gen(function* () {
+        const { provisioner, config, instanceId } = yield* heldLaunch(fake);
+        fake.states[boatSandboxId] = "gone";
+        const fresh = yield* provisioner.launch({ configId: config.id, threadId, project });
+        expect(fresh.instanceId).not.toBe(instanceId);
+        // The stale launch released what it made before the new one began.
+        expect(repository.records.has(instanceId)).toBe(false);
+        expect(deletes(fake)).toEqual([
+          `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        ]);
+        delete fake.states[boatSandboxId];
+        yield* Deferred.succeed(until, undefined);
+        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        expect(waiting.instanceId).toBe(fresh.instanceId);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, repository.layer)),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
+  it.effect("stops a launch when the sweep finds its sandbox deleted outside T3 Code", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "t3.codes/install.sh", until } });
+      const repository = memoryRepository();
+      yield* Effect.gen(function* () {
+        const { provisioner, config, instanceId } = yield* heldLaunch(fake);
+        // A sweep while it starts leaves a machine Boat still has alone.
+        yield* provisioner.sweep;
+        expect(repository.records.get(instanceId)?.state).toBe("provisioning");
+
+        fake.states[boatSandboxId] = "gone";
+        yield* provisioner.sweep;
+        const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
+        expect(failed).toMatchObject({ instanceId, recovery: "relaunch" });
+        expect(failed.error).toContain("deleted outside T3 Code");
+        expect(repository.records.size).toBe(0);
+
+        // The thread is free to start again.
+        delete fake.states[boatSandboxId];
+        const fresh = yield* provisioner.launch({ configId: config.id, threadId, project });
+        expect(fresh.instanceId).not.toBe(instanceId);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, repository.layer)),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
+  it.effect("deleting a starting sandbox stops its launch and frees the thread", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "t3.codes/install.sh", until } });
+      const repository = memoryRepository();
+      yield* Effect.gen(function* () {
+        const { provisioner, config, instanceId } = yield* heldLaunch(fake);
+        yield* provisioner.delete({ provider: "boat", sandboxId: boatSandboxId, instanceId });
+        yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "cancelled");
+        expect(repository.records.size).toBe(0);
+        expect(deletes(fake)).toEqual([
+          `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        ]);
+        const fresh = yield* provisioner.launch({ configId: config.id, threadId, project });
+        expect(fresh.instanceId).not.toBe(instanceId);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, repository.layer)),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
+  it.effect("gives up on a client that never connects and deletes the sandbox", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      yield* TestClock.adjust("9 minutes");
+      // Pairing is the client at work, so the wait starts over.
+      yield* provisioner.pairLaunch({ threadId });
+      yield* TestClock.adjust("9 minutes");
+      expect((yield* snapshotWhere(provisioner, () => true)).phase).toBe("running");
+      expect(deletes(fake)).toEqual([]);
+
+      yield* TestClock.adjust("2 minutes");
+      const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
+      expect(failed).toMatchObject({ instanceId, recovery: "relaunch" });
+      expect(failed.error).toContain("Nothing connected to this sandbox for 10 minutes");
+      expect(stageOf(failed, "pair")?.status).toBe("failed");
+      expect(deletes(fake)).toEqual([`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`]);
+      expect(repository.records.size).toBe(0);
+      // A late completion finds nothing to finish.
+      expect((yield* provisioner.completeLaunch({ threadId }).pipe(Effect.flip)).detail).toContain(
+        "not ready",
+      );
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer)),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("gives up on a failed stage nobody retries and deletes the sandbox", () => {
+    const fake = boatFake({ failing: { text: "git clone", times: 1 } });
+    const repository = memoryRepository();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.recovery === "retry");
+      yield* TestClock.adjust("11 minutes");
+      const failed = yield* snapshotWhere(
+        provisioner,
+        (snapshot) => snapshot.phase === "failed" && snapshot.recovery === "relaunch",
+      );
+      expect(failed.error).toContain("Nothing connected to this sandbox");
+      expect(deletes(fake)).toEqual([`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`]);
+      expect(repository.records.size).toBe(0);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer)),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect(
+    "keeps an abandoned launch's live sandbox as failed and replaces it on relaunch",
+    () => {
+      const abandoned: SandboxRecord = {
+        instanceId: "abandoned",
+        environmentId: null,
+        configId: "config-gone",
+        threadId,
+        projectId,
+        projectTitle: "hello",
+        provider: "boat",
+        sandboxId: "bx_alive",
+        label: "hello on Boat small",
+        size: "small",
+        state: "provisioning",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "",
+        runningSince: "1970-01-01T00:00:00.000Z",
+        maxRunningMinutes: 480,
+      };
+      const repository = memoryRepository([abandoned]);
+      const fake = boatFake({ states: { bx_alive: "idle" } });
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        yield* TestClock.adjust("1 minute");
+        yield* provisioner.sweep;
+        // Boat still runs it: the user decides, so it shows as failed with Delete in the list.
+        expect(deletes(fake)).toEqual([]);
+        expect(repository.records.get("abandoned")).toMatchObject({
+          state: "error",
+          abandonedAt: "1970-01-01T00:01:00.000Z",
+        });
+        const card = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
+        expect(card).toMatchObject({ instanceId: "abandoned", recovery: "relaunch" });
+        expect(card.error).toContain("T3 Code stopped before this sandbox finished starting");
+        // A later sweep leaves it as it is.
+        yield* provisioner.sweep;
+        expect(deletes(fake)).toEqual([]);
+        expect(repository.records.get("abandoned")?.state).toBe("error");
+
+        // Starting the thread again replaces it.
+        const { config } = yield* provisioner.saveConfig({
+          config: configInput,
+          apiKey: "boat_test",
+        });
+        const fresh = yield* provisioner.launch({ configId: config.id, threadId, project });
+        expect(deletes(fake)).toEqual(["DELETE https://boat.dev/api/v1/sandboxes/bx_alive"]);
+        expect(repository.records.has("abandoned")).toBe(false);
+        yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        expect([...repository.records.keys()]).toEqual([fresh.instanceId]);
+      }).pipe(
+        Effect.provide(provisionerLayer(boatSettings, repository.layer)),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
+
+  it.effect("releases an abandoned launch once Boat no longer has its sandbox", () => {
+    const abandoned: SandboxRecord = {
+      instanceId: "abandoned",
+      environmentId: null,
+      threadId,
+      provider: "boat",
+      sandboxId: "bx_later",
+      label: "hello on Boat small",
+      size: "small",
+      state: "error",
+      abandonedAt: "1970-01-01T00:00:00.000Z",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      updatedAt: "1970-01-01T00:00:00.000Z",
+      httpBaseUrl: "",
+      runningSince: "1970-01-01T00:00:00.000Z",
+      maxRunningMinutes: 480,
+    };
+    const repository = memoryRepository([abandoned]);
+    const fake = boatFake({ states: { bx_later: "gone" } });
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      yield* provisioner.sweep;
+      expect(repository.records.size).toBe(0);
+    }).pipe(
+      Effect.provide(provisionerLayer(boatSettings, repository.layer)),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
   it.effect("launches a project that lives only on another machine", () => {
     const fake = boatFake();
     const repository = memoryRepository();
@@ -5988,10 +6375,11 @@ describe("SandboxProvisioner per-thread launches", () => {
         state: "provisioning",
       };
       const repository = memoryRepository([base, abandoned]);
+      // Boat no longer has the abandoned launch's machine.
       const fake = boatFake({
+        states: { bx_abandon: "gone" },
         listed: [
           { id: boatSandboxId, name: "hello on Boat small" },
-          { id: "bx_abandon", name: "hello on Boat small" },
           { id: "bx_orphan", name: "lost", labels: { "t3.code/instance": "gone" } },
         ],
       });
