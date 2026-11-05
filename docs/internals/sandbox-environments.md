@@ -220,9 +220,19 @@ the provisioner's own scope, so it outlives the RPC that started it, and reports
 `sandboxes.subscribeLaunch`. Stages run in a fixed order: `preflight`, `create`, `install`,
 `credentials`, `start`, `repo`, `env-files`, `pair`.
 
+- **Tailnet.** `launchJoinsTailnet` decides at each launch: the config's `joinTailnet` (stored
+  `false` means automatic), a tailnet-only `access`, or Claude's endpoint resolving only to
+  private or tailnet addresses (`SandboxHostAccess.endpointIsPrivate`) while a Tailscale client
+  is saved. A private endpoint with no client fails `preflight`, before anything bills, with code
+  `tailscale_required` and `recovery: "set-up-tailscale"`; the card links to the Tailscale card.
+  A relaunch re-reads the config, so an edit made after a refusal applies.
 - **Failure policy.** A failure up to `start` destroys the machine and ends the launch with
   `recovery: "relaunch"`. A failure in `repo` or `pair` keeps the machine and waits on the
-  launch's retry queue with `recovery: "retry"`. `env-files` and the credential steps only warn.
+  launch's retry queue with `recovery: "retry"`. `env-files` and the other credential steps only
+  warn, except that a sandbox that cannot reach Claude's endpoint (checked with retries for about
+  half a minute, since a fresh tailnet join can need a moment for its route) fails `credentials`:
+  a thread handed to it would sit on Thinking while Claude retries. `sandboxes.create` keeps that
+  check as a warning.
 - **Cancel** interrupts the fiber at any stage; its `onExit` destroys the machine, revokes the hub
   key, removes the key's secret, deletes the tailnet device, and removes the record.
 - **Clone.** The `repo` step runs `git clone` from the project's GitHub URL into `~/work/<repo>`
