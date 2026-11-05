@@ -271,7 +271,13 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
-import { deleteSandboxThread, isSandboxThread } from "../state/sandboxThreads";
+import { useBridgedSandboxCopies } from "../state/sandboxes";
+import {
+  bridgedSandboxCopyHost,
+  deleteSandboxThread,
+  isSandboxThread,
+  withBridgedSandboxCopies,
+} from "../state/sandboxThreads";
 
 function sameSidebarProviderEntries(
   left: ReadonlyMap<string, SidebarProviderEntry>,
@@ -908,7 +914,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  const delegatedUnderParent = useDelegatedUnderParent();
+  // Sandbox copies list nowhere, like delegated tasks: their host thread's row stands for them.
+  const bridgedSandboxCopies = useBridgedSandboxCopies();
+  const delegatedUnderParent = withBridgedSandboxCopies(
+    useDelegatedUnderParent(),
+    bridgedSandboxCopies,
+  );
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -1103,15 +1114,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           ),
         );
   const threads = useQuietThreadShells();
-  const routeRowThreadKey =
+  // A sandbox's own copy of a chat has no row; the host thread's row stands for it.
+  const routeRowThreadRef =
     routeThreadRef === null
+      ? null
+      : (bridgedSandboxCopyHost(bridgedSandboxCopies, routeThreadRef) ?? routeThreadRef);
+  const routeRowThreadKey =
+    routeRowThreadRef === null
       ? null
       : scopedThreadKey(
           scopeThreadRef(
-            routeThreadRef.environmentId,
+            routeRowThreadRef.environmentId,
             resolveSidebarRowThreadId(
-              routeThreadRef.threadId,
-              routeThreadRef.environmentId,
+              routeRowThreadRef.threadId,
+              routeRowThreadRef.environmentId,
               threads,
             ),
           ),

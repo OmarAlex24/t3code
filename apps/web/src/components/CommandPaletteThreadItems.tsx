@@ -30,6 +30,8 @@ import {
   usePrimaryEnvironmentId,
 } from "../state/environments";
 import { useThreadSearch } from "../state/queries";
+import { useBridgedSandboxCopies } from "../state/sandboxes";
+import { bridgedSandboxCopyHost } from "../state/sandboxThreads";
 import { primaryServerProvidersAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -99,7 +101,15 @@ export function useCommandPaletteThreadItems(input: {
 }) {
   const { activeThread, threadSearchQuery } = input;
   const navigate = useNavigate();
-  const threads = useVisibleThreadShells();
+  // A sandbox's own copy of a chat is found as its host thread.
+  const bridgedSandboxCopies = useBridgedSandboxCopies();
+  const threads = useVisibleThreadShells().filter(
+    (thread) =>
+      bridgedSandboxCopyHost(
+        bridgedSandboxCopies,
+        scopeThreadRef(thread.environmentId, thread.id),
+      ) === undefined,
+  );
   const { projectEnvironmentLocationById } = useEnvironmentLookups();
   const providerEntryByEnvironmentAndInstanceId = useProviderEntryByEnvironmentAndInstanceId();
   const messageSearch = useConnectedThreadSearch(threadSearchQuery);
