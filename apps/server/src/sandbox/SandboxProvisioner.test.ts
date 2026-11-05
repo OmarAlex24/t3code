@@ -51,6 +51,7 @@ import type {
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { layerHttpClient, requestJson } from "./SandboxProvider.ts";
 import { boatDriver } from "./providers/boat.ts";
 import { celestoDriver } from "./providers/celesto.ts";
@@ -170,6 +171,42 @@ const memoryWorkspace = (files: Readonly<Record<string, string>> = {}) =>
     ),
   );
 
+/** Projects on the host: env files are read only from one of these. */
+const hostProjects = (
+  projects: Readonly<Record<string, string>> = { "project-host": "/host/hello" },
+) =>
+  Layer.succeed(
+    ProjectStore.ProjectStoreV2,
+    ProjectStore.ProjectStoreV2.of({
+      apply: () => Effect.die("unused"),
+      get: (projectId) =>
+        Effect.succeed(
+          projects[projectId] === undefined
+            ? Option.none()
+            : Option.some({
+                projectId,
+                title: "hello",
+                workspaceRoot: projects[projectId]!,
+                defaultModelSelection: null,
+                defaultThreadEnvMode: null,
+                autoPull: false,
+                faviconPath: null,
+                projectIcon: null,
+                scripts: [],
+                pinnedAt: null,
+                archivedAt: null,
+                createdAt: "2026-11-01T00:00:00.000Z",
+                updatedAt: "2026-11-01T00:00:00.000Z",
+                deletedAt: null,
+              }),
+        ),
+      list: () => Effect.die("unused"),
+      findActiveByWorkspaceRoot: () => Effect.die("unused"),
+      getShell: () => Effect.die("unused"),
+      listShells: () => Effect.die("unused"),
+    }),
+  );
+
 const hostIdentity = Layer.succeed(
   ServerEnvironment.ServerEnvironmentIdentity,
   ServerEnvironment.ServerEnvironmentIdentity.of({
@@ -208,6 +245,7 @@ const provisionerLayer = (
     Layer.provide(options.configs ?? memoryConfigs().layer),
     Layer.provide(hostIdentity),
     Layer.provide(memoryWorkspace(options.workspace)),
+    Layer.provide(hostProjects()),
     Layer.provide(SandboxHostAccess.layerTest(options.host)),
     Layer.provide(options.secrets ?? memorySecrets().layer),
     Layer.provide(secretResolver),
@@ -4602,14 +4640,92 @@ describe("sandbox agent access", () => {
   );
 });
 
+describe("Tailscale OAuth client check", () => {
+  // Tailscale answers the token request with the scopes the client was granted.
+  const tokenClient = (
+    requests: Array<{ method: string; url: string; body: unknown; auth?: string | undefined }>,
+    answer: { readonly status?: number; readonly scope?: string },
+  ) =>
+    recording(requests, (request) =>
+      request.url === "https://api.tailscale.com/api/v2/oauth/token"
+        ? Response.json(
+            { access_token: "tskey-api-ACCESS", token_type: "Bearer", scope: answer.scope },
+            { status: answer.status ?? 200 },
+          )
+        : new Response(null, { status: 404 }),
+    );
+
+  it.effect("takes the client ID from the secret and accepts a client with both scopes", () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const result = yield* provisioner.checkTailscale({
+        clientSecret: "tskey-client-kABC123CNTRL-rest-of-secret",
+      });
+      expect(result).toEqual({
+        clientId: "kABC123CNTRL",
+        scopes: ["auth_keys", "devices:core"],
+        problem: null,
+      });
+      expect(String(requests[0]?.body)).toContain("client_id=kABC123CNTRL");
+    }).pipe(
+      Effect.provide(testLayer),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        tokenClient(requests, { scope: "auth_keys devices:core" }),
+      ),
+    );
+  });
+
+  it.effect("names the missing scope, a rejected secret, and a secret of another shape", () =>
+    Effect.gen(function* () {
+      const check = (
+        answer: { readonly status?: number; readonly scope?: string },
+        input: { readonly clientSecret: string; readonly clientId?: string },
+      ) =>
+        Effect.gen(function* () {
+          const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+          return yield* provisioner.checkTailscale(input);
+        }).pipe(
+          Effect.provide(testLayer),
+          Effect.provideService(HttpClient.HttpClient, tokenClient([], answer)),
+        );
+      const secret = "tskey-client-kABC-rest";
+      expect((yield* check({ scope: "auth_keys" }, { clientSecret: secret })).problem).toBe(
+        "This OAuth client is missing the devices:core scope. Give it write access to Auth Keys and Devices Core for the tag, then try again.",
+      );
+      expect((yield* check({ status: 401 }, { clientSecret: secret })).problem).toContain(
+        "HTTP 401",
+      );
+      expect((yield* check({ scope: "all" }, { clientSecret: secret })).problem).toBeNull();
+      expect((yield* check({}, { clientSecret: "not-a-client-secret" })).problem).toBe(
+        "This does not look like a Tailscale OAuth client secret (tskey-client-…). If yours has another form, enter its client ID under Advanced.",
+      );
+      // A separate client ID still works for a secret of another shape.
+      expect(
+        yield* check(
+          { scope: "auth_keys devices:core" },
+          { clientSecret: "other-secret", clientId: "kOTHER" },
+        ),
+      ).toMatchObject({ clientId: "kOTHER", problem: null });
+    }),
+  );
+});
+
 describe("SandboxProvisioner per-thread launches", () => {
   const threadId = ThreadId.make("thread-launch");
   const projectId = ProjectId.make("project-host");
   const project = {
     id: projectId,
     title: "hello",
-    workspaceRoot: "/host/hello",
     remoteUrl: "git@github.com:octo/hello.git",
+    hostCopy: { projectId, workspaceRoot: "/host/hello" },
+  };
+  // The same repository opened only on a paired machine: this host has no copy of it.
+  const remoteProject = {
+    id: ProjectId.make("project-on-t3-machine"),
+    title: "hello",
+    remoteUrl: "https://github.com/Octo/Hello.git",
   };
   const pairToken = "PAIRLAUNCH42";
   const configInput = {
@@ -4940,6 +5056,72 @@ describe("SandboxProvisioner per-thread launches", () => {
     }),
   );
 
+  it.effect("launches a project that lives only on another machine, matched by repository", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: { ...configInput, repositories: ["octo/hello"] },
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({
+        configId: config.id,
+        threadId,
+        project: remoteProject,
+      });
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(stageOf(waiting, "repo")?.status).toBe("done");
+      // Nothing on this machine to copy from, and nothing read from anywhere else.
+      expect(stageOf(waiting, "env-files")?.status).toBe("skipped");
+      expect(
+        fake.commands.some((command) => command.includes("https://github.com/Octo/Hello.git")),
+      ).toBe(true);
+      expect(repository.records.get(instanceId)).toMatchObject({
+        projectId: remoteProject.id,
+        threadId,
+      });
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: configs.layer,
+          workspace: { ".env": "API_TOKEN=shh" },
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("reads env files only from a project this host really has", () => {
+    const fake = boatFake();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      // A host copy that names no project here, or another directory, is ignored.
+      yield* provisioner.launch({
+        configId: config.id,
+        threadId,
+        project: { ...remoteProject, hostCopy: { projectId, workspaceRoot: "/etc" } },
+      });
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(stageOf(waiting, "env-files")?.status).toBe("skipped");
+      expect(fake.commands.some((command) => command.includes("API_TOKEN"))).toBe(false);
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, discardingRepository, {
+          configs: configs.layer,
+          workspace: { ".env": "API_TOKEN=shh" },
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
   it.effect("refuses a launch the config does not allow before anything bills", () => {
     const fake = boatFake();
     const configs = memoryConfigs();
@@ -4953,6 +5135,21 @@ describe("SandboxProvisioner per-thread launches", () => {
         .launch({ configId: config.id, threadId, project })
         .pipe(Effect.flip);
       expect(notAllowed.detail).toBe("Boat small is not set up for this project.");
+      // A config saved with host project ids keeps matching those, and only those.
+      const legacy = yield* provisioner.saveConfig({
+        config: { ...configInput, projectIds: [projectId] },
+      });
+      const remoteOnLegacy = yield* provisioner
+        .launch({ configId: legacy.config.id, threadId, project: remoteProject })
+        .pipe(Effect.flip);
+      expect(remoteOnLegacy.detail).toBe("Boat small is not set up for this project.");
+      const otherRepository = yield* provisioner.saveConfig({
+        config: { ...configInput, repositories: ["octo/other"] },
+      });
+      const wrongRepository = yield* provisioner
+        .launch({ configId: otherRepository.config.id, threadId, project: remoteProject })
+        .pipe(Effect.flip);
+      expect(wrongRepository.detail).toBe("Boat small is not set up for this project.");
       const open = yield* provisioner.saveConfig({ config: configInput });
       const notGithub = yield* provisioner
         .launch({
