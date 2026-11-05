@@ -314,6 +314,8 @@ const describeProviderFailure = (input: {
       return `Your ${name} plan cannot save templates.`;
     case "template_saving":
       return "A template with this name is still being saved. Wait for it to finish.";
+    // T3's own refusals, never read from a provider's response.
+    case "tailscale_required":
     case "unknown":
       return `The provider responded with HTTP ${input.status}.`;
   }
