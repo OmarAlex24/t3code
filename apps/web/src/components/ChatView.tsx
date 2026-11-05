@@ -190,7 +190,10 @@ import { shortcutLabelForCommand } from "../keybindings";
 import { cn } from "~/lib/utils";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
-import { toastManager } from "./ui/toast";
+import { stackedThreadToast, toastManager } from "./ui/toast";
+import { useThreadSandbox } from "../state/sandboxes";
+import { ensureSandboxThreadRunning, shortSandboxId } from "../state/sandboxThreads";
+import { SandboxProviderLogo } from "./settings/SandboxProviderLogo";
 import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
 import { isInSideChatPane, type SideChatParentPanel } from "~/lib/sideChatPane";
@@ -982,6 +985,11 @@ export default function ChatView(props: ChatViewProps) {
   })();
   const activeThreadRef = useActiveThreadRef(activeThread);
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
+  const activeSandbox = useThreadSandbox(activeThreadRef);
+  // Its server is off on purpose, so the session cannot be read and the connection never comes up
+  // until a send or un-settle resumes it.
+  const activeSandboxStopped = activeSandbox?.state === "stopped";
+  const [sandboxResendPending, setSandboxResendPending] = useState(false);
   const activeEnvironmentServerBrowser = useEnvironmentSupportsServerBrowser(
     activeThreadRef?.environmentId ?? null,
   );
@@ -1306,7 +1314,9 @@ export default function ChatView(props: ChatViewProps) {
   const systemComposerBannerItems = useSystemComposerBanners({
     activeEnvironment,
     activeEnvironmentUnavailable,
-    activeEnvironmentUnavailableState,
+    activeEnvironmentUnavailableState: activeSandboxStopped
+      ? null
+      : activeEnvironmentUnavailableState,
     activeThreadEnvironmentId: activeThread?.environmentId ?? null,
     serverConfig,
     hasMultipleRegisteredEnvironments: environments.length > 1,
@@ -2658,6 +2668,23 @@ export default function ChatView(props: ChatViewProps) {
       freshSessionAvailable && freshSessionArmed && activePendingApproval === null
         ? [freshSessionBannerItem(() => disarmFreshSession(routeThreadKey))]
         : [];
+    const sandboxItems: ComposerBannerStackItem[] =
+      activeSandbox !== undefined && (activeSandboxStopped || sandboxResendPending)
+        ? [
+            {
+              id: `sandbox-stopped:${activeSandbox.instanceId}`,
+              variant: "default",
+              group: "environment",
+              icon: <SandboxProviderLogo kind={activeSandbox.provider} />,
+              title: sandboxResendPending
+                ? `Resuming sandbox ${shortSandboxId(activeSandbox.sandboxId)}`
+                : `Sandbox ${shortSandboxId(activeSandbox.sandboxId)} is stopped`,
+              description: sandboxResendPending
+                ? "Your message sends once it is running again."
+                : "Its disk is kept. Sending a message resumes it.",
+            },
+          ]
+        : [];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
@@ -2667,6 +2694,7 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...freshSessionItems,
+        ...sandboxItems,
         ...systemComposerBannerItems,
       ];
     }
@@ -2678,6 +2706,7 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...freshSessionItems,
+      ...sandboxItems,
       ...systemComposerBannerItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
@@ -2942,6 +2971,30 @@ export default function ChatView(props: ChatViewProps) {
     activeEnvironmentUnavailable,
     defaultRuntimeMode,
   });
+  // A thread kept as a stopped sandbox: its server is off, so a send resumes it and goes once it
+  // answers. The host never sees this thread's traffic, so the resume starts here.
+  const resumeSandboxAndSend = useStableCallback(() => {
+    if (activeThreadRef === null || sandboxResendPending) return;
+    setSandboxResendPending(true);
+    toastManager.add(
+      stackedThreadToast({
+        type: "info",
+        title: "Resuming the sandbox",
+        description: "Your message sends once it is running again.",
+      }),
+    );
+    void ensureSandboxThreadRunning(activeThreadRef).then((running) => {
+      if (running) return;
+      setSandboxResendPending(false);
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Message not sent",
+          description: "The sandbox did not come back. Resume it from the Sandboxes list.",
+        }),
+      );
+    });
+  });
   const { onSend } = useComposerSend({
     environmentId,
     routeThreadKey,
@@ -2976,6 +3029,7 @@ export default function ChatView(props: ChatViewProps) {
     isRevertingCheckpoint,
     threadDetailLoading,
     activeEnvironmentUnavailable,
+    sendResumesSandbox: activeSandboxStopped ? resumeSandboxAndSend : null,
     isSendBusy,
     sendQueuesBehindSetup,
     isDraftHeroState,
@@ -3140,6 +3194,19 @@ export default function ChatView(props: ChatViewProps) {
     setDraftThreadContext,
     workLocallyResendReady,
   ]);
+
+  const sandboxResendReady =
+    sandboxResendPending &&
+    !activeEnvironmentUnavailable &&
+    canOperateThread &&
+    !isSendBusy &&
+    !threadDetailLoading;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends the message that resumed the sandbox once its server answers again
+  useEffect(() => {
+    if (!sandboxResendReady || sendInFlightRef.current) return;
+    setSandboxResendPending(false);
+    void onComposerSendStable();
+  }, [onComposerSendStable, sandboxResendReady, sendInFlightRef]);
 
   const onExpandTimelineImage = (preview: ExpandedImagePreview) => {
     openExpandedImagePreview(routeThreadKey, preview);
@@ -3646,7 +3713,7 @@ export default function ChatView(props: ChatViewProps) {
                             ) : null}
                             {!composerMounted ? null : (
                               <ChatComposer
-                                canOperateThread={canOperateThread}
+                                canOperateThread={canOperateThread || activeSandboxStopped}
                                 reportedModelSelection={reportedModelSelection}
                                 multipleModelSelections={multipleModelSelections}
                                 supportsMultipleModels={
@@ -3687,7 +3754,7 @@ export default function ChatView(props: ChatViewProps) {
                                 canResume={resumableRunId !== null || hasHeldQueuedRuns}
                                 isRevertingCheckpoint={isRevertingCheckpoint}
                                 sendDisabledReason={
-                                  !canOperateThread
+                                  !canOperateThread && !activeSandboxStopped
                                     ? "This connection cannot change threads."
                                     : isEnvironmentChanging
                                       ? "Preparing machine"
@@ -3722,7 +3789,9 @@ export default function ChatView(props: ChatViewProps) {
                                     ? openUsageLimits
                                     : undefined
                                 }
-                                environmentUnavailable={activeEnvironmentUnavailableState}
+                                environmentUnavailable={
+                                  activeSandboxStopped ? null : activeEnvironmentUnavailableState
+                                }
                                 activePendingApproval={activePendingApproval}
                                 pendingApprovals={pendingApprovals}
                                 onHeldRequestIdsChange={onHeldRequestIdsChange}

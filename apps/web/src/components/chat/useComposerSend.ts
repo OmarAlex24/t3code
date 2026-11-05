@@ -202,6 +202,8 @@ interface ComposerSendInput {
   readonly isRevertingCheckpoint: boolean;
   readonly threadDetailLoading: boolean;
   readonly activeEnvironmentUnavailable: boolean;
+  /** Set while the thread's own sandbox is stopped: a send resumes it and goes once it is back. */
+  readonly sendResumesSandbox: (() => void) | null;
   readonly isSendBusy: boolean;
   readonly sendQueuesBehindSetup: boolean;
   readonly isDraftHeroState: boolean;
@@ -299,6 +301,7 @@ export function useComposerSend(input: ComposerSendInput) {
     isRevertingCheckpoint,
     threadDetailLoading,
     activeEnvironmentUnavailable,
+    sendResumesSandbox,
     isSendBusy,
     sendQueuesBehindSetup,
     isDraftHeroState,
@@ -431,6 +434,18 @@ export function useComposerSend(input: ComposerSendInput) {
         setComposerDraftPrompt(composerDraftTarget, "");
         composerRef.current?.resetCursorState();
       }
+      return;
+    }
+
+    // A stopped sandbox's server is off, so its session and thread cannot be read until it runs
+    // again. The resume goes first; ChatView sends the message once the server answers.
+    if (
+      activeEnvironmentUnavailable &&
+      sendResumesSandbox !== null &&
+      activeThread &&
+      !sendInFlightRef.current
+    ) {
+      sendResumesSandbox();
       return;
     }
 
