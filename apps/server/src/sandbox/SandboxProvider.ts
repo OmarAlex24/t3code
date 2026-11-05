@@ -15,9 +15,11 @@ import * as Effect from "effect/Effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as Layer from "effect/Layer";
 import * as Random from "effect/Random";
+import type * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import { makeHttp1Dispatcher } from "../outboundHttp.ts";
+import type { SandboxScript } from "./sandboxSetup.ts";
 
 export interface SandboxProviderConfig {
   readonly apiKey: string;
@@ -66,6 +68,58 @@ export interface ListedSandbox {
   readonly name: string;
   readonly instance?: string | undefined;
   readonly createdAt?: string | undefined;
+}
+
+/** Names every environment T3 makes for a sandbox's agent, so pickers can leave them out. */
+export const AGENT_ENVIRONMENT_PREFIX = "t3-sandbox-";
+
+/** A provider environment T3 made for one sandbox, with no credentials passed to it. */
+export interface AgentEnvironment {
+  readonly id: string;
+  readonly name: string;
+}
+
+/**
+ * Lets the agent in one sandbox use the provider's own CLI. The sandbox runs in an environment
+ * made for it alone, so its forks land there and can be listed, and the key it signs in with is
+ * scoped to that sandbox and the forks it makes.
+ */
+export interface SandboxAgentAccess {
+  /** Fails, with nothing created and nothing billed, when the account key cannot mint scoped keys. */
+  readonly check: (input: {
+    readonly config: SandboxProviderConfig;
+  }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
+  /** Makes the environment and confirms it passes no credentials, or deletes it and fails. */
+  readonly createEnvironment: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly name: string;
+  }) => Effect.Effect<AgentEnvironment, SandboxProviderError, HttpClient.HttpClient>;
+  readonly deleteEnvironment: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly environmentId: string;
+  }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
+  readonly mintKey: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly name: string;
+    readonly sandboxId: string;
+    readonly environmentId: string;
+    readonly ttlMinutes: number;
+  }) => Effect.Effect<
+    { readonly id: string; readonly secret: Redacted.Redacted<string> },
+    SandboxProviderError,
+    HttpClient.HttpClient
+  >;
+  readonly revokeKey: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly keyId: string;
+  }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
+  /** Every sandbox in the environment: the one T3 made and the forks of it. */
+  readonly listSandboxes: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly environmentName: string;
+  }) => Effect.Effect<ReadonlyArray<ListedSandbox>, SandboxProviderError, HttpClient.HttpClient>;
+  /** Signs the CLI in with the key, which the script reads from its secrets, never its text. */
+  readonly loginScript: (secret: string) => SandboxScript;
 }
 
 export interface SandboxProviderDriver {
@@ -173,6 +227,7 @@ export interface SandboxProviderDriver {
     readonly name: string;
   }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
   /** Every sandbox this server tagged at create, so the sweep can flag ones no record tracks. */
+  readonly agentAccess?: SandboxAgentAccess;
   readonly listSandboxes?: (input: {
     readonly config: SandboxProviderConfig;
     readonly host: string;
@@ -316,6 +371,7 @@ const describeProviderFailure = (input: {
       return "A template with this name is still being saved. Wait for it to finish.";
     // T3's own refusals, never read from a provider's response.
     case "tailscale_required":
+    case "scoped_keys_unavailable":
     case "unknown":
       return `The provider responded with HTTP ${input.status}.`;
   }

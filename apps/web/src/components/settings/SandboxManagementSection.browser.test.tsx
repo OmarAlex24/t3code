@@ -97,6 +97,7 @@ const boatInfo = {
     limits: false,
     stopResume: true,
     credentialEnvironments: false,
+    agentProviderAccess: false,
     templates: false,
   },
 };
@@ -228,5 +229,29 @@ describe("SandboxManagementSection", () => {
     expect(mocks.deleteSandbox).toHaveBeenCalledWith(
       expect.objectContaining({ input: { provider: "boat", sandboxId: "bx_lost" } }),
     );
+  });
+  it("lists a fork the agent made under its sandbox, and deleting the sandbox says it goes too", async () => {
+    setup("running");
+    mocks.orphans = [
+      {
+        provider: "boat",
+        sandboxId: "bx_fork1",
+        name: "Web Stack fork",
+        forkOf: "instance-1",
+      },
+    ];
+    await using _screen = await render(<SandboxManagementSection />);
+
+    await expect.element(page.getByText("Web Stack fork", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText(/Fork made by the agent · bx_fork1 · bills like a sandbox/u))
+      .toBeVisible();
+    // A fork is not one of the sandboxes T3 Code lost track of.
+    await expect
+      .element(page.getByText("Not tracked by T3 Code", { exact: true }))
+      .not.toBeInTheDocument();
+
+    await userEvent.click(page.getByRole("button", { name: "Delete sandbox" }).first());
+    await expect.element(page.getByText("It also deletes the fork its agent made.")).toBeVisible();
   });
 });

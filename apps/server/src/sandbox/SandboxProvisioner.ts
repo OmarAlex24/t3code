@@ -112,8 +112,10 @@ import { makePairingKey, pairScript, type PairReport, readPairReport } from "./s
 import { makeSandboxLaunchTracker } from "./sandboxLaunches.ts";
 import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
 import {
+  type AgentEnvironment,
   layerHttpClient,
   requestJson,
+  type SandboxAgentAccess,
   shellQuote,
   type SandboxExecResult,
   type SandboxProviderConfig,
@@ -349,12 +351,16 @@ interface Prepared {
   readonly hubKeySecret: string | undefined;
   readonly githubToken: Redacted.Redacted<string> | undefined;
   readonly tailnet: TailnetJoin | undefined;
+  /** Set when the agent gets its own provider key; checked before anything bills. */
+  readonly agentAccess: SandboxAgentAccess | undefined;
 }
 
 /** What a provisioning attempt made so far; a failure or cancel releases all of it. */
 interface Owned {
   sandbox?: { readonly id: string; readonly config: SandboxProviderConfig };
   deviceId?: string;
+  agentEnvironment?: AgentEnvironment;
+  agentKeyId?: string;
 }
 
 interface Reporter {
@@ -803,6 +809,7 @@ const make = Effect.gen(function* () {
             driver.listTemplates !== undefined &&
             driver.deleteTemplate !== undefined &&
             driver.stop !== undefined,
+          agentProviderAccess: driver.agentAccess !== undefined,
         },
       })),
       host: yield* hostAccessFacts,
@@ -840,6 +847,22 @@ const make = Effect.gen(function* () {
 
   const configError = (provider: SandboxProviderKind, detail: string) =>
     new SandboxProviderError({ provider, stage: "config", detail });
+
+  // The agent's key needs an environment of the sandbox's own, which passes no credentials.
+  const agentAccessRefusal = (driver: SandboxProviderDriver, environment: string | undefined) =>
+    driver.agentAccess === undefined
+      ? `${driver.info.label} cannot give a sandbox's agent a key of its own.`
+      : environment !== undefined
+        ? `Letting the agent use ${driver.info.label} needs a sandbox without a ${driver.info.label} environment. Pick No credentials, or turn it off.`
+        : null;
+
+  // One name for the sandbox's environment and its key, so either says which sandbox it is for.
+  const agentAccessName = Effect.fn("SandboxProvisioner.agentAccessName")(function* (
+    label: string,
+  ) {
+    const hex = (yield* secureRandom.uuidV4()).replaceAll("-", "");
+    return `t3-sandbox-${labelSlug(label)}-${hex.slice(0, 8)}`;
+  });
 
   // Named after the sandbox so the hub's key list says where each key went.
   const mintHubKey = Effect.fn("SandboxProvisioner.mintHubKey")(function* (
@@ -936,6 +959,11 @@ const make = Effect.gen(function* () {
         "This sandbox would receive the credential environment's secrets. Confirm that explicitly first.",
       );
     }
+    const agentAccess = input.agentProviderAccess === true ? driver.agentAccess : undefined;
+    if (input.agentProviderAccess === true) {
+      const refusal = agentAccessRefusal(driver, input.environment);
+      if (refusal !== null) return yield* configError(input.provider, refusal);
+    }
     const access = input.access ?? "public";
     if (access === "tailnet" && input.joinTailnet !== true) {
       return yield* configError(
@@ -966,6 +994,8 @@ const make = Effect.gen(function* () {
       size = found.size ?? size;
     }
     const limits = yield* preflightStart(driver, config, size);
+    // A key that cannot mint the agent's key is refused here, not after a machine is billed.
+    if (agentAccess !== undefined) yield* onHttp(agentAccess.check({ config }));
     // The provider's own auto-stop is the backstop, so a plan maximum below the limit lowers it.
     const maxRunningMinutes = Math.min(
       input.maxRunningMinutes ?? DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
@@ -1006,6 +1036,7 @@ const make = Effect.gen(function* () {
       hubKeySecret,
       githubToken: Option.getOrUndefined(githubToken),
       tailnet,
+      agentAccess,
     } satisfies Prepared;
   });
 
@@ -1017,13 +1048,36 @@ const make = Effect.gen(function* () {
   const releaseOwned = (prepared: Prepared, owned: Owned, instanceId: string) =>
     Effect.all(
       [
-        owned.sandbox === undefined
+        // The sandbox's own environment goes only once the sandbox in it is gone.
+        Effect.gen(function* () {
+          const destroyed =
+            owned.sandbox === undefined
+              ? true
+              : Exit.isSuccess(
+                  yield* onHttp(
+                    prepared.driver.destroy({
+                      config: owned.sandbox.config,
+                      sandboxId: owned.sandbox.id,
+                    }),
+                  ).pipe(Effect.exit),
+                );
+          if (
+            destroyed &&
+            prepared.agentAccess !== undefined &&
+            owned.agentEnvironment !== undefined
+          ) {
+            yield* onHttp(
+              prepared.agentAccess.deleteEnvironment({
+                config: prepared.config,
+                environmentId: owned.agentEnvironment.id,
+              }),
+            ).pipe(Effect.ignore);
+          }
+        }),
+        prepared.agentAccess === undefined || owned.agentKeyId === undefined
           ? Effect.void
           : onHttp(
-              prepared.driver.destroy({
-                config: owned.sandbox.config,
-                sandboxId: owned.sandbox.id,
-              }),
+              prepared.agentAccess.revokeKey({ config: prepared.config, keyId: owned.agentKeyId }),
             ).pipe(Effect.ignore),
         prepared.claude?.hubKey === undefined
           ? Effect.void
@@ -1059,13 +1113,24 @@ const make = Effect.gen(function* () {
     const hostEnvironmentId = yield* environmentIdentity.getEnvironmentId;
 
     yield* report.stage("create", "running");
+    // Made for this sandbox alone and passing no credentials, so its forks land there.
+    const agentEnvironment =
+      prepared.agentAccess === undefined
+        ? undefined
+        : yield* onHttp(
+            prepared.agentAccess.createEnvironment({
+              config,
+              name: yield* agentAccessName(label),
+            }),
+          );
+    if (agentEnvironment !== undefined) owned.agentEnvironment = agentEnvironment;
     const sandbox = yield* onHttp(
       driver.create({
         config,
         name: label,
         size,
         ttlMinutes: prepared.maxRunningMinutes,
-        environment: input.environment,
+        environment: agentEnvironment?.name ?? input.environment,
         idempotencyKey: yield* secureRandom.uuidV4(),
         template: prepared.template,
         tags: { host: hostEnvironmentId, instance: context.instanceId },
@@ -1098,6 +1163,14 @@ const make = Effect.gen(function* () {
       ...(claude?.hubKey === undefined || prepared.hubKeySecret === undefined
         ? {}
         : { claudeHubKey: { sourceId: claude.hubKey.sourceId, secret: prepared.hubKeySecret } }),
+      ...(agentEnvironment === undefined
+        ? {}
+        : {
+            agentProviderAccess: {
+              environmentId: agentEnvironment.id,
+              environmentName: agentEnvironment.name,
+            },
+          }),
     };
     yield* records.put(record).pipe(Effect.orDie);
     const save = (patch: Partial<SandboxRecord>) =>
@@ -1237,6 +1310,46 @@ const make = Effect.gen(function* () {
         stage: "start",
         detail: unreachableClaude,
       });
+    }
+    // The key is scoped to this sandbox's id, so it is minted only now. T3 never keeps it: the
+    // CLI's own config on the sandbox does, and the record names it by id to revoke it.
+    if (prepared.agentAccess !== undefined && agentEnvironment !== undefined) {
+      const agentAccess = prepared.agentAccess;
+      const environment = {
+        environmentId: agentEnvironment.id,
+        environmentName: agentEnvironment.name,
+      };
+      const minted = yield* onHttp(
+        agentAccess.mintKey({
+          config: sandboxConfig,
+          name: agentEnvironment.name,
+          sandboxId: sandbox.id,
+          environmentId: agentEnvironment.id,
+          ttlMinutes: prepared.maxRunningMinutes,
+        }),
+      ).pipe(Effect.option);
+      if (Option.isNone(minted)) {
+        yield* warn(
+          `T3 Code could not make a ${driver.info.label} key for the agent, so it cannot use ${driver.info.label} on this sandbox.`,
+        );
+      } else {
+        owned.agentKeyId = minted.value.id;
+        yield* save({ agentProviderAccess: { ...environment, keyId: minted.value.id } });
+        const login = yield* run(
+          agentAccess.loginScript(Redacted.value(minted.value.secret)),
+          120,
+        ).pipe(Effect.exit);
+        if (Exit.isFailure(login)) {
+          yield* onHttp(
+            agentAccess.revokeKey({ config: sandboxConfig, keyId: minted.value.id }),
+          ).pipe(Effect.ignore);
+          delete owned.agentKeyId;
+          yield* save({ agentProviderAccess: environment });
+          yield* warn(
+            `The ${driver.info.label} CLI could not be signed in on the sandbox, so the agent cannot use ${driver.info.label}. T3 Code revoked its key.`,
+          );
+        }
+      }
     }
     // A tailnet-only sandbox has no other address, so without the join nothing can reach it.
     const tailnetIp = tailnetJoined?.ip;
@@ -1412,6 +1525,7 @@ const make = Effect.gen(function* () {
     ...(config.claude === undefined ? {} : { agentAccess: { claude: config.claude } }),
     ...(config.passGithubToken ? { passGithubToken: true } : {}),
     ...(joinTailnet ? { joinTailnet: true } : {}),
+    ...(config.agentProviderAccess === true ? { agentProviderAccess: true } : {}),
   });
 
   const copyEnvFiles = Effect.fn("SandboxProvisioner.copyEnvFiles")(function* (
@@ -1829,6 +1943,10 @@ const make = Effect.gen(function* () {
     if (input.config.access === "tailnet" && !input.config.joinTailnet) {
       return yield* configError(provider, "A tailnet-only sandbox has to join your tailnet.");
     }
+    if (input.config.agentProviderAccess === true) {
+      const refusal = agentAccessRefusal(driver, input.config.credentialEnvironment);
+      if (refusal !== null) return yield* configError(provider, refusal);
+    }
     if (input.config.claude !== undefined) {
       const endpoint = URL.parse(input.config.claude.baseUrl);
       if (endpoint === null || (endpoint.protocol !== "https:" && endpoint.protocol !== "http:")) {
@@ -1894,7 +2012,81 @@ const make = Effect.gen(function* () {
 
   const orphans = yield* Ref.make<ReadonlyArray<SandboxOrphan>>([]);
 
-  const remove = Effect.fn("SandboxProvisioner.delete")(function* (input: SandboxDeleteInput) {
+  // Revokes the agent's key first, so no fork starts while the rest goes. Forks are deleted only
+  // when the user deletes their sandbox; the environment goes only once nothing is left in it,
+  // since it is the only way to find a fork again.
+  const releaseAgentAccess = Effect.fn("SandboxProvisioner.releaseAgentAccess")(function* (
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+    record: SandboxRecord,
+    deleteForks: boolean,
+  ) {
+    const reference = record.agentProviderAccess;
+    const agentAccess = driver.agentAccess;
+    if (reference === undefined || agentAccess === undefined) {
+      return { warnings: [] as Array<string>, finish: () => Effect.succeed<string | null>(null) };
+    }
+    const name = driver.info.label;
+    const warnings: Array<string> = [];
+    if (reference.keyId !== undefined) {
+      const revoked = yield* onHttp(agentAccess.revokeKey({ config, keyId: reference.keyId })).pipe(
+        Effect.exit,
+      );
+      if (Exit.isFailure(revoked)) {
+        warnings.push(
+          `The ${name} key T3 Code made for ${record.label}'s agent could not be revoked. Revoke the key named ${reference.environmentName} in ${name}.`,
+        );
+      }
+    }
+    const listed = yield* onHttp(
+      agentAccess.listSandboxes({ config, environmentName: reference.environmentName }),
+    ).pipe(Effect.option);
+    const forks = Option.isNone(listed)
+      ? null
+      : listed.value.filter((sandbox) => sandbox.id !== record.sandboxId);
+    const survivors: Array<string> = [];
+    for (const fork of forks ?? []) {
+      const deleted = deleteForks
+        ? Exit.isSuccess(
+            yield* onHttp(driver.destroy({ config, sandboxId: fork.id })).pipe(
+              Effect.catchIf(
+                (error) => error.code === "not_found",
+                () => Effect.void,
+              ),
+              Effect.exit,
+            ),
+          )
+        : false;
+      if (!deleted) survivors.push(fork.id);
+      else yield* Ref.update(orphans, (current) => current.filter((o) => o.sandboxId !== fork.id));
+    }
+    if (deleteForks && survivors.length > 0) {
+      warnings.push(
+        `${survivors.length === 1 ? "A fork" : `${survivors.length} forks`} of ${record.label} could not be deleted: ${survivors.join(", ")}. Delete ${survivors.length === 1 ? "it" : "them"} in ${name}.`,
+      );
+    }
+    // Runs after the sandbox itself is deleted.
+    const finish = () =>
+      forks === null || survivors.length > 0
+        ? Effect.succeed<string | null>(null)
+        : onHttp(
+            agentAccess.deleteEnvironment({ config, environmentId: reference.environmentId }),
+          ).pipe(
+            Effect.as<string | null>(null),
+            Effect.orElseSucceed(
+              () =>
+                `The ${name} environment ${reference.environmentName} could not be deleted. It holds nothing; delete it in ${name}.`,
+            ),
+          );
+    return { warnings, finish };
+  });
+
+  const remove = (input: SandboxDeleteInput) => removeSandbox(input, true);
+
+  const removeSandbox = Effect.fn("SandboxProvisioner.delete")(function* (
+    input: SandboxDeleteInput,
+    deleteForks: boolean,
+  ) {
     const instanceId = input.instanceId;
     // A sandbox still provisioning belongs to its launch; stopping the launch deletes it.
     const live = instanceId === undefined ? undefined : liveInstances.get(instanceId);
@@ -1906,12 +2098,20 @@ const make = Effect.gen(function* () {
       instanceId === undefined
         ? Option.none<SandboxRecord>()
         : yield* records.get(instanceId).pipe(Effect.orDie);
-    if (Option.isNone(record) || record.value.state !== "deleted") {
-      const driver = findDriver(input.provider);
-      const config = Option.isNone(record)
-        ? yield* resolveConfig(driver)
-        : yield* recordConfig(driver, record.value);
-      yield* onHttp(driver.destroy({ config, sandboxId: input.sandboxId })).pipe(
+    const driver = findDriver(input.provider);
+    // A sandbox the provider already deleted needs no key to clear from the list.
+    const machineGone = Option.isSome(record) && record.value.state === "deleted";
+    const config = Option.isNone(record)
+      ? Option.some(yield* resolveConfig(driver))
+      : machineGone
+        ? yield* recordConfig(driver, record.value).pipe(Effect.option)
+        : Option.some(yield* recordConfig(driver, record.value));
+    const agent =
+      Option.isNone(record) || Option.isNone(config)
+        ? null
+        : yield* releaseAgentAccess(driver, config.value, record.value, deleteForks);
+    if (!machineGone && Option.isSome(config)) {
+      yield* onHttp(driver.destroy({ config: config.value, sandboxId: input.sandboxId })).pipe(
         // Deleted from the provider's dashboard before the sweep noticed: the record still goes.
         Effect.catchIf(
           (error) => error.code === "not_found",
@@ -1919,6 +2119,7 @@ const make = Effect.gen(function* () {
         ),
       );
     }
+    const environmentWarning = agent === null ? null : yield* agent.finish();
     if (instanceId !== undefined) yield* records.remove(instanceId).pipe(Effect.orDie);
     yield* Ref.update(orphans, (current) =>
       current.filter((orphan) => orphan.sandboxId !== input.sandboxId),
@@ -1926,9 +2127,12 @@ const make = Effect.gen(function* () {
     // A sandbox deleted outside T3 still has its key on the hub, so this runs for every record.
     const warnings = Option.isNone(record)
       ? []
-      : [yield* releaseHubKey(record.value), yield* releaseTailnetDevice(record.value)].filter(
-          (warning): warning is string => warning !== null,
-        );
+      : [
+          ...(agent?.warnings ?? []),
+          environmentWarning,
+          yield* releaseHubKey(record.value),
+          yield* releaseTailnetDevice(record.value),
+        ].filter((warning): warning is string => warning !== null);
     return { warnings } satisfies SandboxDeleteResult;
   });
 
@@ -2324,6 +2528,43 @@ const make = Effect.gen(function* () {
         });
       }
     }
+    // Forks carry no tag of this server; the environment made for their sandbox finds them.
+    for (const record of all) {
+      const reference = record.agentProviderAccess;
+      const config = configs.get(record.provider);
+      const { agentAccess } = findDriver(record.provider);
+      if (reference === undefined || config === undefined || agentAccess === undefined) continue;
+      const listed = yield* onHttp(
+        agentAccess.listSandboxes({
+          config: withSettings(config, record.providerSettings),
+          environmentName: reference.environmentName,
+        }),
+      ).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("sandbox fork listing failed", {
+            instanceId: record.instanceId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      if (listed === null) {
+        found.push(
+          ...(yield* Ref.get(orphans)).filter((orphan) => orphan.forkOf === record.instanceId),
+        );
+        continue;
+      }
+      for (const sandbox of listed) {
+        if (tracked.has(`${record.provider}:${sandbox.id}`)) continue;
+        if (found.some((orphan) => orphan.sandboxId === sandbox.id)) continue;
+        found.push({
+          provider: record.provider,
+          sandboxId: sandbox.id,
+          name: sandbox.name,
+          forkOf: record.instanceId,
+          ...(sandbox.createdAt === undefined ? {} : { createdAt: sandbox.createdAt }),
+        });
+      }
+    }
     yield* Ref.set(orphans, found);
   });
 
@@ -2334,11 +2575,15 @@ const make = Effect.gen(function* () {
     // to finish or clean it up, so the sweep deletes its machine.
     for (const record of all) {
       if (record.state !== "provisioning" || liveInstances.has(record.instanceId)) continue;
-      yield* remove({
-        provider: record.provider,
-        sandboxId: record.sandboxId,
-        instanceId: record.instanceId,
-      }).pipe(
+      // Forks are the user's to delete, never the sweep's.
+      yield* removeSandbox(
+        {
+          provider: record.provider,
+          sandboxId: record.sandboxId,
+          instanceId: record.instanceId,
+        },
+        false,
+      ).pipe(
         Effect.catch((cause) =>
           Effect.logWarning("abandoned sandbox cleanup failed", {
             instanceId: record.instanceId,

@@ -4766,8 +4766,41 @@ describe("SandboxProvisioner per-thread launches", () => {
     readonly bodies: Array<{ readonly url: string; readonly body: unknown }>;
     /** Sandboxes Boat lists under this host's label; deletes take theirs out. */
     readonly listed: Array<{ id: string; name: string; labels?: Record<string, string> }>;
+    /** Boat's environments, starting with the account's default. */
+    readonly environments: Array<BoatFakeEnvironment>;
+    /** Scoped keys Boat holds, by id. */
+    readonly keys: Set<string>;
+    /** Every sandbox with its environment, as Boat lists them by environment. */
+    readonly inEnvironments: Array<{ id: string; name: string; environment: string }>;
     readonly client: HttpClient.HttpClient;
   }
+
+  interface BoatFakeEnvironment {
+    id: string;
+    name: string;
+    isDefault: boolean;
+    safeForThirdParties: boolean;
+    passGithub: boolean;
+    passSecrets: boolean;
+    passSandboxCredentials: boolean;
+    passAgentsCredentials: boolean;
+    proxyAiCredentials: boolean;
+  }
+
+  const boatEnvironment = (id: string, name: string): BoatFakeEnvironment => ({
+    id,
+    name,
+    isDefault: name === "base",
+    // What Boat gives a new environment: everything passed.
+    safeForThirdParties: false,
+    passGithub: true,
+    passSecrets: true,
+    passSandboxCredentials: true,
+    passAgentsCredentials: true,
+    proxyAiCredentials: false,
+  });
+
+  const agentKeySecret = "boat_scoped_SECRET";
 
   const boatFake = (
     options: {
@@ -4778,12 +4811,18 @@ describe("SandboxProvisioner per-thread launches", () => {
       readonly listed?: BoatFake["listed"];
       /** What the sandbox gets back from Claude's endpoint; `000` means it never connected. */
       readonly endpointStatus?: string;
+      /** How Boat answers the scoped-key check: a key without account admin rights is refused. */
+      readonly scopedKeys?: "admin" | "limited" | "wide";
+      readonly inEnvironments?: BoatFake["inEnvironments"];
     } = {},
   ): BoatFake => {
     const requests: Array<string> = [];
     const commands: Array<string> = [];
     const bodies: Array<{ readonly url: string; readonly body: unknown }> = [];
     const listed = options.listed ?? [];
+    const environments = [boatEnvironment("env-base", "base")];
+    const keys = new Set<string>();
+    const inEnvironments = options.inEnvironments ?? [];
     const respond = (request: HttpClientRequest.HttpClientRequest, body: unknown, status = 200) =>
       Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(body, { status })));
     const client = HttpClient.make((request) => {
@@ -4806,6 +4845,60 @@ describe("SandboxProvisioner per-thread launches", () => {
         return respond(request, {});
       }
       if (request.url.endsWith("/.well-known/t3/environment")) return respond(request, descriptor);
+      if (request.url === "https://boat.dev/api/v1/api-keys/scoped") {
+        if (body.sandboxIds?.[0] === "bx_t3probe0") {
+          return options.scopedKeys === "limited"
+            ? respond(request, { code: "api_key_action_forbidden" }, 403)
+            : respond(request, { code: "api_key_sandbox_forbidden" }, 403);
+        }
+        keys.add("apk_agent1");
+        return respond(
+          request,
+          {
+            ok: true,
+            secret: agentKeySecret,
+            apiKey: {
+              id: "apk_agent1",
+              scope: {
+                sandboxes: options.scopedKeys === "wide" ? "*" : body.sandboxIds,
+                environments: body.environmentIds,
+              },
+            },
+          },
+          201,
+        );
+      }
+      if (request.url.startsWith("https://boat.dev/api/v1/api-keys/")) {
+        const id = request.url.split("/").at(-1) ?? "";
+        return keys.delete(id)
+          ? respond(request, { ok: true })
+          : respond(request, { code: "not_found" }, 404);
+      }
+      if (request.url === "https://boat.dev/api/v1/environments") {
+        if (request.method === "POST") {
+          environments.push(boatEnvironment(`env-${environments.length}`, body.name));
+        }
+        // Creating one answers with all of them, as Boat does.
+        return respond(request, { environments });
+      }
+      if (request.url.startsWith("https://boat.dev/api/v1/environments/")) {
+        const id = request.url.split("/").at(-1) ?? "";
+        const index = environments.findIndex((environment) => environment.id === id);
+        if (index < 0) return respond(request, { code: "not_found" }, 404);
+        if (request.method === "DELETE") environments.splice(index, 1);
+        else Object.assign(environments[index]!, body);
+        return respond(request, { ok: true });
+      }
+      if (request.method === "POST" && request.url === "https://boat.dev/api/v1/sandboxes") {
+        if (typeof body?.environment === "string") {
+          inEnvironments.push({
+            id: boatSandboxId,
+            name: body.name,
+            environment: body.environment,
+          });
+        }
+        return Effect.succeed(boatResponse(request));
+      }
       if (request.url.endsWith("/files")) return respond(request, { ok: true });
       if (request.url.endsWith("/commands")) {
         const command: string = body?.command ?? "";
@@ -4834,9 +4927,15 @@ describe("SandboxProvisioner per-thread launches", () => {
         const id = request.url.split("/").at(-1);
         const index = listed.findIndex((sandbox) => sandbox.id === id);
         if (index >= 0) listed.splice(index, 1);
+        const placed = inEnvironments.findIndex((sandbox) => sandbox.id === id);
+        if (placed >= 0) inEnvironments.splice(placed, 1);
         return respond(request, { ok: true });
       }
       if (request.method === "GET" && request.url.endsWith("/sandboxes")) {
+        // Every sandbox, whatever the filter: the driver keeps only the environment's own.
+        if (new URLSearchParams(query).has("environment")) {
+          return respond(request, { sandboxes: inEnvironments });
+        }
         const label = new URLSearchParams(query).get("label") ?? "";
         return respond(
           request,
@@ -4848,7 +4947,7 @@ describe("SandboxProvisioner per-thread launches", () => {
       }
       return Effect.succeed(boatResponse(request));
     });
-    return { requests, commands, bodies, listed, client };
+    return { requests, commands, bodies, listed, environments, keys, inEnvironments, client };
   };
 
   const snapshotWhere = (
@@ -5115,6 +5214,295 @@ describe("SandboxProvisioner per-thread launches", () => {
           host: { claude: { baseUrl: "https://api.example.test", authToken: Redacted.make("t") } },
         }),
       ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  const agentConfig = { ...configInput, agentProviderAccess: true } as const;
+  const agentEnvironmentName = /^t3-sandbox-hello-on-boat-small-[0-9a-f]{8}$/u;
+  const boatSettings = { sandboxProviders: { boat: { apiKey: "boat_test" } } } as const;
+
+  it.effect("lets the agent use Boat with a key scoped to its own sandbox and forks", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: agentConfig,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+
+      // The check, the environment and its lockdown all come before the machine that bills.
+      const posts = fake.requests.filter((request) => !request.startsWith("GET"));
+      const createAt = posts.indexOf("POST https://boat.dev/api/v1/sandboxes");
+      expect(posts.slice(0, 3)).toEqual([
+        "POST https://boat.dev/api/v1/api-keys/scoped",
+        "POST https://boat.dev/api/v1/environments",
+        "PUT https://boat.dev/api/v1/environments/env-1",
+      ]);
+      expect(createAt).toBe(3);
+      const environment = fake.environments.find((candidate) => candidate.id === "env-1");
+      expect(environment).toMatchObject({
+        safeForThirdParties: true,
+        passGithub: false,
+        passSecrets: false,
+        passSandboxCredentials: false,
+        passAgentsCredentials: false,
+      });
+      expect(environment?.name).toMatch(agentEnvironmentName);
+      const created = fake.bodies.find(
+        (entry) => entry.url === "https://boat.dev/api/v1/sandboxes",
+      )?.body;
+      expect(created).toMatchObject({ environment: environment?.name });
+      expect(created).not.toHaveProperty("noEnv");
+
+      // Scoped to this sandbox and its environment, and no longer than the running limit.
+      const minted = fake.bodies.filter(
+        (entry) => entry.url === "https://boat.dev/api/v1/api-keys/scoped",
+      )[1]?.body;
+      expect(minted).toEqual({
+        name: environment?.name,
+        ttl: "480m",
+        actions: [
+          "sandbox.create",
+          "sandbox.read",
+          "sandbox.stop",
+          "sandbox.fork",
+          "sandbox.delete-own",
+          "exec",
+          "file.read",
+          "file.write",
+          "host",
+        ],
+        sandboxIds: [boatSandboxId],
+        environmentIds: ["env-1"],
+      });
+      // The key reaches the sandbox in a private file, never in a command's text.
+      expect(fake.commands.some((command) => command.includes("boat login --key-stdin"))).toBe(
+        true,
+      );
+      expect(fake.commands.some((command) => command.includes(agentKeySecret))).toBe(false);
+      expect(
+        fake.bodies.some(
+          (entry) =>
+            entry.url.endsWith("/files") && JSON.stringify(entry.body).includes(agentKeySecret),
+        ),
+      ).toBe(true);
+      expect(repository.records.get(instanceId)?.agentProviderAccess).toEqual({
+        environmentId: "env-1",
+        environmentName: environment?.name,
+        keyId: "apk_agent1",
+      });
+      // The sandbox's own environment is not a credential environment to pick.
+      const picker = yield* provisioner.environments({ provider: "boat" });
+      expect(picker.environments.map((candidate) => candidate.name)).toEqual(["base"]);
+
+      yield* provisioner.pairLaunch({ threadId });
+      yield* provisioner.completeLaunch({ threadId });
+      // The agent forked its sandbox; the fork carries no tag, only the environment.
+      fake.inEnvironments.push(
+        { id: "bx_fork1", name: "hello on Boat small fork", environment: environment!.name },
+        { id: "bx_elsewhere", name: "someone else's", environment: "base" },
+      );
+      yield* provisioner.sweep;
+      expect((yield* provisioner.list).orphans).toEqual([
+        {
+          provider: "boat",
+          sandboxId: "bx_fork1",
+          name: "hello on Boat small fork",
+          forkOf: instanceId,
+        },
+      ]);
+      // The sweep lists forks and never deletes them.
+      expect(deletes(fake)).toEqual([]);
+
+      const removed = yield* provisioner.delete({
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        instanceId,
+      });
+      expect(removed.warnings).toEqual([]);
+      expect(deletes(fake)).toEqual([
+        "DELETE https://boat.dev/api/v1/api-keys/apk_agent1",
+        "DELETE https://boat.dev/api/v1/sandboxes/bx_fork1",
+        `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        "DELETE https://boat.dev/api/v1/environments/env-1",
+      ]);
+      expect(fake.keys.size).toBe(0);
+      expect(fake.environments.map((candidate) => candidate.name)).toEqual(["base"]);
+      expect(fake.inEnvironments.map((sandbox) => sandbox.id)).toEqual(["bx_elsewhere"]);
+      expect((yield* provisioner.list).orphans).toEqual([]);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("refuses before anything bills when the Boat key cannot make scoped keys", () => {
+    const fake = boatFake({ scopedKeys: "limited" });
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: agentConfig,
+        apiKey: "boat_test",
+      });
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
+      expect(failed.error).toBe(
+        "Your Boat key can't create scoped keys; use an admin key or turn off Let the agent use Boat.",
+      );
+      expect(stageOf(failed, "preflight")?.status).toBe("failed");
+      expect(fake.requests.filter((request) => request.startsWith("POST"))).toEqual([
+        "POST https://boat.dev/api/v1/api-keys/scoped",
+      ]);
+
+      // A credential environment would pass its secrets into the forks too.
+      const refused = yield* provisioner
+        .saveConfig({ config: { ...agentConfig, credentialEnvironment: "base" } })
+        .pipe(Effect.flip);
+      expect(refused.detail).toBe(
+        "Letting the agent use Boat needs a sandbox without a Boat environment. Pick No credentials, or turn it off.",
+      );
+    }).pipe(
+      Effect.provide(provisionerLayer({}, discardingRepository, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect(
+    "revokes the agent's key and deletes its environment when a launch is cancelled",
+    () => {
+      const fake = boatFake();
+      const repository = memoryRepository();
+      const configs = memoryConfigs();
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const { config } = yield* provisioner.saveConfig({
+          config: agentConfig,
+          apiKey: "boat_test",
+        });
+        yield* provisioner.launch({ configId: config.id, threadId, project });
+        yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        expect(yield* provisioner.cancelLaunch({ threadId })).toEqual({ cancelled: true });
+        yield* Effect.yieldNow;
+        const released = deletes(fake);
+        expect(released).toContain("DELETE https://boat.dev/api/v1/api-keys/apk_agent1");
+        // The environment goes only after the sandbox in it.
+        expect(
+          released.indexOf(`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`),
+        ).toBeLessThan(released.indexOf("DELETE https://boat.dev/api/v1/environments/env-1"));
+        expect(fake.keys.size).toBe(0);
+        expect(fake.environments.map((candidate) => candidate.name)).toEqual(["base"]);
+        expect(repository.records.size).toBe(0);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
+
+  it.effect("keeps the sandbox and revokes the key when the boat CLI cannot sign in", () => {
+    const fake = boatFake({ failing: { text: "boat login", times: 1 } });
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: agentConfig,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(waiting.warnings).toContain(
+        "The Boat CLI could not be signed in on the sandbox, so the agent cannot use Boat. T3 Code revoked its key.",
+      );
+      expect(fake.keys.size).toBe(0);
+      // The sandbox still runs in its environment, so the record keeps it without a key.
+      expect(repository.records.get(instanceId)?.agentProviderAccess).toEqual({
+        environmentId: "env-1",
+        environmentName: expect.stringMatching(agentEnvironmentName),
+      });
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("revokes a key Boat scoped wider than the sandbox and says so", () => {
+    const fake = boatFake({ scopedKeys: "wide" });
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: agentConfig,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      expect(waiting.warnings).toContain(
+        "T3 Code could not make a Boat key for the agent, so it cannot use Boat on this sandbox.",
+      );
+      expect(fake.keys.size).toBe(0);
+      expect(fake.commands.some((command) => command.includes("boat login"))).toBe(false);
+      expect(repository.records.get(instanceId)?.agentProviderAccess?.keyId).toBeUndefined();
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("deletes an abandoned launch but leaves its forks and their environment", () => {
+    const abandoned: SandboxRecord = {
+      instanceId: "abandoned",
+      environmentId: null,
+      provider: "boat",
+      sandboxId: "bx_abandon",
+      label: "hello on Boat small",
+      size: "small",
+      state: "provisioning",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      updatedAt: "1970-01-01T00:00:00.000Z",
+      httpBaseUrl: "",
+      runningSince: "1970-01-01T00:00:00.000Z",
+      maxRunningMinutes: 480,
+      agentProviderAccess: {
+        environmentId: "env-1",
+        environmentName: "t3-sandbox-hello-on-boat-small-0badc0de",
+        keyId: "apk_agent1",
+      },
+    };
+    const repository = memoryRepository([abandoned]);
+    const fake = boatFake({
+      inEnvironments: [
+        { id: "bx_abandon", name: "hello", environment: "t3-sandbox-hello-on-boat-small-0badc0de" },
+        {
+          id: "bx_fork1",
+          name: "hello fork",
+          environment: "t3-sandbox-hello-on-boat-small-0badc0de",
+        },
+      ],
+    });
+    fake.keys.add("apk_agent1");
+    fake.environments.push({
+      ...boatEnvironment("env-1", "t3-sandbox-hello-on-boat-small-0badc0de"),
+      safeForThirdParties: true,
+    });
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      yield* provisioner.sweep;
+      expect(deletes(fake)).toEqual([
+        "DELETE https://boat.dev/api/v1/api-keys/apk_agent1",
+        "DELETE https://boat.dev/api/v1/sandboxes/bx_abandon",
+      ]);
+      expect(fake.environments.map((candidate) => candidate.id)).toEqual(["env-base", "env-1"]);
+      expect(repository.records.size).toBe(0);
+    }).pipe(
+      Effect.provide(provisionerLayer(boatSettings, repository.layer)),
       Effect.provideService(HttpClient.HttpClient, fake.client),
     );
   });
