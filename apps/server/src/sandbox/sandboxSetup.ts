@@ -190,6 +190,33 @@ export const parseEndpointReach = (stdout: string): "reachable" | "unreachable" 
   return status === "000" ? "unreachable" : "reachable";
 };
 
+const WORK_PREFIX = "T3_WORK:";
+
+/**
+ * Counts changed or untracked files and commits no remote has, in the thread's clone. Read-only:
+ * it never fetches, so a commit counts as pushed only when a remote branch this clone saw has it.
+ */
+export const workCheckScript = (
+  directory: string,
+) => `cd ${shellQuote(directory)} 2>/dev/null || { printf '${WORK_PREFIX}none\n'; exit 0; }
+files="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+commits="$(git rev-list --count HEAD --not --remotes 2>/dev/null || echo x)"
+printf '${WORK_PREFIX}%s:%s\n' "$files" "$commits"
+exit 0`;
+
+/** Files and commits a delete would lose, or null when the check could not tell. */
+export const parseWorkCheck = (
+  stdout: string,
+): { readonly files: number; readonly commits: number } | null => {
+  const line = stdout
+    .split("\n")
+    .find((candidate) => candidate.startsWith(WORK_PREFIX))
+    ?.slice(WORK_PREFIX.length)
+    .trim();
+  const match = line === undefined ? null : /^(\d+):(\d+)$/u.exec(line);
+  return match === null ? null : { files: Number(match[1]), commits: Number(match[2]) };
+};
+
 const TAILSCALE_PREFIX = "T3_TAILSCALE_";
 
 const AS_ROOT = `as_root() {

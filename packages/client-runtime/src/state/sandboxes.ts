@@ -133,6 +133,10 @@ export function createSandboxEnvironmentAtoms<R, E>(
       label: "environment-data:sandboxes:resume",
       tag: WS_METHODS.sandboxesResume,
     }),
+    sandboxesCheckWork: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandboxes:check-work",
+      tag: WS_METHODS.sandboxesCheckWork,
+    }),
     sandboxesSaveTemplate: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandboxes:save-template",
       tag: WS_METHODS.sandboxesSaveTemplate,

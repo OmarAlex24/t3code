@@ -9,6 +9,7 @@ import {
   type SandboxCredentialEnvironment,
   type SandboxEnvironmentConfig,
   type SandboxProviderInfo,
+  type SandboxSettleAction,
 } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -104,6 +105,31 @@ function OptIn({
     </label>
   );
 }
+
+const SETTLE_LABELS: Record<SandboxSettleAction, string> = {
+  ask: "Ask me",
+  snapshot: "Keep a snapshot",
+  delete: "Delete the sandbox",
+};
+
+// What each choice does to the machine and the conversation on it, and what the provider bills.
+const settleHint = (
+  action: SandboxSettleAction,
+  providerLabel: string,
+  retentionDays: number | undefined,
+) => {
+  const kept =
+    retentionDays === undefined
+      ? `${providerLabel} bills for a stopped disk while it keeps it.`
+      : `${providerLabel} keeps a stopped disk for ${retentionDays} days and bills for it.`;
+  if (action === "snapshot") {
+    return `Stops the sandbox and keeps its disk; sending a message resumes it. ${kept}`;
+  }
+  if (action === "delete") {
+    return "Deletes the sandbox and the conversation on it. It checks for unpushed work first and asks you to confirm when it finds some or can't check.";
+  }
+  return `Asks whether to keep a snapshot or delete the sandbox. ${kept}`;
+};
 
 function MinutesField({
   label,
@@ -224,6 +250,7 @@ export function SandboxEnvironmentFields({
   const [agentProviderAccess, setAgentProviderAccess] = useState(
     config?.agentProviderAccess ?? false,
   );
+  const [onSettle, setOnSettle] = useState<SandboxSettleAction>(config?.onSettle ?? "ask");
   // Null until toggled, so it follows whether the server's Claude endpoint is private.
   // Stored off means automatic: a launch joins anyway while Claude's endpoint is private.
   const [joinTailnet, setJoinTailnet] = useState(config?.joinTailnet ?? false);
@@ -350,6 +377,7 @@ export function SandboxEnvironmentFields({
           ...(sendsClaude ? { claude: { baseUrl: claudeEndpoint } } : {}),
           passGithubToken: passGithub && host?.github === true,
           ...(agentProviderAccess && canGiveAgentAccess ? { agentProviderAccess: true } : {}),
+          ...(onSettle === "ask" ? {} : { onSettle }),
           // A tailnet-only sandbox has to ask to join; otherwise the launch decides.
           joinTailnet: tailscaleReady && (joinTailnet || (autoJoinsTailnet && tailnetOnly)),
           access: joinsTailnet && tailnetOnly ? "tailnet" : "public",
@@ -714,6 +742,33 @@ export function SandboxEnvironmentFields({
                   : `Needs No credentials as the ${provider.label} environment under Advanced, so forks never receive its secrets.`}
               </OptIn>
             ) : null}
+          </div>
+
+          <div className="space-y-2">
+            <label className="block">
+              <FieldLabel>When a chat is settled</FieldLabel>
+              <Select
+                value={onSettle}
+                disabled={isSaving}
+                onValueChange={(value) => {
+                  if (value !== null) setOnSettle(value);
+                }}
+              >
+                <SelectTrigger aria-label="When a chat is settled" size="default">
+                  <SelectValue>{SETTLE_LABELS[onSettle]}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  <SelectItem value="ask">{SETTLE_LABELS.ask}</SelectItem>
+                  {provider.capabilities.stopResume ? (
+                    <SelectItem value="snapshot">{SETTLE_LABELS.snapshot}</SelectItem>
+                  ) : null}
+                  <SelectItem value="delete">{SETTLE_LABELS.delete}</SelectItem>
+                </SelectPopup>
+              </Select>
+            </label>
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              {settleHint(onSettle, provider.label, provider.diskRetentionDays)}
+            </p>
           </div>
 
           <div className="space-y-2">
