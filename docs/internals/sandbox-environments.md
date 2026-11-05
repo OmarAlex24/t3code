@@ -366,7 +366,9 @@ Every machine gets a row in `sandbox_instances` (see
 the provisioner picks before create, since the environment id is only known once T3 answers on
 the machine. Environments stay the source of truth for connection details; the record only adds
 what the provider needs to act on the machine (provider, sandbox id, size, credential environment)
-and the thread, config, and project it belongs to.
+and the thread, config, and project it belongs to. A sandbox's environment is that thread's machine,
+so the web app lists it under Settings → Environments only, never where a project is added
+(`useSandboxEnvironmentIds`, from every record, launching ones included).
 
 `maxRunningMinutes` (480 by default, clamped to the provider's `maxTtlMinutes`) limits how long a
 sandbox runs since its last start (`runningSince`); a resume starts the count again. The sweep runs
