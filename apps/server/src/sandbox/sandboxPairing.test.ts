@@ -23,6 +23,9 @@ Token: ${TOKEN}
 Expires: 2026-11-04T13:30:00.000Z
 `;
 
+// Read once outside Effect code; the stubbed shells only need the machine's PATH.
+const HOST_PATH = process.env.PATH ?? "";
+
 const SHELL_TOOLS = ["mktemp", "cat", "rm", "awk", "tail", "touch"];
 
 const leaks = (text: string) =>
@@ -51,7 +54,7 @@ const runPair = (stub: string, tools?: ReadonlyArray<string>) =>
           }),
         )
         .pipe(Effect.orDie);
-    let path = process.env.PATH ?? "";
+    let path = HOST_PATH;
     if (tools !== undefined) {
       yield* sh(
         `mkdir "$HOME/tools"

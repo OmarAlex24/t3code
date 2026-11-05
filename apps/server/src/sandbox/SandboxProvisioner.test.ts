@@ -59,6 +59,9 @@ import { daytonaDriver } from "./providers/daytona.ts";
 import { upstashDriver } from "./providers/upstash.ts";
 import { vercelDriver } from "./providers/vercel.ts";
 
+// Read once outside Effect code; stubbed shells only need the machine's PATH.
+const HOST_PATH = process.env.PATH ?? "";
+
 const boatSandboxId = "bx_abcdefgh";
 const testEnvironmentId = EnvironmentId.make("11111111-1111-4111-8111-111111111111");
 const descriptor = {
@@ -3703,7 +3706,7 @@ printf '%s\\n' 'listen EADDRINUSE 0.0.0.0:3773' 'Token: 7KQ2M9XRTW4H' 'Pairing U
           NodeFS.writeFileSync(NodePath.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
         }
         const started = NodeChildProcess.spawnSync("sh", ["-c", startOf("boat")], {
-          env: { PATH: `${bin}:${process.env.PATH}`, HOME: home },
+          env: { PATH: `${bin}:${HOST_PATH}`, HOME: home },
           encoding: "utf8",
         });
         expect(started.status).toBe(1);

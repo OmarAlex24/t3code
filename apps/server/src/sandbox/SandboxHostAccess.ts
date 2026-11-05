@@ -23,6 +23,11 @@ import { readClaudeSettingsEnv } from "../provider/Drivers/ClaudeSkills.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SourceControlDrivers from "../sourceControl/builtInDrivers.ts";
 
+/** Swallowed by its caller: an unresolvable host is simply not private. */
+class HostLookupError extends Schema.TaggedError<HostLookupError>()("HostLookupError", {
+  hostname: Schema.String,
+}) {}
+
 export interface SandboxHostClaude {
   /** The endpoint this server's own Claude talks to, from Claude's settings or its env. */
   readonly baseUrl?: string;
@@ -110,9 +115,10 @@ const make = Effect.gen(function* () {
     const hostname = hostnameOf(baseUrl);
     if (hostname === null) return [];
     // An IP literal resolves to itself.
-    return yield* Effect.tryPromise(() =>
-      NodeDnsPromises.lookup(hostname, { all: true, verbatim: true }),
-    ).pipe(
+    return yield* Effect.tryPromise({
+      try: () => NodeDnsPromises.lookup(hostname, { all: true, verbatim: true }),
+      catch: () => new HostLookupError({ hostname }),
+    }).pipe(
       Effect.timeout(Duration.seconds(3)),
       Effect.map((entries) => entries.map((entry) => entry.address)),
       Effect.orElseSucceed((): ReadonlyArray<string> => []),
