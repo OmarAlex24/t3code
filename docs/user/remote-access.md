@@ -33,7 +33,9 @@ each sandbox [joins your tailnet](#private-endpoints-tailscale) on its own once 
 up; without Tailscale, T3 Code refuses to start the sandbox and points you to its setup. You can
 also expose the endpoint publicly instead (for example with Tailscale Funnel or Cloudflare Tunnel).
 **Sign GitHub in with this machine's token** lets `gh` and `git` in each sandbox clone private
-repositories and push. Without it a sandbox can clone public repositories only. T3 Code also
+repositories and push. Without it a sandbox can clone public repositories only.
+[**Let the agent use Boat**](#let-the-agent-use-boat) signs the `boat` CLI in on each Boat sandbox
+with a key scoped to it. T3 Code also
 installs git, the GitHub CLI, and Claude Code when the provider's image lacks them; sign Codex in
 from the sandbox's **Settings → Providers**.
 
@@ -103,7 +105,8 @@ thread it belonged to was deleted.
 
 **Not tracked by T3 Code** lists sandboxes that carry this server's tag but have no record, for
 example after a crash. They may still bill; delete the ones you do not need. Only Boat reports
-these.
+these. Forks an agent made of its sandbox show under that sandbox instead (see
+[Let the agent use Boat](#let-the-agent-use-boat)).
 
 Each provider also stops sandboxes on its own, as a backstop for the running limit:
 
@@ -130,6 +133,33 @@ and show no cost.
 
 Daytona deletes a sandbox, files included, a day after its running limit, so copy out anything you
 need before then.
+
+### Let the agent use Boat
+
+Off by default, and offered only for Boat. With it on, the agent in each sandbox can run `boat`
+against its own machine: fork it, host its ports, stop it, and delete the forks it made. Forks bill
+like new sandboxes, and they count against Boat's start limits.
+
+- At launch T3 Code makes a Boat environment for that sandbox alone, named
+  `t3-sandbox-<name>-<random>`, with **Safe for third parties** on and no GitHub token, secrets,
+  sandbox credentials or agent logins passed. The sandbox starts in it, and so do its forks. That is
+  also why the option needs **No credentials** as the Boat environment under **Advanced**.
+- Once the sandbox exists, T3 Code mints a scoped key with the same name, limited to that sandbox
+  and its environment, and signs `boat` in with it. The key travels in a private file, never in a
+  command, and only the sandbox keeps it, in `boat`'s own config. Its actions are
+  `sandbox.create` (forking makes a sandbox), `sandbox.read`, `sandbox.stop`, `sandbox.fork`,
+  `sandbox.delete-own`, `exec`, `file.read`, `file.write` and `host`. It cannot read or delete any
+  other sandbox on your account, or the sandbox it runs on.
+- The key expires after the config's running limit, counted from launch, even if the sandbox was
+  stopped in between. After that `boat` on that sandbox stops working; start a new thread for a new
+  key.
+- Before anything bills, T3 Code checks that your Boat key can mint scoped keys. A key that cannot
+  stops the launch with "Your Boat key can't create scoped keys; use an admin key or turn off Let
+  the agent use Boat".
+- Forks appear under their sandbox in the Sandboxes list, each with its own delete. Deleting the
+  sandbox revokes its key, deletes its forks, and then deletes its environment. T3 Code never
+  deletes a fork on its own: a launch cut short by a restart loses its key and machine, but any
+  fork stays, with its environment, for you to delete in Boat.
 
 ### Templates
 
