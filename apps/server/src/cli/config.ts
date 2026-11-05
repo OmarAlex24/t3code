@@ -388,6 +388,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   const desktopBrowserFd = bootstrap?.desktopBrowserFd;
   const desktopBrowserControlFd = bootstrap?.desktopBrowserControlFd;
   const resourceMonitorPath = bootstrap?.resourceMonitorPath;
+  const environmentLabel = bootstrap?.environmentLabel;
   const autoBootstrapProjectFromCwd = Option.getOrElse(
     resolveOptionPrecedence(
       Option.fromUndefinedOr(options?.forceAutoBootstrapProjectFromCwd),
@@ -517,6 +518,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     desktopBootstrapToken,
     ...(desktopBootstrapSecret === undefined ? {} : { desktopBootstrapSecret }),
     ...(shellEnvironmentPrepared === undefined ? {} : { shellEnvironmentPrepared }),
+    ...(environmentLabel === undefined ? {} : { environmentLabel }),
     desktopTelemetryFd,
     desktopTelemetryControlFd,
     ...(desktopAppUpdate === undefined ? {} : { desktopAppUpdate }),
