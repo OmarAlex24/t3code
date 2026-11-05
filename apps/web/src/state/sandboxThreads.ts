@@ -1,14 +1,91 @@
-import type { SandboxProviderInfo, SandboxRecord, ScopedThreadRef } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  type ProjectId,
+  ProviderInstanceId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  type SandboxProviderInfo,
+  type SandboxRecord,
+  type ScopedThreadRef,
+  type ServerProvider,
+  type ServerSettings,
+  type ThreadId,
+} from "@t3tools/contracts";
 
-/** The sandbox a thread runs on: the record that names its environment and thread. */
+import { isProviderInstancePickerReady, providerInstanceEntriesFor } from "../providerInstances";
+
+/**
+ * The sandbox a thread runs on. The ref is either the sandbox's own thread, or the host thread the
+ * sandbox bridge drives: the provisioning server's thread with the same id, once it is linked.
+ */
 export const findThreadSandbox = (
   sandboxes: ReadonlyArray<SandboxRecord>,
   threadRef: ScopedThreadRef,
+  provisionerEnvironmentId: EnvironmentId | null,
 ): SandboxRecord | undefined =>
   sandboxes.find(
     (sandbox) =>
       sandbox.environmentId === threadRef.environmentId && sandbox.threadId === threadRef.threadId,
+  ) ??
+  (threadRef.environmentId === provisionerEnvironmentId
+    ? sandboxes.find(
+        (sandbox) =>
+          sandbox.threadId === threadRef.threadId &&
+          sandbox.hostProjectId !== undefined &&
+          sandbox.state !== "provisioning" &&
+          sandbox.state !== "deleted",
+      )
+    : undefined);
+
+/** Whether the ref is the host thread the bridge drives rather than the sandbox's own thread. */
+export const isHostThreadRef = (sandbox: SandboxRecord, threadRef: ScopedThreadRef) =>
+  sandbox.environmentId !== threadRef.environmentId;
+
+/**
+ * Whether the sandbox's conversation is kept on the host, in the thread the bridge drives. A launch
+ * that could not link sends on the sandbox instead, so only the host thread's existence says so.
+ */
+export const isBridgedSandbox = (
+  sandbox: SandboxRecord,
+  threads: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly id: ThreadId }>,
+  provisionerEnvironmentId: EnvironmentId | null,
+) =>
+  sandbox.threadId !== undefined &&
+  threads.some(
+    (thread) => thread.environmentId === provisionerEnvironmentId && thread.id === sandbox.threadId,
   );
+
+const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
+
+/**
+ * Whether a host thread can send through the bridge in this project yet. Linking turns the
+ * provider on for the project and the server probes it after; until then the composer would pick
+ * another provider, or the placeholder model the instance lists before its probe finds `model`.
+ */
+export const sandboxBridgeReady = (input: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly settings: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides"> | null;
+  readonly projects: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly id: ProjectId;
+  }>;
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly model: string;
+}) => {
+  if (input.settings === null) return false;
+  const listed = input.projects.some(
+    (project) => project.environmentId === input.environmentId && project.id === input.projectId,
+  );
+  const entry = providerInstanceEntriesFor(input.providers, input.settings, input.projectId).find(
+    (candidate) => candidate.instanceId === bridgeInstanceId,
+  );
+  return (
+    listed &&
+    entry !== undefined &&
+    isProviderInstancePickerReady(entry) &&
+    entry.models.some((candidate) => candidate.slug === input.model)
+  );
+};
 
 const DAY_MINUTES = 24 * 60;
 // A stopped disk this close to the provider's limit gets a warning that recommends deleting it.
@@ -51,9 +128,9 @@ export const shortSandboxId = (sandboxId: string) => {
 };
 
 /**
- * What the thread actions ask of the one mounted sandbox coordinator. The thread lives on its
+ * What the thread actions ask of the one mounted sandbox coordinator. A legacy thread lives on its
  * sandbox's server, which this host never hears from, so settling, resuming and deleting the
- * sandbox all start in this client.
+ * sandbox all start in this client. A bridged thread's host thread goes through it too.
  */
 export interface SandboxThreadHandlers {
   readonly isSandboxThread: (threadRef: ScopedThreadRef) => boolean;
@@ -66,7 +143,7 @@ export interface SandboxThreadHandlers {
     threadRef: ScopedThreadRef,
     deleteThread: () => Promise<{ readonly _tag: string }>,
   ) => Promise<void>;
-  /** Confirms with the work check and deletes the sandbox, and the conversation on it. */
+  /** Confirms with the work check and deletes the sandbox, and any conversation only on it. */
   readonly deleteSandbox: (threadRef: ScopedThreadRef) => Promise<void>;
 }
 
