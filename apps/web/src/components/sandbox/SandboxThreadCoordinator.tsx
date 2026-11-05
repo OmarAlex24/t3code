@@ -26,12 +26,16 @@ import { useEnvironmentQuery } from "~/state/query";
 import { useSandboxProvisionerEnvironmentId } from "~/state/sandboxes";
 import {
   findThreadSandbox,
+  isBridgedSandbox,
+  isHostThreadRef,
   registerSandboxThreadHandlers,
   shortSandboxId,
 } from "~/state/sandboxThreads";
 import { serverEnvironment } from "~/state/server";
 import { readEnvironmentScope } from "~/state/session";
+import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { describeSandboxFailure } from "../settings/SandboxStartLimits";
 import {
   AlertDialog,
@@ -57,6 +61,7 @@ type Prompt =
       readonly id: number;
       readonly threadRef: ScopedThreadRef;
       readonly sandbox: SandboxRecord;
+      readonly bridged: boolean;
     }
   | {
       readonly kind: "delete";
@@ -64,6 +69,7 @@ type Prompt =
       readonly threadRef: ScopedThreadRef;
       readonly sandbox: SandboxRecord;
       readonly reason: DeleteReason;
+      readonly bridged: boolean;
       readonly work: SandboxCheckWorkResult | null;
       readonly deleteThread?: () => Promise<{ readonly _tag: string }>;
       readonly done: () => void;
@@ -85,9 +91,32 @@ const describeWork = (work: SandboxCheckWorkResult) => {
   return `${parts.join(" and ")} would be lost.`;
 };
 
+const deleteDescription = (
+  prompt: Extract<Prompt, { kind: "delete" }>,
+  short: string,
+  providerLabel: string,
+) => {
+  if (!prompt.bridged) {
+    return `${
+      prompt.reason === "thread"
+        ? `Also deletes sandbox ${short} on ${providerLabel}.`
+        : `This deletes the machine and its disk on ${providerLabel}.`
+    } The conversation lives on the sandbox, so it is deleted too.`;
+  }
+  if (prompt.reason !== "thread") {
+    return `This deletes the machine and its disk on ${providerLabel}. The conversation stays in this thread on this computer; work only on the sandbox's disk is lost.`;
+  }
+  return isHostThreadRef(prompt.sandbox, prompt.threadRef)
+    ? `Also deletes sandbox ${short} on ${providerLabel}, with its disk and its copy of this thread.`
+    : `Also deletes sandbox ${short} on ${providerLabel}. The conversation stays in the thread on this computer.`;
+};
+
 /**
  * Settling, resuming and deleting a thread's own sandbox. Mounted once; the thread actions reach
  * it through `sandboxThreads.ts`, since every settle and delete path goes through them.
+ *
+ * A bridged thread keeps its conversation in the host thread, so deleting its sandbox loses only
+ * the sandbox's disk. A legacy thread lives only on its sandbox and goes with it.
  */
 export function SandboxThreadCoordinator() {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
@@ -129,6 +158,9 @@ export function SandboxThreadCoordinator() {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
+  const deleteRemoteThread = useOrchestrationCommand(threadEnvironment.delete, {
+    reportFailure: false,
+  });
   const { entries } = useAtomValue(environmentCatalog.catalogValueAtom);
   const { environments } = useEnvironments();
   const threads = useThreadShells();
@@ -147,6 +179,10 @@ export function SandboxThreadCoordinator() {
   const configOf = (sandbox: SandboxRecord): SandboxEnvironmentConfig | undefined =>
     configs.find((config) => config.id === sandbox.configId);
   const providerLabel = (sandbox: SandboxRecord) => providerOf(sandbox)?.label ?? sandbox.provider;
+  const findSandbox = (threadRef: ScopedThreadRef) =>
+    findThreadSandbox(sandboxes, threadRef, provisionerEnvironmentId);
+  const bridgedOf = (sandbox: SandboxRecord) =>
+    isBridgedSandbox(sandbox, threads, provisionerEnvironmentId);
   const isConnected = (environmentId: EnvironmentId) => {
     const environment = environments.find((candidate) => candidate.environmentId === environmentId);
     return environment?.connection.phase === "connected" && environment.serverConfig !== null;
@@ -215,15 +251,23 @@ export function SandboxThreadCoordinator() {
     );
   };
 
-  const leaveThread = (threadRef: ScopedThreadRef) => {
-    if (window.location.pathname.includes(threadRef.threadId)) void navigate({ to: "/" });
+  // The host thread and the sandbox's thread share an id, so a bridged sandbox's delete leaves
+  // only a page showing the sandbox's thread, unless the host thread was deleted too.
+  const leaveThread = (sandbox: SandboxRecord, threadRef: ScopedThreadRef, hostKept: boolean) => {
+    const path = window.location.pathname;
+    if (!path.includes(threadRef.threadId)) return;
+    if (hostKept && (sandbox.environmentId === null || !path.includes(sandbox.environmentId))) {
+      return;
+    }
+    void navigate({ to: "/" });
   };
 
-  // The conversation lives on the sandbox, so it goes with it; the toast says so.
+  // A legacy thread's conversation lives on the sandbox, so it goes with it; the toast says so.
   const removeSandbox = async (
     sandbox: SandboxRecord,
     threadRef: ScopedThreadRef,
     title: string,
+    options: { readonly bridged: boolean; readonly hostThreadDeleted: boolean },
   ) => {
     if (provisionerEnvironmentId === null) return false;
     const result = await deleteSandbox({
@@ -239,8 +283,10 @@ export function SandboxThreadCoordinator() {
       if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not delete the sandbox");
       return false;
     }
-    ThreadUndo.invalidate("settle", scopedThreadKey(threadRef));
-    leaveThread(threadRef);
+    const hostKept = options.bridged && !options.hostThreadDeleted;
+    // A kept host thread can still be un-settled; a thread that is gone cannot.
+    if (!hostKept) ThreadUndo.invalidate("settle", scopedThreadKey(threadRef));
+    leaveThread(sandbox, threadRef, hostKept);
     if (sandbox.environmentId !== null && entries.has(sandbox.environmentId)) {
       await removeEnvironment(sandbox.environmentId);
     }
@@ -248,7 +294,11 @@ export function SandboxThreadCoordinator() {
       stackedThreadToast({
         type: "success",
         title,
-        description: `The conversation was on sandbox ${shortSandboxId(sandbox.sandboxId)}, so it is gone too.`,
+        description: !options.bridged
+          ? `The conversation was on sandbox ${shortSandboxId(sandbox.sandboxId)}, so it is gone too.`
+          : hostKept
+            ? "The conversation stays in this thread. Its next message needs a new sandbox."
+            : `The thread and sandbox ${shortSandboxId(sandbox.sandboxId)} are gone.`,
       }),
     );
     for (const warning of result.value.warnings) {
@@ -288,6 +338,7 @@ export function SandboxThreadCoordinator() {
   ) =>
     new Promise<void>((resolve) => {
       const id = nextId.current++;
+      const bridged = bridgedOf(sandbox);
       if (options.remembered === true) {
         void runCheck(sandbox).then((work) => {
           if (work.status === "clean") {
@@ -295,10 +346,11 @@ export function SandboxThreadCoordinator() {
               sandbox,
               threadRef,
               `Deleted sandbox ${shortSandboxId(sandbox.sandboxId)}`,
+              { bridged, hostThreadDeleted: false },
             ).then(() => resolve());
             return;
           }
-          enqueue({ kind: "delete", id, threadRef, sandbox, reason, work, done: resolve });
+          enqueue({ kind: "delete", id, threadRef, sandbox, reason, bridged, work, done: resolve });
         });
         return;
       }
@@ -308,6 +360,7 @@ export function SandboxThreadCoordinator() {
         threadRef,
         sandbox,
         reason,
+        bridged,
         work: null,
         ...(options.deleteThread === undefined ? {} : { deleteThread: options.deleteThread }),
         done: resolve,
@@ -333,29 +386,67 @@ export function SandboxThreadCoordinator() {
         return;
       }
     }
+    const hostThreadDeleted = prompt.reason === "thread" && isHostThreadRef(sandbox, threadRef);
+    // The sandbox's copy of a deleted host thread goes too while its server answers; the sandbox
+    // delete below would take it anyway, but this leaves no stray thread if that delete fails.
+    if (
+      hostThreadDeleted &&
+      sandbox.environmentId !== null &&
+      sandbox.threadId !== undefined &&
+      isConnected(sandbox.environmentId)
+    ) {
+      await deleteRemoteThread({
+        environmentId: sandbox.environmentId,
+        input: { threadId: sandbox.threadId },
+      });
+    }
     await removeSandbox(
       sandbox,
       threadRef,
       prompt.reason === "thread"
         ? `Deleted the thread and sandbox ${shortSandboxId(sandbox.sandboxId)}`
         : `Deleted sandbox ${shortSandboxId(sandbox.sandboxId)}`,
+      { bridged: prompt.bridged, hostThreadDeleted },
     );
     prompt.done();
   };
 
   const onSettled = useStableCallback((threadRef: ScopedThreadRef) => {
-    const sandbox = findThreadSandbox(sandboxes, threadRef);
+    const sandbox = findSandbox(threadRef);
     if (sandbox === undefined || (sandbox.state !== "running" && sandbox.state !== "error")) return;
     const action = configOf(sandbox)?.onSettle ?? "ask";
     if (action === "snapshot") void keepSnapshot(sandbox);
     else if (action === "delete") {
       void startDelete(sandbox, threadRef, "settle", { remembered: true });
-    } else enqueue({ kind: "settle", id: nextId.current++, threadRef, sandbox });
+    } else {
+      enqueue({
+        kind: "settle",
+        id: nextId.current++,
+        threadRef,
+        sandbox,
+        bridged: bridgedOf(sandbox),
+      });
+    }
   });
 
   const ensureRunning = useStableCallback(async (threadRef: ScopedThreadRef) => {
-    const sandbox = findThreadSandbox(sandboxes, threadRef);
+    const sandbox = findSandbox(threadRef);
     if (sandbox === undefined || provisionerEnvironmentId === null) return true;
+    // The host thread's server is up. Its next turn makes the host resume the sandbox and waits for
+    // it, so only an explicit resume (un-settle, the header menu) starts one here, without waiting.
+    if (isHostThreadRef(sandbox, threadRef)) {
+      if (sandbox.state !== "stopped") return true;
+      const result = await resumeSandbox({
+        environmentId: provisionerEnvironmentId,
+        input: { instanceId: sandbox.instanceId },
+      });
+      void list.refresh();
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not resume the sandbox");
+        return false;
+      }
+      return true;
+    }
     if (sandbox.state !== "stopped" && isConnected(threadRef.environmentId)) return true;
     if (sandbox.state === "stopped") {
       const result = await resumeSandbox({
@@ -384,18 +475,18 @@ export function SandboxThreadCoordinator() {
 
   const deleteThreadAndSandbox = useStableCallback(
     (threadRef: ScopedThreadRef, deleteThread: () => Promise<{ readonly _tag: string }>) => {
-      const sandbox = findThreadSandbox(sandboxes, threadRef);
+      const sandbox = findSandbox(threadRef);
       if (sandbox === undefined) return deleteThread().then(() => undefined);
       return startDelete(sandbox, threadRef, "thread", { deleteThread });
     },
   );
 
   const isSandboxThread = useStableCallback(
-    (threadRef: ScopedThreadRef) => findThreadSandbox(sandboxes, threadRef) !== undefined,
+    (threadRef: ScopedThreadRef) => findSandbox(threadRef) !== undefined,
   );
 
   const deleteOnly = useStableCallback((threadRef: ScopedThreadRef) => {
-    const sandbox = findThreadSandbox(sandboxes, threadRef);
+    const sandbox = findSandbox(threadRef);
     return sandbox === undefined ? Promise.resolve() : startDelete(sandbox, threadRef, "menu");
   });
 
@@ -501,13 +592,15 @@ function SandboxThreadPrompt({
           <AlertDialogHeader>
             <AlertDialogTitle>Keep this chat&apos;s sandbox?</AlertDialogTitle>
             <AlertDialogDescription>
-              {threadTitle === null ? "This chat" : `"${threadTitle}"`} lives on {providerLabel}{" "}
-              sandbox {short}. A snapshot stops the machine and keeps its disk, and sending a
-              message resumes it.
+              {threadTitle === null ? "This chat" : `"${threadTitle}"`}{" "}
+              {prompt.bridged ? "runs on" : "lives on"} {providerLabel} sandbox {short}. A snapshot
+              stops the machine and keeps its disk, and sending a message resumes it.
               {retentionDays === undefined
                 ? ` ${providerLabel} bills for the stopped disk.`
                 : ` ${providerLabel} keeps a stopped disk for ${retentionDays} days and bills for it.`}{" "}
-              Deleting the sandbox deletes this conversation too.
+              {prompt.bridged
+                ? "Deleting the sandbox keeps this conversation here; work only on its disk is lost."
+                : "Deleting the sandbox deletes this conversation too."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {rememberLabel === null ? null : (
@@ -538,10 +631,7 @@ function SandboxThreadPrompt({
                 : `Delete sandbox ${short}?`}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {prompt.reason === "thread"
-                ? `Also deletes sandbox ${short} on ${providerLabel}. `
-                : `This deletes the machine and its disk on ${providerLabel}. `}
-              The conversation lives on the sandbox, so it is deleted too. This cannot be undone.
+              {deleteDescription(prompt, short, providerLabel)} This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <p

@@ -261,8 +261,83 @@ the provisioner's own scope, so it outlives the RPC that started it, and reports
   through `uploadFile` with mode 600.
 - **Pairing.** The host pairs with the sandbox (sealed, as below) and hands the client the origin
   and pairing code through `sandboxes.pairLaunch`; the client registers the environment, waits
-  for the project to appear, retargets the composer draft onto it, sends, and calls
-  `sandboxes.completeLaunch`, which marks the record with the thread id.
+  for the project to appear, and calls `sandboxes.completeLaunch`, which marks the record with the
+  thread id and returns once the launch fiber (bridge credential included) has ended. The client
+  then links the host thread (see [Sandbox bridge](#sandbox-bridge)) and sends there; if linking
+  fails, it retargets the draft onto the sandbox's project and sends there instead.
+
+## Sandbox bridge
+
+A thread that runs on a sandbox lives on the sandbox's own T3 server, which only clients paired with
+it can drive. The bridge lets any client of the host (the phone included) drive it through the host,
+without pairing with the sandbox.
+
+- **One provider instance.** `sandboxes` (displayName "Sandboxes", driver `acpRegistry`, source
+  `local`) runs this server's own entrypoint as `sandbox-bridge`, a fast path in
+  [`bin.ts`](../../apps/server/src/bin.ts). The agent is
+  [`packages/sandbox-bridge`](../../packages/sandbox-bridge/src/bridge.ts); the process wiring is
+  [`sandboxBridgeCli.ts`](../../apps/server/src/sandbox/sandboxBridgeCli.ts).
+  [`sandboxBridge.ts`](../../apps/server/src/sandbox/sandboxBridge.ts) seeds the instance at
+  startup and rewrites it only when its command or secrets directory is stale, keeping user edits.
+  It is off machine-wide on first seed; each host project of a sandbox thread enables it with a
+  project override (`providerInstances.sandboxes.enabled`), so it shows in that project's pickers
+  only. Project-enabled instances are probed and routed even when off machine-wide.
+- **Same thread id.** The host thread and the sandbox thread share a `ThreadId`. `session/new`
+  reads the host thread through the thread-scoped MCP credential (`t3_thread_configure`) and
+  answers `sandbox:<threadId>`; the provider probe (`t3-code-provider-test`), a session without
+  that MCP server, or a thread with no link gets a dry-run session that explains itself. Sessions
+  resume without replay: the host keeps the conversation.
+- **A turn.** Each prompt opens one WebSocket to the sandbox (a ticket from
+  `/api/auth/websocket-ticket/rpc` with the bridge's bearer and `orchestrationProtocol`). The
+  bridge forwards only the user's text: it unwraps the host's `<t3_code_instructions>` /
+  `<user_request>` wrapper and drops the `<runtime_info>` block, since the sandbox's server adds
+  its own for its agent. It then reads the thread's projection, and
+  either launches the thread there (same id, the sandbox project, the sandbox's default model or
+  Claude, the host thread's runtime mode) or dispatches `message.dispatch`. It streams new
+  assistant and reasoning text and tool calls, ignores what was on the thread before the turn, and
+  ends the ACP turn (`state_update` idle) when the run carrying its message ends.
+- **Approvals and questions.** A pending approval becomes `session/request_permission` with an
+  `edit` or `execute` tool kind, never a read kind the host's policy would allow on its own; the
+  chosen option's id is the T3 decision sent back with `runtime-request.respond`. If the host
+  thread is not Supervised (`approval-required`), the request stays pending on the sandbox and the
+  turn ends with one notice asking to switch back. Questions become an `elicitation/create` form;
+  declining dismisses them. Requests already pending when a turn starts are surfaced first.
+- **Cancel** sends `thread.stop` where the sandbox advertises it, else `run.interrupt`, and ends
+  the turn `cancelled`.
+- **Credential.** After the launch hand-off the provisioner runs
+  [`bridgeCredentialScript`](../../apps/server/src/sandbox/sandboxBridgeCredential.ts) on the
+  sandbox: `t3 auth session issue` with `orchestration:read` and `orchestration:operate`, label
+  `t3-sandbox-bridge`, 365 days (the CLI has no cap, and the token dies with the machine). The
+  token comes back sealed to a one-time key in 180-byte parts, like the pairing code. The record
+  keeps `bridge: { sessionId, secret, expiresAt }`; the token, address, sandbox project and ids sit
+  in the server secret `sandbox-bridge-<hex thread id>`, which the bridge reads from the directory
+  the instance environment names (`T3_SANDBOX_BRIDGE_SECRETS_DIR`). Resume rewrites the link and
+  re-mints a bearer within 30 days of expiry, revoking the old one; delete removes the secret.
+- **Linking.** `sandboxes.linkHostThread` (settings-write scope) picks the host project: the
+  launch's verified host copy (`hostProjectId` on the record), or a lightweight project, an empty
+  folder `<baseDir>/sandbox-projects/<owner>/<repo>` titled with the repository name, reused per
+  repository and never a checkout (`isSandboxHostProjectRoot` recognises it). It enables the
+  instance there, ensures the credential, saves `hostProjectId`, and returns the model selection
+  (`sandboxes` / `sandbox`) to create the host thread with. Call it after `completeLaunch`.
+- **The client's handoff**
+  ([`useSandboxLaunch.tsx`](../../apps/web/src/components/chat/useSandboxLaunch.tsx)). After
+  linking, the draft keeps its thread id and waits until the host's provider list has `sandboxes`
+  ready and the project override arrived (`sandboxBridgeReady`), since the composer would otherwise
+  send with another provider; then it moves to the host project with the returned model and
+  `approval-required`, and sends. Past 60 seconds, or when linking fails, it sends on the sandbox's
+  project with a warning. The client stays paired with the sandbox for files, diffs and terminals.
+- **Which thread is the sandbox's.** `findThreadSandbox` matches a record by the sandbox's
+  environment and thread id, or, on the provisioning environment, by thread id once the record has
+  `hostProjectId`. Whether the conversation survives a delete depends on whether a host thread with
+  that id exists, not on the record: a launch that fell back still has `hostProjectId`.
+  A host thread never takes the client-side resume path; un-settle and the header's **Resume** call
+  `sandboxes.resume` without waiting, and a send relies on the watcher below.
+- **Placeholder projects.** A project whose root `isSandboxHostProjectRoot` matches gets no git
+  status, scripts, open-in, files or terminal in the web app, and a composer notice that points to
+  the sandbox's thread.
+- **Stopped sandbox.** A run starting on a `sandboxes` thread whose sandbox is stopped makes the
+  host resume it. Meanwhile the bridge retries for about four minutes, showing "Resuming sandbox
+  bx_…", then says the sandbox is not answering.
 
 ## Lifecycle and hard limits
 
