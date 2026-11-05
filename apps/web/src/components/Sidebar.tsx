@@ -272,12 +272,12 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
-import { useBridgedSandboxCopies } from "../state/sandboxes";
+import { useSandboxHostMirrors } from "../state/sandboxes";
 import {
-  bridgedSandboxCopyHost,
   deleteSandboxThread,
   isSandboxThread,
-  withBridgedSandboxCopies,
+  sandboxMirrorTarget,
+  withSandboxHostMirrors,
 } from "../state/sandboxThreads";
 
 function sameSidebarProviderEntries(
@@ -915,11 +915,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  // Sandbox copies list nowhere, like delegated tasks: their host thread's row stands for them.
-  const bridgedSandboxCopies = useBridgedSandboxCopies();
-  const delegatedUnderParent = withBridgedSandboxCopies(
+  // Host mirrors of sandbox threads list nowhere, like delegated tasks: the sandbox's own row
+  // stands for them.
+  const sandboxHostMirrors = useSandboxHostMirrors();
+  const delegatedUnderParent = withSandboxHostMirrors(
     useDelegatedUnderParent(),
-    bridgedSandboxCopies,
+    sandboxHostMirrors,
   );
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -1122,11 +1123,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ? asLaunchingThread(thread)
             : thread,
         );
-  // A sandbox's own copy of a chat has no row; the host thread's row stands for it.
+  // A host mirror has no row; its sandbox thread's row stands for it.
   const routeRowThreadRef =
     routeThreadRef === null
       ? null
-      : (bridgedSandboxCopyHost(bridgedSandboxCopies, routeThreadRef) ?? routeThreadRef);
+      : (sandboxMirrorTarget(sandboxHostMirrors, routeThreadRef) ?? routeThreadRef);
   const routeRowThreadKey =
     routeRowThreadRef === null
       ? null

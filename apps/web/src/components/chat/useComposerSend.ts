@@ -111,6 +111,7 @@ import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
 import { useLinkedEnvironments } from "../../state/peerLinks";
 import { readEnvironmentScope } from "../../state/session";
+import { useSandboxMirrorSend } from "./useSandboxMirrorSend";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
@@ -340,6 +341,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
+  const mirrorSandboxSend = useSandboxMirrorSend();
   const uploadThreadFeedback = useOrchestrationCommand(threadEnvironment.uploadFeedback, {
     reportFailure: false,
   });
@@ -1326,6 +1328,15 @@ export function useComposerSend(input: ComposerSendInput) {
             checkoutPullRequestUrl,
           );
         }
+        void mirrorSandboxSend(scopeThreadRef(environmentId, threadIdForSend), {
+          messageId: messageIdForSend,
+          text: outgoingMessageText,
+          attachmentCount: turnAttachmentsResult.value.length,
+          title,
+          runtimeMode,
+          interactionMode: sendInteractionMode,
+          createdAt: messageCreatedAt,
+        });
         setKeepFullHistory(routeThreadKey, false);
         if (freshArm !== undefined) disarmFreshSession(routeThreadKey, freshArm);
         clearUsageLimitsFor(routeThreadKey);
