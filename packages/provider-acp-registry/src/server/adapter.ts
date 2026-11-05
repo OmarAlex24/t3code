@@ -15,7 +15,13 @@ import {
   isCopilotLostSessionError,
   makeCopilotSubagentRouting,
 } from "./copilotAcp.ts";
-import { defaultInstanceIdForDriver, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_MESSAGE_META,
+  SANDBOX_BRIDGE_WITHDRAW_METHOD,
+} from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
 import { AcpRegistrySettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -111,6 +117,17 @@ export function registerMistralVibeAcpExtensions(context: AcpAdapterV2ExtensionC
           retryable: true,
         }),
       }),
+  );
+}
+
+const SandboxRequestsWithdrawn = Schema.Struct({ sessionId: Schema.String });
+
+/** The sandbox bridge withdraws a request once it is answered on the sandbox, so both sides close it. */
+function registerSandboxBridgeExtensions(context: AcpAdapterV2ExtensionContext) {
+  return context.runtime.handleExtNotification(
+    SANDBOX_BRIDGE_WITHDRAW_METHOD,
+    SandboxRequestsWithdrawn,
+    (notice) => context.withdrawPendingRequests(notice.sessionId),
   );
 }
 
@@ -227,6 +244,12 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     ...(registryAgentId === "glm-acp-agent" ? { reportsPerTurnPromptUsage: true } : {}),
     ...(registryAgentId === "mistral-vibe"
       ? { registerExtensions: registerMistralVibeAcpExtensions }
+      : {}),
+    ...(options.instanceId === SANDBOX_BRIDGE_INSTANCE_ID
+      ? {
+          registerExtensions: registerSandboxBridgeExtensions,
+          promptMeta: (message) => ({ [SANDBOX_BRIDGE_MESSAGE_META]: { ...message } }),
+        }
       : {}),
     ...(isClaude
       ? {
