@@ -258,6 +258,7 @@ import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
+import * as DiyKit from "./diy/DiyKit.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
@@ -2006,6 +2007,7 @@ export const layerWsRpc = (
       });
 
       const sandboxHandlers = yield* SandboxProvisioner.rpcHandlers;
+      const diyHandlers = yield* DiyKit.rpcHandlers(currentSession);
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
@@ -3419,6 +3421,7 @@ export const layerWsRpc = (
             ),
           ),
         ...sandboxHandlers,
+        ...diyHandlers,
       });
       const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
       const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =
