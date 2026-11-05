@@ -40,6 +40,8 @@ export const DesktopConfig = Config.all({
   t3Home: trimmedString("T3CODE_HOME"),
   devServerUrl: Config.URL("VITE_DEV_SERVER_URL").pipe(Config.option),
   appUserModelIdOverride: trimmedString("T3CODE_DESKTOP_APP_USER_MODEL_ID"),
+  // A renamed build (t3code-diy's side-by-side app) names its windows and About panel itself.
+  displayNameOverride: trimmedString("T3CODE_DESKTOP_DISPLAY_NAME"),
   devRemoteT3ServerEntryPath: trimmedString("T3CODE_DEV_REMOTE_T3_SERVER_ENTRY_PATH"),
   configuredBackendPort: Config.Port("T3CODE_PORT").pipe(Config.option),
   commitHashOverride: trimmedString("T3CODE_COMMIT_HASH"),
