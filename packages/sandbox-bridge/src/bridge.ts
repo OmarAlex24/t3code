@@ -1,11 +1,13 @@
 /**
  * The sandbox bridge: an ACP agent the host runs for a thread whose work happens on a sandbox's
  * own T3 server. It forwards each prompt to the thread with the same id on the sandbox, streams
- * the sandbox's text back, and turns the sandbox's approvals and questions into ACP requests, so
+ * the sandbox's work back, and turns the sandbox's approvals and questions into ACP requests, so
  * any client of the host (the phone included) can drive the thread.
  */
 import {
+  type ChatAttachment,
   CommandId,
+  CONTINUE_AFTER_INTERRUPTION_PROMPT,
   MessageId,
   type ModelSelection,
   type OrchestrationV2Command,
@@ -18,16 +20,22 @@ import {
   type OrchestrationV2UserInputQuestion,
   type ProviderApprovalDecision,
   type ProviderApprovalOption,
+  type ProviderInteractionMode,
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
+  SANDBOX_BRIDGE_MESSAGE_META,
+  SANDBOX_BRIDGE_WITHDRAW_METHOD,
   ThreadId,
+  type UploadChatAttachment,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -49,6 +57,7 @@ export class SandboxBridgeError extends Schema.TaggedError<SandboxBridgeError>()
 export interface HostThread {
   readonly threadId: ThreadId;
   readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
 }
 
 /** The thread-scoped MCP credential the host hands every ACP session. */
@@ -69,6 +78,12 @@ export interface SandboxSession {
     input: OrchestrationV2ThreadLaunchInput,
   ) => Effect.Effect<void, SandboxBridgeError>;
   readonly dispatch: (command: OrchestrationV2Command) => Effect.Effect<void, SandboxBridgeError>;
+  /** Saves images on the sandbox for the message that will carry them. */
+  readonly persistAttachments: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+    readonly attachments: ReadonlyArray<UploadChatAttachment>;
+  }) => Effect.Effect<ReadonlyArray<ChatAttachment>, SandboxBridgeError>;
   readonly subscribe: (
     threadId: ThreadId,
   ) => Stream.Stream<OrchestrationV2ThreadStreamItem, SandboxBridgeError>;
@@ -95,12 +110,12 @@ const MODEL_OPTION_VALUE = "sandbox";
 /** Sandbox chats are made only where the sandbox configs live; other clients continue them. */
 export const NOT_LINKED_MESSAGE =
   "Sandbox chats start from T3 Code on your computer (Run on → Sandbox). After that you can keep the conversation going here.";
-export const SUPERVISED_NOTICE =
-  "This thread must stay Supervised for the sandbox's approvals to reach you. Switch it back to Supervised; the request is waiting on the sandbox.";
 export const unreachableMessage = (link: SandboxBridgeLink) =>
   `Sandbox ${link.sandboxId || link.label} is stopped or not answering. Resume it from T3 Code on your computer, then send again.`;
 export const waitingThought = (link: SandboxBridgeLink) =>
   `Resuming sandbox ${link.sandboxId || link.label}…`;
+export const skippedAttachmentsMessage = (names: ReadonlyArray<string>) =>
+  `${names.map((name) => `"${name}"`).join(", ")} ${names.length === 1 ? "wasn't" : "weren't"} sent to the sandbox. Only images can be sent from here; attach other files from T3 Code on your computer.`;
 
 const modelConfigOptions: ReadonlyArray<AcpSchema.SessionConfigOption> = [
   {
@@ -126,28 +141,112 @@ const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
 const HOST_INSTRUCTIONS_WRAPPER =
   /^\s*<t3_code_instructions>[\s\S]*?<\/t3_code_instructions>\s*<user_request>\n?([\s\S]*?)\n?<\/user_request>\s*$/u;
 const HOST_RUNTIME_NOTES = /^\s*<runtime_info>/u;
+// The host lists each attachment by its path on the host, which means nothing on the sandbox.
+const HOST_ATTACHMENT_LINE = /^\[Attached (\S+) "(.+)" is (?:saved at: .*|unavailable: .*)\]$/u;
 
-/** The text a prompt carries; attachments wait for a later phase. */
+/** The text a prompt carries, without the host's notes or its attachment paths. */
 export const promptText = (blocks: ReadonlyArray<AcpSchema.ContentBlock>): string =>
-  blocks
-    .flatMap((block) => {
-      switch (block.type) {
-        case "text": {
-          const text = String(block.text);
-          if (HOST_RUNTIME_NOTES.test(text)) return [];
-          return [HOST_INSTRUCTIONS_WRAPPER.exec(text)?.[1] ?? text];
-        }
-        case "resource_link":
-          return [block.uri];
-        case "resource": {
-          const resource: unknown = block.resource;
-          return isRecord(resource) && typeof resource.text === "string" ? [resource.text] : [];
-        }
-        default:
-          return [];
+  promptContent(blocks).text;
+
+export interface PromptContent {
+  readonly text: string;
+  readonly images: ReadonlyArray<UploadChatAttachment>;
+  /** Attachments the bridge cannot carry, by name. */
+  readonly skipped: ReadonlyArray<string>;
+}
+
+const base64Bytes = (data: string) => {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+};
+
+const IMAGE_EXTENSIONS: Readonly<Record<string, string>> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
+export const promptContent = (blocks: ReadonlyArray<AcpSchema.ContentBlock>): PromptContent => {
+  const texts: Array<string> = [];
+  const attached: Array<{ readonly type: string; readonly name: string }> = [];
+  const imageBlocks: Array<{ readonly data: string; readonly mimeType: string }> = [];
+  for (const block of blocks) {
+    switch (block.type) {
+      case "text": {
+        const raw = String(block.text);
+        if (HOST_RUNTIME_NOTES.test(raw)) break;
+        const lines = (HOST_INSTRUCTIONS_WRAPPER.exec(raw)?.[1] ?? raw).split("\n");
+        const kept = lines.filter((line) => {
+          const match = HOST_ATTACHMENT_LINE.exec(line.trim());
+          if (match === null) return true;
+          attached.push({ type: match[1]!, name: match[2]! });
+          return false;
+        });
+        texts.push(kept.join("\n").trim());
+        break;
       }
-    })
-    .join("\n\n");
+      case "resource_link":
+        texts.push(String(block.uri));
+        break;
+      case "resource": {
+        const resource: unknown = block.resource;
+        if (isRecord(resource) && typeof resource.text === "string") texts.push(resource.text);
+        break;
+      }
+      case "image":
+        imageBlocks.push({ data: String(block.data), mimeType: String(block.mimeType) });
+        break;
+      default:
+        break;
+    }
+  }
+  const imageNames = attached.filter((entry) => entry.type === "image").map((entry) => entry.name);
+  const images = imageBlocks.map((image, index): UploadChatAttachment => ({
+    type: "image",
+    name: imageNames[index] ?? `image-${index + 1}.${IMAGE_EXTENSIONS[image.mimeType] ?? "png"}`,
+    mimeType: image.mimeType,
+    sizeBytes: base64Bytes(image.data),
+    dataUrl: `data:${image.mimeType};base64,${image.data}`,
+  }));
+  // The host sends an image block only for types agents read; any other attachment stays behind.
+  const skipped = [
+    ...imageNames.slice(imageBlocks.length),
+    ...attached.filter((entry) => entry.type !== "image").map((entry) => entry.name),
+  ];
+  return {
+    text: texts.filter((text) => text.length > 0).join("\n\n"),
+    images,
+    skipped,
+  };
+};
+
+/** The T3 message a host prompt carries, from the `_meta` the host's ACP adapter sets. */
+export interface PromptMessage {
+  readonly messageId: MessageId;
+  readonly createdBy: string;
+  readonly creationSource: string;
+}
+
+export const promptMessageOf = (meta: unknown): PromptMessage | null => {
+  const message = isRecord(meta) ? meta[SANDBOX_BRIDGE_MESSAGE_META] : undefined;
+  if (!isRecord(message) || typeof message.messageId !== "string" || message.messageId === "") {
+    return null;
+  }
+  return {
+    messageId: MessageId.make(message.messageId),
+    createdBy: typeof message.createdBy === "string" ? message.createdBy : "",
+    creationSource: typeof message.creationSource === "string" ? message.creationSource : "",
+  };
+};
+
+/**
+ * The host's own "continue" after it restarted or a usage limit lifted. The sandbox never stopped,
+ * so forwarding it would make its agent repeat work; the bridge follows the sandbox's turn instead.
+ */
+export const isHostContinuation = (text: string, message: PromptMessage | null) =>
+  text.startsWith(CONTINUE_AFTER_INTERRUPTION_PROMPT) &&
+  (message === null || (message.createdBy === "agent" && message.creationSource === "server"));
 
 /**
  * Never a read kind: the host's ACP policy allows reads without asking, and every request the
@@ -204,6 +303,37 @@ export const decisionOf = (
     ? (response.outcome.optionId as ProviderApprovalDecision)
     : null;
 
+const APPROVAL_FIELD = "decision";
+
+/**
+ * An approval asked as a one-question form, for a host thread that is not Supervised: its own
+ * policy would answer a permission request without the user, and the sandbox needs them.
+ */
+export const approvalForm = (
+  options: ReadonlyArray<AcpSchema.PermissionOption>,
+): AcpSchema.ElicitationSchema => ({
+  type: "object",
+  properties: {
+    [APPROVAL_FIELD]: {
+      type: "string" as const,
+      title: "Allow this?",
+      enum: options.map((option) => option.name),
+    },
+  },
+  required: [APPROVAL_FIELD],
+});
+
+export const formDecisionOf = (
+  options: ReadonlyArray<AcpSchema.PermissionOption>,
+  content: unknown,
+): ProviderApprovalDecision | null => {
+  const picked = isRecord(content) ? content[APPROVAL_FIELD] : undefined;
+  const option = options.find((candidate) => candidate.name === picked);
+  return option !== undefined && DECISIONS.has(option.optionId)
+    ? (option.optionId as ProviderApprovalDecision)
+    : null;
+};
+
 const optionValue = (option: OrchestrationV2UserInputQuestion["options"][number]) =>
   option.value ?? option.label;
 
@@ -257,10 +387,27 @@ const isTerminalRun = (run: OrchestrationV2Run) => TERMINAL_RUN_STATUSES.has(run
 
 type ToolItem = Extract<
   OrchestrationV2TurnItem,
-  { readonly type: "command_execution" | "file_change" | "file_search" | "web_search" }
+  {
+    readonly type:
+      | "command_execution"
+      | "file_change"
+      | "file_search"
+      | "web_search"
+      | "dynamic_tool"
+      | "subagent";
+  }
 >;
 type ApprovalItem = Extract<OrchestrationV2TurnItem, { readonly type: "approval_request" }>;
 type QuestionItem = Extract<OrchestrationV2TurnItem, { readonly type: "user_input_request" }>;
+type UserMessageItem = Extract<OrchestrationV2TurnItem, { readonly type: "user_message" }>;
+
+const isToolItem = (item: OrchestrationV2TurnItem): item is ToolItem =>
+  item.type === "command_execution" ||
+  item.type === "file_change" ||
+  item.type === "file_search" ||
+  item.type === "web_search" ||
+  item.type === "dynamic_tool" ||
+  item.type === "subagent";
 
 const toolKindOf = (item: ToolItem): AcpSchema.ToolKind => {
   switch (item.type) {
@@ -272,19 +419,33 @@ const toolKindOf = (item: ToolItem): AcpSchema.ToolKind => {
       return "search";
     case "web_search":
       return "fetch";
+    case "dynamic_tool":
+    case "subagent":
+      return "other";
   }
 };
 
-const toolTitleOf = (item: ToolItem): string => {
+const TITLE_LIMIT = 160;
+// A summary line for the phone: the command or target itself, not the provider's generic label.
+const summary = (text: string | null | undefined) => {
+  const line = (text ?? "").trim().split("\n")[0]?.trim() ?? "";
+  return line.length > TITLE_LIMIT ? `${line.slice(0, TITLE_LIMIT - 1)}…` : line;
+};
+
+export const toolTitleOf = (item: ToolItem): string => {
   switch (item.type) {
     case "command_execution":
-      return item.title ?? item.input;
+      return summary(item.input) || summary(item.title) || "Run a command";
     case "file_change":
-      return item.title ?? item.fileName;
+      return `Edit ${item.fileName}`;
     case "file_search":
-      return item.title ?? item.pattern ?? "Search files";
+      return summary(item.pattern) || summary(item.title) || "Search files";
     case "web_search":
-      return item.title ?? item.patterns?.join(", ") ?? "Search the web";
+      return summary(item.patterns?.join(", ")) || summary(item.title) || "Search the web";
+    case "dynamic_tool":
+      return summary(item.title) || summary(item.toolName) || "Use a tool";
+    case "subagent":
+      return `Subagent: ${summary(item.title) || summary(item.prompt) || "working"}`;
   }
 };
 
@@ -322,9 +483,9 @@ export type TurnAction =
   | { readonly _tag: "question"; readonly item: QuestionItem };
 
 /**
- * Follows a sandbox thread for one host turn. Text already on the sandbox before the turn counts
- * as sent, so a thread's history is never replayed; anything new on any run is streamed, and the
- * turn ends when the run carrying the forwarded message ends.
+ * Follows a sandbox thread for one host turn. Text already on the sandbox before `replayFrom`
+ * (everything, when unset) counts as sent, so a thread's history is never replayed; anything newer
+ * on any run is streamed, and the turn ends when the run carrying the message ends.
  */
 export class TurnTracker {
   private readonly runs = new Map<string, OrchestrationV2Run>();
@@ -333,14 +494,25 @@ export class TurnTracker {
   private readonly sent = new Map<string, number>();
   private readonly toolStatus = new Map<string, AcpSchema.ToolCallStatus>();
   private readonly handled = new Set<string>();
+  private readonly settledRequests = new Map<string, Deferred.Deferred<void>>();
   private readonly messageId: MessageId;
 
-  constructor(messageId: MessageId, baseline: Option.Option<OrchestrationV2ThreadProjection>) {
+  constructor(
+    messageId: MessageId,
+    baseline: Option.Option<OrchestrationV2ThreadProjection>,
+    replayFrom?: number,
+  ) {
     this.messageId = messageId;
     if (Option.isSome(baseline)) {
+      for (const run of baseline.value.runs) this.runs.set(run.id, run);
+      for (const request of baseline.value.runtimeRequests) this.requests.set(request.id, request);
       for (const item of baseline.value.turnItems) {
+        this.items.set(item.id, item);
+        if (replayFrom !== undefined && item.ordinal >= replayFrom) continue;
         if (item.type === "assistant_message" || item.type === "reasoning") {
           this.sent.set(item.id, item.text.length);
+        } else if (item.type === "proposed_plan") {
+          this.sent.set(item.id, item.markdown.length);
         } else if (isToolItem(item)) {
           this.toolStatus.set(item.id, toolStatusOf(item.status));
         }
@@ -348,11 +520,17 @@ export class TurnTracker {
     }
   }
 
+  /** The actions the baseline owes the host: whatever it holds from `replayFrom` on. */
+  replay(): ReadonlyArray<TurnAction> {
+    return this.actionsFor([...this.items.values()]);
+  }
+
   apply(item: OrchestrationV2ThreadStreamItem): ReadonlyArray<TurnAction> {
     if (item.kind === "snapshot") {
       for (const run of item.projection.runs) this.runs.set(run.id, run);
       for (const request of item.projection.runtimeRequests) this.requests.set(request.id, request);
       for (const turnItem of item.projection.turnItems) this.items.set(turnItem.id, turnItem);
+      this.settleAnswered();
       return this.actionsFor(item.projection.turnItems);
     }
     if (item.kind !== "event") return [];
@@ -361,24 +539,35 @@ export class TurnTracker {
       case "run.created":
       case "run.updated":
         this.runs.set(event.payload.id, event.payload);
+        this.settleAnswered();
         return [];
       case "runtime-request.updated":
         this.requests.set(event.payload.id, event.payload);
+        this.settleAnswered();
         return [];
       case "turn-item.updated":
         this.items.set(event.payload.id, event.payload);
+        this.settleAnswered();
         return this.actionsFor([event.payload]);
       default:
         return [];
     }
   }
 
-  /** The run carrying the forwarded message, once the sandbox has made it. */
+  private get userMessage(): UserMessageItem | undefined {
+    for (const item of this.items.values()) {
+      if (item.type === "user_message" && item.messageId === this.messageId) return item;
+    }
+    return undefined;
+  }
+
+  /** The run carrying the message: the one it started, or the one it was steered into. */
   get run(): OrchestrationV2Run | undefined {
     for (const run of this.runs.values()) {
       if (run.userMessageId === this.messageId) return run;
     }
-    return undefined;
+    const runId = this.userMessage?.runId;
+    return runId == null ? undefined : this.runs.get(runId);
   }
 
   get done(): boolean {
@@ -391,15 +580,43 @@ export class TurnTracker {
     return this.run?.id ?? [...this.runs.values()].findLast((run) => !isTerminalRun(run))?.id;
   }
 
-  /** Requests still pending on the sandbox that this turn has not handled. */
-  pendingRequests(): ReadonlyArray<TurnAction> {
-    return this.actionsFor([...this.items.values()]).filter(
-      (action) => action._tag === "approval" || action._tag === "question",
-    );
-  }
-
   markHandled(requestId: RuntimeRequestId): void {
     this.handled.add(requestId);
+  }
+
+  /** Completes once the request is no longer waiting on the sandbox, whoever answered it. */
+  answered(requestId: RuntimeRequestId): Deferred.Deferred<void> {
+    let settled = this.settledRequests.get(requestId);
+    if (settled === undefined) {
+      settled = Deferred.makeUnsafe<void>();
+      this.settledRequests.set(requestId, settled);
+      this.settleAnswered();
+    }
+    return settled;
+  }
+
+  private stillWaiting(requestId: string): boolean {
+    if (this.done) return false;
+    const request = this.requests.get(requestId);
+    if (request !== undefined) return request.status === "pending";
+    for (const item of this.items.values()) {
+      if (
+        (item.type === "approval_request" || item.type === "user_input_request") &&
+        item.requestId === requestId
+      ) {
+        return item.status === "pending" || item.status === "waiting" || item.status === "running";
+      }
+    }
+    return true;
+  }
+
+  private settleAnswered(): void {
+    for (const [requestId, settled] of this.settledRequests) {
+      if (!this.stillWaiting(requestId)) {
+        Deferred.doneUnsafe(settled, Effect.void);
+        this.settledRequests.delete(requestId);
+      }
+    }
   }
 
   private isPending(requestId: RuntimeRequestId, status: OrchestrationV2TurnItem["status"]) {
@@ -412,15 +629,20 @@ export class TurnTracker {
   private actionsFor(items: ReadonlyArray<OrchestrationV2TurnItem>): ReadonlyArray<TurnAction> {
     const actions: Array<TurnAction> = [];
     for (const item of [...items].sort((a, b) => a.ordinal - b.ordinal)) {
-      if (item.type === "assistant_message" || item.type === "reasoning") {
+      if (
+        item.type === "assistant_message" ||
+        item.type === "reasoning" ||
+        item.type === "proposed_plan"
+      ) {
+        const text = item.type === "proposed_plan" ? item.markdown : item.text;
         const sent = this.sent.get(item.id) ?? 0;
-        if (item.text.length <= sent) continue;
-        this.sent.set(item.id, item.text.length);
+        if (text.length <= sent) continue;
+        this.sent.set(item.id, text.length);
         actions.push({
           _tag: "text",
           kind: item.type === "reasoning" ? "thought" : "message",
           id: item.id,
-          text: item.text.slice(sent),
+          text: text.slice(sent),
         });
       } else if (isToolItem(item)) {
         const status = toolStatusOf(item.status);
@@ -434,11 +656,13 @@ export class TurnTracker {
           status,
         });
       } else if (item.type === "approval_request" && this.isPending(item.requestId, item.status)) {
+        this.handled.add(item.requestId);
         actions.push({ _tag: "approval", item });
       } else if (
         item.type === "user_input_request" &&
         this.isPending(item.requestId, item.status)
       ) {
+        this.handled.add(item.requestId);
         actions.push({ _tag: "question", item });
       }
     }
@@ -446,12 +670,44 @@ export class TurnTracker {
   }
 }
 
-const isToolItem = (item: OrchestrationV2TurnItem): item is ToolItem =>
-  item.type === "command_execution" ||
-  item.type === "file_change" ||
-  item.type === "file_search" ||
-  item.type === "web_search";
+/** Where a host turn picks up on the sandbox: a message already there, or a new one to send. */
+export type TurnTarget =
+  | { readonly _tag: "attach"; readonly messageId: MessageId; readonly replayFrom: number }
+  | { readonly _tag: "send"; readonly messageId: MessageId | null }
+  | { readonly _tag: "nothing" };
 
+const userMessages = (projection: Option.Option<OrchestrationV2ThreadProjection>) =>
+  Option.isNone(projection)
+    ? []
+    : projection.value.turnItems.filter(
+        (item): item is UserMessageItem => item.type === "user_message",
+      );
+
+/**
+ * A message the sandbox already has (sent on the computer, or forwarded before a restart) is
+ * followed rather than sent again; the host's own "continue" follows the sandbox's latest message.
+ */
+export const turnTargetOf = (
+  before: Option.Option<OrchestrationV2ThreadProjection>,
+  message: PromptMessage | null,
+  text: string,
+): TurnTarget => {
+  const messages = userMessages(before);
+  if (isHostContinuation(text, message)) {
+    const latest = messages.reduce<UserMessageItem | undefined>(
+      (newest, item) => (newest === undefined || item.ordinal > newest.ordinal ? item : newest),
+      undefined,
+    );
+    return latest === undefined
+      ? { _tag: "nothing" }
+      : { _tag: "attach", messageId: latest.messageId, replayFrom: latest.ordinal };
+  }
+  const existing =
+    message === null ? undefined : messages.find((item) => item.messageId === message.messageId);
+  return existing === undefined
+    ? { _tag: "send", messageId: message?.messageId ?? null }
+    : { _tag: "attach", messageId: existing.messageId, replayFrom: existing.ordinal };
+};
 /** The MCP credential the host put in a session's `mcpServers`, over stdio or HTTP. */
 export const hostMcpOf = (
   servers: ReadonlyArray<AcpSchema.McpServer> | undefined,
@@ -495,6 +751,8 @@ interface BridgeSession {
   cancel: Deferred.Deferred<void> | null;
 }
 
+const END_OF_TURN = { _tag: "end" } as const;
+
 /**
  * Serves ACP on the agent's stdio until the host closes it. The host starts one bridge process
  * per thread; a session that maps to no sandbox (the provider probe's, for one) is a dry run.
@@ -532,7 +790,8 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       return {
         protocolVersion: 2,
         info: { name: "t3-sandbox-bridge", version: "1" },
-        capabilities: { session: { prompt: {} } },
+        // Images go to the sandbox as its own attachments; other files get a notice instead.
+        capabilities: { session: { prompt: { image: {} } } },
       } satisfies AcpSchema.InitializeResponse;
     }),
   );
@@ -693,74 +952,120 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       return "end_turn";
     }
     const { link, sandbox } = connected.value;
+    const sandboxName = link.sandboxId || link.label;
+    const readHost = session.mcp
+      ? ports.readHostThread(session.mcp).pipe(Effect.option)
+      : Effect.succeedNone;
     const before = yield* sandbox.projection(threadId);
-    const messageId = MessageId.make(yield* newId);
-    const text = promptText(request.prompt);
-    const commandId = CommandId.make(yield* newId);
-    const dispatchMessage = sandbox.dispatch({
-      type: "message.dispatch",
-      commandId,
-      createdBy: "user",
-      creationSource: "web",
-      threadId,
-      messageId,
-      text,
-      attachments: [],
-      dispatchMode: { type: "start_immediately" },
-    });
-    if (Option.isNone(before)) {
-      // The first message makes the thread on the sandbox, with the id the host thread has.
-      const runtimeMode = session.mcp
-        ? yield* ports.readHostThread(session.mcp).pipe(
-            Effect.map((host) => host.runtimeMode),
-            Effect.orElseSucceed((): RuntimeMode => "approval-required"),
-          )
-        : "approval-required";
-      yield* sandbox
-        .launch({
-          commandId,
-          creationSource: "web",
-          threadId,
-          projectId: link.sandboxProjectId,
-          title: text.slice(0, 80).trim() || "Sandbox thread",
-          generateTitle: true,
-          modelSelection: sandbox.defaultModelSelection ?? CLAUDE_FALLBACK_MODEL,
-          runtimeMode,
-          interactionMode: "default",
-          workspaceStrategy: { type: "root" },
-          initialMessage: { messageId, text, attachments: [] },
-        })
-        .pipe(Effect.catch(() => dispatchMessage));
+    const content = promptContent(request.prompt);
+    const target = turnTargetOf(before, promptMessageOf(request._meta), content.text);
+    if (target._tag === "nothing") return "end_turn";
+
+    let tracker: TurnTracker;
+    if (target._tag === "attach") {
+      tracker = new TurnTracker(target.messageId, before, target.replayFrom);
     } else {
-      yield* dispatchMessage;
+      if (content.skipped.length > 0) {
+        yield* sayOnce(sessionId, "message", skippedAttachmentsMessage(content.skipped));
+      }
+      if (content.text === "" && content.images.length === 0) return "end_turn";
+      const messageId = target.messageId ?? MessageId.make(yield* newId);
+      const host = yield* readHost;
+      const runtimeMode = Option.match(host, {
+        onNone: (): RuntimeMode => "approval-required",
+        onSome: (thread) => thread.runtimeMode,
+      });
+      const interactionMode = Option.match(host, {
+        onNone: (): ProviderInteractionMode => "default",
+        onSome: (thread) => thread.interactionMode,
+      });
+      const attachments =
+        content.images.length === 0
+          ? []
+          : yield* sandbox.persistAttachments({
+              threadId,
+              messageId,
+              attachments: content.images,
+            });
+      const commandId = CommandId.make(yield* newId);
+      const dispatchMessage = sandbox.dispatch({
+        type: "message.dispatch",
+        commandId,
+        createdBy: "user",
+        creationSource: "web",
+        threadId,
+        messageId,
+        text: content.text,
+        attachments: [...attachments],
+        dispatchMode: { type: "start_immediately" },
+      });
+      if (Option.isNone(before)) {
+        // The first message makes the thread on the sandbox, with the id the host thread has.
+        yield* sandbox
+          .launch({
+            commandId,
+            creationSource: "web",
+            threadId,
+            projectId: link.sandboxProjectId,
+            title: content.text.slice(0, 80).trim() || "Sandbox thread",
+            generateTitle: true,
+            modelSelection: sandbox.defaultModelSelection ?? CLAUDE_FALLBACK_MODEL,
+            runtimeMode,
+            interactionMode,
+            workspaceStrategy: { type: "root" },
+            initialMessage: { messageId, text: content.text, attachments: [...attachments] },
+          })
+          .pipe(Effect.catch(() => dispatchMessage));
+      } else {
+        // The phone's permission and plan modes are the thread's; the sandbox runs with them.
+        const thread = before.value.thread;
+        if (Option.isSome(host) && thread.runtimeMode !== runtimeMode) {
+          yield* sandbox.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make(yield* newId),
+            threadId,
+            runtimeMode,
+          });
+        }
+        if (Option.isSome(host) && thread.interactionMode !== interactionMode) {
+          yield* sandbox.dispatch({
+            type: "thread.interaction-mode.set",
+            commandId: CommandId.make(yield* newId),
+            threadId,
+            interactionMode,
+          });
+        }
+        yield* dispatchMessage;
+      }
+      tracker = new TurnTracker(messageId, before);
     }
 
-    const tracker = new TurnTracker(messageId, before);
-    let refusedNoticeSent = false;
-    // A request left waiting for a Supervised thread blocks the turn; it ends here instead.
-    let refused = false;
+    const withdraw = agent.client
+      .extNotification(SANDBOX_BRIDGE_WITHDRAW_METHOD, { sessionId })
+      .pipe(Effect.ignore);
+    // A request answered on the computer (or by the sandbox itself) closes the host's copy.
+    const unlessAnswered = <A, E, R>(requestId: RuntimeRequestId, ask: Effect.Effect<A, E, R>) =>
+      ask.pipe(
+        Effect.asSome,
+        Effect.raceFirst(
+          Deferred.await(tracker.answered(requestId)).pipe(
+            Effect.andThen(withdraw),
+            Effect.as(Option.none<A>()),
+          ),
+        ),
+      );
+    // The sandbox refuses an answer to a request someone already answered; that one is settled.
+    const respond = (command: OrchestrationV2Command) =>
+      sandbox.dispatch(command).pipe(Effect.catchTags({ SandboxBridgeError: () => Effect.void }));
 
     const forwardApproval = Effect.fn("SandboxBridge.forwardApproval")(function* (
       item: ApprovalItem,
     ) {
-      const mode = session.mcp
-        ? yield* ports.readHostThread(session.mcp).pipe(
-            Effect.map((host) => host.runtimeMode),
-            Effect.option,
-          )
-        : Option.none<RuntimeMode>();
-      tracker.markHandled(item.requestId);
-      if (Option.getOrUndefined(mode) !== "approval-required") {
-        refused = true;
-        if (!refusedNoticeSent) {
-          refusedNoticeSent = true;
-          yield* sayOnce(sessionId, "message", SUPERVISED_NOTICE);
-        }
-        return;
-      }
+      const mode = Option.map(yield* readHost, (host) => host.runtimeMode);
       const toolCallId = `sandbox-request:${item.requestId}`;
-      const title = `Sandbox ${link.sandboxId || link.label}: ${item.prompt ?? item.title ?? "Approve this action"}`;
+      const title = `Sandbox ${sandboxName}: ${item.prompt ?? item.title ?? "Approve this action"}`;
       const kind = approvalToolKind(item.requestKind);
+      const options = approvalOptions(item.options);
       yield* update(sessionId, {
         sessionUpdate: "tool_call_update",
         toolCallId,
@@ -768,19 +1073,50 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         kind,
         status: "pending",
       });
-      const response = yield* agent.client.requestPermission({
-        sessionId,
-        title,
-        ...(item.reason === undefined ? {} : { description: item.reason }),
-        subject: {
-          type: "tool_call",
-          toolCall: { toolCallId, title, kind, status: "pending" },
-        },
-        options: approvalOptions(item.options),
-      });
-      const decision = decisionOf(response);
+      // Only a Supervised thread shows a permission request to the user; any other mode's
+      // policy would answer it alone, so the request comes as a question instead.
+      const ask =
+        Option.getOrUndefined(mode) === "approval-required"
+          ? agent.client
+              .requestPermission({
+                sessionId,
+                title,
+                ...(item.reason === undefined ? {} : { description: item.reason }),
+                subject: {
+                  type: "tool_call",
+                  toolCall: { toolCallId, title, kind, status: "pending" },
+                },
+                options,
+              })
+              .pipe(Effect.map(decisionOf))
+          : agent.client
+              .elicit({
+                sessionId,
+                message: item.reason === undefined ? title : `${title}\n\n${item.reason}`,
+                mode: "form",
+                requestedSchema: approvalForm(options),
+              })
+              .pipe(
+                Effect.map((response): ProviderApprovalDecision | null =>
+                  response.action === "accept"
+                    ? formDecisionOf(options, "content" in response ? response.content : undefined)
+                    : response.action === "decline"
+                      ? "decline"
+                      : null,
+                ),
+              );
+      const answer = yield* unlessAnswered(item.requestId, ask);
+      if (Option.isNone(answer)) {
+        yield* update(sessionId, {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "completed",
+        });
+        return;
+      }
+      const decision = answer.value;
       if (decision === null) return;
-      yield* sandbox.dispatch({
+      yield* respond({
         type: "runtime-request.respond",
         commandId: CommandId.make(yield* newId),
         threadId,
@@ -797,15 +1133,19 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     const forwardQuestion = Effect.fn("SandboxBridge.forwardQuestion")(function* (
       item: QuestionItem,
     ) {
-      tracker.markHandled(item.requestId);
-      const response = yield* agent.client.elicit({
-        sessionId,
-        message: `Sandbox ${link.sandboxId || link.label} asks`,
-        mode: "form",
-        requestedSchema: questionForm(item.questions),
-      });
+      const answer = yield* unlessAnswered(
+        item.requestId,
+        agent.client.elicit({
+          sessionId,
+          message: `Sandbox ${sandboxName} asks`,
+          mode: "form",
+          requestedSchema: questionForm(item.questions),
+        }),
+      );
+      if (Option.isNone(answer)) return;
+      const response = answer.value;
       if (response.action === "accept") {
-        yield* sandbox.dispatch({
+        yield* respond({
           type: "runtime-request.respond",
           commandId: CommandId.make(yield* newId),
           threadId,
@@ -813,7 +1153,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
           answers: answersOf(item.questions, "content" in response ? response.content : undefined),
         });
       } else if (response.action === "decline") {
-        yield* sandbox.dispatch({
+        yield* respond({
           type: "thread.user-input.dismiss",
           commandId: CommandId.make(yield* newId),
           threadId,
@@ -841,15 +1181,31 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       }
     };
 
-    const follow = sandbox.subscribe(threadId).pipe(
-      Stream.runForEachWhile((item) =>
-        Effect.forEach(tracker.apply(item), perform, { discard: true }).pipe(
-          Effect.as(!tracker.done && !refused),
-        ),
-      ),
+    // The stream keeps reading while an approval waits on the host, so an answer given on the
+    // computer reaches it; actions run one at a time, in order.
+    const actions = yield* Queue.unbounded<TurnAction | typeof END_OF_TURN>();
+    yield* Queue.offerAll(actions, target._tag === "attach" ? tracker.replay() : []);
+    const reader = yield* (
+      tracker.done
+        ? Effect.void
+        : sandbox
+            .subscribe(threadId)
+            .pipe(
+              Stream.runForEachWhile((item) =>
+                Queue.offerAll(actions, tracker.apply(item)).pipe(Effect.map(() => !tracker.done)),
+              ),
+            )
+    ).pipe(Effect.ensuring(Queue.offer(actions, END_OF_TURN)), Effect.forkScoped);
+    const performAll = Effect.gen(function* () {
+      while (true) {
+        const action = yield* Queue.take(actions);
+        if (action._tag === "end") return;
+        yield* perform(action);
+      }
+    });
+    const outcome = yield* performAll.pipe(
+      Effect.andThen(Fiber.join(reader)),
       Effect.as("followed" as const),
-    );
-    const outcome = yield* follow.pipe(
       Effect.raceFirst(Deferred.await(cancel).pipe(Effect.as("cancelled" as const))),
     );
     if (outcome === "cancelled") {
