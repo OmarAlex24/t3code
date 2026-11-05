@@ -1,10 +1,14 @@
+import { isReasoningSelect } from "@t3tools/client-runtime/model-traits";
 import {
+  DIY_RESOLVER_EFFORTS,
   type DiyKitStatus,
   type DiyResolverProvider,
   ProviderDriverKind,
+  type ServerProviderModel,
 } from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 
+import { getProviderModelCapabilities } from "../../providerModels";
 import { formatDayAwareTimestamp, formatUpcomingTimestamp } from "../../timestampFormat";
 
 export type DiyRunTone = "ok" | "failed" | "running" | "idle";
@@ -14,6 +18,50 @@ export const DIY_RESOLVER_DRIVERS: ReadonlyMap<ProviderDriverKind, DiyResolverPr
   [ProviderDriverKind.make("claudeAgent"), "claude"],
   [ProviderDriverKind.make("codex"), "codex"],
 ]);
+
+/**
+ * The models as the resolver's picker shows them: each keeps only its reasoning levels that the
+ * provider's CLI takes headless (`DIY_RESOLVER_EFFORTS`). Workflow levels, Ultrathink, Fast mode and
+ * every other option go, so the composer's effort column lists exactly what the kit can pass.
+ */
+export function resolverPickerModels(
+  provider: DiyResolverProvider,
+  models: ReadonlyArray<ServerProviderModel>,
+): ReadonlyArray<ServerProviderModel> {
+  const allowed = DIY_RESOLVER_EFFORTS[provider];
+  return models.map((model) => {
+    const reasoning = model.capabilities?.optionDescriptors?.find(isReasoningSelect);
+    if (reasoning === undefined) return { ...model, capabilities: { optionDescriptors: [] } };
+    // The catalog's current value and prompt keywords belong to a chat, not to the kit's config.
+    const { currentValue: _current, promptInjectedValues: _prompt, ...descriptor } = reasoning;
+    const options = descriptor.options.filter((option) => allowed.includes(option.id));
+    return {
+      ...model,
+      capabilities: { optionDescriptors: options.length > 0 ? [{ ...descriptor, options }] : [] },
+    };
+  });
+}
+
+/** The one model's effort control as the picker lists it, when it has levels the CLI takes. */
+export function resolverEffortDescriptor(
+  provider: DiyResolverProvider,
+  driver: ProviderDriverKind,
+  models: ReadonlyArray<ServerProviderModel>,
+  model: string,
+) {
+  const caps = getProviderModelCapabilities(resolverPickerModels(provider, models), model, driver);
+  return caps.optionDescriptors?.find(isReasoningSelect);
+}
+
+/** The instance that stands for the kit's provider: its default one, else the first enabled. */
+export function resolverActiveEntry<
+  Entry extends { readonly driverKind: ProviderDriverKind; readonly isDefault: boolean },
+>(entries: ReadonlyArray<Entry>, provider: DiyResolverProvider): Entry | undefined {
+  const matching = entries.filter(
+    (entry) => DIY_RESOLVER_DRIVERS.get(entry.driverKind) === provider,
+  );
+  return matching.find((entry) => entry.isDefault) ?? matching[0];
+}
 
 /** "OmarAlex24/t3code" from an SSH or HTTPS remote; the URL itself when it isn't one. */
 export function repositoryName(url: string): string {

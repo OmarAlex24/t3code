@@ -35,7 +35,7 @@ const KIT_STATUS = {
   },
   fork: { url: "git@github.com:you/t3code.git", branch: "my-changes" },
   upstream: { url: "https://github.com/pingdotgg/t3code.git", branch: "main" },
-  resolver: { provider: "claude", model: "opus", timeoutMinutes: 90 },
+  resolver: { provider: "claude", model: "opus", effort: "high", timeoutMinutes: 90 },
   schedule: {
     loaded: true,
     hour: 5,
@@ -116,6 +116,7 @@ describe("DiyKit", () => {
         available: true,
         status: {
           fork: { branch: "my-changes" },
+          resolver: { provider: "claude", model: "opus", effort: "high" },
           lastRun: { result: "tests_failed", reason: "your fork's tests failed" },
         },
       });
@@ -152,6 +153,35 @@ describe("DiyKit", () => {
           "claude-opus-4-6[1m]",
         ]),
       );
+
+      // An effort goes along only when given, so a kit that predates RESOLVER_EFFORT still answers.
+      yield* withKit(
+        env,
+        DiyKit.DiyKit.use((kit) =>
+          kit.setResolver({ provider: "claude", model: "opus", effort: "xhigh" }),
+        ),
+      );
+      expect(yield* fake.argv).toEqual(
+        Option.some([
+          "config",
+          "set",
+          "RESOLVER_PROVIDER",
+          "claude",
+          "RESOLVER_MODEL",
+          "opus",
+          "RESOLVER_EFFORT",
+          "xhigh",
+        ]),
+      );
+      const ultracode = yield* withKit(
+        env,
+        DiyKit.DiyKit.use((kit) =>
+          kit
+            .setResolver({ provider: "claude", model: "opus", effort: "ultracode" })
+            .pipe(Effect.flip),
+        ),
+      );
+      expect(ultracode.message).toBe("That resolver or model isn't valid.");
 
       const refused = yield* withKit(
         env,

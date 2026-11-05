@@ -26,6 +26,20 @@ export type DiyResolverProvider = typeof DiyResolverProvider.Type;
 export const DIY_RESOLVER_MODEL_PATTERN = /^(?:[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,127})?$/;
 export const DiyResolverModel = Schema.String.check(Schema.isPattern(DIY_RESOLVER_MODEL_PATTERN));
 
+/**
+ * The effort levels each resolver CLI takes headless, as `claude --effort` and
+ * `codex exec -c model_reasoning_effort=`. Workflow levels (Claude's Ultracode, Codex's Ultra) and
+ * Ultrathink are left out: they are not effort for a one-shot rebase. Empty means the CLI's default.
+ * The kit keeps the same lists in `valid_resolver_effort` (lib/common.sh); change both together.
+ */
+export const DIY_RESOLVER_EFFORTS: Readonly<Record<DiyResolverProvider, ReadonlyArray<string>>> = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+};
+
+export const isDiyResolverEffort = (provider: DiyResolverProvider, effort: string): boolean =>
+  effort === "" || DIY_RESOLVER_EFFORTS[provider].includes(effort);
+
 const NullableString = Schema.NullOr(Schema.String);
 
 export const DiyRunResult = Schema.Struct({
@@ -49,7 +63,12 @@ export const DiyKitStatus = Schema.Struct({
   }),
   fork: Schema.Struct({ url: Schema.String, branch: Schema.String }),
   upstream: Schema.Struct({ url: Schema.String, branch: Schema.String }),
-  resolver: Schema.Struct({ provider: Schema.String, model: Schema.String }),
+  resolver: Schema.Struct({
+    provider: Schema.String,
+    model: Schema.String,
+    /** Missing from kits older than RESOLVER_EFFORT, which can't set it either. */
+    effort: Schema.optional(Schema.String),
+  }),
   schedule: Schema.Struct({ loaded: Schema.Boolean, nextRun: NullableString }),
   running: Schema.Boolean,
   lastRun: Schema.NullOr(DiyRunResult),
@@ -62,10 +81,17 @@ export const DiyStatusResult = Schema.Union([
 ]);
 export type DiyStatusResult = typeof DiyStatusResult.Type;
 
+/** Without `effort` the kit's effort is left alone, so a kit that predates it still answers. */
 export const DiySetResolverInput = Schema.Struct({
   provider: DiyResolverProvider,
   model: DiyResolverModel,
-});
+  effort: Schema.optional(Schema.String),
+}).check(
+  Schema.makeFilter(
+    (input) => input.effort === undefined || isDiyResolverEffort(input.provider, input.effort),
+    { expected: "an effort level the resolver's CLI takes" },
+  ),
+);
 export type DiySetResolverInput = typeof DiySetResolverInput.Type;
 
 const DIY_LOG_MAX_LINES = 2_000;

@@ -130,11 +130,21 @@ const make = Effect.gen(function* () {
   // Decoded again here: these values become a child's argv, so nothing unchecked gets there.
   const setResolver: DiyKit["Service"]["setResolver"] = Effect.fn("DiyKit.setResolver")(
     function* (input) {
-      const { provider, model } = yield* decodeResolver(input).pipe(
+      const { provider, model, effort } = yield* decodeResolver(input).pipe(
         Effect.mapError(() => new DiyKitError({ message: "That resolver or model isn't valid." })),
       );
+      // Only when given: a kit from before RESOLVER_EFFORT refuses the key, and it leaves the
+      // effort alone otherwise (clearing one the new provider lacks).
       yield* run(
-        ["config", "set", "RESOLVER_PROVIDER", provider, "RESOLVER_MODEL", model],
+        [
+          "config",
+          "set",
+          "RESOLVER_PROVIDER",
+          provider,
+          "RESOLVER_MODEL",
+          model,
+          ...(effort === undefined ? [] : ["RESOLVER_EFFORT", effort]),
+        ],
         CONFIG_TIMEOUT,
       );
     },
