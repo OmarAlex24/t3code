@@ -112,6 +112,7 @@ import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment, useFilesystemReadAccess } from "../state/filesystem";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
+import { useSandboxEnvironmentIds } from "../state/sandboxes";
 import { serverEnvironment } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
@@ -462,6 +463,7 @@ function OpenCommandPaletteDialog(props: {
     reportFailure: false,
   });
   const { environments } = useEnvironments();
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
@@ -567,8 +569,13 @@ function OpenCommandPaletteDialog(props: {
   };
 
   const addProjectEnvironmentOptions = (() => {
+    // A sandbox is a thread's machine, so it never takes a new project.
     const options = environments
-      .filter((environment) => canCreateProjectInEnvironment(environment.connection.phase))
+      .filter(
+        (environment) =>
+          canCreateProjectInEnvironment(environment.connection.phase) &&
+          !sandboxEnvironmentIds.has(environment.environmentId),
+      )
       .map((environment): AddProjectEnvironmentOption => {
         const isPrimary = environment.entry.target._tag === "PrimaryConnectionTarget";
         return {
