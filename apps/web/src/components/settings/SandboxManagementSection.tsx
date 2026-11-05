@@ -1,6 +1,14 @@
-import { LayersIcon, PencilIcon, PlayIcon, PlusIcon, SquareIcon, Trash2Icon } from "lucide-react";
+import {
+  CornerDownRightIcon,
+  LayersIcon,
+  PencilIcon,
+  PlayIcon,
+  PlusIcon,
+  SquareIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
@@ -98,6 +106,8 @@ const shortSandboxId = (sandboxId: string) => {
 
 // Rows sit straight in the group with the insets of every settings row and a hairline between them.
 const ROW_CLASSNAME = "@container/sandbox-row px-3 py-3 sm:px-4";
+// Under its sandbox, past that row's status dot.
+const FORK_ROW_CLASSNAME = "@container/sandbox-row py-2.5 pr-3 pl-8 sm:pr-4 sm:pl-9";
 const ROW_INNER_CLASSNAME =
   "flex flex-col gap-2 @min-[32rem]/sandbox-row:flex-row @min-[32rem]/sandbox-row:items-start @min-[32rem]/sandbox-row:justify-between @min-[32rem]/sandbox-row:gap-4";
 // Lines under the title start where the title does, past the status dot.
@@ -192,21 +202,40 @@ export function SandboxManagementSection() {
     return null;
   }
   const { groups, other } = groupByConfig(sandboxes, configs);
+  // A fork an agent made sits under its sandbox; one whose sandbox is gone is simply untracked.
+  const tracked = new Set(sandboxes.map((sandbox) => sandbox.instanceId));
+  const forksOf = (instanceId: string) => orphans.filter((orphan) => orphan.forkOf === instanceId);
+  const untracked = orphans.filter(
+    (orphan) => orphan.forkOf === undefined || !tracked.has(orphan.forkOf),
+  );
   const providerOf = (kind: string) => providers.find((candidate) => candidate.kind === kind);
   const refresh = () => {
     void list.refresh();
     void configsQuery.refresh();
   };
-  const row = (sandbox: SandboxRecord, inConfig: boolean) => (
-    <SandboxRow
-      key={sandbox.instanceId}
-      environmentId={provisionerEnvironmentId}
-      sandbox={sandbox}
-      provider={providerOf(sandbox.provider)}
-      inConfig={inConfig}
-      onChanged={refresh}
-    />
-  );
+  const row = (sandbox: SandboxRecord, inConfig: boolean) => {
+    const forks = forksOf(sandbox.instanceId);
+    return (
+      <Fragment key={sandbox.instanceId}>
+        <SandboxRow
+          environmentId={provisionerEnvironmentId}
+          sandbox={sandbox}
+          provider={providerOf(sandbox.provider)}
+          inConfig={inConfig}
+          forkCount={forks.length}
+          onChanged={refresh}
+        />
+        {forks.map((fork) => (
+          <OrphanRow
+            key={`${fork.provider}:${fork.sandboxId}`}
+            environmentId={provisionerEnvironmentId}
+            orphan={fork}
+            onChanged={refresh}
+          />
+        ))}
+      </Fragment>
+    );
+  };
 
   return (
     <SettingsSection
@@ -275,7 +304,7 @@ export function SandboxManagementSection() {
           {other.map((sandbox) => row(sandbox, false))}
         </div>
       )}
-      {orphans.length === 0 ? null : (
+      {untracked.length === 0 ? null : (
         <div className={GROUP_CLASSNAME}>
           <div className="px-3 py-2.5 sm:px-4">
             <p className="text-sm font-medium text-foreground">Not tracked by T3 Code</p>
@@ -284,7 +313,7 @@ export function SandboxManagementSection() {
               still bill. Delete the ones you don't need.
             </p>
           </div>
-          {orphans.map((orphan) => (
+          {untracked.map((orphan) => (
             <OrphanRow
               key={`${orphan.provider}:${orphan.sandboxId}`}
               environmentId={provisionerEnvironmentId}
@@ -349,19 +378,30 @@ function OrphanRow({
     }
     onChanged();
   };
+  // A fork hangs off the sandbox above it: the agent made it, and it bills on its own.
+  const fork = orphan.forkOf !== undefined;
   return (
-    <div className={ROW_CLASSNAME}>
+    <div className={fork ? FORK_ROW_CLASSNAME : ROW_CLASSNAME}>
       <div className={ROW_INNER_CLASSNAME}>
         <div className="min-w-0 flex-1">
           <div className="flex min-h-6 min-w-0 items-center gap-2">
-            <ConnectionStatusDot tooltipText="Not tracked by T3 Code" dotClassName="bg-warning" />
+            {fork ? (
+              <CornerDownRightIcon
+                aria-hidden
+                className="size-3 shrink-0 text-muted-foreground/70"
+              />
+            ) : (
+              <ConnectionStatusDot tooltipText="Not tracked by T3 Code" dotClassName="bg-warning" />
+            )}
             <p className="truncate text-sm font-medium text-foreground">{orphan.name}</p>
           </div>
           <p className={`${ROW_INDENT_CLASSNAME} truncate text-xs text-muted-foreground`}>
+            {fork ? "Fork made by the agent · " : ""}
             {orphan.sandboxId}
             {orphan.createdAt === undefined
               ? ""
               : ` · made ${new Date(orphan.createdAt).toLocaleDateString()}`}
+            {fork ? " · bills like a sandbox" : ""}
           </p>
         </div>
         <div className={ROW_ACTIONS_CLASSNAME}>
@@ -426,6 +466,7 @@ function SandboxRow({
   sandbox,
   provider,
   inConfig,
+  forkCount,
   onChanged,
 }: {
   readonly environmentId: EnvironmentId;
@@ -433,6 +474,8 @@ function SandboxRow({
   readonly provider: SandboxProviderInfo | undefined;
   /** Under its config's header, which already names the size and template. */
   readonly inConfig: boolean;
+  /** Forks its agent made, which deleting it deletes too. */
+  readonly forkCount: number;
   readonly onChanged: () => void;
 }) {
   const navigate = useNavigate();
@@ -741,6 +784,11 @@ function SandboxRow({
           <SandboxStartConfirmation
             warnings={[
               `This deletes the machine and its disk at ${provider?.label ?? sandbox.provider}${sandbox.threadId === undefined ? "" : ", along with any work in its thread that is not pushed"}. It cannot be undone.`,
+              ...(forkCount === 0
+                ? []
+                : [
+                    `It also deletes the ${forkCount === 1 ? "fork" : `${forkCount} forks`} its agent made.`,
+                  ]),
             ]}
             confirmLabel="Delete sandbox"
             destructive
