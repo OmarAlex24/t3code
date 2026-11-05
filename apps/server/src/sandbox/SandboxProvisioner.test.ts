@@ -4814,6 +4814,8 @@ describe("SandboxProvisioner per-thread launches", () => {
       /** How Boat answers the scoped-key check: a key without account admin rights is refused. */
       readonly scopedKeys?: "admin" | "limited" | "wide";
       readonly inEnvironments?: BoatFake["inEnvironments"];
+      /** What the work check prints; a clean clone by default. */
+      readonly work?: string;
     } = {},
   ): BoatFake => {
     const requests: Array<string> = [];
@@ -4914,9 +4916,11 @@ describe("SandboxProvisioner per-thread launches", () => {
             ? "T3_REPO_DIR: /home/boat/work/hello\nT3_REPO_PROJECT: project-remote\n"
             : options.endpointStatus !== undefined && command.includes("T3_ENDPOINT_STATUS")
               ? `T3_ENDPOINT_STATUS:${options.endpointStatus}\n`
-              : command.includes("T3_TAILSCALE_")
-                ? "T3_TAILSCALE_DAEMON: nohup\nT3_TAILSCALE_MODE: kernel\nT3_TAILSCALE_STATE: Running\nT3_TAILSCALE_NODE: nNODE1CNTRL\n"
-                : pairOr(bodyTextOf(request), pairToken, "");
+              : command.includes("T3_WORK:")
+                ? `${options.work ?? "T3_WORK:0:0"}\n`
+                : command.includes("T3_TAILSCALE_")
+                  ? "T3_TAILSCALE_DAEMON: nohup\nT3_TAILSCALE_MODE: kernel\nT3_TAILSCALE_STATE: Running\nT3_TAILSCALE_NODE: nNODE1CNTRL\n"
+                  : pairOr(bodyTextOf(request), pairToken, "");
           return respond(request, { exitCode: 0, stdout, stderr: "" });
         });
         return options.holding !== undefined && command.includes(options.holding.text)
@@ -5034,6 +5038,8 @@ describe("SandboxProvisioner per-thread launches", () => {
         configId: config.id,
         label: "hello on Boat small",
         environmentId: testEnvironmentId,
+        // Where a delete checks for unpushed work.
+        repoDir: "/home/boat/work/hello",
       });
 
       const paired = yield* provisioner.pairLaunch({ threadId });
@@ -5455,6 +5461,64 @@ describe("SandboxProvisioner per-thread launches", () => {
       Effect.provideService(HttpClient.HttpClient, fake.client),
     );
   });
+
+  const runningRecord: SandboxRecord = {
+    instanceId: "checked",
+    environmentId: testEnvironmentId,
+    provider: "boat",
+    sandboxId: boatSandboxId,
+    label: "hello on Boat small",
+    size: "small",
+    state: "running",
+    createdAt: "1970-01-01T00:00:00.000Z",
+    updatedAt: "1970-01-01T00:00:00.000Z",
+    httpBaseUrl: "https://boat.example/t3",
+    runningSince: "1970-01-01T00:00:00.000Z",
+    maxRunningMinutes: 480,
+    threadId,
+    repoDir: "/home/boat/work/hello",
+  };
+
+  it.effect("checks a running sandbox's clone for work a delete would lose", () =>
+    Effect.gen(function* () {
+      const check = (record: SandboxRecord, work?: string) =>
+        Effect.gen(function* () {
+          const fake = boatFake(work === undefined ? {} : { work });
+          const result = yield* SandboxProvisioner.SandboxProvisioner.pipe(
+            Effect.flatMap((provisioner) =>
+              provisioner.checkWork({ instanceId: record.instanceId }),
+            ),
+            Effect.provide(provisionerLayer(boatSettings, memoryRepository([record]).layer)),
+            Effect.provideService(HttpClient.HttpClient, fake.client),
+          );
+          return { result, commands: fake.commands };
+        });
+
+      const clean = yield* check(runningRecord);
+      expect(clean.result).toEqual({ status: "clean", uncommittedFiles: 0, unpushedCommits: 0 });
+      expect(clean.commands[0]).toContain("/home/boat/work/hello");
+      expect(clean.commands[0]).toContain("--not --remotes");
+
+      const dirty = yield* check(runningRecord, "T3_WORK:3:2");
+      expect(dirty.result).toEqual({ status: "dirty", uncommittedFiles: 3, unpushedCommits: 2 });
+
+      // A stopped sandbox is not started just to look.
+      const stopped = yield* check({ ...runningRecord, state: "stopped", runningSince: null });
+      expect(stopped.result).toMatchObject({ status: "unknown" });
+      expect(stopped.commands).toEqual([]);
+
+      const garbled = yield* check(runningRecord, "something else");
+      expect(garbled.result).toMatchObject({
+        status: "unknown",
+        detail: "The sandbox did not answer in time.",
+      });
+
+      const { repoDir: _repoDir, ...older } = runningRecord;
+      const unknownDir = yield* check(older);
+      expect(unknownDir.result).toMatchObject({ status: "unknown" });
+      expect(unknownDir.commands).toEqual([]);
+    }),
+  );
 
   it.effect("deletes an abandoned launch but leaves its forks and their environment", () => {
     const abandoned: SandboxRecord = {

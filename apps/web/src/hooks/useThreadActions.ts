@@ -58,6 +58,7 @@ import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
 import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
+import { ensureSandboxThreadRunning, notifySandboxThreadSettled } from "../state/sandboxThreads";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
@@ -692,6 +693,8 @@ export function useThreadActions() {
   };
 
   const unsettleThread = async (target: ScopedThreadRef) => {
+    // A thread kept as a stopped sandbox lives on that sandbox's server, so it runs again first.
+    await ensureSandboxThreadRunning(target);
     if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
@@ -821,6 +824,8 @@ export function useThreadActions() {
       undo: () => runUndoPlan(target, undoPlan),
       failureTitle: "Failed to undo settle",
     });
+    // A thread on its own sandbox: keep, delete, or ask, as its config says.
+    notifySandboxThreadSettled(target);
     return result;
   };
 

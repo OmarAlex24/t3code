@@ -1,9 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, SandboxRecord, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 
 import { environmentCatalog } from "../connection/catalog";
 import { usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentQuery } from "./query";
+import { findThreadSandbox } from "./sandboxThreads";
 import { serverEnvironment } from "./server";
 
 /**
@@ -41,4 +42,18 @@ export function useSandboxThreadEnvironmentIds(): ReadonlyMap<EnvironmentId, Thr
         : [[sandbox.environmentId, sandbox.threadId] as const],
     ),
   );
+}
+
+/** The sandbox a thread runs on, from the provisioning server's list; undefined for any other. */
+export function useThreadSandbox(threadRef: ScopedThreadRef | null): SandboxRecord | undefined {
+  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
+  const list = useEnvironmentQuery(
+    provisionerEnvironmentId === null || threadRef === null
+      ? null
+      : serverEnvironment.sandboxesList({
+          environmentId: provisionerEnvironmentId,
+          input: undefined,
+        }),
+  );
+  return threadRef === null ? undefined : findThreadSandbox(list.data?.sandboxes ?? [], threadRef);
 }

@@ -273,6 +273,7 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
+import { deleteSandboxThread, isSandboxThread } from "../state/sandboxThreads";
 
 function sameSidebarProviderEntries(
   left: ReadonlyMap<string, SidebarProviderEntry>,
@@ -2847,6 +2848,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             return;
           }
           case "delete": {
+            // Its own confirmation names the sandbox that goes with it.
+            if (isSandboxThread(threadRef)) {
+              await deleteSandboxThread(threadRef, () => deleteThread(threadRef));
+              return;
+            }
             if (confirmThreadDelete) {
               const confirmed = await settlePromise(() =>
                 api.dialogs.confirm(
