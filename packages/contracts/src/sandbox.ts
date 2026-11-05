@@ -882,6 +882,10 @@ export type SandboxLaunchStreamEvent = typeof SandboxLaunchStreamEvent.Type;
 /** The provider instance that drives sandbox threads from the host, and its one model. */
 export const SANDBOX_BRIDGE_INSTANCE_ID = "sandboxes";
 export const SANDBOX_BRIDGE_MODEL = "sandbox";
+/** The host's prompt `_meta` key naming the T3 message, so the bridge reuses its id on the sandbox. */
+export const SANDBOX_BRIDGE_MESSAGE_META = "t3code/message";
+/** The bridge's ACP notification that its open approval or question was answered on the sandbox. */
+export const SANDBOX_BRIDGE_WITHDRAW_METHOD = "_t3code/sandbox_requests_withdrawn";
 
 /**
  * Provider instances T3 seeds and runs for itself, like the sandbox bridge. They work wherever a
