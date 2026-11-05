@@ -167,11 +167,15 @@ const make = Effect.fn("desktop.environment.make")(function* (
     input.isPackaged && input.platform === "win32"
       ? path.join(input.resourcesPath, "server.asar")
       : appRoot;
-  const branding = resolveDesktopAppBranding({
+  const resolvedBranding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
   });
-  const displayName = branding.displayName;
+  const displayName = Option.getOrElse(
+    config.displayNameOverride,
+    () => resolvedBranding.displayName,
+  );
+  const branding = { ...resolvedBranding, displayName };
   const stateDir = resolveDesktopStateDir({
     baseDir,
     isDevelopment,
