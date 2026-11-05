@@ -263,8 +263,8 @@ the provisioner's own scope, so it outlives the RPC that started it, and reports
   and pairing code through `sandboxes.pairLaunch`; the client registers the environment, waits
   for the project to appear, and calls `sandboxes.completeLaunch`, which marks the record with the
   thread id and returns once the launch fiber (bridge credential included) has ended. The client
-  then links the host thread (see [Sandbox bridge](#sandbox-bridge)) and sends there; if linking
-  fails, it retargets the draft onto the sandbox's project and sends there instead.
+  then links the host thread (see [Sandbox bridge](#sandbox-bridge)) and sends on the sandbox's
+  project, linked or not.
 
 ## Sandbox bridge
 
@@ -332,10 +332,21 @@ without pairing with the sandbox.
 - **The client's handoff**
   ([`useSandboxLaunch.tsx`](../../apps/web/src/components/chat/useSandboxLaunch.tsx)). After
   linking, the draft keeps its thread id and waits until the host's provider list has `sandboxes`
-  ready and the project override arrived (`sandboxBridgeReady`), since the composer would otherwise
-  send with another provider; then it moves to the host project with the returned model and
-  `approval-required`, and sends. Past 60 seconds, or when linking fails, it sends on the sandbox's
-  project with a warning. The client stays paired with the sandbox for files, diffs and terminals.
+  ready and the project override arrived (`sandboxBridgeReady`), so the host can create its
+  thread; then it moves to the sandbox's project, keeping the model and modes the user picked, and
+  sends. Past 60 seconds it sends anyway; when linking fails it sends with a warning that the
+  phone cannot follow the thread. The client stays paired with the sandbox for files, diffs and
+  terminals.
+- **One thread on the computer.** A client paired with the sandbox shows only the sandbox's own
+  thread. The host thread is its mirror for the phone: `sandboxHostMirrors` lists the host threads
+  whose sandbox thread this client also has, the sidebar and command palette leave them out, and
+  opening one moves to the sandbox's thread. The mirror takes the sandbox thread's title. Each
+  message the composer sends on a linked sandbox thread is copied to the mirror with the same
+  message id and `dispatchMode: "queue"`
+  ([`useSandboxMirrorSend.ts`](../../apps/web/src/components/chat/useSandboxMirrorSend.ts)), after
+  setting the mirror's modes to the thread's, creating the mirror on the first message. Its bridge
+  finds the message already on the sandbox and streams the answer instead of sending it again.
+  Attachments stay on the sandbox; the mirror's message notes how many were sent.
 - **Which thread is the sandbox's.** `findThreadSandbox` matches a record by the sandbox's
   environment and thread id, or, on the provisioning environment, by thread id once the record has
   `hostProjectId`. Whether the conversation survives a delete depends on whether a host thread with
@@ -343,8 +354,7 @@ without pairing with the sandbox.
   A host thread never takes the client-side resume path; un-settle and the header's **Resume** call
   `sandboxes.resume` without waiting, and a send relies on the watcher below.
 - **Placeholder projects.** A project whose root `isSandboxHostProjectRoot` matches gets no git
-  status, scripts, open-in, files or terminal in the web app, and a composer notice that points to
-  the sandbox's thread.
+  status, scripts, open-in, files or terminal in the web app.
 - **Stopped sandbox.** A run starting on a `sandboxes` thread whose sandbox is stopped makes the
   host resume it. Meanwhile the bridge retries for about four minutes, showing "Resuming sandbox
   bx_…", then says the sandbox is not answering.
