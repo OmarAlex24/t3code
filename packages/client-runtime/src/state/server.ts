@@ -56,6 +56,7 @@ import {
 } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
+import { createDiyEnvironmentAtoms } from "./diy.ts";
 import { createSandboxEnvironmentAtoms } from "./sandboxes.ts";
 import {
   applyServerConfigProjection,
@@ -1691,5 +1692,6 @@ export function createServerEnvironmentAtoms<R, E>(
       },
     }),
     ...createSandboxEnvironmentAtoms(runtime),
+    ...createDiyEnvironmentAtoms(runtime),
   };
 }
