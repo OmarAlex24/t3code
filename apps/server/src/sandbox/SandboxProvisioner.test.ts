@@ -5870,10 +5870,19 @@ describe("SandboxProvisioner per-thread launches", () => {
     });
     return Effect.gen(function* () {
       const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // The bridge hears of every removed record, the sweep's too.
+      const removed = yield* provisioner.removed.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild({ startImmediately: true }),
+      );
       yield* provisioner.sweep;
       expect(deletes(fake)).toEqual([
         "DELETE https://boat.dev/api/v1/api-keys/apk_agent1",
         "DELETE https://boat.dev/api/v1/sandboxes/bx_abandon",
+      ]);
+      expect([...(yield* Fiber.join(removed))].map((record) => record.instanceId)).toEqual([
+        "abandoned",
       ]);
       expect(fake.environments.map((candidate) => candidate.id)).toEqual(["env-base", "env-1"]);
       expect(repository.records.size).toBe(0);
