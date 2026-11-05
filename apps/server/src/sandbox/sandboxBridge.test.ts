@@ -54,8 +54,12 @@ interface Harness {
   readonly events: Queue.Queue<OrchestrationV2DomainEvent>;
   readonly resumes: Queue.Queue<string>;
   readonly modeChanges: Queue.Queue<{ readonly threadId: ThreadId; readonly runtimeMode: string }>;
-  readonly deleted: Array<string>;
-  readonly dispatched: Array<{ readonly type: string; readonly runId?: string }>;
+  readonly removals: Queue.Queue<SandboxRecord>;
+  readonly dispatched: Queue.Queue<{
+    readonly type: string;
+    readonly threadId: string;
+    readonly runId?: string;
+  }>;
   // The host thread as the orchestrator would read it.
   hostThread: { readonly instanceId: string; readonly settledAt: string | null };
   hostRuns: Array<{ readonly id: string; readonly status: string }>;
@@ -73,8 +77,12 @@ const makeHarness = Effect.gen(function* () {
       readonly threadId: ThreadId;
       readonly runtimeMode: string;
     }>(),
-    deleted: [],
-    dispatched: [],
+    removals: yield* Queue.unbounded<SandboxRecord>(),
+    dispatched: yield* Queue.unbounded<{
+      readonly type: string;
+      readonly threadId: string;
+      readonly runId?: string;
+    }>(),
     hostThread: { instanceId: SANDBOX_BRIDGE_INSTANCE_ID, settledAt: null },
     hostRuns: [],
   };
@@ -85,11 +93,7 @@ const makeHarness = Effect.gen(function* () {
         harness.linked.push(input);
         return record({ hostProjectId: input.hostProjectId });
       }),
-    delete: (input) =>
-      Effect.sync(() => {
-        harness.deleted.push(input.sandboxId);
-        return { warnings: [] };
-      }),
+    removed: Stream.fromQueue(harness.removals),
     resume: (input) =>
       Effect.sync(() => {
         harness.resumed.push(input.instanceId);
@@ -154,15 +158,17 @@ const makeHarness = Effect.gen(function* () {
         },
         runs: harness.hostRuns,
       })),
-    dispatch: (command: { readonly type: string; readonly runId?: string }) =>
-      Effect.sync(() => {
-        harness.dispatched.push(
-          command.runId === undefined
-            ? { type: command.type }
-            : { type: command.type, runId: command.runId },
-        );
-        return { sequence: 1 };
-      }),
+    dispatch: (command: {
+      readonly type: string;
+      readonly threadId: string;
+      readonly runId?: string;
+    }) =>
+      Queue.offer(
+        harness.dispatched,
+        command.runId === undefined
+          ? { type: command.type, threadId: command.threadId }
+          : { type: command.type, threadId: command.threadId, runId: command.runId },
+      ).pipe(Effect.as({ sequence: 1 })),
   } as unknown as Orchestrator.OrchestratorV2["Service"]);
   const remote = Layer.succeed(SandboxBridge.SandboxThreadRemote, {
     setModes: (threadId, modes) =>
@@ -341,25 +347,25 @@ describe("SandboxBridge", () => {
     ),
   );
 
-  it.effect("settles a deleted sandbox's host thread and cancels what was queued for it", () =>
+  it.effect("settles a removed sandbox's host thread and cancels what was queued for it", () =>
     withHarness((harness) =>
       Effect.gen(function* () {
-        harness.records.push(record({ hostProjectId: ProjectId.make("project-host") }));
         harness.hostRuns = [
           { id: "run-done", status: "completed" },
           { id: "run-queued", status: "queued" },
         ];
-        const bridge = yield* SandboxBridge.SandboxBridge;
-        yield* bridge.deleteSandbox({
-          provider: "boat",
-          sandboxId: "bx_1",
-          instanceId: "sandbox-1",
+        yield* SandboxBridge.SandboxBridge;
+        // However the sandbox went: a delete, the sweep, a launch replacing it.
+        yield* Queue.offer(
+          harness.removals,
+          record({ hostProjectId: ProjectId.make("project-host") }),
+        );
+        expect(yield* Queue.take(harness.dispatched)).toEqual({
+          type: "queued-run.cancel",
+          threadId,
+          runId: "run-queued",
         });
-        expect(harness.deleted).toEqual(["bx_1"]);
-        expect(harness.dispatched).toEqual([
-          { type: "queued-run.cancel", runId: "run-queued" },
-          { type: "thread.settle" },
-        ]);
+        expect(yield* Queue.take(harness.dispatched)).toEqual({ type: "thread.settle", threadId });
       }),
     ),
   );
@@ -367,15 +373,22 @@ describe("SandboxBridge", () => {
   it.effect("leaves the thread alone for a sandbox the bridge never linked", () =>
     withHarness((harness) =>
       Effect.gen(function* () {
-        harness.records.push(record());
-        const bridge = yield* SandboxBridge.SandboxBridge;
-        yield* bridge.deleteSandbox({
-          provider: "boat",
-          sandboxId: "bx_1",
-          instanceId: "sandbox-1",
+        const linkedThread = ThreadId.make("thread-linked");
+        yield* SandboxBridge.SandboxBridge;
+        yield* Queue.offerAll(harness.removals, [
+          record(),
+          record({
+            instanceId: "sandbox-2",
+            threadId: linkedThread,
+            hostProjectId: ProjectId.make("project-host"),
+          }),
+        ]);
+        // Removals are handled in order, so the linked one's settle comes first only if the
+        // unlinked one dispatched nothing.
+        expect(yield* Queue.take(harness.dispatched)).toEqual({
+          type: "thread.settle",
+          threadId: linkedThread,
         });
-        expect(harness.deleted).toEqual(["bx_1"]);
-        expect(harness.dispatched).toEqual([]);
       }),
     ),
   );
