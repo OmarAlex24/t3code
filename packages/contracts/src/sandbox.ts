@@ -877,6 +877,13 @@ export type SandboxLaunchStreamEvent = typeof SandboxLaunchStreamEvent.Type;
 /** The provider instance that drives sandbox threads from the host, and its one model. */
 export const SANDBOX_BRIDGE_INSTANCE_ID = "sandboxes";
 export const SANDBOX_BRIDGE_MODEL = "sandbox";
+
+/**
+ * Provider instances T3 seeds and runs for itself, like the sandbox bridge. They work wherever a
+ * thread already uses one, but nobody picks them: Settings and model pickers leave them out.
+ */
+export const isInternalProviderInstance = (instanceId: string): boolean =>
+  instanceId === SANDBOX_BRIDGE_INSTANCE_ID;
 /** Lightweight host projects for sandbox threads live under this folder of the server's home. */
 export const SANDBOX_HOST_PROJECTS_FOLDER = "sandbox-projects";
 
