@@ -24,6 +24,10 @@ import {
   type SandboxLaunchPairResult,
   type SandboxLaunchResult,
   type SandboxLaunchThreadInput,
+  type SandboxTailscaleCheckInput,
+  type SandboxTailscaleCheckResult,
+  SANDBOX_TAILSCALE_SCOPES,
+  tailscaleClientIdFromSecret,
   type SandboxOrphan,
   type SandboxSaveConfigInput,
   type SandboxSaveConfigResult,
@@ -51,6 +55,8 @@ import {
   type SandboxProviderInfo,
   type SandboxProviderKind,
   type SandboxProvidersResult,
+  githubRepositoryOf,
+  sandboxConfigAllows,
   type WorktreeSetupStageStatus,
 } from "@t3tools/contracts";
 import { COPYABLE_FILE_MAX_BYTES, isDefaultCopiedFile } from "@t3tools/shared/copiedFiles";
@@ -77,6 +83,7 @@ import * as SandboxRecords from "../persistence/SandboxRecords.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { requireSettingsSecret } from "../secrets/settingsSecretValue.ts";
 import { type CliproxyHub, makeCliproxyApi } from "../usage/cliproxyApi.ts";
@@ -378,18 +385,12 @@ interface Machine {
   readonly save: (patch: Partial<SandboxRecord>) => Effect.Effect<SandboxRecord>;
 }
 
-const GITHUB_REMOTE =
-  /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/u;
-
 /** The https clone URL of a github.com remote, or null; a credential in the URL is dropped. */
 const githubCloneUrl = (remoteUrl: string) => {
-  const match = GITHUB_REMOTE.exec(remoteUrl.trim());
-  if (match === null) return null;
-  return {
-    url: `https://github.com/${match[1]}/${match[2]}.git`,
-    name: match[2]!,
-    owner: match[1]!,
-  };
+  const repository = githubRepositoryOf(remoteUrl);
+  return repository === null
+    ? null
+    : { url: repository.cloneUrl, name: repository.name, owner: repository.owner };
 };
 
 const sameDirectory = (path: string) =>
@@ -464,6 +465,10 @@ export class SandboxProvisioner extends Context.Service<
     readonly completeLaunch: (
       input: SandboxLaunchThreadInput,
     ) => Effect.Effect<void, SandboxProviderError>;
+    /** Signs in with a Tailscale OAuth client and says whether it can do what T3 needs. */
+    readonly checkTailscale: (
+      input: SandboxTailscaleCheckInput,
+    ) => Effect.Effect<SandboxTailscaleCheckResult>;
     /** Stops sandboxes past their running limit and syncs every other record with its provider. */
     readonly sweep: Effect.Effect<void>;
   }
@@ -476,6 +481,7 @@ const make = Effect.gen(function* () {
   const environmentIdentity = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const workspaceFiles = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+  const projectStore = yield* ProjectStore.ProjectStoreV2;
   // Launches outlive the request that started them: a client disconnecting must not strand a
   // half-made machine, so they run in the server's own scope.
   const launchScope = yield* Effect.scope;
@@ -580,7 +586,10 @@ const make = Effect.gen(function* () {
     );
 
   const tailscaleClient = (value: ServerSettingsValue): TailscaleOAuthClient | undefined => {
-    const { clientId, clientSecret, tag } = value.sandboxTailscale;
+    const { clientSecret, tag } = value.sandboxTailscale;
+    // The one-field form leaves the ID to the secret it is part of.
+    const clientId =
+      value.sandboxTailscale.clientId || (tailscaleClientIdFromSecret(clientSecret) ?? "");
     if (clientId === "" || clientSecret === "") return undefined;
     return {
       clientId,
@@ -590,6 +599,39 @@ const make = Effect.gen(function* () {
   };
 
   const tailscaleToken = (client: TailscaleOAuthClient) => tailscaleApi.accessToken(client);
+
+  const checkTailscale = Effect.fn("SandboxProvisioner.checkTailscale")(function* (
+    input: SandboxTailscaleCheckInput,
+  ) {
+    const clientId = input.clientId ?? tailscaleClientIdFromSecret(input.clientSecret);
+    if (clientId === null) {
+      return {
+        clientId: "",
+        scopes: [],
+        problem:
+          "This does not look like a Tailscale OAuth client secret (tskey-client-…). If yours has another form, enter its client ID under Advanced.",
+      } satisfies SandboxTailscaleCheckResult;
+    }
+    const signedIn = yield* tailscaleApi
+      .signIn({ clientId, clientSecret: Redacted.make(input.clientSecret) })
+      .pipe(Effect.result);
+    if (signedIn._tag === "Failure") {
+      return { clientId, scopes: [], problem: signedIn.failure.detail };
+    }
+    const { scopes } = signedIn.success;
+    // `all` is the older scope that covers every other.
+    const missing = scopes.includes("all")
+      ? []
+      : SANDBOX_TAILSCALE_SCOPES.filter((scope) => !scopes.includes(scope));
+    return {
+      clientId,
+      scopes,
+      problem:
+        missing.length === 0
+          ? null
+          : `This OAuth client is missing the ${missing.join(" and ")} ${missing.length === 1 ? "scope" : "scopes"}. Give it write access to Auth Keys and Devices Core for the tag, then try again.`,
+    } satisfies SandboxTailscaleCheckResult;
+  });
 
   // Mints a single-use key and runs the join. A warning means it did not end up connected; `joined`
   // is set whenever the sandbox registered, so a failure can still remove the device.
@@ -1323,16 +1365,14 @@ const make = Effect.gen(function* () {
 
   const copyEnvFiles = Effect.fn("SandboxProvisioner.copyEnvFiles")(function* (
     machine: Machine,
-    project: SandboxLaunchInput["project"],
+    workspaceRoot: string,
     directory: string,
     selected: ReadonlyArray<string> | undefined,
   ) {
     const listed =
       selected !== undefined
         ? null
-        : yield* workspaceEntries
-            .listIgnoredFiles({ cwd: project.workspaceRoot })
-            .pipe(Effect.option);
+        : yield* workspaceEntries.listIgnoredFiles({ cwd: workspaceRoot }).pipe(Effect.option);
     const paths = (
       selected ??
       (listed === null || Option.isNone(listed)
@@ -1355,7 +1395,7 @@ const make = Effect.gen(function* () {
     }
     for (const path of paths) {
       const read = yield* workspaceFiles
-        .readFile({ cwd: project.workspaceRoot, relativePath: path })
+        .readFile({ cwd: workspaceRoot, relativePath: path })
         .pipe(Effect.option);
       if (Option.isNone(read) || read.value.truncated || read.value.exists === false) {
         failed.push(path);
@@ -1498,12 +1538,18 @@ const make = Effect.gen(function* () {
         yield* reporter.stage("repo", "done", cloned.directory.replace(/^.*\/work\//u, "~/work/"));
 
         yield* reporter.stage("env-files", "running");
-        const copied = yield* copyEnvFiles(
-          machine,
-          input.project,
-          cloned.directory,
-          config.envFiles[input.project.id],
-        );
+        const hostCopy = yield* verifiedHostCopy(input.project);
+        const repositoryKey = githubRepositoryOf(input.project.remoteUrl)?.key;
+        const copied =
+          hostCopy === null
+            ? { copied: 0, failed: [] as ReadonlyArray<string> }
+            : yield* copyEnvFiles(
+                machine,
+                hostCopy.workspaceRoot,
+                cloned.directory,
+                (repositoryKey === undefined ? undefined : config.envFiles[repositoryKey]) ??
+                  config.envFiles[hostCopy.projectId],
+              );
         if (copied.failed.length > 0) {
           yield* reporter.warn(`Could not copy ${copied.failed.join(", ")} to the sandbox.`);
         }
@@ -1551,6 +1597,23 @@ const make = Effect.gen(function* () {
     return { instanceId } satisfies SandboxLaunchResult;
   });
 
+  /**
+   * The project's copy on this server, when the client named one and it is an active project here
+   * at that directory; env files are read from nowhere else.
+   */
+  const verifiedHostCopy = Effect.fn("SandboxProvisioner.verifiedHostCopy")(function* (
+    project: SandboxLaunchInput["project"],
+  ) {
+    const claimed = project.hostCopy;
+    if (claimed === undefined) return null;
+    const found = yield* projectStore.get(claimed.projectId).pipe(Effect.option);
+    if (Option.isNone(found) || Option.isNone(found.value)) return null;
+    const row = found.value.value;
+    return row.deletedAt === null && row.workspaceRoot === claimed.workspaceRoot
+      ? { projectId: row.projectId, workspaceRoot: row.workspaceRoot }
+      : null;
+  });
+
   const launch = Effect.fn("SandboxProvisioner.launch")(function* (input: SandboxLaunchInput) {
     const current = launches.get(input.threadId);
     if (current !== undefined && current.fiber.pollUnsafe() === undefined) {
@@ -1564,15 +1627,23 @@ const make = Effect.gen(function* () {
       return yield* launchConfigError("This sandbox config no longer exists.");
     }
     const config = found.value;
-    if (config.projectIds.length > 0 && !config.projectIds.includes(input.project.id)) {
+    // The sandbox clones from GitHub, so the project may live on any machine the client reaches.
+    const repository = githubRepositoryOf(input.project.remoteUrl);
+    if (repository === null) {
       return yield* launchConfigError(
-        `${config.label} is not set up for this project.`,
+        "Only projects with a github.com remote can start in a sandbox.",
         config.provider,
       );
     }
-    if (githubCloneUrl(input.project.remoteUrl) === null) {
+    const hostCopy = yield* verifiedHostCopy(input.project);
+    if (
+      !sandboxConfigAllows(config, {
+        repository: repository.key,
+        hostProjectId: hostCopy?.projectId ?? null,
+      })
+    ) {
       return yield* launchConfigError(
-        "Only projects with a github.com remote can start in a sandbox.",
+        `${config.label} is not set up for this project.`,
         config.provider,
       );
     }
@@ -2273,6 +2344,7 @@ const make = Effect.gen(function* () {
     retryLaunch,
     pairLaunch,
     completeLaunch,
+    checkTailscale,
     sweep,
   });
 });
@@ -2282,6 +2354,7 @@ export const layer = Layer.effect(SandboxProvisioner, make);
 /** The provisioner with the host access, provider HTTP client and record stores only it uses. */
 export const layerRuntime = layer.pipe(
   Layer.provide(SandboxHostAccess.layer),
+  Layer.provide(ProjectStore.layer),
   Layer.provide(layerHttpClient),
   Layer.provide(Layer.merge(SandboxRecords.layer, SandboxRecords.layerConfigs)),
 );
@@ -2332,5 +2405,7 @@ export const rpcHandlers = Effect.gen(function* () {
       sandboxes.pairLaunch(input),
     [WS_METHODS.sandboxesCompleteLaunch]: (input: SandboxLaunchThreadInput) =>
       sandboxes.completeLaunch(input),
+    [WS_METHODS.sandboxesCheckTailscale]: (input: SandboxTailscaleCheckInput) =>
+      sandboxes.checkTailscale(input),
   };
 });
