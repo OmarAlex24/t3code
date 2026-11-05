@@ -289,19 +289,29 @@ without pairing with the sandbox.
   resume without replay: the host keeps the conversation.
 - **A turn.** Each prompt opens one WebSocket to the sandbox (a ticket from
   `/api/auth/websocket-ticket/rpc` with the bridge's bearer and `orchestrationProtocol`). The
-  bridge forwards only the user's text: it unwraps the host's `<t3_code_instructions>` /
-  `<user_request>` wrapper and drops the `<runtime_info>` block, since the sandbox's server adds
-  its own for its agent. It then reads the thread's projection, and
-  either launches the thread there (same id, the sandbox project, the sandbox's default model or
-  Claude, the host thread's runtime mode) or dispatches `message.dispatch`. It streams new
-  assistant and reasoning text and tool calls, ignores what was on the thread before the turn, and
-  ends the ACP turn (`state_update` idle) when the run carrying its message ends.
-- **Approvals and questions.** A pending approval becomes `session/request_permission` with an
-  `edit` or `execute` tool kind, never a read kind the host's policy would allow on its own; the
-  chosen option's id is the T3 decision sent back with `runtime-request.respond`. If the host
-  thread is not Supervised (`approval-required`), the request stays pending on the sandbox and the
-  turn ends with one notice asking to switch back. Questions become an `elicitation/create` form;
-  declining dismisses them. Requests already pending when a turn starts are surfaced first.
+  bridge forwards the user's text and images: it unwraps the host's `<t3_code_instructions>` /
+  `<user_request>` wrapper, drops the `<runtime_info>` block and the host-path attachment lines,
+  saves image blocks on the sandbox (`assets.persistChatAttachments`) and names any other file in a
+  notice, since only images reach it. The host's ACP adapter puts the T3 message in the prompt's
+  `_meta` (`SANDBOX_BRIDGE_MESSAGE_META`), and the bridge reuses that id on the sandbox: a message the
+  sandbox already has (sent on the computer, or forwarded before a restart) is followed, replaying
+  its run, instead of sent again, and the host's own "continue" after a restart follows the
+  sandbox's latest message. A new message launches the thread there (same id, the sandbox project,
+  the sandbox's default model or Claude) or is dispatched, after moving the sandbox thread to the
+  host thread's runtime and interaction modes. It streams new text, plans and summarized tool,
+  command and subagent activity, ignores what was on the thread before, and ends the ACP turn
+  (`state_update` idle) when the run carrying the message ends.
+- **Modes.** The sandbox thread runs in the host thread's runtime and interaction modes. The host
+  forwards a mode change on a `sandboxes` thread as soon as it happens (`SandboxThreadRemote`), and
+  each new message re-checks them, so Supervised asks and other modes do not wait.
+- **Approvals and questions.** Nothing the sandbox asks is ever left unanswerable. On a Supervised
+  host thread a pending approval becomes `session/request_permission` with an `edit` or `execute`
+  tool kind (never a read kind the host's policy would allow on its own); on any other mode, whose
+  policy would answer a permission request alone, it becomes a one-question form. Questions become an
+  `elicitation/create` form; declining dismisses them. The bridge keeps reading the sandbox while the
+  host asks: when the request is answered on the sandbox (on the computer), it sends
+  `SANDBOX_BRIDGE_WITHDRAW_METHOD` and the host's ACP adapter cancels its copy. Requests already
+  pending when a turn starts are surfaced first.
 - **Cancel** sends `thread.stop` where the sandbox advertises it, else `run.interrupt`, and ends
   the turn `cancelled`.
 - **Credential.** After the launch hand-off the provisioner runs

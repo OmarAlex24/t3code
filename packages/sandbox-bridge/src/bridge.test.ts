@@ -1,5 +1,7 @@
 import {
   type MessageId,
+  SANDBOX_BRIDGE_MESSAGE_META,
+  SANDBOX_BRIDGE_WITHDRAW_METHOD,
   type OrchestrationV2Command,
   type OrchestrationV2ThreadLaunchInput,
   type OrchestrationV2ThreadProjection,
@@ -18,6 +20,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
@@ -37,7 +40,8 @@ import {
   SandboxBridgeError,
   type SandboxBridgePorts,
   type SandboxSession,
-  SUPERVISED_NOTICE,
+  skippedAttachmentsMessage,
+  toolTitleOf,
 } from "./bridge.ts";
 import type { SandboxBridgeLink } from "./link.ts";
 
@@ -127,13 +131,32 @@ const question = (requestId: string) =>
   }) as never;
 const event = (type: string, payload: unknown): OrchestrationV2ThreadStreamItem =>
   ({ kind: "event", sequence: 1, event: { type, payload } }) as never;
-const projection = (turnItems: ReadonlyArray<unknown>, runs: ReadonlyArray<unknown> = []) =>
-  ({ turnItems, runs, runtimeRequests: [] }) as unknown as OrchestrationV2ThreadProjection;
+const projection = (
+  turnItems: ReadonlyArray<unknown>,
+  runs: ReadonlyArray<unknown> = [],
+  runtimeMode: RuntimeMode = "approval-required",
+) =>
+  ({
+    thread: { runtimeMode, interactionMode: "default" },
+    turnItems,
+    runs,
+    runtimeRequests: [],
+  }) as unknown as OrchestrationV2ThreadProjection;
+const userMessage = (messageId: string, ordinal: number, runId: string | null = null) =>
+  ({
+    id: `item-${messageId}`,
+    type: "user_message",
+    messageId,
+    runId,
+    status: "completed",
+    ordinal,
+  }) as never;
 
 interface FakeSandbox {
   readonly session: SandboxSession;
   readonly commands: Array<OrchestrationV2Command>;
   readonly launches: Array<OrchestrationV2ThreadLaunchInput>;
+  readonly uploads: Array<unknown>;
   readonly push: (item: OrchestrationV2ThreadStreamItem) => Effect.Effect<void>;
 }
 
@@ -150,9 +173,11 @@ const makeFakeSandbox = (options: {
     const stream = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
     const commands: Array<OrchestrationV2Command> = [];
     const launches: Array<OrchestrationV2ThreadLaunchInput> = [];
+    const uploads: Array<unknown> = [];
     const fake: FakeSandbox = {
       commands,
       launches,
+      uploads,
       push: (item) => Queue.offer(stream, item).pipe(Effect.asVoid),
       session: {
         threadStop: options.threadStop ?? true,
@@ -172,6 +197,17 @@ const makeFakeSandbox = (options: {
           Effect.suspend(() => {
             commands.push(command);
             return options.react?.(command as never, fake) ?? Effect.void;
+          }),
+        persistAttachments: (input) =>
+          Effect.sync(() => {
+            uploads.push(input);
+            return input.attachments.map((attachment, index) => ({
+              type: "image" as const,
+              id: `saved-${index}`,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              sizeBytes: attachment.sizeBytes,
+            })) as never;
           }),
         subscribe: () => Stream.fromQueue(stream),
       },
@@ -207,6 +243,7 @@ interface Harness {
   readonly updates: Array<AcpSchema.SessionNotification>;
   readonly permissions: Array<AcpSchema.RequestPermissionRequest>;
   readonly elicitations: Array<AcpSchema.CreateElicitationRequest>;
+  readonly withdrawals: Array<unknown>;
 }
 
 const messages = (
@@ -230,6 +267,8 @@ const withBridge = <A, E>(
       request: AcpSchema.RequestPermissionRequest,
     ) => AcpSchema.RequestPermissionResponse;
     readonly elicitation?: AcpSchema.CreateElicitationResponse;
+    /** Holds every permission request open, as a user who has not answered yet; set on arrival. */
+    readonly permissionPending?: Deferred.Deferred<void>;
     readonly clientName?: string;
   },
   body: (harness: Harness) => Effect.Effect<A, E, Scope.Scope>,
@@ -238,7 +277,11 @@ const withBridge = <A, E>(
     const pipes = yield* crossedStdio;
     const ports: SandboxBridgePorts = {
       readHostThread: () =>
-        Effect.succeed({ threadId, runtimeMode: options.runtimeMode ?? "approval-required" }),
+        Effect.succeed({
+          threadId,
+          runtimeMode: options.runtimeMode ?? "approval-required",
+          interactionMode: "default",
+        }),
       findLink: () => Effect.succeed(options.linked === false ? Option.none() : Option.some(link)),
       connect:
         options.connect ??
@@ -255,17 +298,31 @@ const withBridge = <A, E>(
     );
     yield* Effect.yieldNow;
     const acp = yield* AcpClient.make(pipes.client);
-    const harness: Harness = { acp, updates: [], permissions: [], elicitations: [] };
+    const harness: Harness = {
+      acp,
+      updates: [],
+      permissions: [],
+      elicitations: [],
+      withdrawals: [],
+    };
+    yield* acp.handleExtNotification(SANDBOX_BRIDGE_WITHDRAW_METHOD, Schema.Unknown, (payload) =>
+      Effect.sync(() => void harness.withdrawals.push(payload)),
+    );
     yield* acp.handleSessionUpdate((notification) =>
       Effect.sync(() => void harness.updates.push(notification)),
     );
     yield* acp.handleRequestPermission((request) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         harness.permissions.push(request);
-        return (
+        if (options.permissionPending !== undefined) {
+          return Deferred.succeed(options.permissionPending, undefined).pipe(
+            Effect.andThen(Effect.never),
+          );
+        }
+        return Effect.succeed(
           options.permission?.(request) ?? {
             outcome: { outcome: "selected", optionId: request.options[0]!.optionId },
-          }
+          },
         );
       }),
     );
@@ -286,11 +343,34 @@ const withBridge = <A, E>(
 const openThread = (acp: AcpClient.AcpClient["Service"]) =>
   acp.agent.createSession({ cwd: "/tmp/host-project", mcpServers: [hostMcpServer] });
 
-const say = (acp: AcpClient.AcpClient["Service"], sessionId: string, text: string) =>
-  acp.agent.prompt({ sessionId, prompt: [{ type: "text", text }] });
+const say = (
+  acp: AcpClient.AcpClient["Service"],
+  sessionId: string,
+  text: string,
+  message?: {
+    readonly messageId: string;
+    readonly createdBy?: string;
+    readonly creationSource?: string;
+  },
+) =>
+  acp.agent.prompt({
+    sessionId,
+    prompt: [{ type: "text", text }],
+    ...(message === undefined
+      ? {}
+      : {
+          _meta: {
+            [SANDBOX_BRIDGE_MESSAGE_META]: {
+              createdBy: "user",
+              creationSource: "mobile",
+              ...message,
+            },
+          },
+        }),
+  });
 
 describe("the ACP side", () => {
-  it.effect("advertises session loading and no images, and gives the probe a dry-run session", () =>
+  it.effect("advertises session loading and images, and gives the probe a dry-run session", () =>
     Effect.gen(function* () {
       const pipes = yield* crossedStdio;
       yield* runSandboxBridge({
@@ -308,7 +388,7 @@ describe("the ACP side", () => {
         clientInfo: { name: PROBE_CLIENT_NAME, version: "1" },
       });
       assert.strictEqual(init.agentCapabilities?.loadSession, true);
-      assert.notStrictEqual(init.agentCapabilities?.promptCapabilities?.image, true);
+      assert.strictEqual(init.agentCapabilities?.promptCapabilities?.image, true);
       const session = yield* openThread(acp);
       assert.isTrue(session.sessionId.startsWith("sandbox-dry-run:"));
       assert.deepStrictEqual(
@@ -469,8 +549,53 @@ describe("forwarding a turn", () => {
     }),
   );
 
-  it.effect("leaves an approval waiting and says so once when the thread is not Supervised", () =>
+  it.effect("asks with a form when the thread is not Supervised, so its policy cannot answer", () =>
     Effect.gen(function* () {
+      const fake = yield* makeFakeSandbox({
+        react: (command, sandbox) => {
+          if (command.type === "launch") {
+            return Effect.forEach(
+              [
+                event("run.created", run(command.messageId!, "waiting")),
+                event("turn-item.updated", approval("req-1", "command", 5)),
+              ],
+              sandbox.push,
+              { discard: true },
+            );
+          }
+          return command.type === "runtime-request.respond"
+            ? sandbox.push(event("run.updated", run(launchedMessageId(sandbox), "completed")))
+            : Effect.void;
+        },
+      });
+      yield* withBridge(
+        {
+          fake,
+          runtimeMode: "auto",
+          elicitation: { action: "accept", content: { decision: "Allow" } },
+        },
+        ({ acp, permissions, elicitations }) =>
+          Effect.gen(function* () {
+            const session = yield* openThread(acp);
+            const result = yield* say(acp, session.sessionId, "Clean up");
+            assert.strictEqual(result.stopReason, "end_turn");
+            assert.deepStrictEqual(permissions, []);
+            assert.strictEqual(elicitations.length, 1);
+            const respond = fake.commands.find(
+              (command) => command.type === "runtime-request.respond",
+            );
+            assert.strictEqual(
+              respond?.type === "runtime-request.respond" && respond.decision,
+              "accept",
+            );
+          }),
+      );
+    }),
+  );
+
+  it.effect("closes the host's request when the approval is answered on the sandbox", () =>
+    Effect.gen(function* () {
+      const asked = yield* Deferred.make<void>();
       const fake = yield* makeFakeSandbox({
         react: (command, sandbox) =>
           command.type === "launch"
@@ -478,21 +603,151 @@ describe("forwarding a turn", () => {
                 [
                   event("run.created", run(command.messageId!, "waiting")),
                   event("turn-item.updated", approval("req-1", "command", 5)),
-                  event("turn-item.updated", approval("req-2", "file-change", 6)),
                 ],
                 sandbox.push,
                 { discard: true },
               )
             : Effect.void,
       });
-      yield* withBridge({ fake, runtimeMode: "full-access" }, ({ acp, updates, permissions }) =>
+      yield* withBridge({ fake, permissionPending: asked }, ({ acp, withdrawals }) =>
         Effect.gen(function* () {
           const session = yield* openThread(acp);
-          const result = yield* say(acp, session.sessionId, "Clean up");
+          const prompt = yield* say(acp, session.sessionId, "Clean up").pipe(Effect.forkScoped);
+          // The computer answers: the sandbox resolves the request and the run finishes.
+          yield* Deferred.await(asked);
+          yield* fake.push(
+            event("runtime-request.updated", { id: "req-1", status: "resolved" } as never),
+          );
+          yield* fake.push(event("run.updated", run(launchedMessageId(fake), "completed")));
+          const result = yield* Fiber.join(prompt);
           assert.strictEqual(result.stopReason, "end_turn");
-          assert.deepStrictEqual(permissions, []);
-          assert.deepStrictEqual(messages(updates), [SUPERVISED_NOTICE]);
+          assert.deepStrictEqual(withdrawals, [{ sessionId: session.sessionId }]);
           assert.deepStrictEqual(fake.commands, []);
+        }),
+      );
+    }),
+  );
+
+  it.effect("follows a message the sandbox already has instead of sending it again", () =>
+    Effect.gen(function* () {
+      // Sent on the computer: the sandbox has the message and part of its answer already.
+      const existing = projection(
+        [
+          assistant("old", "Earlier answer", 1),
+          userMessage("msg-desk", 2, "run-desk"),
+          assistant("partial", "Half", 3),
+        ],
+        [run("msg-desk" as MessageId, "running", "run-desk")],
+      );
+      const fake = yield* makeFakeSandbox({ existing });
+      yield* withBridge({ fake }, ({ acp, updates }) =>
+        Effect.gen(function* () {
+          const session = yield* openThread(acp);
+          const prompt = yield* say(acp, session.sessionId, "From the computer", {
+            messageId: "msg-desk",
+            creationSource: "web",
+          }).pipe(Effect.forkScoped);
+          yield* fake.push(event("turn-item.updated", assistant("partial", "Half done", 3)));
+          yield* fake.push(
+            event("run.updated", run("msg-desk" as MessageId, "completed", "run-desk")),
+          );
+          const result = yield* Fiber.join(prompt);
+          assert.strictEqual(result.stopReason, "end_turn");
+          assert.deepStrictEqual(messages(updates), ["Half", " done"]);
+          assert.deepStrictEqual(fake.commands, []);
+          assert.deepStrictEqual(fake.launches, []);
+        }),
+      );
+    }),
+  );
+
+  it.effect(
+    "sends a new message with the host's id, after moving the sandbox to the thread's modes",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeSandbox({
+          existing: projection([], [], "approval-required"),
+          react: answerWith("Done"),
+        });
+        yield* withBridge({ fake, runtimeMode: "auto" }, ({ acp }) =>
+          Effect.gen(function* () {
+            const session = yield* openThread(acp);
+            yield* say(acp, session.sessionId, "Go", { messageId: "msg-phone" });
+            assert.deepStrictEqual(
+              fake.commands.map((command) => command.type),
+              ["thread.runtime-mode.set", "message.dispatch"],
+            );
+            const [mode, sent] = fake.commands;
+            assert.strictEqual(
+              mode?.type === "thread.runtime-mode.set" && mode.runtimeMode,
+              "auto",
+            );
+            assert.strictEqual(
+              sent?.type === "message.dispatch" && String(sent.messageId),
+              "msg-phone",
+            );
+          }),
+        );
+      }),
+  );
+
+  it.effect("follows the sandbox's turn when the host continues after a restart", () =>
+    Effect.gen(function* () {
+      const existing = projection(
+        [userMessage("msg-1", 1, "run-1"), assistant("a", "Working", 2)],
+        [run("msg-1" as MessageId, "running", "run-1")],
+      );
+      const fake = yield* makeFakeSandbox({ existing });
+      yield* withBridge({ fake }, ({ acp, updates }) =>
+        Effect.gen(function* () {
+          const session = yield* openThread(acp);
+          const prompt = yield* say(
+            acp,
+            session.sessionId,
+            "Continue where you left off. Your last turn was cut short.",
+            { messageId: "msg-continue", createdBy: "agent", creationSource: "server" },
+          ).pipe(Effect.forkScoped);
+          yield* fake.push(event("run.updated", run("msg-1" as MessageId, "completed", "run-1")));
+          const result = yield* Fiber.join(prompt);
+          assert.strictEqual(result.stopReason, "end_turn");
+          assert.deepStrictEqual(fake.commands, []);
+          assert.deepStrictEqual(messages(updates), ["Working"]);
+        }),
+      );
+    }),
+  );
+
+  it.effect("sends images as sandbox attachments and says which files stayed behind", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeSandbox({ react: answerWith("Nice picture") });
+      yield* withBridge({ fake }, ({ acp, updates }) =>
+        Effect.gen(function* () {
+          const session = yield* openThread(acp);
+          yield* acp.agent.prompt({
+            sessionId: session.sessionId,
+            prompt: [
+              {
+                type: "text",
+                text:
+                  "<t3_code_instructions>\nx\n</t3_code_instructions>\n\n<user_request>\nLook at this\n\n" +
+                  '[Attached image "shot.png" is saved at: /Users/me/.t3/attachments/a.png]\n\n' +
+                  '[Attached file "notes.pdf" is saved at: /Users/me/.t3/attachments/b.pdf]\n</user_request>',
+              },
+              { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+            ],
+          });
+          const launch = fake.launches[0]!;
+          assert.strictEqual(launch.initialMessage?.text, "Look at this");
+          assert.deepStrictEqual(
+            launch.initialMessage?.attachments.map((attachment) => attachment.name),
+            ["shot.png"],
+          );
+          const upload = fake.uploads[0] as {
+            attachments: ReadonlyArray<{ dataUrl: string; sizeBytes: number }>;
+          };
+          assert.strictEqual(upload.attachments[0]?.dataUrl, "data:image/png;base64,aGVsbG8=");
+          assert.strictEqual(upload.attachments[0]?.sizeBytes, 5);
+          assert.include(messages(updates), skippedAttachmentsMessage(["notes.pdf"]));
         }),
       );
     }),
@@ -636,6 +891,25 @@ describe("mapping", () => {
         ["acceptAlways", "allow_always"],
         ["decline", "reject_once"],
       ],
+    );
+  });
+
+  it("titles a tool by what it does, not the provider's generic label", () => {
+    assert.strictEqual(
+      toolTitleOf({
+        type: "command_execution",
+        title: "Ran command",
+        input: "cargo build\n--release",
+      } as never),
+      "cargo build",
+    );
+    assert.strictEqual(
+      toolTitleOf({ type: "subagent", title: null, prompt: "Review the diff" } as never),
+      "Subagent: Review the diff",
+    );
+    assert.strictEqual(
+      toolTitleOf({ type: "dynamic_tool", title: null, toolName: "t3_thread_read" } as never),
+      "t3_thread_read",
     );
   });
 

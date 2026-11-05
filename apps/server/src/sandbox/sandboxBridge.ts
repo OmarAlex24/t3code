@@ -9,6 +9,7 @@ import {
   type ModelSelection,
   type ProjectId,
   ProjectId as ProjectIdSchema,
+  type ProviderInteractionMode,
   type ProviderInstanceConfig,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -19,10 +20,16 @@ import {
   type SandboxLinkHostThreadResult,
   SandboxProviderError,
   type SandboxRecord,
+  type RuntimeMode,
   type ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
-import { SANDBOX_BRIDGE_SECRETS_DIR_ENV } from "@t3tools/sandbox-bridge/link";
+import { connectSandbox } from "@t3tools/sandbox-bridge";
+import {
+  bridgeLinkSecretName,
+  SANDBOX_BRIDGE_SECRETS_DIR_ENV,
+  SandboxBridgeLinkJson,
+} from "@t3tools/sandbox-bridge/link";
 import { resolveSelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -31,8 +38,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { FetchHttpClient } from "effect/http";
 
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -98,6 +108,79 @@ export const seedInstance = Effect.gen(function* () {
   yield* settings.updateProviderInstance({ operation: "upsert", instanceId, instance });
 });
 
+/** The thread with the same id on a sandbox, reached with the bridge's own link and bearer. */
+export class SandboxThreadRemote extends Context.Service<
+  SandboxThreadRemote,
+  {
+    /** Puts the sandbox's thread in the host thread's modes; a thread with no link is skipped. */
+    readonly setModes: (
+      threadId: ThreadId,
+      modes: {
+        readonly runtimeMode: RuntimeMode;
+        readonly interactionMode: ProviderInteractionMode;
+      },
+    ) => Effect.Effect<void, SandboxProviderError>;
+  }
+>()("t3/sandbox/sandboxBridge/SandboxThreadRemote") {}
+
+const decodeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
+
+const layerThreadRemote = Layer.effect(
+  SandboxThreadRemote,
+  Effect.gen(function* () {
+    const secrets = yield* ServerSecretStore.ServerSecretStore;
+    const random = yield* SecureRandom.SecureRandom;
+    const failed = (detail: string) => (cause: unknown) =>
+      new SandboxProviderError({ provider: "boat", stage: "pair", detail, cause });
+    const commandId = random.uuidV4().pipe(
+      Effect.orDie,
+      Effect.map((id) => CommandId.make(`sandbox-mode-sync:${id}`)),
+    );
+    const setModes = Effect.fn("SandboxThreadRemote.setModes")(function* (
+      threadId: ThreadId,
+      modes: {
+        readonly runtimeMode: RuntimeMode;
+        readonly interactionMode: ProviderInteractionMode;
+      },
+    ) {
+      const stored = yield* secrets
+        .get(bridgeLinkSecretName(threadId))
+        .pipe(Effect.mapError(failed("Could not read this thread's sandbox link.")));
+      if (Option.isNone(stored)) return;
+      const link = yield* decodeLink(new TextDecoder().decode(stored.value)).pipe(
+        Effect.mapError(failed("This thread's sandbox link is unreadable.")),
+      );
+      yield* Effect.gen(function* () {
+        const sandbox = yield* connectSandbox(link);
+        const projection = yield* sandbox.projection(threadId);
+        if (Option.isNone(projection)) return;
+        const thread = projection.value.thread;
+        if (thread.runtimeMode !== modes.runtimeMode) {
+          yield* sandbox.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: yield* commandId,
+            threadId,
+            runtimeMode: modes.runtimeMode,
+          });
+        }
+        if (thread.interactionMode !== modes.interactionMode) {
+          yield* sandbox.dispatch({
+            type: "thread.interaction-mode.set",
+            commandId: yield* commandId,
+            threadId,
+            interactionMode: modes.interactionMode,
+          });
+        }
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(FetchHttpClient.layer),
+        Effect.mapError(failed("Could not reach the sandbox to change its modes.")),
+      );
+    });
+    return SandboxThreadRemote.of({ setModes });
+  }),
+);
+
 export class SandboxBridge extends Context.Service<
   SandboxBridge,
   {
@@ -131,6 +214,7 @@ const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const path = yield* Path.Path;
   const fileSystem = yield* FileSystem.FileSystem;
+  const remote = yield* SandboxThreadRemote;
 
   yield* seedInstance.pipe(
     Effect.catchCause((cause) =>
@@ -259,6 +343,28 @@ const make = Effect.gen(function* () {
   });
   yield* forkParked(
     Stream.runForEach(orchestrator.streamDomainEvents, (event) => {
+      // The sandbox's thread runs in the host thread's modes, so a change on either client (the
+      // phone here, or the computer, which sets them on this thread too) reaches it at once.
+      if (
+        (event.type === "thread.runtime-mode-updated" ||
+          event.type === "thread.interaction-mode-updated") &&
+        event.payload.modelSelection.instanceId === instanceId
+      ) {
+        return remote
+          .setModes(event.payload.id, {
+            runtimeMode: event.payload.runtimeMode,
+            interactionMode: event.payload.interactionMode,
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not move a sandbox thread to its host thread's modes", {
+                cause,
+              }),
+            ),
+            Effect.forkScoped,
+            Effect.asVoid,
+          );
+      }
       if (event.type !== "run.created" && event.type !== "run.updated") return Effect.void;
       const run = event.payload;
       if (run.providerInstanceId !== instanceId) return Effect.void;
@@ -282,6 +388,8 @@ const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(SandboxBridge, make);
+
+export const layerLive = layer.pipe(Layer.provide(layerThreadRemote));
 
 /** The sandbox WebSocket handlers: the provisioner's, plus linking a thread to the bridge. */
 export const rpcHandlers = Effect.gen(function* () {

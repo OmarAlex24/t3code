@@ -6,7 +6,7 @@
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { RuntimeMode, ThreadId } from "@t3tools/contracts";
+import { ProviderInteractionMode, RuntimeMode, ThreadId } from "@t3tools/contracts";
 import {
   connectSandbox,
   runSandboxBridge,
@@ -30,7 +30,11 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import { mcpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
 
-const HostThreadConfiguration = Schema.Struct({ threadId: ThreadId, runtimeMode: RuntimeMode });
+const HostThreadConfiguration = Schema.Struct({
+  threadId: ThreadId,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+});
 const decodeHostThread = Schema.decodeUnknownEffect(
   Schema.Struct({ structuredContent: HostThreadConfiguration }),
 );
