@@ -1,6 +1,13 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  SANDBOX_SETUP_STAGE_ORDER,
+  type SandboxSetupSnapshot,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { useSyncExternalStore } from "react";
@@ -163,11 +170,39 @@ function Harness() {
     onHandedOff,
   });
   return (
-    <button type="button" onClick={() => launch.interceptSend()}>
-      Send
-    </button>
+    <div>
+      {launch.card}
+      <button type="button" onClick={() => launch.interceptSend()}>
+        Send
+      </button>
+    </div>
   );
 }
+
+// The host's launch of the harness's thread, as it streams it.
+const launchSnapshot = (overrides: Partial<SandboxSetupSnapshot> = {}): SandboxSetupSnapshot => ({
+  threadId,
+  instanceId: "instance-1",
+  configId: "config-1",
+  label: "Boat small",
+  provider: "boat",
+  phase: "running",
+  startedAt: "2026-11-05T18:36:53.000Z",
+  endedAt: null,
+  stages: SANDBOX_SETUP_STAGE_ORDER.map((id, index) => ({
+    id,
+    status: index < 2 ? "done" : index === 2 ? "running" : "pending",
+    startedAt: index <= 2 ? "2026-11-05T18:36:53.000Z" : null,
+    endedAt: index < 2 ? "2026-11-05T18:37:10.000Z" : null,
+    detail: null,
+  })),
+  warnings: [],
+  error: null,
+  recovery: null,
+  awaitingHandoff: false,
+  sequence: 1,
+  ...overrides,
+});
 
 const linked = {
   instanceId: "sandboxes",
@@ -180,7 +215,7 @@ const linked = {
 async function launchToHandoff() {
   await userEvent.click(page.getByRole("button", { name: "Send" }));
   await vi.waitFor(() => expect(mocks.launch).toHaveBeenCalledOnce());
-  mocks.state.snapshot = { threadId, sequence: 1, phase: "running", awaitingHandoff: true };
+  mocks.state.snapshot = launchSnapshot({ awaitingHandoff: true });
   mocks.state.bump();
   await vi.waitFor(() => expect(mocks.completeLaunch).toHaveBeenCalledOnce());
 }
@@ -197,6 +232,8 @@ function setup() {
     mocks.state.bridgeReady = false;
     for (const mock of [
       mocks.launch,
+      mocks.cancelLaunch,
+      mocks.retryLaunch,
       mocks.pairLaunch,
       mocks.connectPairing,
       mocks.completeLaunch,
@@ -279,5 +316,78 @@ describe("useSandboxLaunch handoff", () => {
       }),
     );
     toast.mockRestore();
+  });
+
+  it("picks a launch up again when the user leaves the thread and comes back", async () => {
+    setup();
+    mocks.linkHostThread.mockResolvedValue(AsyncResult.success(linked));
+    {
+      await using _first = await render(<Harness />);
+      await userEvent.click(page.getByRole("button", { name: "Send" }));
+      await vi.waitFor(() => expect(mocks.launch).toHaveBeenCalledOnce());
+      mocks.state.snapshot = launchSnapshot();
+      mocks.state.bump();
+      await expect
+        .element(page.getByText("Starting a sandbox on Boat small…").first())
+        .toBeVisible();
+    }
+    // Away on another thread, the host reached the handoff that only this client can finish.
+    mocks.state.snapshot = launchSnapshot({ awaitingHandoff: true, sequence: 2 });
+    expect(mocks.pairLaunch).not.toHaveBeenCalled();
+
+    await using _second = await render(<Harness />);
+    await vi.waitFor(() => expect(mocks.completeLaunch).toHaveBeenCalledOnce());
+    expect(mocks.pairLaunch).toHaveBeenCalledOnce();
+    expect(mocks.launch).toHaveBeenCalledOnce();
+    mocks.state.bridgeReady = true;
+    mocks.state.bump();
+    // The message the user sent before leaving goes out on the host thread.
+    await vi.waitFor(() => expect(onHandedOff).toHaveBeenCalledOnce());
+    expect(draftProjectRef()).toEqual({ environmentId: HOST_ENV, projectId: "project-host" });
+  });
+
+  it("follows a launch already starting when the user sends again", async () => {
+    setup();
+    mocks.state.snapshot = launchSnapshot();
+    const toast = vi.spyOn(toastManager, "add");
+    await using _screen = await render(<Harness />);
+    await expect.element(page.getByText("Starting a sandbox on Boat small…").first()).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: "Send" }));
+    expect(mocks.launch).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+    await expect.element(page.getByText("Starting a sandbox on Boat small…").first()).toBeVisible();
+    toast.mockRestore();
+  });
+
+  it("starts a new sandbox from a launch the host lost, or dismisses it", async () => {
+    setup();
+    mocks.state.snapshot = launchSnapshot({
+      phase: "failed",
+      error: "T3 Code stopped before this sandbox finished starting.",
+      recovery: "relaunch",
+    });
+    await using _screen = await render(<Harness />);
+    await expect
+      .element(page.getByText("The sandbox on Boat small could not start").first())
+      .toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: "Start a new sandbox" }));
+    await vi.waitFor(() =>
+      expect(mocks.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          environmentId: HOST_ENV,
+          input: expect.objectContaining({ configId: "config-1", threadId }),
+        }),
+      ),
+    );
+    expect(mocks.retryLaunch).not.toHaveBeenCalled();
+
+    await userEvent.click(page.getByRole("button", { name: "Dismiss" }));
+    expect(mocks.cancelLaunch).toHaveBeenCalledOnce();
+    // The host still streams the failed launch until it drops it; the card stays gone.
+    await expect
+      .element(page.getByText("The sandbox on Boat small could not start").first())
+      .not.toBeInTheDocument();
   });
 });
