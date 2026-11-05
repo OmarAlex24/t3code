@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import { AuthSettingsWriteScope, EnvironmentAuthorizationError } from "./auth.ts";
 import {
+  SandboxCheckWorkResult,
   SandboxConfigsResult,
   SandboxCreateInput,
   SandboxCreateResult,
@@ -45,6 +46,7 @@ export const SANDBOX_WS_METHODS = {
   sandboxesList: "sandboxes.list",
   sandboxesStop: "sandboxes.stop",
   sandboxesResume: "sandboxes.resume",
+  sandboxesCheckWork: "sandboxes.checkWork",
   sandboxesTemplates: "sandboxes.templates",
   sandboxesSaveTemplate: "sandboxes.saveTemplate",
   sandboxesDeleteTemplate: "sandboxes.deleteTemplate",
@@ -89,6 +91,13 @@ const WsSandboxesListRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesList, {
 const WsSandboxesStopRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesStop, {
   payload: SandboxLifecycleInput,
   success: SandboxStopResult,
+  error: SandboxFailure,
+});
+
+// Runs a fixed git check on the sandbox; never a failure, since `unknown` says why it could not.
+const WsSandboxesCheckWorkRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCheckWork, {
+  payload: SandboxLifecycleInput,
+  success: SandboxCheckWorkResult,
   error: SandboxFailure,
 });
 
@@ -199,6 +208,7 @@ export const SandboxRpcs = [
   WsSandboxesListRpc,
   WsSandboxesStopRpc,
   WsSandboxesResumeRpc,
+  WsSandboxesCheckWorkRpc,
   WsSandboxesTemplatesRpc,
   WsSandboxesSaveTemplateRpc,
   WsSandboxesDeleteTemplateRpc,
@@ -221,6 +231,7 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesDelete]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesStop]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesResume]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesCheckWork]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesSaveTemplate]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesDeleteTemplate]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesSaveConfig]: AuthSettingsWriteScope,
