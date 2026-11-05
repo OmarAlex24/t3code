@@ -10,6 +10,7 @@ import {
   TrimmedNonEmptyString,
   TrimmedString,
 } from "./baseSchemas.ts";
+import { ModelSelection } from "./modelSelection.ts";
 import { WorktreeSetupPhase, WorktreeSetupStageStatus } from "./worktreeSetup.ts";
 
 /**
@@ -331,6 +332,19 @@ export const SandboxRecord = Schema.Struct({
       environmentName: TrimmedString,
       keyId: Schema.optionalKey(TrimmedString),
     }),
+  ),
+  /** The project T3 added for the clone on the sandbox, where the sandbox bridge starts the thread. */
+  sandboxProjectId: Schema.optionalKey(ProjectId),
+  /** The github.com repository the sandbox cloned, as `owner/name`. */
+  repository: Schema.optionalKey(TrimmedString),
+  /** The project on this server that holds the thread the phone sees; the bridge routes it here. */
+  hostProjectId: Schema.optionalKey(ProjectId),
+  /**
+   * The bearer session minted on the sandbox for the sandbox bridge. The token is a server secret
+   * named by `secret`; the record only says where it lives and when it expires.
+   */
+  bridge: Schema.optionalKey(
+    Schema.Struct({ sessionId: TrimmedString, secret: TrimmedString, expiresAt: TrimmedString }),
   ),
   /** Provider settings the sandbox was created with; they win over the current ones for it. */
   providerSettings: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
@@ -890,6 +904,27 @@ export type SandboxLaunchThreadInput = typeof SandboxLaunchThreadInput.Type;
 
 export const SandboxLaunchStreamEvent = Schema.NullOr(SandboxSetupSnapshot);
 export type SandboxLaunchStreamEvent = typeof SandboxLaunchStreamEvent.Type;
+
+/** The provider instance that drives sandbox threads from the host, and its one model. */
+export const SANDBOX_BRIDGE_INSTANCE_ID = "sandboxes";
+export const SANDBOX_BRIDGE_MODEL = "sandbox";
+/** Lightweight host projects for sandbox threads live under this folder of the server's home. */
+export const SANDBOX_HOST_PROJECTS_FOLDER = "sandbox-projects";
+
+/** Whether a host project is a folder T3 made only to hold sandbox threads; it has no checkout. */
+export const isSandboxHostProjectRoot = (workspaceRoot: string): boolean =>
+  /[\\/]sandbox-projects[\\/][^\\/]+[\\/][^\\/]+[\\/]?$/u.test(workspaceRoot);
+
+export const SandboxLinkHostThreadResult = Schema.Struct({
+  instanceId: TrimmedNonEmptyString,
+  /** Where the thread goes on this server: the repository's own copy, or a lightweight project. */
+  hostProjectId: ProjectId,
+  /** True when T3 made the project only for sandbox threads; it has no checkout. */
+  lightweightProject: Schema.Boolean,
+  /** What the host thread sends with: the sandbox bridge's instance and its one model. */
+  modelSelection: ModelSelection,
+});
+export type SandboxLinkHostThreadResult = typeof SandboxLinkHostThreadResult.Type;
 
 export const SandboxLaunchCancelResult = Schema.Struct({
   cancelled: Schema.Boolean,
