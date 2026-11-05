@@ -371,6 +371,7 @@ let pendingDispatches: Array<{
 }> = [];
 let sandboxes: ReadonlyArray<SandboxRecord> = [];
 let scopes: ReadonlyArray<string> = AuthStandardClientScopes;
+let projectWorkspaceRoot = project.workspaceRoot;
 let sequence = 1;
 let vcsStatusSubscriber: Queue.Queue<VcsStatusStreamEvent> | null = null;
 
@@ -413,7 +414,7 @@ const handlers: Record<string, (input: never) => unknown> = {
         snapshot: {
           schemaVersion: 1,
           snapshotSequence: sequence,
-          projects: [project],
+          projects: [{ ...project, workspaceRoot: projectWorkspaceRoot }],
           threads: threads.filter((thread) => !thread.olderSettled).map(shellOf),
           archivedThreads: [],
         },
@@ -535,6 +536,8 @@ export function installFakeEnvironment(
     readonly sandboxes?: ReadonlyArray<SandboxRecord>;
     /** What the session grants; a scope left out is one this client cannot read as granted. */
     readonly scopes?: ReadonlyArray<string>;
+    /** Where the one project lives, such as a sandbox's placeholder folder. */
+    readonly projectWorkspaceRoot?: string;
   },
 ): Disposable {
   threads = fixtures;
@@ -544,6 +547,7 @@ export function installFakeEnvironment(
   holdCommand = options?.holdCommand ?? (() => false);
   sandboxes = options?.sandboxes ?? [];
   scopes = options?.scopes ?? AuthStandardClientScopes;
+  projectWorkspaceRoot = options?.projectWorkspaceRoot ?? project.workspaceRoot;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
     if (url.origin !== window.location.origin) return realFetch(input, init);
@@ -572,6 +576,7 @@ export function installFakeEnvironment(
       pendingDispatches = [];
       sandboxes = [];
       scopes = AuthStandardClientScopes;
+      projectWorkspaceRoot = project.workspaceRoot;
       if (offline) {
         offline = false;
         Effect.runSync(Deferred.succeed(backOnline, undefined));
