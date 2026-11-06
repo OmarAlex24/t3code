@@ -61,7 +61,11 @@ interface Harness {
     readonly runId?: string;
   }>;
   // The host thread as the orchestrator would read it.
-  hostThread: { readonly instanceId: string; readonly settledAt: string | null };
+  hostThread: {
+    readonly instanceId: string;
+    readonly settledAt: string | null;
+    readonly runtimeMode?: string;
+  };
   hostRuns: Array<{ readonly id: string; readonly status: string }>;
 }
 
@@ -152,6 +156,8 @@ const makeHarness = Effect.gen(function* () {
       Effect.sync(() => ({
         thread: {
           modelSelection: { instanceId: harness.hostThread.instanceId, model: "sandbox" },
+          runtimeMode: harness.hostThread.runtimeMode ?? "approval-required",
+          interactionMode: "default",
           settledAt: harness.hostThread.settledAt,
           settledOverride: null,
           deletedAt: null,
@@ -341,6 +347,42 @@ describe("SandboxBridge", () => {
         yield* Queue.offerAll(harness.events, [
           modeSet("codex", "full-access"),
           modeSet(SANDBOX_BRIDGE_INSTANCE_ID, "auto"),
+        ]);
+        expect(yield* Queue.take(harness.modeChanges)).toEqual({ threadId, runtimeMode: "auto" });
+      }),
+    ),
+  );
+
+  it.effect("moves the sandbox to full access once the run it waited out has ended", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        yield* SandboxBridge.SandboxBridge;
+        const ended = (id: string) =>
+          ({
+            type: "run.updated",
+            threadId,
+            payload: { id, threadId, providerInstanceId: instanceId, status: "completed" },
+          }) as unknown as OrchestrationV2DomainEvent;
+        harness.hostThread = { ...harness.hostThread, runtimeMode: "full-access" };
+        yield* Queue.offer(harness.events, ended("run-1"));
+        expect(yield* Queue.take(harness.modeChanges)).toEqual({
+          threadId,
+          runtimeMode: "full-access",
+        });
+        // Supervised: nothing was held back, so the end of a run changes nothing.
+        harness.hostThread = { ...harness.hostThread, runtimeMode: "approval-required" };
+        yield* Queue.offerAll(harness.events, [
+          ended("run-2"),
+          {
+            type: "thread.runtime-mode-updated",
+            threadId,
+            payload: {
+              id: threadId,
+              modelSelection: { instanceId, model: "sandbox" },
+              runtimeMode: "auto",
+              interactionMode: "default",
+            },
+          } as unknown as OrchestrationV2DomainEvent,
         ]);
         expect(yield* Queue.take(harness.modeChanges)).toEqual({ threadId, runtimeMode: "auto" });
       }),
