@@ -240,7 +240,11 @@ the projects allowed, per-project copied files, and the running limit. Saving on
 creates nothing.
 
 `sandboxes.launch` takes a config, a thread id, and the host's project, and refuses a project the
-config does not allow or one without a github.com remote. The launch runs in a fiber forked into
+config does not allow or one without a github.com remote. A thread has one machine: a launch for a
+thread whose record is not `deleted` or `expired` returns that record's instance id and creates
+nothing, since a client that lost its handoff sends again. An abandoned launch's machine is the
+exception, and it is deleted first; when that delete fails the launch fails, so the old machine
+never bills beside a new one. The launch runs in a fiber forked into
 the provisioner's own scope, so it outlives the RPC that started it, and reports a
 `SandboxSetupSnapshot` per change through
 [`sandboxLaunches.ts`](../../apps/server/src/sandbox/sandboxLaunches.ts), which clients read with
@@ -347,7 +351,11 @@ without pairing with the sandbox.
   picked on the host, which lists no hub models, so the draft also waits for the sandbox to list
   Pi with that model and moves onto it; the sandbox's default model is set to it too, so a chat
   the bridge starts from the phone runs there. The client stays paired with the sandbox for files, diffs and
-  terminals.
+  terminals. This state lives only in the composer, and the host's card is gone 30 seconds after
+  `completeLaunch`, so the record is what resumes it: a draft whose thread has a running record
+  on a sandbox this client is paired with, while no launch runs, links and sends on that sandbox
+  (a remount or a reload), and a send for a thread whose sandbox is stopped or unreachable waits
+  with a toast instead of launching.
 - **One thread on the computer.** A client paired with the sandbox shows only the sandbox's own
   thread. The host thread is its mirror for the phone: `sandboxHostMirrors` lists the host threads
   whose sandbox thread this client also has, the sidebar and command palette leave them out, and

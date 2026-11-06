@@ -11,6 +11,12 @@ const mocks = vi.hoisted(() => ({
   configs: [] as Array<unknown>,
   deleteSandbox: vi.fn(async () => AsyncResult.success({ warnings: [] })),
   stopSandbox: vi.fn(async () => AsyncResult.success(undefined)),
+  navigate: vi.fn(),
+}));
+
+vi.mock(import("@tanstack/react-router"), async (original) => ({
+  ...(await original()),
+  useNavigate: (() => mocks.navigate) as never,
 }));
 
 vi.mock(import("../../state/use-atom-command"), async (original) => ({
@@ -213,6 +219,13 @@ describe("SandboxManagementSection", () => {
     await using _screen = await render(<SandboxManagementSection />);
     await expect.element(page.getByText("hello", { exact: true })).toBeVisible();
     await expect.element(page.getByText(/Its thread was deleted/u)).not.toBeInTheDocument();
+    // It still bills, so the row says the message is waiting and leads back to it.
+    await expect.element(page.getByText(/Its first message has not reached it yet/u)).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Open draft" }));
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/draft/$draftId",
+      params: { draftId: "draft-1" },
+    });
   });
 
   it("lists tagged sandboxes T3 Code does not track and deletes one on confirm", async () => {
