@@ -64,13 +64,31 @@ const headerNamesOf = (config: JsonObject) =>
 const isLoopback = (host: string) =>
   host === "localhost" || host.startsWith("127.") || host === "[::1]";
 
+/** Railway's own MCP server: `railway mcp`, the npm shim that runs it, or the hosted one. */
+const isRailwayMcpEntry = (config: JsonObject) => {
+  const args = Array.isArray(config.args) ? config.args : [];
+  if (typeof config.command === "string") {
+    return (
+      (config.command.split("/").at(-1) === "railway" && args.includes("mcp")) ||
+      args.some((arg) => typeof arg === "string" && arg.startsWith("@railway/mcp-server"))
+    );
+  }
+  const url = typeof config.url === "string" ? URL.parse(config.url) : null;
+  return url?.hostname === "mcp.railway.com";
+};
+
+export interface McpMintReadiness {
+  readonly mapleReady: boolean;
+  readonly railwayReady: boolean;
+}
+
 /**
- * How a server reaches a sandbox, judged from its entry alone. Maple servers never copy this
- * machine's key: each sandbox gets one of its own, or none when no admin key is saved.
+ * How a server reaches a sandbox, judged from its entry alone. Maple and Railway servers never
+ * copy this machine's sign-in: each sandbox gets its own, or none when nothing is saved to mint it.
  */
 export const describeHostMcpServer = (
   entry: HostMcpEntry,
-  options: { readonly mapleReady: boolean },
+  options: McpMintReadiness,
 ): SandboxHostMcpServer => {
   const transport = transportOf(entry.config);
   const url = typeof entry.config.url === "string" ? URL.parse(entry.config.url) : null;
@@ -82,6 +100,21 @@ export const describeHostMcpServer = (
     headerNames,
     ...(url === null ? {} : { host: url.host }),
   };
+  if (isRailwayMcpEntry(entry.config)) {
+    return options.railwayReady
+      ? {
+          ...base,
+          copy: "mint",
+          mintedBy: "railway",
+          reason:
+            "Runs the Railway CLI on the sandbox with a token of its own, revoked when the sandbox is deleted.",
+        }
+      : {
+          ...base,
+          copy: "unavailable",
+          reason: "Save a Railway token under Sandboxes so each sandbox gets its own.",
+        };
+  }
   if (transport === "stdio") {
     return {
       ...base,
@@ -95,7 +128,7 @@ export const describeHostMcpServer = (
   }
   if (mapleApiBaseUrl(url.href) !== null) {
     return options.mapleReady
-      ? { ...base, copy: "mint" }
+      ? { ...base, copy: "mint", mintedBy: "maple" }
       : {
           ...base,
           copy: "unavailable",
@@ -133,7 +166,7 @@ export const pickHostMcpEntries = (
 /** Lists each name once, preferring an entry that can be copied. */
 export const listHostMcpServers = (
   entries: ReadonlyArray<HostMcpEntry>,
-  options: { readonly mapleReady: boolean },
+  options: McpMintReadiness,
 ): ReadonlyArray<SandboxHostMcpServer> => {
   const byName = new Map<string, SandboxHostMcpServer>();
   for (const entry of entries) {

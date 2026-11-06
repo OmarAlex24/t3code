@@ -30,6 +30,7 @@ import {
   resolveClaudeConfigDirPath,
 } from "../provider/Drivers/ClaudeSkills.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { railwayCredentialsOf } from "./railwayApi.ts";
 import * as SourceControlDrivers from "../sourceControl/builtInDrivers.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import {
@@ -211,9 +212,10 @@ const make = Effect.gen(function* () {
 
   const tooling = Effect.gen(function* () {
     const { configDirectory } = yield* claudePaths;
-    const mapleReady =
-      ((yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))?.sandboxTooling
-        .mapleAdminKey ?? "") !== "";
+    const saved = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
+      ?.sandboxTooling;
+    const mapleReady = (saved?.mapleAdminKey ?? "") !== "";
+    const railwayReady = saved !== undefined && railwayCredentialsOf(saved) !== undefined;
     const identity = yield* gitIdentity;
     return {
       ...(identity === null ? {} : { gitIdentity: identity }),
@@ -221,7 +223,7 @@ const make = Effect.gen(function* () {
         .exists(path.join(configDirectory, "CLAUDE.md"))
         .pipe(Effect.orElseSucceed(() => false)),
       skills: yield* listHostSkills(path.join(configDirectory, "skills")),
-      mcpServers: listHostMcpServers(yield* readMcpEntries, { mapleReady }),
+      mcpServers: listHostMcpServers(yield* readMcpEntries, { mapleReady, railwayReady }),
     } satisfies SandboxHostTooling;
   }).pipe(
     Effect.provideService(FileSystem.FileSystem, fileSystem),
