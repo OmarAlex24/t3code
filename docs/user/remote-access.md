@@ -23,20 +23,21 @@ The key is saved on the T3 Code server that keeps the configs (this machine, or 
 you paired on the hosted web app), not on the client. Each sandbox bills the provider account that
 owns the key.
 
-A sandbox gets none of this machine's logins unless the config asks. **Use this machine's Claude
-setup** appears when Claude here talks to a custom endpoint, and points Claude in each sandbox at
-the same one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
+A sandbox gets none of this machine's logins unless the config asks. **Agent access** lists only
+what this machine has set up, with a switch each; connect more under **Settings → Connections →
+Sandboxes → Add integration**. **Claude** appears when Claude here talks to a custom endpoint, and
+points Claude in each sandbox at the same one. If that endpoint is a [CLIProxyAPI hub you connected](./usage.md#connect-a-cliproxyapi-hub),
 each sandbox gets its own key on the hub, which T3 Code removes when you delete the sandbox;
 otherwise this machine's Claude token is copied, and it stays valid after the sandbox is gone. The
 sandbox must be able to reach that endpoint. When it only answers on your tailnet or local network,
 each sandbox [joins your tailnet](#private-endpoints-tailscale) on its own once Tailscale is set
 up; without Tailscale, T3 Code refuses to start the sandbox and points you to its setup. You can
 also expose the endpoint publicly instead (for example with Tailscale Funnel or Cloudflare Tunnel).
-With a hub, **Set up Pi with your hub's other models** also installs the [Pi agent](./providers-pi.md)
+With a hub, **Pi** also installs the [Pi agent](./providers-pi.md)
 in each sandbox with the hub's non-Claude models, on that same key, and **Start new chats on** can
 make new chats on the config start on Pi with one of them instead of Claude.
-**Sign GitHub in with this machine's token** lets `gh` and `git` in each sandbox clone private
-repositories and push. Without it a sandbox can clone public repositories only.
+**GitHub** lets `gh` and `git` in each sandbox clone private repositories and push, with a
+token from the GitHub App or this machine's own. Without it a sandbox can clone public repositories only.
 [**Let the agent use Boat**](#let-the-agent-use-boat) signs the `boat` CLI in on each Boat sandbox
 with a key scoped to it. T3 Code also
 installs git, the GitHub CLI, and Claude Code when the provider's image lacks them; sign Codex in
@@ -51,16 +52,14 @@ this server, keep working and switch to repositories the next time you save them
 
 - **Running limit** (8 hours by default) stops a sandbox that has run that long since its last
   start. Its disk stays, so **Resume** brings it back with the thread's files.
-- **Idle stop** (30 minutes by default) is saved for a later release. For now only the running
-  limit stops sandboxes, along with the provider's own auto-stop.
 - **Files copied from this machine** chooses, per repository, which git-ignored files go into the
   clone. They come from the repository's copy on the server that keeps the configs, so a project
   open only on another machine gets none. By default each sandbox gets that copy's env files
   (`.env` files, `.envrc`, `.dev.vars`). They are written into the clone with owner-only
   permissions and never appear in a provider's command history.
-- **Reach it only through my tailnet** (when the sandbox joins your tailnet) gives it no public URL.
-  This app then connects over your tailnet, so the machine running it has to be on your tailnet
-  too, and the hosted web app cannot reach it.
+- **Reach it only through my tailnet** shows only on a config that already has it, so you can turn
+  it off. Such a sandbox has no public URL: this app connects over your tailnet, so the machine
+  running it has to be on your tailnet too, and the hosted web app cannot reach it.
 
 ### Start a thread on a sandbox
 
@@ -246,7 +245,7 @@ tagged `tag:t3-sandbox`, with a single-use key; deleting the sandbox removes the
 that stays stopped for more than about an hour drops off the tailnet and rejoins as a new device
 when you resume it.
 
-**Settings → Connections → Sandboxes → Tailscale → Set up** walks through the same three steps,
+**Settings → Connections → Sandboxes → Add integration → Tailscale** walks through the same three steps,
 with the policy snippet filled in for this server's Claude endpoint.
 
 1. Add the tag and an access rule. Open the

@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import "~/index.css";
 import { render } from "../../../test/render";
 
 const NOTHING_SAVED = {
@@ -47,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   ),
   update: vi.fn((_patch: unknown) => {}),
   saved: {} as Record<string, string>,
+  tailscale: { clientId: "", clientSecret: "", tag: "" },
   openExternal: vi.fn(async (_url: string) => {}),
 }));
 
@@ -66,10 +68,10 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
 vi.mock(import("~/hooks/useSettings"), async (original) => ({
   ...(await original()),
   useEnvironmentSettings: ((_environmentId: unknown, select: (settings: unknown) => unknown) =>
-    select({ sandboxTooling: mocks.saved })) as never,
+    select({ sandboxTooling: mocks.saved, sandboxTailscale: mocks.tailscale })) as never,
   useUpdateEnvironmentSettings: (() => mocks.update) as never,
 }));
-// The row's chrome reads app-wide scope; its control and form are what is under test.
+// The row's chrome reads app-wide scope; its control and list are what is under test.
 vi.mock(import("./settingsLayout"), async (original) => ({
   ...(await original()),
   SettingsRow: (({
@@ -100,15 +102,26 @@ vi.mock(import("~/state/server"), async (original) => {
 });
 
 import { SandboxAccessRows } from "./SandboxAccessRows";
+import { SettingsPageContainer } from "./settingsLayout";
 
 const STATE_KEY = "t3code:sandbox-github-app-state";
 const rows = () => (
   <SandboxAccessRows environmentId={EnvironmentId.make("11111111-1111-4111-8111-111111111111")} />
 );
-const githubRow = () => page.getByRole("region", { name: "GitHub App" });
+const connected = () => page.getByRole("list", { name: "Connected integrations" });
+const add = async (name: string) => {
+  await userEvent.click(page.getByRole("button", { name: "Add integration" }));
+  await userEvent.click(page.getByRole("menuitem", { name }));
+};
+const actions = async (name: string) =>
+  userEvent.click(page.getByRole("button", { name: `More actions for ${name}` }));
 
-function setup(saved: Record<string, string>) {
+function setup(
+  saved: Record<string, string>,
+  tailscale = { clientId: "", clientSecret: "", tag: "" },
+) {
   mocks.saved = saved;
+  mocks.tailscale = tailscale;
   mocks.openExternal.mockClear();
   mocks.connect.mockClear();
   mocks.connectRailway.mockClear();
@@ -138,6 +151,20 @@ describe("SandboxAccessRows", () => {
     }
   });
 
+  it("lists nothing when nothing is connected, and offers every integration to add", async () => {
+    setup(NOTHING_SAVED);
+    await using _screen = await render(rows());
+
+    await expect.element(connected()).not.toBeInTheDocument();
+    await expect.element(page.getByText(/^None connected\./u)).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Add integration" }));
+    await expect
+      .poll(() =>
+        Array.from(document.querySelectorAll('[role="menuitem"]'), (item) => item.textContent),
+      )
+      .toEqual(["Tailscale", "GitHub App", "Northflank", "Maple", "Railway"]);
+  });
+
   it("opens GitHub with the manifest in a new tab and connects from a pasted address", async () => {
     setup(NOTHING_SAVED);
     const submitted: Array<{ action: string; target: string; manifest: unknown }> = [];
@@ -153,6 +180,8 @@ describe("SandboxAccessRows", () => {
     });
     try {
       await using _screen = await render(rows());
+      await add("GitHub App");
+      await expect.element(page.getByRole("dialog", { name: "Connect GitHub App" })).toBeVisible();
       await userEvent.click(page.getByRole("button", { name: "Create the app" }));
 
       const state = localStorage.getItem(STATE_KEY);
@@ -178,7 +207,7 @@ describe("SandboxAccessRows", () => {
       ]);
       expect(submitted[0]!.manifest).not.toHaveProperty("hook_attributes");
 
-      const connect = page.getByRole("button", { name: "Connect" });
+      const connect = page.getByRole("button", { name: "Connect", exact: true });
       await expect.element(connect).toBeDisabled();
       await userEvent.fill(
         page.getByRole("textbox", { name: "Address GitHub opened" }),
@@ -188,6 +217,8 @@ describe("SandboxAccessRows", () => {
       expect(mocks.connect).toHaveBeenCalledWith(
         expect.objectContaining({ input: { code: "pasted-code" } }),
       );
+      // Connecting closes the panel.
+      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
     } finally {
       submit.mockRestore();
     }
@@ -199,6 +230,7 @@ describe("SandboxAccessRows", () => {
     window.desktopBridge = {} as NonNullable<typeof window.desktopBridge>;
     try {
       await using _screen = await render(rows());
+      await add("GitHub App");
       await userEvent.click(page.getByRole("button", { name: "Create the app" }));
 
       const state = localStorage.getItem(STATE_KEY);
@@ -226,9 +258,13 @@ describe("SandboxAccessRows", () => {
     await using _screen = await render(rows());
 
     await expect
-      .element(githubRow().getByRole("link", { name: "Install on repositories" }))
+      .element(connected().getByRole("listitem", { name: "GitHub App" }))
+      .toHaveTextContent("GitHub Appt3-code-sandboxes");
+    await actions("GitHub App");
+    await expect
+      .element(page.getByRole("menuitem", { name: "Install on repositories" }))
       .toHaveAttribute("href", "https://github.com/apps/t3-code-sandboxes/installations/new");
-    await userEvent.click(githubRow().getByRole("button", { name: "Remove" }));
+    await userEvent.click(page.getByRole("menuitem", { name: "Remove" }));
     expect(mocks.update).toHaveBeenCalledWith({
       sandboxTooling: {
         githubAppId: "",
@@ -243,17 +279,24 @@ describe("SandboxAccessRows", () => {
     setup({ ...NOTHING_SAVED, mapleAdminKey: "••••••" });
     await using _screen = await render(rows());
 
-    const northflank = page.getByRole("region", { name: "Northflank token" });
-    await userEvent.click(northflank.getByRole("button", { name: "Add" }));
-    await userEvent.fill(northflank.getByLabelText("Northflank API token"), "nf-not-a-real-token");
-    await userEvent.click(northflank.getByRole("button", { name: "Save" }));
+    // Only what is connected is listed; the rest waits under Add integration.
+    await expect
+      .element(connected().getByRole("listitem", { name: "Maple" }))
+      .toHaveTextContent("MapleAdmin key saved");
+    expect(connected().getByRole("listitem").elements()).toHaveLength(1);
+    await add("Northflank");
+    await userEvent.fill(page.getByLabelText("Northflank API token"), "nf-not-a-real-token");
+    await userEvent.click(page.getByRole("button", { name: "Save" }));
     expect(mocks.update).toHaveBeenLastCalledWith({
       sandboxTooling: { northflankToken: "nf-not-a-real-token" },
     });
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
 
-    const maple = page.getByRole("region", { name: "Maple admin key" });
-    await expect.element(maple.getByText("Saved")).toBeVisible();
-    await userEvent.click(maple.getByRole("button", { name: "Remove" }));
+    await actions("Maple");
+    await expect
+      .element(page.getByRole("menuitem", { name: "API keys" }))
+      .toHaveAttribute("href", "https://maple.dev/docs/reference/api/");
+    await userEvent.click(page.getByRole("menuitem", { name: "Remove" }));
     expect(mocks.update).toHaveBeenLastCalledWith({ sandboxTooling: { mapleAdminKey: "" } });
   });
 
@@ -261,8 +304,8 @@ describe("SandboxAccessRows", () => {
     setup(NOTHING_SAVED);
     await using _screen = await render(rows());
 
-    const railway = page.getByRole("region", { name: "Railway token" });
-    await userEvent.click(railway.getByRole("button", { name: "Add" }));
+    await add("Railway");
+    const railway = page.getByRole("dialog", { name: "Connect Railway" });
     await userEvent.fill(railway.getByLabelText("Railway token"), "account-token");
     await userEvent.click(railway.getByRole("button", { name: "Save" }));
     await expect
@@ -278,10 +321,10 @@ describe("SandboxAccessRows", () => {
     expect(mocks.connectRailway).toHaveBeenLastCalledWith(
       expect.objectContaining({ input: { token: "account-token", workspaceId: "ws_2" } }),
     );
-    await expect.element(railway.getByLabelText("Railway token")).not.toBeInTheDocument();
+    await expect.element(page.getByLabelText("Railway token")).not.toBeInTheDocument();
   });
 
-  it("shows the saved Railway workspace and removes the token with it", async () => {
+  it("shows the saved Railway workspace, replaces the token in the same panel, and removes it", async () => {
     setup({
       ...NOTHING_SAVED,
       railwayToken: "••••••",
@@ -289,11 +332,38 @@ describe("SandboxAccessRows", () => {
       railwayWorkspaceName: "Omar's projects",
     });
     await using _screen = await render(rows());
-    const railway = page.getByRole("region", { name: "Railway token" });
-    await expect.element(railway.getByText("Omar's projects")).toBeVisible();
-    await userEvent.click(railway.getByRole("button", { name: "Remove" }));
+    await expect
+      .element(connected().getByRole("listitem", { name: "Railway" }))
+      .toHaveTextContent("RailwayOmar's projects");
+
+    await actions("Railway");
+    await userEvent.click(page.getByRole("menuitem", { name: "Replace…" }));
+    await expect
+      .element(
+        page.getByRole("dialog", { name: "Replace Railway" }).getByLabelText("Railway token"),
+      )
+      .toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Cancel" }));
+
+    await actions("Railway");
+    await userEvent.click(page.getByRole("menuitem", { name: "Remove" }));
     expect(mocks.update).toHaveBeenLastCalledWith({
       sandboxTooling: { railwayToken: "", railwayWorkspaceId: "", railwayWorkspaceName: "" },
     });
+  });
+
+  it("opens the panel for a linked integration that isn't connected, and lands on one that is", async () => {
+    setup({ ...NOTHING_SAVED, mapleAdminKey: "••••••" });
+    {
+      await using _screen = await render(<SettingsPageContainer>{rows()}</SettingsPageContainer>, {
+        router: "/#sandbox-railway",
+      });
+      await expect.element(page.getByRole("dialog", { name: "Connect Railway" })).toBeVisible();
+    }
+    await using _screen = await render(<SettingsPageContainer>{rows()}</SettingsPageContainer>, {
+      router: "/#sandbox-maple",
+    });
+    await vi.waitFor(() => expect(document.activeElement?.id).toBe("sandbox-maple"));
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
   });
 });

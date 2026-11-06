@@ -1,4 +1,12 @@
-import { CheckIcon, ExternalLinkIcon } from "lucide-react";
+import {
+  EllipsisIcon,
+  ExternalLinkIcon,
+  GithubIcon,
+  KeyRoundIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 import {
   isAtomCommandInterrupted,
@@ -11,7 +19,6 @@ import {
   SANDBOX_GITHUB_APP_PASTE_REDIRECT_URL,
   sandboxGithubAppManifest,
   type SandboxRailwayWorkspace,
-  type SandboxToolingSettings,
 } from "@t3tools/contracts";
 
 import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "~/hooks/useSettings";
@@ -21,11 +28,25 @@ import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogDescription,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
 import { Input } from "../ui/input";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { describeSandboxFailure } from "./SandboxStartLimits";
-import { SettingsRow } from "./settingsLayout";
+import { SandboxTailscaleForm } from "./SandboxTailscaleForm";
+import {
+  SettingsRow,
+  useSettingsSearchTarget,
+  useSettingsSearchTargetRequest,
+} from "./settingsLayout";
 
 const STATE_KEY = "t3code:sandbox-github-app-state";
 const GITHUB_NEW_APP = "https://github.com/settings/apps/new";
@@ -124,33 +145,111 @@ const postManifestForm = (state: string) => {
   form.remove();
 };
 
-function DocsLink({ href, children }: { href: string; children: string }) {
+const TAILSCALE_OAUTH_DOCS = "https://tailscale.com/kb/1215/oauth-clients";
+const GITHUB_APP_DOCS =
+  "https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest";
+
+/** Tailscale's mark: a three-by-three grid of dots, the middle row and bottom centre solid. */
+function TailscaleMark() {
+  const dots = [0, 1, 2].flatMap((row) => [0, 1, 2].map((column) => ({ row, column })));
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className="inline-flex items-center gap-0.5 underline-offset-2 hover:underline"
-    >
-      {children}
-      <ExternalLinkIcon aria-hidden className="size-3" />
-    </a>
+    <svg aria-hidden viewBox="0 0 24 24" className="size-4" fill="currentColor">
+      {dots.map(({ row, column }) => (
+        <circle
+          key={`${row}-${column}`}
+          cx={4 + column * 8}
+          cy={4 + row * 8}
+          r={2.9}
+          opacity={row === 1 || (row === 2 && column === 1) ? 1 : 0.25}
+        />
+      ))}
+    </svg>
   );
 }
 
-function GithubAppRow({
-  environmentId,
-  saved,
-}: {
-  readonly environmentId: EnvironmentId;
-  readonly saved: SandboxToolingSettings;
-}) {
-  const updateSettings = useUpdateEnvironmentSettings(environmentId);
+type IntegrationId = "tailscale" | "github" | "northflank" | "maple" | "railway";
+
+const INTEGRATION_IDS: ReadonlyArray<IntegrationId> = [
+  "tailscale",
+  "github",
+  "northflank",
+  "maple",
+  "railway",
+];
+
+/** What the add panel says about each one; the docs link sits in its menu too. */
+const INTEGRATIONS: Record<
+  IntegrationId,
+  {
+    readonly anchor: string;
+    readonly name: string;
+    readonly about: string;
+    readonly docs: { readonly href: string; readonly label: string };
+  }
+> = {
+  tailscale: {
+    anchor: "sandbox-tailscale",
+    name: "Tailscale",
+    about:
+      "Lets a sandbox join your tailnet to reach private endpoints. Each gets a single-use, ephemeral key and leaves the tailnet when deleted.",
+    docs: { href: TAILSCALE_OAUTH_DOCS, label: "OAuth clients" },
+  },
+  github: {
+    anchor: "sandbox-github-app",
+    name: "GitHub App",
+    about:
+      "Gives each sandbox an hour-long token for its own repository, revoked when it's deleted. Create the app once, then install it on the repositories sandboxes may use.",
+    docs: { href: GITHUB_APP_DOCS, label: "How it works" },
+  },
+  northflank: {
+    anchor: "sandbox-northflank",
+    name: "Northflank",
+    about:
+      "Signs the Northflank CLI in on sandboxes that ask for it. Every sandbox shares this token, so make one just for sandboxes, with only the access they need.",
+    docs: { href: NORTHFLANK_TOKEN_DOCS, label: "API tokens" },
+  },
+  maple: {
+    anchor: "sandbox-maple",
+    name: "Maple",
+    about:
+      "Makes a Maple MCP key for each sandbox, revoked when it's deleted. Needs an org admin key with the api_keys:write scope; it never leaves this machine.",
+    docs: { href: MAPLE_KEY_DOCS, label: "API keys" },
+  },
+  railway: {
+    anchor: "sandbox-railway",
+    name: "Railway",
+    about:
+      "Makes a Railway token for each sandbox, revoked when it's deleted. Use a workspace token; it never leaves this machine.",
+    docs: { href: RAILWAY_TOKEN_DOCS, label: "Tokens" },
+  },
+};
+
+function IntegrationIcon({ id }: { readonly id: IntegrationId }) {
+  return (
+    <span
+      aria-hidden
+      className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-foreground"
+    >
+      {id === "tailscale" ? (
+        <TailscaleMark />
+      ) : id === "github" ? (
+        <GithubIcon className="size-4" />
+      ) : (
+        <KeyRoundIcon className="size-3.5 text-muted-foreground" />
+      )}
+    </span>
+  );
+}
+
+/**
+ * Creating the GitHub App, from the manifest form to the code GitHub sends back. It lives with
+ * the list, which is always mounted, so the tab GitHub returns to connects even with no panel open.
+ */
+function useGithubAppConnect(environmentId: EnvironmentId, onConnected: () => void) {
   const connectApp = useAtomCommand(serverEnvironment.sandboxesConnectGithubApp, {
     reportFailure: false,
   });
   const httpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
-  const connected = saved.githubAppId !== "" && saved.githubAppPrivateKey !== "";
   // How GitHub's form was opened, while the app isn't connected yet.
   const [waiting, setWaiting] = useState<"post" | "external" | null>(null);
   const [pasted, setPasted] = useState("");
@@ -180,6 +279,7 @@ function GithubAppRow({
     writeState(null);
     setWaiting(null);
     setPasted("");
+    onConnected();
   };
 
   // GitHub sends the new tab back here with the code; it connects once.
@@ -211,206 +311,137 @@ function GithubAppRow({
       ?.shell.openExternal(launch.url)
       .catch(() => setProblem("Could not open your browser. Try again."));
   };
-  const pastedCode = githubAppCodeFrom(pasted);
 
+  const reset = () => {
+    setWaiting(null);
+    setPasted("");
+    setProblem(null);
+  };
+
+  return {
+    waiting,
+    pasted,
+    setPasted,
+    connecting,
+    problem,
+    connect,
+    startCreate,
+    reset,
+  };
+}
+
+type GithubAppConnect = ReturnType<typeof useGithubAppConnect>;
+
+function GithubAppForm({
+  flow,
+  onCancel,
+}: {
+  readonly flow: GithubAppConnect;
+  readonly onCancel: () => void;
+}) {
+  const pastedCode = githubAppCodeFrom(flow.pasted);
   return (
-    <SettingsRow
-      id="sandbox-github-app"
-      title="GitHub App"
-      description={
-        <>
-          Gives each sandbox an hour-long GitHub token for its own repository, revoked when the
-          sandbox is deleted. Create the app once, then install it on the repositories sandboxes may
-          use.{" "}
-          <DocsLink href="https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest">
-            How it works
-          </DocsLink>
-        </>
-      }
-      serverScoped
-      settingKeys={["sandboxTooling"]}
-      control={
-        connecting ? (
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Spinner className="size-3" />
-            Connecting…
-          </span>
-        ) : connected ? (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <CheckIcon aria-hidden className="size-3.5 text-success" />
-            <span className="truncate">{saved.githubAppSlug}</span>
-            <span aria-hidden>·</span>
-            <Button
-              variant="link"
-              size="xs"
-              render={
-                <a href={installUrlOf(saved.githubAppSlug)} target="_blank" rel="noreferrer" />
-              }
-            >
-              Install on repositories
-            </Button>
-            <span aria-hidden>·</span>
-            <Button
-              variant="link"
-              size="xs"
-              onClick={() =>
-                updateSettings({
-                  sandboxTooling: {
-                    githubAppId: "",
-                    githubAppSlug: "",
-                    githubAppOwner: "",
-                    githubAppPrivateKey: "",
-                  },
-                })
-              }
-            >
-              Remove
-            </Button>
-          </div>
-        ) : (
-          <Button size="xs" variant="outline" onClick={startCreate}>
+    <div className="space-y-3">
+      {flow.connecting ? (
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Spinner className="size-3" />
+          Connecting…
+        </p>
+      ) : flow.waiting === null ? (
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={flow.startCreate}>
+            <GithubIcon />
             Create the app
           </Button>
-        )
-      }
-    >
-      {waiting !== null && !connected ? (
+        </div>
+      ) : (
         <form
-          className="space-y-2 pt-2 pb-2"
+          className="space-y-2"
           onSubmit={(event) => {
             event.preventDefault();
-            if (pastedCode !== null) void connect(pastedCode.code);
+            if (pastedCode !== null) void flow.connect(pastedCode.code);
           }}
         >
           <p className="text-xs text-muted-foreground">
-            {waiting === "post"
+            {flow.waiting === "post"
               ? "On GitHub, choose Create GitHub App. The new tab comes back here and connects the app. If that tab can't load, paste its address below."
               : "On GitHub, in your browser, choose Create GitHub App. GitHub then opens a page that won't load: copy its address and paste it below."}
           </p>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              aria-label="Address GitHub opened"
-              placeholder="Address GitHub opened, with ?code=…"
-              value={pasted}
-              onChange={(event) => setPasted(event.target.value)}
-              spellCheck={false}
-              autoComplete="off"
-              disabled={connecting}
-            />
-            <div className="flex shrink-0 justify-end gap-2">
-              <Button
-                type="button"
-                size="xs"
-                variant="ghost"
-                disabled={connecting}
-                onClick={() => setWaiting(null)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                size="xs"
-                variant="outline"
-                disabled={connecting || pastedCode === null}
-              >
-                Connect
-              </Button>
-            </div>
-          </div>
-        </form>
-      ) : null}
-      {problem === null ? null : (
-        <p role="alert" className="pb-2 text-xs text-destructive-foreground">
-          {problem}
-        </p>
-      )}
-    </SettingsRow>
-  );
-}
-
-function TokenRow({
-  environmentId,
-  id,
-  title,
-  description,
-  field,
-  saved,
-  inputLabel,
-  placeholder,
-}: {
-  readonly environmentId: EnvironmentId;
-  readonly id: string;
-  readonly title: string;
-  readonly description: ReactNode;
-  readonly field: "northflankToken" | "mapleAdminKey";
-  readonly saved: boolean;
-  readonly inputLabel: string;
-  readonly placeholder: string;
-}) {
-  const updateSettings = useUpdateEnvironmentSettings(environmentId);
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState("");
-  const persist = (next: string) => {
-    updateSettings({ sandboxTooling: { [field]: next } });
-    setEditing(false);
-    setValue("");
-  };
-  return (
-    <SettingsRow
-      id={id}
-      title={title}
-      description={description}
-      serverScoped
-      settingKeys={["sandboxTooling"]}
-      control={
-        editing ? null : saved ? (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <CheckIcon aria-hidden className="size-3.5 text-success" />
-            <span>Saved</span>
-            <span aria-hidden>·</span>
-            <Button variant="link" size="xs" onClick={() => setEditing(true)}>
-              Replace
-            </Button>
-            <span aria-hidden>·</span>
-            <Button variant="link" size="xs" onClick={() => persist("")}>
-              Remove
-            </Button>
-          </div>
-        ) : (
-          <Button size="xs" variant="outline" onClick={() => setEditing(true)}>
-            Add
-          </Button>
-        )
-      }
-    >
-      {editing ? (
-        <form
-          className="flex flex-col gap-2 pt-2 pb-2 sm:flex-row"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (value.trim() !== "") persist(value.trim());
-          }}
-        >
           <Input
-            aria-label={inputLabel}
-            type="password"
-            placeholder={placeholder}
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
+            aria-label="Address GitHub opened"
+            placeholder="Address GitHub opened, with ?code=…"
+            value={flow.pasted}
+            onChange={(event) => flow.setPasted(event.target.value)}
             spellCheck={false}
             autoComplete="off"
           />
-          <div className="flex shrink-0 justify-end gap-2">
-            <Button type="button" size="xs" variant="ghost" onClick={() => setEditing(false)}>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={onCancel}>
               Cancel
             </Button>
-            <Button type="submit" size="xs" variant="outline" disabled={value.trim() === ""}>
-              Save
+            <Button type="submit" disabled={pastedCode === null}>
+              Connect
             </Button>
           </div>
         </form>
-      ) : null}
-    </SettingsRow>
+      )}
+      {flow.problem === null ? null : (
+        <p role="alert" className="text-xs text-destructive-foreground">
+          {flow.problem}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TokenForm({
+  environmentId,
+  field,
+  inputLabel,
+  placeholder,
+  onDone,
+  onCancel,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly field: "northflankToken" | "mapleAdminKey";
+  readonly inputLabel: string;
+  readonly placeholder: string;
+  readonly onDone: () => void;
+  readonly onCancel: () => void;
+}) {
+  const updateSettings = useUpdateEnvironmentSettings(environmentId);
+  const [value, setValue] = useState("");
+  return (
+    <form
+      className="space-y-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (value.trim() === "") return;
+        updateSettings({ sandboxTooling: { [field]: value.trim() } });
+        onDone();
+      }}
+    >
+      <Input
+        aria-label={inputLabel}
+        type="password"
+        placeholder={placeholder}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        spellCheck={false}
+        autoComplete="off"
+      />
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={value.trim() === ""}>
+          Save
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -418,18 +449,18 @@ function TokenRow({
  * The Railway token sandboxes get theirs from. The server checks it with Railway before saving,
  * and asks for the workspace only when the token reaches more than one, or can't say which.
  */
-function RailwayRow({
+function RailwayForm({
   environmentId,
-  saved,
+  onDone,
+  onCancel,
 }: {
   readonly environmentId: EnvironmentId;
-  readonly saved: SandboxToolingSettings;
+  readonly onDone: () => void;
+  readonly onCancel: () => void;
 }) {
-  const updateSettings = useUpdateEnvironmentSettings(environmentId);
   const connectRailway = useAtomCommand(serverEnvironment.sandboxesConnectRailway, {
     reportFailure: false,
   });
-  const [editing, setEditing] = useState(false);
   const [token, setToken] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
   const [choices, setChoices] = useState<ReadonlyArray<SandboxRailwayWorkspace>>([]);
@@ -437,16 +468,6 @@ function RailwayRow({
   const [askId, setAskId] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const connected = saved.railwayToken !== "" && saved.railwayWorkspaceId !== "";
-
-  const close = () => {
-    setEditing(false);
-    setToken("");
-    setWorkspaceId("");
-    setChoices([]);
-    setAskId(false);
-    setProblem(null);
-  };
 
   const connect = async () => {
     setConnecting(true);
@@ -469,7 +490,7 @@ function RailwayRow({
       return;
     }
     if (result.value.saved !== undefined) {
-      close();
+      onDone();
       return;
     }
     setChoices(result.value.workspaces);
@@ -480,173 +501,337 @@ function RailwayRow({
   const choiceName = choices.find((choice) => choice.id === workspaceId)?.name;
 
   return (
-    <SettingsRow
-      id="sandbox-railway"
-      title="Railway token"
-      description={
-        <>
-          Makes a Railway token for each sandbox that signs Railway in, revoked when the sandbox is
-          deleted. Use a workspace token; it never leaves this machine.{" "}
-          <DocsLink href={RAILWAY_TOKEN_DOCS}>Tokens</DocsLink>
-        </>
-      }
-      serverScoped
-      settingKeys={["sandboxTooling"]}
-      control={
-        editing ? null : connected ? (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <CheckIcon aria-hidden className="size-3.5 text-success" />
-            <span className="truncate">{saved.railwayWorkspaceName || "Saved"}</span>
-            <span aria-hidden>·</span>
-            <Button variant="link" size="xs" onClick={() => setEditing(true)}>
-              Replace
-            </Button>
-            <span aria-hidden>·</span>
-            <Button
-              variant="link"
-              size="xs"
-              onClick={() =>
-                updateSettings({
-                  sandboxTooling: {
-                    railwayToken: "",
-                    railwayWorkspaceId: "",
-                    railwayWorkspaceName: "",
-                  },
-                })
-              }
-            >
-              Remove
-            </Button>
-          </div>
-        ) : (
-          <Button size="xs" variant="outline" onClick={() => setEditing(true)}>
-            Add
-          </Button>
-        )
-      }
+    <form
+      className="space-y-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (token.trim() !== "") void connect();
+      }}
     >
-      {editing ? (
-        <form
-          className="space-y-2 pt-2 pb-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (token.trim() !== "") void connect();
+      <Input
+        aria-label="Railway token"
+        type="password"
+        placeholder="Railway workspace token"
+        value={token}
+        onChange={(event) => {
+          setToken(event.target.value);
+          setChoices([]);
+          setAskId(false);
+        }}
+        spellCheck={false}
+        autoComplete="off"
+        disabled={connecting}
+      />
+      {choices.length > 1 ? (
+        <Select
+          value={workspaceId}
+          disabled={connecting}
+          onValueChange={(value) => {
+            if (value !== null) setWorkspaceId(value);
           }}
         >
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              aria-label="Railway token"
-              type="password"
-              placeholder="Railway workspace token"
-              value={token}
-              onChange={(event) => {
-                setToken(event.target.value);
-                setChoices([]);
-                setAskId(false);
-              }}
-              spellCheck={false}
-              autoComplete="off"
-              disabled={connecting}
-            />
-            {choices.length > 1 ? (
-              <Select
-                value={workspaceId}
-                disabled={connecting}
-                onValueChange={(value) => {
-                  if (value !== null) setWorkspaceId(value);
-                }}
-              >
-                <SelectTrigger aria-label="Railway workspace">
-                  <SelectValue>{choiceName ?? "Pick a workspace"}</SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  {choices.map((choice) => (
-                    <SelectItem key={choice.id} value={choice.id}>
-                      {choice.name}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            ) : askId ? (
-              <Input
-                aria-label="Railway workspace ID"
-                placeholder="Workspace ID"
-                value={workspaceId}
-                onChange={(event) => setWorkspaceId(event.target.value)}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={connecting}
-              />
-            ) : null}
-            <div className="flex shrink-0 items-center justify-end gap-2">
-              {connecting ? <Spinner className="size-3" /> : null}
-              <Button type="button" size="xs" variant="ghost" disabled={connecting} onClick={close}>
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                size="xs"
-                variant="outline"
-                disabled={
-                  connecting ||
-                  token.trim() === "" ||
-                  (choices.length > 1 && choiceName === undefined)
-                }
-              >
-                Save
-              </Button>
-            </div>
-          </div>
-          {problem === null ? null : (
-            <p role="alert" className="text-xs text-destructive-foreground">
-              {problem}
-            </p>
-          )}
-        </form>
+          <SelectTrigger aria-label="Railway workspace">
+            <SelectValue>{choiceName ?? "Pick a workspace"}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            {choices.map((choice) => (
+              <SelectItem key={choice.id} value={choice.id}>
+                {choice.name}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      ) : askId ? (
+        <Input
+          aria-label="Railway workspace ID"
+          placeholder="Workspace ID"
+          value={workspaceId}
+          onChange={(event) => setWorkspaceId(event.target.value)}
+          spellCheck={false}
+          autoComplete="off"
+          disabled={connecting}
+        />
       ) : null}
-    </SettingsRow>
+      {problem === null ? null : (
+        <p role="alert" className="text-xs text-destructive-foreground">
+          {problem}
+        </p>
+      )}
+      <div className="flex items-center justify-end gap-2">
+        {connecting ? <Spinner className="size-3.5" /> : null}
+        <Button type="button" variant="ghost" disabled={connecting} onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          disabled={
+            connecting || token.trim() === "" || (choices.length > 1 && choiceName === undefined)
+          }
+        >
+          Save
+        </Button>
+      </div>
+    </form>
   );
 }
 
-/** Where sandboxes get GitHub, Northflank, Maple and Railway credentials. Secrets arrive redacted. */
-export function SandboxAccessRows({ environmentId }: { readonly environmentId: EnvironmentId }) {
-  const saved = useEnvironmentSettings(environmentId, (settings) => settings.sandboxTooling);
+function IntegrationRow({
+  id,
+  status,
+  extraItems,
+  onReplace,
+  onRemove,
+}: {
+  readonly id: IntegrationId;
+  readonly status: string;
+  readonly extraItems?: ReactNode;
+  readonly onReplace: () => void;
+  readonly onRemove: () => void;
+}) {
+  const { anchor, name, docs } = INTEGRATIONS[id];
+  const targetRef = useSettingsSearchTarget<HTMLLIElement>(anchor);
   return (
-    <>
-      <GithubAppRow environmentId={environmentId} saved={saved} />
-      <TokenRow
-        environmentId={environmentId}
-        id="sandbox-northflank"
-        title="Northflank token"
-        description={
-          <>
-            Signs the Northflank CLI in on sandboxes that ask for it. Northflank can't make a token
-            per sandbox, so every sandbox shares this one: create a token just for sandboxes, with
-            only the access they need. <DocsLink href={NORTHFLANK_TOKEN_DOCS}>API tokens</DocsLink>
-          </>
-        }
-        field="northflankToken"
-        saved={saved.northflankToken !== ""}
-        inputLabel="Northflank API token"
-        placeholder="Northflank API token"
-      />
-      <TokenRow
-        environmentId={environmentId}
-        id="sandbox-maple"
-        title="Maple admin key"
-        description={
-          <>
-            Makes a Maple MCP key for each sandbox that copies your Maple server, revoked when the
-            sandbox is deleted. Needs an org admin key with the api_keys:write scope; it never
-            leaves this machine. <DocsLink href={MAPLE_KEY_DOCS}>API keys</DocsLink>
-          </>
-        }
-        field="mapleAdminKey"
-        saved={saved.mapleAdminKey !== ""}
-        inputLabel="Maple admin key"
-        placeholder="Maple admin API key"
-      />
-      <RailwayRow environmentId={environmentId} saved={saved} />
-    </>
+    <li
+      id={anchor}
+      ref={targetRef}
+      tabIndex={-1}
+      aria-label={name}
+      className="flex min-h-11 items-center gap-3 px-3 py-1.5 outline-none"
+    >
+      <IntegrationIcon id={id} />
+      <span className="flex min-w-0 flex-1 items-baseline gap-2">
+        <span className="shrink-0 text-sm font-medium text-foreground">{name}</span>
+        <span className="min-w-0 truncate text-xs text-muted-foreground">{status}</span>
+      </span>
+      <Menu>
+        <MenuTrigger
+          render={
+            <Button
+              type="button"
+              variant="ghost-muted"
+              size="icon-xs"
+              aria-label={`More actions for ${name}`}
+            />
+          }
+        >
+          <EllipsisIcon className="size-3.5" />
+        </MenuTrigger>
+        <MenuPopup align="end">
+          {extraItems}
+          <MenuItem onClick={onReplace}>
+            <RefreshCwIcon />
+            Replace…
+          </MenuItem>
+          <MenuItem render={<a href={docs.href} target="_blank" rel="noreferrer" />}>
+            <ExternalLinkIcon />
+            {docs.label}
+          </MenuItem>
+          <MenuSeparator />
+          <MenuItem variant="destructive" onClick={onRemove}>
+            <Trash2Icon />
+            Remove
+          </MenuItem>
+        </MenuPopup>
+      </Menu>
+    </li>
+  );
+}
+
+type Panel = { readonly id: IntegrationId; readonly replacing: boolean };
+
+/**
+ * The credentials sandboxes get from this server: one line per connected integration, and an
+ * Add menu for the rest. Secrets arrive redacted, so a non-empty value only says one is saved.
+ */
+export function SandboxAccessRows({ environmentId }: { readonly environmentId: EnvironmentId }) {
+  const tooling = useEnvironmentSettings(environmentId, (settings) => settings.sandboxTooling);
+  const tailscale = useEnvironmentSettings(environmentId, (settings) => settings.sandboxTailscale);
+  const updateSettings = useUpdateEnvironmentSettings(environmentId);
+  const connected: Record<IntegrationId, boolean> = {
+    tailscale: tailscale.clientId !== "" && tailscale.clientSecret !== "",
+    github: tooling.githubAppId !== "" && tooling.githubAppPrivateKey !== "",
+    northflank: tooling.northflankToken !== "",
+    maple: tooling.mapleAdminKey !== "",
+    railway: tooling.railwayToken !== "" && tooling.railwayWorkspaceId !== "",
+  };
+  // The tab GitHub sends back opens on the GitHub panel, so its progress or problem shows.
+  const [panel, setPanel] = useState<Panel | null>(() =>
+    takeGithubRedirect() === null ? null : { id: "github", replacing: false },
+  );
+  const github = useGithubAppConnect(environmentId, () => setPanel(null));
+  const open = (id: IntegrationId) => {
+    if (id === "github") github.reset();
+    setPanel({ id, replacing: connected[id] });
+  };
+
+  // A link to an integration that isn't connected has no row to land on, so it opens its panel.
+  const { targetId, onTargetHandled } = useSettingsSearchTargetRequest();
+  const requested = INTEGRATION_IDS.find(
+    (id) => INTEGRATIONS[id].anchor === targetId && !connected[id],
+  );
+  const [answered, setAnswered] = useState<IntegrationId | null>(null);
+  if ((requested ?? null) !== answered) {
+    setAnswered(requested ?? null);
+    if (requested !== undefined) open(requested);
+  }
+  const clearTarget = useEffectEvent(() => onTargetHandled());
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the router address's settings target once its panel opened
+  useEffect(() => {
+    if (requested !== undefined) clearTarget();
+  }, [requested]);
+
+  const close = () => setPanel(null);
+  const status: Record<IntegrationId, string> = {
+    tailscale: tailscale.tag,
+    github: tooling.githubAppSlug,
+    northflank: "Token saved",
+    maple: "Admin key saved",
+    railway: tooling.railwayWorkspaceName || "Token saved",
+  };
+  const remove: Record<IntegrationId, () => void> = {
+    tailscale: () =>
+      updateSettings({ sandboxTailscale: { clientId: "", clientSecret: "", tag: "" } }),
+    github: () =>
+      updateSettings({
+        sandboxTooling: {
+          githubAppId: "",
+          githubAppSlug: "",
+          githubAppOwner: "",
+          githubAppPrivateKey: "",
+        },
+      }),
+    northflank: () => updateSettings({ sandboxTooling: { northflankToken: "" } }),
+    maple: () => updateSettings({ sandboxTooling: { mapleAdminKey: "" } }),
+    railway: () =>
+      updateSettings({
+        sandboxTooling: { railwayToken: "", railwayWorkspaceId: "", railwayWorkspaceName: "" },
+      }),
+  };
+  const listed = INTEGRATION_IDS.filter((id) => connected[id]);
+  const addable = INTEGRATION_IDS.filter((id) => !connected[id]);
+  const shown = panel === null ? null : INTEGRATIONS[panel.id];
+
+  return (
+    <SettingsRow
+      id="sandbox-integrations"
+      title="Integrations"
+      serverScoped
+      settingKeys={["sandboxTooling", "sandboxTailscale"]}
+      control={
+        addable.length === 0 ? null : (
+          <Menu>
+            <MenuTrigger render={<Button size="xs" variant="outline" />}>
+              <PlusIcon className="size-3" />
+              Add integration
+            </MenuTrigger>
+            <MenuPopup align="end">
+              {addable.map((id) => (
+                <MenuItem key={id} onClick={() => open(id)}>
+                  <IntegrationIcon id={id} />
+                  {INTEGRATIONS[id].name}
+                </MenuItem>
+              ))}
+            </MenuPopup>
+          </Menu>
+        )
+      }
+    >
+      <div className="pb-3 pt-1">
+        {listed.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            None connected. Sandboxes get no credentials from this machine until you add one.
+          </p>
+        ) : (
+          <ul
+            aria-label="Connected integrations"
+            className="divide-y divide-border/50 rounded-lg border border-border/60"
+          >
+            {listed.map((id) => (
+              <IntegrationRow
+                key={id}
+                id={id}
+                status={status[id]}
+                onReplace={() => open(id)}
+                onRemove={remove[id]}
+                {...(id === "github"
+                  ? {
+                      extraItems: (
+                        <MenuItem
+                          render={
+                            <a
+                              href={installUrlOf(tooling.githubAppSlug)}
+                              target="_blank"
+                              rel="noreferrer"
+                            />
+                          }
+                        >
+                          <GithubIcon />
+                          Install on repositories
+                        </MenuItem>
+                      ),
+                    }
+                  : {})}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+      <Dialog
+        open={panel !== null}
+        onOpenChange={(next) => {
+          if (!next) close();
+        }}
+      >
+        <DialogPopup className="sm:max-w-lg">
+          {panel === null || shown === null ? null : (
+            <>
+              <DialogHeader>
+                <DialogTitle>
+                  {panel.replacing ? `Replace ${shown.name}` : `Connect ${shown.name}`}
+                </DialogTitle>
+                <DialogDescription>
+                  {shown.about}{" "}
+                  <a
+                    href={shown.docs.href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-0.5 underline-offset-2 hover:underline"
+                  >
+                    {shown.docs.label}
+                    <ExternalLinkIcon aria-hidden className="size-3" />
+                  </a>
+                </DialogDescription>
+              </DialogHeader>
+              <DialogPanel>
+                {panel.id === "tailscale" ? (
+                  <SandboxTailscaleForm
+                    environmentId={environmentId}
+                    onDone={close}
+                    onCancel={close}
+                  />
+                ) : panel.id === "github" ? (
+                  <GithubAppForm flow={github} onCancel={close} />
+                ) : panel.id === "railway" ? (
+                  <RailwayForm environmentId={environmentId} onDone={close} onCancel={close} />
+                ) : (
+                  <TokenForm
+                    environmentId={environmentId}
+                    field={panel.id === "northflank" ? "northflankToken" : "mapleAdminKey"}
+                    inputLabel={
+                      panel.id === "northflank" ? "Northflank API token" : "Maple admin key"
+                    }
+                    placeholder={
+                      panel.id === "northflank" ? "Northflank API token" : "Maple admin API key"
+                    }
+                    onDone={close}
+                    onCancel={close}
+                  />
+                )}
+              </DialogPanel>
+            </>
+          )}
+        </DialogPopup>
+      </Dialog>
+    </SettingsRow>
   );
 }

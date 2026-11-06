@@ -45,7 +45,6 @@ import {
 } from "./SandboxStartLimits";
 import { SandboxConfigDialog } from "./SandboxConfigDialog";
 import { SandboxAccessRows } from "./SandboxAccessRows";
-import { SandboxTailscaleRow } from "./SandboxTailscaleRow";
 import { SandboxProviderLogo } from "./SandboxProviderLogo";
 import { SandboxTemplateList, SaveSandboxTemplateDialog } from "./SandboxTemplates";
 import { Button } from "../ui/button";
@@ -247,7 +246,6 @@ export function SandboxManagementSection() {
         </Button>
       }
     >
-      <SandboxTailscaleRow environmentId={provisionerEnvironmentId} />
       <SandboxAccessRows environmentId={provisionerEnvironmentId} />
       {list.error ? (
         <p className="px-3 py-3 text-xs text-destructive sm:px-4">{list.error}</p>

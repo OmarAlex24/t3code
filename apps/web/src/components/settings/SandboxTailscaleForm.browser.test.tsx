@@ -1,6 +1,5 @@
 import { AsyncResult } from "effect/reactivity";
 import { EnvironmentId } from "@t3tools/contracts";
-import type { ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -23,16 +22,6 @@ vi.mock(import("~/hooks/useSettings"), async (original) => ({
   ...(await original()),
   useEnvironmentSettings: (() => mocks.saved) as never,
   useUpdateEnvironmentSettings: (() => mocks.update) as never,
-}));
-// The row's chrome reads app-wide scope; its control and form are what is under test.
-vi.mock(import("./settingsLayout"), async (original) => ({
-  ...(await original()),
-  SettingsRow: (({ control, children }: { control: ReactNode; children: ReactNode }) => (
-    <div>
-      {control}
-      {children}
-    </div>
-  )) as never,
 }));
 vi.mock(import("~/state/server"), async (original) => {
   const actual = await original();
@@ -70,22 +59,25 @@ vi.mock(import("~/state/query"), async (original) => ({
   })) as never,
 }));
 
-import { SandboxTailscaleRow } from "./SandboxTailscaleRow";
+import { SandboxTailscaleForm } from "./SandboxTailscaleForm";
 
 const SECRET = "tskey-client-kABC-not-a-real-secret";
 const NOTHING_SAVED = { clientId: "", clientSecret: "", tag: "tag:t3-sandbox" };
 const SAVED = { clientId: "kABC", clientSecret: "••••••", tag: "tag:t3-sandbox" };
 
-const row = () => (
-  <SandboxTailscaleRow environmentId={EnvironmentId.make("11111111-1111-4111-8111-111111111111")} />
+const form = (onDone: () => void = () => {}) => (
+  <SandboxTailscaleForm
+    environmentId={EnvironmentId.make("11111111-1111-4111-8111-111111111111")}
+    onDone={onDone}
+    onCancel={() => {}}
+  />
 );
 
-describe("SandboxTailscaleRow", () => {
+describe("SandboxTailscaleForm", () => {
   it("walks through the tag, the OAuth client and the secret when nothing is saved", async () => {
     mocks.saved = NOTHING_SAVED;
-    await using _screen = await render(row());
+    await using _screen = await render(form());
 
-    await userEvent.click(page.getByRole("button", { name: "Set up" }));
     await expect.element(page.getByText("Add the tag and an access rule")).toBeVisible();
     // The rule lets sandboxes reach the Claude endpoint at its tailnet address, and nothing else.
     await expect
@@ -104,9 +96,8 @@ describe("SandboxTailscaleRow", () => {
 
   it("keeps the steps folded when replacing a saved client", async () => {
     mocks.saved = SAVED;
-    await using _screen = await render(row());
+    await using _screen = await render(form());
 
-    await userEvent.click(page.getByRole("button", { name: "Replace" }));
     await expect.element(page.getByLabelText("Tailscale OAuth client secret")).toBeVisible();
     await expect.element(page.getByText("Add the tag and an access rule")).not.toBeInTheDocument();
     await userEvent.click(page.getByRole("button", { name: "Setup steps" }));
@@ -123,9 +114,8 @@ describe("SandboxTailscaleRow", () => {
         problem: "Tailscale won't give this client tag:t3-sandbox. Add the tag to tagOwners.",
       }),
     );
-    await using _screen = await render(row());
+    await using _screen = await render(form());
 
-    await userEvent.click(page.getByRole("button", { name: "Replace" }));
     await userEvent.fill(page.getByLabelText("Tailscale OAuth client secret"), SECRET);
     await userEvent.click(page.getByRole("button", { name: "Save" }));
 
@@ -142,9 +132,9 @@ describe("SandboxTailscaleRow", () => {
     mocks.saved = NOTHING_SAVED;
     mocks.check.mockClear();
     mocks.update.mockClear();
-    await using _screen = await render(row());
+    const onDone = vi.fn();
+    await using _screen = await render(form(onDone));
 
-    await userEvent.click(page.getByRole("button", { name: "Set up" }));
     await userEvent.fill(page.getByLabelText("Tailscale OAuth client secret"), SECRET);
     await expect.element(page.getByText(/Client ID kABC, read from the secret/u)).toBeVisible();
     await userEvent.click(page.getByRole("button", { name: "Save" }));
@@ -155,6 +145,7 @@ describe("SandboxTailscaleRow", () => {
     expect(mocks.update).toHaveBeenCalledWith({
       sandboxTailscale: { clientId: "kABC", clientSecret: SECRET, tag: "tag:t3-sandbox" },
     });
+    expect(onDone).toHaveBeenCalledOnce();
   });
 
   it("keeps the form open with the reason when the client lacks a scope", async () => {
@@ -167,9 +158,8 @@ describe("SandboxTailscaleRow", () => {
         problem: "This OAuth client is missing the devices:core scope.",
       }),
     );
-    await using _screen = await render(row());
+    await using _screen = await render(form());
 
-    await userEvent.click(page.getByRole("button", { name: "Set up" }));
     await userEvent.fill(page.getByLabelText("Tailscale OAuth client secret"), SECRET);
     await userEvent.click(page.getByRole("button", { name: "Save" }));
 
@@ -182,9 +172,8 @@ describe("SandboxTailscaleRow", () => {
   it("takes a separate client ID under Advanced for a secret of another form", async () => {
     mocks.saved = NOTHING_SAVED;
     mocks.check.mockClear();
-    await using _screen = await render(row());
+    await using _screen = await render(form());
 
-    await userEvent.click(page.getByRole("button", { name: "Set up" }));
     await userEvent.fill(page.getByLabelText("Tailscale OAuth client secret"), "other-secret");
     await expect.element(page.getByRole("button", { name: "Save" })).toBeDisabled();
     await userEvent.click(page.getByRole("button", { name: "Advanced" }));
