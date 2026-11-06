@@ -241,7 +241,7 @@ creates nothing.
 
 `sandboxes.launch` takes a config, a thread id, and the host's project, and refuses a project the
 config does not allow or one without a github.com remote. A thread has one machine: a launch for a
-thread whose record is not `deleted` or `expired` returns that record's instance id and creates
+thread whose record is not `deleted` returns that record's instance id and creates
 nothing, since a client that lost its handoff sends again. An abandoned launch's machine is the
 exception, and it is deleted first; when that delete fails the launch fails, so the old machine
 never bills beside a new one. The launch runs in a fiber forked into
