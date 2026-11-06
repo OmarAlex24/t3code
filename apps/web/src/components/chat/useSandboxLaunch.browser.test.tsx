@@ -32,6 +32,8 @@ const mocks = vi.hoisted(() => {
     // What the hook asked the sandbox to list before it sends there.
     piReadyFor: null as unknown,
     piReady: false,
+    // The host's sandbox records, as `sandboxes.list` returns them.
+    records: [] as Array<unknown>,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -121,9 +123,14 @@ vi.mock(import("~/state/sandboxes"), async (original) => ({
   ...(await original()),
   useSandboxProvisionerEnvironmentId: (() => EnvironmentId.make(HOST_ENV)) as never,
   useSandboxThreadEnvironmentIds: (() => new Map()) as never,
-  useSandboxBridgeReady: (() => {
+  useSandboxRecords: (() => {
     useVersion();
-    return mocks.state.bridgeReady;
+    return mocks.state.records;
+  }) as never,
+  // Like the real hook, nothing is ready on no environment.
+  useSandboxBridgeReady: ((environmentId: unknown) => {
+    useVersion();
+    return environmentId !== null && mocks.state.bridgeReady;
   }) as never,
   useProviderInstanceReady: ((...args: Array<unknown>) => {
     useVersion();
@@ -216,6 +223,25 @@ const launchSnapshot = (overrides: Partial<SandboxSetupSnapshot> = {}): SandboxS
   ...overrides,
 });
 
+// The host's record of the harness thread's sandbox once its launch ended.
+const sandboxRecord = {
+  instanceId: "instance-1",
+  environmentId: SANDBOX_ENV,
+  configId: "config-1",
+  threadId,
+  provider: "boat",
+  sandboxId: "bx_handoff",
+  label: "web on Boat small",
+  size: "small",
+  state: "running",
+  createdAt: "2026-11-05T18:36:53.000Z",
+  updatedAt: "2026-11-05T18:40:00.000Z",
+  httpBaseUrl: "https://bx.example.test",
+  runningSince: "2026-11-05T18:36:53.000Z",
+  maxRunningMinutes: 480,
+  sandboxProjectId: "project-sandbox",
+};
+
 const linked = {
   instanceId: "sandboxes",
   hostProjectId: ProjectId.make("project-host"),
@@ -245,6 +271,7 @@ function setup() {
     mocks.state.piStartModel = undefined;
     mocks.state.piReadyFor = null;
     mocks.state.piReady = false;
+    mocks.state.records = [];
     for (const mock of [
       mocks.launch,
       mocks.cancelLaunch,
@@ -267,7 +294,16 @@ function setup() {
       }),
     );
     mocks.connectPairing.mockResolvedValue(AsyncResult.success(undefined));
-    mocks.completeLaunch.mockResolvedValue(AsyncResult.success(undefined));
+    // The host ends the launch before it answers, so its card turns done.
+    mocks.completeLaunch.mockImplementation(async () => {
+      mocks.state.snapshot = launchSnapshot({
+        phase: "done",
+        endedAt: "2026-11-05T18:40:00.000Z",
+        sequence: 50,
+      });
+      mocks.state.bump();
+      return AsyncResult.success(undefined);
+    });
     useComposerDraftStore
       .getState()
       .setProjectDraftThreadId(
@@ -388,6 +424,51 @@ describe("useSandboxLaunch handoff", () => {
     // The message the user sent before leaving goes out on the sandbox's thread.
     await vi.waitFor(() => expect(onHandedOff).toHaveBeenCalledOnce());
     expect(draftProjectRef()).toEqual({ environmentId: SANDBOX_ENV, projectId: "project-sandbox" });
+  });
+
+  it("finishes a lost handoff on the thread's sandbox instead of launching another", async () => {
+    setup();
+    mocks.linkHostThread.mockResolvedValue(AsyncResult.success(linked));
+    {
+      await using _first = await render(<Harness />);
+      await launchToHandoff();
+      await vi.waitFor(() => expect(mocks.linkHostThread).toHaveBeenCalledOnce());
+      // The user leaves while the host still probes the Sandboxes provider for the phone.
+    }
+    expect(onHandedOff).not.toHaveBeenCalled();
+    // The host dropped the finished launch; its record is all that says where the thread runs.
+    // A reload also forgets the config the draft was started on.
+    mocks.state.snapshot = null;
+    mocks.state.records = [sandboxRecord];
+    useSandboxComposerStore.getState().select(draftId, null);
+
+    await using _second = await render(<Harness />);
+    await vi.waitFor(() => expect(mocks.linkHostThread).toHaveBeenCalledTimes(2));
+    // A send while it links waits for the sandbox rather than starting a second one.
+    await userEvent.click(page.getByRole("button", { name: "Send" }));
+    expect(onHandedOff).not.toHaveBeenCalled();
+    mocks.state.bridgeReady = true;
+    mocks.state.bump();
+    await vi.waitFor(() => expect(onHandedOff).toHaveBeenCalledOnce());
+    expect(draftProjectRef()).toEqual({ environmentId: SANDBOX_ENV, projectId: "project-sandbox" });
+    expect(mocks.launch).toHaveBeenCalledOnce();
+    expect(mocks.completeLaunch).toHaveBeenCalledOnce();
+    expect(mocks.pairLaunch).toHaveBeenCalledOnce();
+  });
+
+  it("holds a send for a thread whose sandbox is stopped instead of launching another", async () => {
+    setup();
+    mocks.state.records = [{ ...sandboxRecord, state: "stopped", runningSince: null }];
+    const toast = vi.spyOn(toastManager, "add");
+    await using _screen = await render(<Harness />);
+
+    await userEvent.click(page.getByRole("button", { name: "Send" }));
+    expect(mocks.launch).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "This thread's sandbox is stopped" }),
+    );
+    expect(draftProjectRef()).toEqual({ environmentId: HOST_ENV, projectId: sourceProject.id });
+    toast.mockRestore();
   });
 
   it("follows a launch already starting when the user sends again", async () => {
