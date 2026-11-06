@@ -1,11 +1,18 @@
 import { AsyncResult } from "effect/reactivity";
-import { EnvironmentId, type SandboxRecord, ThreadId } from "@t3tools/contracts";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
+import {
+  EnvironmentId,
+  type ScopedThreadRef,
+  type SandboxRecord,
+  ThreadId,
+} from "@t3tools/contracts";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import "~/index.css";
 
-import { render } from "../../../test/render";
+import { fakeTimers, render } from "../../../test/render";
 
 const SANDBOX_ENV = "22222222-2222-4222-8222-222222222222";
 const HOST_ENV = "11111111-1111-4111-8111-111111111111";
@@ -25,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   // A bridged thread also lives on the host, under the same id.
   hostThread: false,
   hostTitle: "Fix the login bug",
+  settled: true,
 }));
 
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
@@ -42,12 +50,15 @@ vi.mock(import("~/state/environments"), async (original) => ({
 }));
 vi.mock(import("~/state/entities"), async (original) => ({
   ...(await original()),
-  useThreadShells: (() => [
-    { environmentId: SANDBOX_ENV, id: "thread-1", title: "Fix the login bug" },
-    ...(mocks.hostThread
-      ? [{ environmentId: HOST_ENV, id: "thread-1", title: mocks.hostTitle }]
-      : []),
-  ]) as never,
+  useThreadShells: (() => {
+    const settledOverride = mocks.settled ? "settled" : null;
+    return [
+      { environmentId: SANDBOX_ENV, id: "thread-1", title: "Fix the login bug", settledOverride },
+      ...(mocks.hostThread
+        ? [{ environmentId: HOST_ENV, id: "thread-1", title: mocks.hostTitle, settledOverride }]
+        : []),
+    ];
+  }) as never,
 }));
 vi.mock(import("~/state/use-orchestration-command"), async (original) => ({
   ...(await original()),
@@ -128,7 +139,7 @@ import {
   notifySandboxThreadSettled,
 } from "~/state/sandboxThreads";
 import { toastManager } from "../ui/toast";
-import { SandboxThreadCoordinator } from "./SandboxThreadCoordinator";
+import { SETTLE_DELETE_DELAY_MS, SandboxThreadCoordinator } from "./SandboxThreadCoordinator";
 
 const threadRef = {
   environmentId: EnvironmentId.make(SANDBOX_ENV),
@@ -174,6 +185,12 @@ const config = (onSettle?: "ask" | "snapshot" | "delete") => ({
   ...(onSettle === undefined ? {} : { onSettle }),
 });
 
+// What `useThreadActions.settleThread` hands the coordinator: the settle's Undo claim and plan.
+const settleUndo = (ref: ScopedThreadRef) => ({
+  claim: ThreadUndo.begin("settle", scopedThreadKey(ref)),
+  undo: vi.fn(async () => AsyncResult.success(undefined)),
+});
+
 function setup(
   onSettle?: "ask" | "snapshot" | "delete",
   work?: unknown,
@@ -185,6 +202,7 @@ function setup(
 ) {
   mocks.hostThread = options.bridged === true;
   mocks.hostTitle = options.hostTitle ?? "Fix the login bug";
+  mocks.settled = true;
   mocks.sandboxes = [
     {
       ...sandbox,
@@ -213,7 +231,7 @@ describe("SandboxThreadCoordinator", () => {
     setup();
     await using _screen = await render(<SandboxThreadCoordinator />);
 
-    notifySandboxThreadSettled(threadRef);
+    notifySandboxThreadSettled(threadRef, settleUndo(threadRef));
     await expect.element(page.getByText("Keep this chat's sandbox?")).toBeVisible();
     await expect
       .element(page.getByText(/Boat keeps a stopped disk for 14 days and bills for it/u))
@@ -248,7 +266,7 @@ describe("SandboxThreadCoordinator", () => {
       content.selectNodeContents(element);
       return footer.getBoundingClientRect().top - content.getBoundingClientRect().bottom;
     };
-    notifySandboxThreadSettled(threadRef);
+    notifySandboxThreadSettled(threadRef, settleUndo(threadRef));
     const remember = page.getByText("Remember for Boat small");
     await expect.element(remember).toBeVisible();
     expect(gapAboveFooter(remember.element().closest("label")!)).toBeGreaterThanOrEqual(16);
@@ -263,7 +281,7 @@ describe("SandboxThreadCoordinator", () => {
     setup("ask", { status: "dirty", uncommittedFiles: 2, unpushedCommits: 1 });
     await using _screen = await render(<SandboxThreadCoordinator />);
 
-    notifySandboxThreadSettled(threadRef);
+    notifySandboxThreadSettled(threadRef, settleUndo(threadRef));
     await userEvent.click(page.getByRole("button", { name: "Delete sandbox…" }));
     await expect.element(page.getByText("Delete sandbox bx_46wr?")).toBeVisible();
     await expect
@@ -285,7 +303,7 @@ describe("SandboxThreadCoordinator", () => {
     setup("snapshot");
     await using _screen = await render(<SandboxThreadCoordinator />);
 
-    notifySandboxThreadSettled(threadRef);
+    notifySandboxThreadSettled(threadRef, settleUndo(threadRef));
     await vi.waitFor(() => expect(mocks.stopSandbox).toHaveBeenCalledOnce());
     await expect.element(page.getByText("Keep this chat's sandbox?")).not.toBeInTheDocument();
   });
@@ -299,13 +317,106 @@ describe("SandboxThreadCoordinator", () => {
     });
     await using _screen = await render(<SandboxThreadCoordinator />);
 
-    notifySandboxThreadSettled(threadRef);
+    {
+      using _timers = fakeTimers();
+      notifySandboxThreadSettled(threadRef, settleUndo(threadRef));
+      await vi.advanceTimersByTimeAsync(SETTLE_DELETE_DELAY_MS);
+    }
     await expect
       .element(
         page.getByText("Couldn't check for unpushed work. The sandbox did not answer in time."),
       )
       .toBeVisible();
     expect(mocks.deleteSandbox).not.toHaveBeenCalled();
+  });
+
+  describe("a remembered delete on settle", () => {
+    it("waits 10 s with Undo, then deletes a clean sandbox and ends the settle's Undo", async () => {
+      setup("delete");
+      using toast = vi.spyOn(toastManager, "add");
+      await using _screen = await render(<SandboxThreadCoordinator />);
+      using _timers = fakeTimers();
+
+      const settle = settleUndo(threadRef);
+      expect(notifySandboxThreadSettled(threadRef, settle)).toBe(true);
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Settled · sandbox bx_46wr will be deleted in 10 s",
+          actionProps: expect.objectContaining({ children: "Undo" }),
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(SETTLE_DELETE_DELAY_MS - 1);
+      expect(mocks.checkWork).not.toHaveBeenCalled();
+      expect(mocks.deleteSandbox).not.toHaveBeenCalled();
+      expect(settle.claim.isCurrent()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(mocks.deleteSandbox).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(settle.claim.isCurrent()).toBe(false));
+      expect(settle.undo).not.toHaveBeenCalled();
+    });
+
+    it("Undo cancels the delete and un-settles the thread", async () => {
+      setup("delete");
+      using toast = vi.spyOn(toastManager, "add");
+      using close = vi.spyOn(toastManager, "close");
+      await using _screen = await render(<SandboxThreadCoordinator />);
+      using _timers = fakeTimers();
+
+      const settle = settleUndo(threadRef);
+      notifySandboxThreadSettled(threadRef, settle);
+      const [options] = toast.mock.calls.at(-1)!;
+      const toastId = toast.mock.results.at(-1)!.value;
+      (options.actionProps as { onClick: () => void }).onClick();
+      expect(settle.undo).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledWith(toastId);
+
+      await vi.advanceTimersByTimeAsync(SETTLE_DELETE_DELAY_MS);
+      expect(mocks.checkWork).not.toHaveBeenCalled();
+      expect(mocks.deleteSandbox).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        how: "the thread is un-settled elsewhere",
+        change: () => {
+          mocks.settled = false;
+        },
+      },
+      {
+        how: "a pin or un-settle supersedes the settle",
+        change: () => ThreadUndo.invalidate("settle", scopedThreadKey(threadRef)),
+      },
+      {
+        how: "the sandbox stops",
+        change: () => {
+          mocks.sandboxes = [{ ...sandbox, state: "stopped" }];
+        },
+      },
+      {
+        how: "the sandbox is deleted elsewhere",
+        change: () => {
+          mocks.sandboxes = [];
+        },
+      },
+    ])("drops the toast and deletes nothing when $how during the wait", async ({ change }) => {
+      setup("delete");
+      using toast = vi.spyOn(toastManager, "add");
+      using close = vi.spyOn(toastManager, "close");
+      await using screen = await render(<SandboxThreadCoordinator />);
+      using _timers = fakeTimers();
+
+      notifySandboxThreadSettled(threadRef, settleUndo(threadRef));
+      const toastId = toast.mock.results.at(-1)!.value;
+      await vi.advanceTimersByTimeAsync(SETTLE_DELETE_DELAY_MS / 2);
+      expect(close).not.toHaveBeenCalledWith(toastId);
+      change();
+      await screen.rerender(<SandboxThreadCoordinator />);
+      expect(close).toHaveBeenCalledWith(toastId);
+      await vi.advanceTimersByTimeAsync(SETTLE_DELETE_DELAY_MS);
+      expect(mocks.checkWork).not.toHaveBeenCalled();
+      expect(mocks.deleteSandbox).not.toHaveBeenCalled();
+    });
   });
 
   it("names the sandbox when its thread is deleted, and deletes both on confirm", async () => {
@@ -330,7 +441,7 @@ describe("SandboxThreadCoordinator", () => {
       setup("ask", undefined, { bridged: true });
       await using _screen = await render(<SandboxThreadCoordinator />);
 
-      notifySandboxThreadSettled(hostRef);
+      notifySandboxThreadSettled(hostRef, settleUndo(hostRef));
       await expect.element(page.getByText("Keep this chat's sandbox?")).toBeVisible();
       await expect
         .element(
