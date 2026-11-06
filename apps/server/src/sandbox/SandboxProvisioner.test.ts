@@ -5060,6 +5060,8 @@ describe("SandboxProvisioner per-thread launches", () => {
       readonly bridgeExpiresAt?: string;
       /** Boat's state per sandbox id; `gone` answers 404, as Boat does once it is deleted. */
       readonly states?: Record<string, string>;
+      /** Sandbox ids Boat refuses to delete. */
+      readonly undeletable?: ReadonlyArray<string>;
     } = {},
   ): BoatFake => {
     const states = options.states ?? {};
@@ -5187,6 +5189,9 @@ describe("SandboxProvisioner per-thread launches", () => {
       }
       if (request.method === "DELETE" && request.url.includes("/sandboxes/")) {
         const id = request.url.split("/").at(-1);
+        if (options.undeletable?.includes(id ?? "") === true) {
+          return respond(request, { code: "forbidden" }, 403);
+        }
         const index = listed.findIndex((sandbox) => sandbox.id === id);
         if (index >= 0) listed.splice(index, 1);
         const placed = inEnvironments.findIndex((sandbox) => sandbox.id === id);
@@ -6160,6 +6165,33 @@ describe("SandboxProvisioner per-thread launches", () => {
     }),
   );
 
+  it.effect("keeps a thread on its one sandbox when a client launches it again", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    return Effect.gen(function* () {
+      const { provisioner, instanceId } = yield* launchedThread;
+      const configId = repository.records.get(instanceId)!.configId!;
+      // A client that lost the handoff sends again once the launch has ended.
+      const again = yield* provisioner.launch({ configId, threadId, project });
+      expect(again.instanceId).toBe(instanceId);
+      repository.records.set(instanceId, {
+        ...repository.records.get(instanceId)!,
+        state: "stopped",
+      });
+      const stopped = yield* provisioner.launch({ configId, threadId, project });
+      expect(stopped.instanceId).toBe(instanceId);
+
+      expect(sandboxCreates(fake)).toHaveLength(1);
+      expect(deletes(fake)).toEqual([]);
+      expect([...repository.records.keys()]).toEqual([instanceId]);
+      // No new launch began, so no card offers to set one up.
+      expect((yield* snapshotWhere(provisioner, () => true)).phase).toBe("done");
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer)),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
   it.effect("replaces a starting launch whose sandbox was deleted outside T3 Code", () =>
     Effect.gen(function* () {
       const until = yield* Deferred.make<void>();
@@ -6348,6 +6380,47 @@ describe("SandboxProvisioner per-thread launches", () => {
         expect(repository.records.has("abandoned")).toBe(false);
         yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
         expect([...repository.records.keys()]).toEqual([fresh.instanceId]);
+      }).pipe(
+        Effect.provide(provisionerLayer(boatSettings, repository.layer)),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
+
+  it.effect(
+    "starts no sandbox in place of a lost launch whose machine Boat will not delete",
+    () => {
+      const abandoned: SandboxRecord = {
+        instanceId: "abandoned",
+        environmentId: null,
+        threadId,
+        provider: "boat",
+        sandboxId: "bx_stuck",
+        label: "hello on Boat small",
+        size: "small",
+        state: "error",
+        abandonedAt: "1970-01-01T00:00:00.000Z",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "",
+        runningSince: "1970-01-01T00:00:00.000Z",
+        maxRunningMinutes: 480,
+      };
+      const repository = memoryRepository([abandoned]);
+      const fake = boatFake({ states: { bx_stuck: "idle" }, undeletable: ["bx_stuck"] });
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const { config } = yield* provisioner.saveConfig({
+          config: configInput,
+          apiKey: "boat_test",
+        });
+        const refused = yield* provisioner
+          .launch({ configId: config.id, threadId, project })
+          .pipe(Effect.flip);
+        expect(refused.detail).toContain("bx_stuck");
+        // The old machine would keep billing beside a new one, so nothing new starts.
+        expect(sandboxCreates(fake)).toEqual([]);
+        expect(repository.records.get("abandoned")?.state).toBe("error");
       }).pipe(
         Effect.provide(provisionerLayer(boatSettings, repository.layer)),
         Effect.provideService(HttpClient.HttpClient, fake.client),
