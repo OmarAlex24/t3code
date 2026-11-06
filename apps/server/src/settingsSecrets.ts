@@ -9,6 +9,7 @@ import {
   SimlockDeviceHostConfig,
   SandboxSettings,
   SandboxTailscaleSettings,
+  SandboxToolingSettings,
   UsageLimitSourceConfig,
   isSecretReference,
   secretSettingsFields,
@@ -49,6 +50,7 @@ const providerSecretFields = new Map([
 const usageLimitSecretFields = secretSettingsFields(UsageLimitSourceConfig);
 const sandboxSecretFields = secretSettingsFields(SandboxSettings);
 const sandboxTailscaleSecretFields = secretSettingsFields(SandboxTailscaleSettings);
+const sandboxToolingSecretFields = secretSettingsFields(SandboxToolingSettings);
 const easDeviceHostSecretFields = secretSettingsFields(EasDeviceHostConfig);
 const simlockDeviceHostSecretFields = secretSettingsFields(SimlockDeviceHostConfig);
 const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url");
@@ -251,12 +253,19 @@ function mapSecretFieldGroups(
     (field) => `sandbox-tailscale-${encode(field)}`,
   ) as ServerSettings["sandboxTailscale"];
 
+  const sandboxTooling = mapFields(
+    settings.sandboxTooling,
+    sandboxToolingSecretFields,
+    (field) => `sandbox-tooling-${encode(field)}`,
+  ) as ServerSettings["sandboxTooling"];
+
   return {
     ...settings,
     providerInstances,
     sourceControlHosts,
     sandboxProviders,
     sandboxTailscale,
+    sandboxTooling,
     usageLimitSources,
     easDeviceHosts,
     simlockDeviceHosts,
