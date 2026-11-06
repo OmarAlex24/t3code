@@ -35,6 +35,7 @@ import {
   useProviderInstanceReady,
   useSandboxBridgeReady,
   useSandboxProvisionerEnvironmentId,
+  useSandboxRecords,
   useSandboxThreadEnvironmentIds,
 } from "../../state/sandboxes";
 import { hostCopyOf, sandboxRepositoryOf } from "../../state/sandboxRepositories";
@@ -225,16 +226,15 @@ export function useSandboxLaunch(input: {
   const snapshot =
     activeLaunch !== null && hostSnapshot?.threadId === activeLaunch.threadId ? hostSnapshot : null;
 
-  // A config whose new chats start on Pi: the host's picker cannot offer the sandbox's models, so
-  // the draft moves onto that model when it moves onto the sandbox.
-  const launchedConfig =
-    configs.find((config) => config.id === (snapshot?.configId ?? selectedConfig?.id)) ?? null;
-  const piStartModel = launchedConfig?.pi?.startModel;
-  const piModel = piStartModel === undefined ? null : sandboxPiModelSlug(piStartModel);
-
-  // The handoff runs once per pairing attempt: a retry clears it so the next attempt can pair.
+  // The handoff runs once per pairing attempt: a retry clears it so the next attempt can pair. It
+  // names its own launch, since the host's card goes away once the launch completes.
   const [handoff, setHandoff] = useState<{
-    readonly sequence: number;
+    readonly instanceId: string;
+    readonly configId: string | null;
+    readonly hostEnvironmentId: EnvironmentId;
+    readonly threadId: ThreadId;
+    /** The host already completed the launch, so only the link and the send are left. */
+    readonly completed: boolean;
     readonly target: {
       readonly environmentId: EnvironmentId;
       readonly projectId: ProjectId;
@@ -244,11 +244,28 @@ export function useSandboxLaunch(input: {
   const [localError, setLocalError] = useState<string | null>(null);
   const pairingRef = useRef(false);
 
+  // A config whose new chats start on Pi: the host's picker cannot offer the sandbox's models, so
+  // the draft moves onto that model when it moves onto the sandbox.
+  const launchedConfig =
+    configs.find(
+      (config) => config.id === (snapshot?.configId ?? handoff?.configId ?? selectedConfig?.id),
+    ) ?? null;
+  const piStartModel = launchedConfig?.pi?.startModel;
+  const piModel = piStartModel === undefined ? null : sandboxPiModelSlug(piStartModel);
+
   const startHandoff = useStableCallback(async () => {
     if (activeLaunch === null || snapshot === null || pairingRef.current) return;
     pairingRef.current = true;
     setLocalError(null);
-    setHandoff({ sequence: snapshot.sequence, target: null, startedAt: Date.now() });
+    setHandoff({
+      instanceId: snapshot.instanceId,
+      configId: snapshot.configId,
+      hostEnvironmentId: activeLaunch.hostEnvironmentId,
+      threadId: activeLaunch.threadId,
+      completed: false,
+      target: null,
+      startedAt: Date.now(),
+    });
     const target = {
       environmentId: activeLaunch.hostEnvironmentId,
       input: { threadId: activeLaunch.threadId },
@@ -315,6 +332,7 @@ export function useSandboxLaunch(input: {
 
   // The host thread the message waits for, between a successful link and the provider being ready.
   const [linked, setLinked] = useState<{
+    readonly hostEnvironmentId: EnvironmentId;
     readonly hostProjectId: ProjectId;
     readonly modelSelection: ModelSelection;
     readonly sandboxTarget: {
@@ -325,7 +343,7 @@ export function useSandboxLaunch(input: {
   } | null>(null);
   const finishingRef = useRef(false);
   const bridgeReady = useSandboxBridgeReady(
-    linked === null ? null : (activeLaunch?.hostEnvironmentId ?? null),
+    linked?.hostEnvironmentId ?? null,
     linked?.hostProjectId ?? null,
     linked?.modelSelection.model ?? null,
   );
@@ -344,7 +362,8 @@ export function useSandboxLaunch(input: {
   );
 
   const endLaunch = () => {
-    if (snapshot !== null) setReleasedInstanceId(snapshot.instanceId);
+    const instanceId = handoff?.instanceId ?? snapshot?.instanceId;
+    if (instanceId !== undefined) setReleasedInstanceId(instanceId);
     finishingRef.current = false;
     pairingRef.current = false;
     setWaitingForPi(null);
@@ -431,16 +450,18 @@ export function useSandboxLaunch(input: {
   });
 
   const finishHandoff = useStableCallback(async () => {
-    if (activeLaunch === null || handoff?.target == null || draftId === null) return;
+    if (handoff?.target == null || draftId === null) return;
     if (finishingRef.current) return;
     finishingRef.current = true;
     const sandboxTarget = handoff.target;
-    const target = {
-      environmentId: activeLaunch.hostEnvironmentId,
-      input: { threadId: activeLaunch.threadId },
-    };
-    const completed = await completeLaunch(target);
-    if (completed._tag === "Failure" && !isAtomCommandInterrupted(completed)) {
+    const { hostEnvironmentId: host, threadId: launchThreadId } = handoff;
+    const target = { environmentId: host, input: { threadId: launchThreadId } };
+    const completed = handoff.completed ? null : await completeLaunch(target);
+    if (
+      completed !== null &&
+      completed._tag === "Failure" &&
+      !isAtomCommandInterrupted(completed)
+    ) {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
@@ -450,16 +471,18 @@ export function useSandboxLaunch(input: {
       );
     }
     // completeLaunch waits for the host to finish the launch, so the link never finds it starting.
-    const link = completed._tag === "Success" ? await linkHostThread(target) : completed;
+    const link =
+      completed === null || completed._tag === "Success" ? await linkHostThread(target) : completed;
     if (link._tag === "Failure") {
       sendOnSandbox(sandboxTarget, failureText(link, "The host could not link this thread"));
       return;
     }
     rememberSandboxMirror(
-      { environmentId: sandboxTarget.environmentId, threadId: activeLaunch.threadId },
+      { environmentId: sandboxTarget.environmentId, threadId: launchThreadId },
       link.value.hostProjectId,
     );
     setLinked({
+      hostEnvironmentId: host,
       hostProjectId: link.value.hostProjectId,
       modelSelection: link.value.modelSelection,
       sandboxTarget,
@@ -499,14 +522,96 @@ export function useSandboxLaunch(input: {
     const timer = window.setTimeout(
       () => {
         pairingRef.current = false;
-        setLocalError(
-          "The sandbox connected but did not show its project. Check it under Settings → Connections → Sandboxes.",
-        );
+        const error =
+          "The sandbox connected but did not show its project. Check it under Settings → Connections → Sandboxes.";
+        setLocalError(error);
+        // A handoff picked up after its launch ended has no card to show the error on.
+        if (handoff.completed) {
+          toastManager.add(
+            stackedThreadToast({ type: "error", title: "Message not sent", description: error }),
+          );
+        }
       },
       Math.max(0, handoff.startedAt + PROJECT_WAIT_MS - Date.now()),
     );
     return () => window.clearTimeout(timer);
   }, [handoff, handoffProject]);
+
+  // The thread's own sandbox, once no launch for it is under way. A thread never gets a second
+  // machine: a handoff this app lost (the user left, or reloaded, after the host completed the
+  // launch) finishes on this one, and a send waits for it.
+  const sandboxRecords = useSandboxRecords();
+  const threadSandbox =
+    threadId === null || hostSnapshot?.phase === "running"
+      ? null
+      : (sandboxRecords.find(
+          (record) =>
+            record.threadId === threadId &&
+            record.abandonedAt === undefined &&
+            (record.state === "running" || record.state === "stopped" || record.state === "error"),
+        ) ?? null);
+  const resumeTarget = (() => {
+    if (threadSandbox === null || draftId === null || threadId === null) return null;
+    if (envLocked || hostEnvironmentId === null || snapshotQuery.data === undefined) return null;
+    const { environmentId, sandboxProjectId, instanceId } = threadSandbox;
+    if (threadSandbox.state !== "running" || instanceId === releasedInstanceId) return null;
+    if (environmentId === null || sandboxProjectId === undefined) return null;
+    if (environmentId === activeEnvironmentId) return null;
+    // Only a sandbox this app is paired with can take the draft.
+    if (!environments.some((environment) => environment.environmentId === environmentId)) {
+      return null;
+    }
+    return {
+      instanceId,
+      configId: threadSandbox.configId ?? null,
+      hostEnvironmentId,
+      threadId,
+      target: { environmentId, projectId: sandboxProjectId },
+    };
+  })();
+  const resumeHandoff = useStableCallback(() => {
+    if (resumeTarget === null) return;
+    setHandoff({ ...resumeTarget, completed: true, startedAt: Date.now() });
+  });
+  const resumeInstanceId = resumeTarget?.instanceId ?? null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- picks up a handoff this app lost, on the sandbox the host already completed for this thread
+  useEffect(() => {
+    if (resumeInstanceId === null || localError !== null) return;
+    if (handoff !== null || linked !== null || waitingForPi !== null) return;
+    resumeHandoff();
+  }, [handoff, linked, localError, resumeHandoff, resumeInstanceId, waitingForPi]);
+
+  const holdForThreadSandbox = () => {
+    if (threadSandbox === null) return;
+    if (resumeTarget !== null) {
+      // A handoff that gave up tries again on the next send.
+      if (localError !== null && handoff?.completed === true) {
+        finishingRef.current = false;
+        setHandoff(null);
+        setLocalError(null);
+      }
+      return;
+    }
+    toastManager.add(
+      stackedThreadToast(
+        threadSandbox.state === "stopped"
+          ? {
+              type: "warning",
+              title: "This thread's sandbox is stopped",
+              description:
+                "Resume it under Settings → Connections → Sandboxes. The message waits here and goes to it once it runs.",
+            }
+          : {
+              type: "warning",
+              title: "This thread's sandbox is not reachable",
+              description:
+                threadSandbox.state === "error"
+                  ? "It is not answering. Check it under Settings → Connections → Sandboxes."
+                  : "This app is not connected to it. Open the thread where it was started, or delete the sandbox under Settings → Connections → Sandboxes to start a new one.",
+            },
+      ),
+    );
+  };
 
   const onEnvironmentChange = (id: EnvironmentId): boolean => {
     if (draftId === null) return false;
@@ -571,6 +676,11 @@ export function useSandboxLaunch(input: {
 
   /** Starts the launch instead of sending; true while the message has to wait for it. */
   const interceptSend = (): boolean => {
+    if (threadSandbox !== null) {
+      if (threadSandbox.environmentId === activeEnvironmentId) return false;
+      holdForThreadSandbox();
+      return true;
+    }
     // A launch already under way, this view's or one it picked up, holds the message.
     if (activeLaunch !== null) return true;
     if (selectedConfig === null) return false;
