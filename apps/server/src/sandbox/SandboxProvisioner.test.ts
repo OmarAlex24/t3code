@@ -6180,6 +6180,13 @@ describe("SandboxProvisioner per-thread launches", () => {
       });
       const stopped = yield* provisioner.launch({ configId, threadId, project });
       expect(stopped.instanceId).toBe(instanceId);
+      // Its disk gone, it is still the thread's until the user deletes it.
+      repository.records.set(instanceId, {
+        ...repository.records.get(instanceId)!,
+        state: "expired",
+      });
+      const expired = yield* provisioner.launch({ configId, threadId, project });
+      expect(expired.instanceId).toBe(instanceId);
 
       expect(sandboxCreates(fake)).toHaveLength(1);
       expect(deletes(fake)).toEqual([]);

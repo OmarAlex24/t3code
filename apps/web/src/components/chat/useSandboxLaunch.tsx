@@ -548,7 +548,8 @@ export function useSandboxLaunch(input: {
           (record) =>
             record.threadId === threadId &&
             record.abandonedAt === undefined &&
-            (record.state === "running" || record.state === "stopped" || record.state === "error"),
+            record.state !== "provisioning" &&
+            record.state !== "deleted",
         ) ?? null);
   const resumeTarget = (() => {
     if (threadSandbox === null || draftId === null || threadId === null) return null;
@@ -592,6 +593,8 @@ export function useSandboxLaunch(input: {
       }
       return;
     }
+    // The host's launch state has not loaded yet; the handoff picks up once it has.
+    if (threadSandbox.state === "running" && snapshotQuery.data === undefined) return;
     toastManager.add(
       stackedThreadToast(
         threadSandbox.state === "stopped"
@@ -607,7 +610,9 @@ export function useSandboxLaunch(input: {
               description:
                 threadSandbox.state === "error"
                   ? "It is not answering. Check it under Settings → Connections → Sandboxes."
-                  : "This app is not connected to it. Open the thread where it was started, or delete the sandbox under Settings → Connections → Sandboxes to start a new one.",
+                  : threadSandbox.state === "expired"
+                    ? "Its provider no longer keeps its disk. Delete it under Settings → Connections → Sandboxes to start a new one."
+                    : "This app is not connected to it. Open the thread where it was started, or delete the sandbox under Settings → Connections → Sandboxes to start a new one.",
             },
       ),
     );
