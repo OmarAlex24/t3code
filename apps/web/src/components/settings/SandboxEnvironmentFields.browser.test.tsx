@@ -8,6 +8,7 @@ import { render } from "../../../test/render";
 
 const mocks = vi.hoisted(() => ({
   tailscaleClientId: "",
+  host: {} as Record<string, unknown>,
   projects: [] as Array<Record<string, unknown>>,
   saveConfig: vi.fn(async (request: { input: { config: Record<string, unknown> } }) =>
     AsyncResult.success({ config: { id: "config-1", ...request.input.config } }),
@@ -114,6 +115,7 @@ vi.mock(import("~/state/query"), async (original) => ({
             host: {
               claude: { baseUrl: "https://hub.example.test", key: "hub", privateNetwork: true },
               github: true,
+              ...mocks.host,
             },
           }
         : null,
@@ -142,8 +144,15 @@ const project = (environmentId: string, id: string, remoteUrl: string) => ({
   updatedAt: "2026-11-01T00:00:00.000Z",
 });
 
-function setup(options: { tailscale?: boolean; projects?: Array<Record<string, unknown>> } = {}) {
+function setup(
+  options: {
+    tailscale?: boolean;
+    projects?: Array<Record<string, unknown>>;
+    host?: Record<string, unknown>;
+  } = {},
+) {
   mocks.tailscaleClientId = options.tailscale === true ? "kCLIENT" : "";
+  mocks.host = options.host ?? {};
   mocks.projects = options.projects ?? [];
   mocks.saveConfig.mockClear();
   mocks.deleteConfig.mockClear();
@@ -190,6 +199,46 @@ const editing = (
     onDone={() => {}}
   />
 );
+
+const TOOLING_HOST = {
+  githubApp: { slug: "t3-code-sandboxes", owner: "OmarAlex24" },
+  northflank: true,
+  maple: true,
+  tooling: {
+    gitIdentity: { name: "Omar", email: "omar@example.test" },
+    claudeMd: true,
+    skills: [
+      { name: "frontend-design", bytes: 12_000, copyable: true },
+      { name: "synced", bytes: 30_000_000, copyable: false },
+    ],
+    mcpServers: [
+      {
+        name: "docs",
+        scope: "project",
+        transport: "http",
+        host: "docs.example.test",
+        headerNames: ["X-Key"],
+        copy: "copy",
+      },
+      {
+        name: "maple",
+        scope: "user",
+        transport: "http",
+        host: "api.maple.dev",
+        headerNames: [],
+        copy: "mint",
+      },
+      {
+        name: "railway",
+        scope: "user",
+        transport: "stdio",
+        headerNames: [],
+        copy: "unavailable",
+        reason: "Runs a program on this machine, so it can't be copied.",
+      },
+    ],
+  },
+};
 
 const advanced = () => page.getByRole("button", { name: "Advanced" });
 const summary = () => page.getByTestId("sandbox-config-summary");
@@ -256,7 +305,7 @@ describe("SandboxEnvironmentFields", () => {
     await expect
       .element(summary())
       .toHaveTextContent(
-        "Claude via hub.example.test · joins your tailnet · GitHub signed in · agent can use Boat · keeps a snapshot when settled",
+        "Claude via hub.example.test · joins your tailnet · GitHub signed in with this machine's token · agent can use Boat · keeps a snapshot when settled",
       );
     await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
   });
@@ -456,5 +505,106 @@ describe("SandboxEnvironmentFields", () => {
       expect.objectContaining({ input: { configId: "config-1" } }),
     );
     expect(onDone).toHaveBeenCalledTimes(2);
+  });
+  it("gives a new config the GitHub App, git identity, tools, MCP servers and Claude files", async () => {
+    setup({ host: TOOLING_HOST });
+    await using _screen = await render(fields());
+
+    // The GitHub App and CLAUDE.md are on by default once this machine has them.
+    await expect.element(summary()).toHaveTextContent("GitHub signed in · copies CLAUDE.md");
+    await userEvent.click(advanced());
+    await expect
+      .element(page.getByRole("combobox", { name: "GitHub sign-in" }))
+      .toHaveTextContent("GitHub App (recommended)");
+    await expect
+      .element(page.getByRole("textbox", { name: "Git name" }))
+      .toHaveAttribute("placeholder", "Omar");
+    await expect.element(page.getByRole("checkbox", { name: /railway/u })).toBeDisabled();
+    await expect
+      .element(page.getByText("Runs a program on this machine, so it can't be copied."))
+      .toBeVisible();
+    await expect
+      .element(page.getByText(/Copies this machine's X-Key header. Deleting the sandbox/u))
+      .toBeVisible();
+    await expect.element(page.getByRole("checkbox", { name: /synced/u })).toBeDisabled();
+
+    await userEvent.fill(
+      page.getByRole("textbox", { name: "Tools to install" }),
+      "command -v psql || sudo apt-get install -y postgresql-client",
+    );
+    await userEvent.click(page.getByText("Sign the Northflank CLI in"));
+    await userEvent.click(page.getByText("docs", { exact: true }));
+    await userEvent.click(page.getByText("maple", { exact: true }));
+    await userEvent.click(page.getByText("frontend-design", { exact: true }));
+    await expect
+      .element(summary())
+      .toHaveTextContent(
+        "GitHub signed in · runs your setup script · Northflank signed in · 2 MCP servers · copies CLAUDE.md and 1 skill",
+      );
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toMatchObject({
+      passGithubToken: false,
+      githubApp: true,
+      setupScript: "command -v psql || sudo apt-get install -y postgresql-client",
+      northflank: true,
+      mcpServers: ["docs", "maple"],
+      claudeMd: true,
+      skills: ["frontend-design"],
+    });
+    expect(savedConfig()).not.toHaveProperty("gitIdentity");
+  });
+
+  it("keeps a saved config's tooling, and asks for both parts of a git identity", async () => {
+    setup({ host: TOOLING_HOST });
+    await using _screen = await render(
+      editing(
+        saved({
+          passGithubToken: true,
+          mcpServers: ["docs"],
+          skills: ["frontend-design"],
+          setupScript: "make tools",
+        }),
+      ),
+    );
+
+    await userEvent.click(advanced());
+    await expect
+      .element(page.getByRole("combobox", { name: "GitHub sign-in" }))
+      .toHaveTextContent("This machine's token (legacy)");
+    await expect.element(page.getByRole("checkbox", { name: /Your CLAUDE.md/u })).not.toBeChecked();
+    await userEvent.fill(page.getByRole("textbox", { name: "Git name" }), "Sandbox Bot");
+    await expect
+      .element(summary())
+      .toHaveTextContent("Enter both a git name and email, or leave both empty");
+    await expect.element(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    await userEvent.fill(page.getByRole("textbox", { name: "Git email" }), "bot@example.test");
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    const config = savedConfig();
+    expect(config).toMatchObject({
+      passGithubToken: true,
+      gitIdentity: { name: "Sandbox Bot", email: "bot@example.test" },
+      setupScript: "make tools",
+      mcpServers: ["docs"],
+      skills: ["frontend-design"],
+    });
+    expect(config).not.toHaveProperty("githubApp");
+    expect(config).not.toHaveProperty("claudeMd");
+  });
+
+  it("asks to connect the GitHub App before a config can use it", async () => {
+    setup();
+    await using _screen = await render(fields());
+
+    await userEvent.click(advanced());
+    await userEvent.click(page.getByRole("combobox", { name: "GitHub sign-in" }));
+    await userEvent.click(page.getByRole("option", { name: "GitHub App (recommended)" }));
+    await expect
+      .element(summary())
+      .toHaveTextContent("Connect the GitHub App under Sandboxes, or pick another GitHub option");
+    await expect.element(page.getByText(/The GitHub App isn't connected yet./u)).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Add sandbox config" })).toBeDisabled();
+    await expect
+      .element(page.getByRole("checkbox", { name: /Sign the Northflank CLI in/u }))
+      .toBeDisabled();
   });
 });
