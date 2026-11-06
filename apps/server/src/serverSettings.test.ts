@@ -1477,6 +1477,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
             },
           ],
           sandboxTailscale: { clientId: "ts-client", clientSecret: "tailscale-secret" },
+          sandboxTooling: {
+            githubAppId: "123",
+            githubAppPrivateKey: "github-app-key-secret",
+            northflankToken: "northflank-secret",
+            mapleAdminKey: "maple-secret",
+          },
         });
         const values = [
           "config-secret",
@@ -1487,6 +1493,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
           "quota-secret",
           "expo-secret",
           "tailscale-secret",
+          "github-app-key-secret",
+          "northflank-secret",
+          "maple-secret",
         ];
         const client = ServerSettingsModule.redactServerSettingsForClient(saved, {
           secretReferences: true,
@@ -1505,6 +1514,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
           usageLimitSources: client.usageLimitSources,
           easDeviceHosts: client.easDeviceHosts,
           sandboxTailscale: client.sandboxTailscale,
+          sandboxTooling: client.sandboxTooling,
         });
         for (const value of values) assert.include(JSON.stringify(echoed), value);
         const renamed = yield* service.updateProviderInstance({
