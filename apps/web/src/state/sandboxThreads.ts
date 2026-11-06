@@ -171,6 +171,23 @@ export const sandboxMirrorOf = (
 const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
 
 /**
+ * Whether a host thread sent through the sandbox bridge and its sandbox is gone: the chat stays to
+ * read, and nothing it sends could reach a sandbox. False while the sandbox list loads.
+ */
+export const isSandboxlessBridgeThread = (input: {
+  readonly sandboxes: ReadonlyArray<SandboxRecord> | null;
+  readonly threadRef: ScopedThreadRef;
+  readonly instanceId: string | undefined;
+  readonly provisionerEnvironmentId: EnvironmentId | null;
+}) =>
+  input.sandboxes !== null &&
+  input.instanceId === bridgeInstanceId &&
+  input.threadRef.environmentId === input.provisionerEnvironmentId &&
+  !input.sandboxes.some(
+    (sandbox) => sandbox.threadId === input.threadRef.threadId && sandbox.state !== "deleted",
+  );
+
+/**
  * Whether a host thread can send through the bridge in this project yet. Linking turns the
  * provider on for the project and the server probes it after; until then the composer would pick
  * another provider, or the placeholder model the instance lists before its probe finds `model`.

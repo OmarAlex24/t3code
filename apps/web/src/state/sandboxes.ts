@@ -13,7 +13,12 @@ import { environmentCatalog } from "../connection/catalog";
 import { useProjects, useQuietThreadShells } from "./entities";
 import { useEnvironmentProviders, usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentQuery } from "./query";
-import { findThreadSandbox, sandboxBridgeReady, sandboxHostMirrors } from "./sandboxThreads";
+import {
+  findThreadSandbox,
+  isSandboxlessBridgeThread,
+  sandboxBridgeReady,
+  sandboxHostMirrors,
+} from "./sandboxThreads";
 import { serverEnvironment } from "./server";
 
 const NO_SETTINGS = Atom.make<ServerSettings | null>(null);
@@ -85,6 +90,31 @@ export function useThreadSandbox(threadRef: ScopedThreadRef | null): SandboxReco
   return threadRef === null
     ? undefined
     : findThreadSandbox(list.data?.sandboxes ?? [], threadRef, provisionerEnvironmentId);
+}
+
+/** Whether the thread ran on a sandbox that is gone; see `isSandboxlessBridgeThread`. */
+export function useSandboxlessBridgeThread(
+  threadRef: ScopedThreadRef | null,
+  instanceId: string | undefined,
+): boolean {
+  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
+  const list = useEnvironmentQuery(
+    provisionerEnvironmentId === null || threadRef === null
+      ? null
+      : serverEnvironment.sandboxesList({
+          environmentId: provisionerEnvironmentId,
+          input: undefined,
+        }),
+  );
+  return (
+    threadRef !== null &&
+    isSandboxlessBridgeThread({
+      sandboxes: list.data?.sandboxes ?? null,
+      threadRef,
+      instanceId,
+      provisionerEnvironmentId,
+    })
+  );
 }
 
 /** The host's mirrors of sandbox threads, by thread key; see `sandboxHostMirrors`. */
