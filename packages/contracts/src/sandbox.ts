@@ -1133,6 +1133,10 @@ const SANDBOX_GITHUB_APP_PERMISSIONS = {
   contents: "write",
   pull_requests: "write",
   metadata: "read",
+  // So an agent can read how CI went on the pull requests it opens.
+  checks: "read",
+  statuses: "read",
+  actions: "read",
 } as const;
 
 /** The sandboxes' GitHub App's homepage on github.com. */
