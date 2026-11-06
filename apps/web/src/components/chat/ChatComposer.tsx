@@ -374,6 +374,8 @@ export interface ChatComposerProps {
   canResume: boolean;
   isRevertingCheckpoint?: boolean;
   sendDisabledReason: string | null;
+  /** Replaces the prompt's placeholder when the chat cannot take messages at all. */
+  readOnlyPlaceholder?: string | null;
   isPreparingWorktree: boolean;
   isCompacting: boolean;
   bannerItems: readonly ComposerBannerStackItem[];
@@ -530,6 +532,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     canResume,
     isRevertingCheckpoint = false,
     sendDisabledReason: externalSendDisabledReason,
+    readOnlyPlaceholder = null,
     isPreparingWorktree,
     isCompacting,
     environmentUnavailable,
@@ -3427,7 +3430,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onCitationDraftSave={saveCitationDraftToPromptStable}
                     onPaste={onComposerPasteStable}
                     placeholder={
-                      isComposerApprovalState
+                      readOnlyPlaceholder ??
+                      (isComposerApprovalState
                         ? activePendingApproval?.supportsFeedback
                           ? "Send feedback to decline this request"
                           : "Send a message to decline and redirect the agent"
@@ -3441,7 +3445,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               ? "Choose a project above to start a thread"
                               : showProviderUnavailable
                                 ? "Enable a provider in Settings to send a message"
-                                : DEFAULT_COMPOSER_PLACEHOLDER
+                                : DEFAULT_COMPOSER_PLACEHOLDER)
                     }
                     disabled={
                       projectSelectionRequired ||
