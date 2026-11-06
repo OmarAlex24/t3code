@@ -31,6 +31,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Spinner } from "../ui/spinner";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { ConfigSection, FieldLabel, OptIn, SubHeading } from "./SandboxFormParts";
+import { piUnavailableReason, SandboxPiFields } from "./SandboxPiFields";
 import { SandboxProviderLogo } from "./SandboxProviderLogo";
 import {
   SandboxAgentToolingFields,
@@ -235,6 +236,8 @@ export function SandboxEnvironmentFields({
   const [agentProviderAccess, setAgentProviderAccess] = useState(
     config?.agentProviderAccess ?? false,
   );
+  const [usePi, setUsePi] = useState(config?.pi !== undefined);
+  const [piStartModel, setPiStartModel] = useState(config?.pi?.startModel ?? "");
   const [onSettle, setOnSettle] = useState<SandboxSettleAction>(config?.onSettle ?? "ask");
   // Null until toggled, so it follows whether the server's Claude endpoint is private.
   // Stored off means automatic: a launch joins anyway while Claude's endpoint is private.
@@ -291,6 +294,8 @@ export function SandboxEnvironmentFields({
   const canWriteSettings = readEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const claudeEndpoint = (claudeBaseUrl ?? host?.claude?.baseUrl ?? "").trim();
   const sendsClaude = useClaude && (host?.claude !== undefined || config?.claude !== undefined);
+  const piUnavailable = piUnavailableReason(host, sendsClaude);
+  const sendsPi = usePi && piUnavailable === null;
   // Read from settings, so a client saved in the Sandboxes section applies without a refetch.
   const tailscaleReady = useEnvironmentSettings(
     environmentId,
@@ -342,6 +347,11 @@ export function SandboxEnvironmentFields({
   ].filter((part): part is string => part !== null);
   const agentSummary = [
     sendsClaude ? `Claude via ${claudeHost}` : null,
+    sendsPi
+      ? piStartModel === ""
+        ? "Pi with hub models"
+        : `Pi with hub models, new chats on ${piStartModel}`
+      : null,
     ...tooling.agentSummaryParts,
     agentProviderAccess && canGiveAgentAccess && provider !== undefined
       ? `agent can use ${provider.label}`
@@ -402,6 +412,7 @@ export function SandboxEnvironmentFields({
           ...(template === undefined ? {} : { template: template.name }),
           ...(credentialEnvironment === "" ? {} : { credentialEnvironment }),
           ...(sendsClaude ? { claude: { baseUrl: claudeEndpoint } } : {}),
+          ...(sendsPi ? { pi: piStartModel === "" ? {} : { startModel: piStartModel } } : {}),
           ...tooling.toConfig(),
           ...(agentProviderAccess && canGiveAgentAccess ? { agentProviderAccess: true } : {}),
           ...(onSettle === "ask" ? {} : { onSettle }),
@@ -814,6 +825,15 @@ export function SandboxEnvironmentFields({
                   ) : null}
                 </div>
               )}
+              <SandboxPiFields
+                host={host}
+                unavailable={piUnavailable}
+                enabled={usePi}
+                startModel={piStartModel}
+                disabled={isSaving}
+                onEnabledChange={setUsePi}
+                onStartModelChange={setPiStartModel}
+              />
               <SandboxAgentToolingFields
                 draft={tooling}
                 disabled={isSaving}
