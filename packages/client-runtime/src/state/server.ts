@@ -1629,7 +1629,7 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId }) => environmentId,
       },
     }),
-    ...createSandboxEnvironmentAtoms(runtime),
+    ...createSandboxEnvironmentAtoms(runtime, settingsValueAtom),
     ...createDiyEnvironmentAtoms(runtime),
   };
 }
