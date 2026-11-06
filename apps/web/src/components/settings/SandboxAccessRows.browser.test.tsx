@@ -137,15 +137,22 @@ describe("SandboxAccessRows", () => {
     localStorage.setItem(STATE_KEY, "state-1");
     window.history.replaceState(window.history.state, "", "?code=one-time-code&state=state-1");
     try {
+      {
+        await using _screen = await render(rows());
+        await vi.waitFor(() =>
+          expect(mocks.connect).toHaveBeenCalledWith(
+            expect.objectContaining({ input: { code: "one-time-code" } }),
+          ),
+        );
+        // The code is used once and taken out of the address.
+        expect(window.location.search).toBe("");
+        expect(localStorage.getItem(STATE_KEY)).toBeNull();
+      }
+      // Coming back to the page later neither sends the code again nor reopens the panel.
       await using _screen = await render(rows());
-      await vi.waitFor(() =>
-        expect(mocks.connect).toHaveBeenCalledWith(
-          expect.objectContaining({ input: { code: "one-time-code" } }),
-        ),
-      );
-      // The code is used once and taken out of the address.
-      expect(window.location.search).toBe("");
-      expect(localStorage.getItem(STATE_KEY)).toBeNull();
+      await expect.element(page.getByRole("button", { name: "Add integration" })).toBeVisible();
+      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+      expect(mocks.connect).toHaveBeenCalledOnce();
     } finally {
       window.history.replaceState(window.history.state, "", original);
     }
