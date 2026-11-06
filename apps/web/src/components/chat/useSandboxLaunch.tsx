@@ -9,7 +9,10 @@ import {
   type EnvironmentId,
   type ModelSelection,
   type ProjectId,
+  ProviderInstanceId,
+  SANDBOX_PI_INSTANCE_ID,
   type SandboxEnvironmentConfig,
+  sandboxPiModelSlug,
   type ThreadId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -29,6 +32,7 @@ import {
   useSandboxComposerStore,
 } from "../../state/sandboxComposer";
 import {
+  useProviderInstanceReady,
   useSandboxBridgeReady,
   useSandboxProvisionerEnvironmentId,
   useSandboxThreadEnvironmentIds,
@@ -50,6 +54,10 @@ const PROJECT_WAIT_MS = 90_000;
 // Linking turns the Sandboxes provider on for the host project, and the host probes it after. A
 // send before that would go to another provider, so past this the message goes to the sandbox.
 const BRIDGE_READY_WAIT_MS = 60_000;
+// The sandbox probes Pi when T3 starts there, well before the clone ends; past this, a config's
+// chats that start on Pi send anyway, on the model picked here.
+const PI_READY_WAIT_MS = 60_000;
+const piInstanceId = ProviderInstanceId.make(SANDBOX_PI_INSTANCE_ID);
 
 const failureText = (result: Parameters<typeof squashAtomCommandFailure>[0], title: string) =>
   describeSandboxFailure(squashAtomCommandFailure(result), title).description;
@@ -82,6 +90,7 @@ export function useSandboxLaunch(input: {
   const projects = useProjects();
   const { environments } = useEnvironments();
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
+  const setModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const selectedConfigId = useSandboxComposerStore((state) =>
     draftId === null ? undefined : state.selections[draftId],
   );
@@ -216,6 +225,13 @@ export function useSandboxLaunch(input: {
   const snapshot =
     activeLaunch !== null && hostSnapshot?.threadId === activeLaunch.threadId ? hostSnapshot : null;
 
+  // A config whose new chats start on Pi: the host's picker cannot offer the sandbox's models, so
+  // the draft moves onto that model when it moves onto the sandbox.
+  const launchedConfig =
+    configs.find((config) => config.id === (snapshot?.configId ?? selectedConfig?.id)) ?? null;
+  const piStartModel = launchedConfig?.pi?.startModel;
+  const piModel = piStartModel === undefined ? null : sandboxPiModelSlug(piStartModel);
+
   // The handoff runs once per pairing attempt: a retry clears it so the next attempt can pair.
   const [handoff, setHandoff] = useState<{
     readonly sequence: number;
@@ -314,10 +330,24 @@ export function useSandboxLaunch(input: {
     linked?.modelSelection.model ?? null,
   );
 
+  // The sandbox's draft target, waiting for the sandbox to list Pi with the config's model.
+  const [waitingForPi, setWaitingForPi] = useState<{
+    readonly target: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId };
+    readonly detail: string | null;
+    readonly startedAt: number;
+  } | null>(null);
+  const piReady = useProviderInstanceReady(
+    waitingForPi?.target.environmentId ?? null,
+    waitingForPi?.target.projectId ?? null,
+    piInstanceId,
+    piModel,
+  );
+
   const endLaunch = () => {
     if (snapshot !== null) setReleasedInstanceId(snapshot.instanceId);
     finishingRef.current = false;
     pairingRef.current = false;
+    setWaitingForPi(null);
     setLinked(null);
     setHandoff(null);
     setLaunch(null);
@@ -326,12 +356,14 @@ export function useSandboxLaunch(input: {
   };
 
   // The thread always lives on its sandbox; without a link it works the same, minus the phone.
-  const sendOnSandbox = useStableCallback(
+  const moveToSandbox = useStableCallback(
     (
       target: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId },
       detail: string | null,
+      selection: ModelSelection | null,
     ) => {
       if (draftId === null) return;
+      if (selection !== null) setModelSelection(draftId, selection, { explicit: true });
       setDraftThreadContext(draftId, {
         projectRef: scopeProjectRef(target.environmentId, target.projectId),
         environmentSelection: "manual",
@@ -352,6 +384,45 @@ export function useSandboxLaunch(input: {
       endLaunch();
     },
   );
+
+  const sendOnSandbox = useStableCallback(
+    (
+      target: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId },
+      detail: string | null,
+    ) => {
+      if (piModel === null) moveToSandbox(target, detail, null);
+      else setWaitingForPi({ target, detail, startedAt: Date.now() });
+    },
+  );
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends once the paired sandbox lists Pi with the config's model
+  useEffect(() => {
+    if (waitingForPi === null || !piReady || piModel === null) return;
+    moveToSandbox(waitingForPi.target, waitingForPi.detail, {
+      instanceId: piInstanceId,
+      model: piModel,
+    } as ModelSelection);
+  }, [moveToSandbox, piModel, piReady, waitingForPi]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- falls back to the picked model when the sandbox never readies Pi
+  useEffect(() => {
+    if (waitingForPi === null) return;
+    const timer = window.setTimeout(
+      () => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Pi did not get ready on the sandbox",
+            description:
+              "This message went to the model picked here. Check Pi in the sandbox's provider settings.",
+          }),
+        );
+        moveToSandbox(waitingForPi.target, waitingForPi.detail, null);
+      },
+      Math.max(0, waitingForPi.startedAt + PI_READY_WAIT_MS - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [moveToSandbox, waitingForPi]);
 
   // Once the host lists the Sandboxes provider, the first send's copy for the phone can start.
   const sendLinked = useStableCallback(() => {
@@ -515,6 +586,7 @@ export function useSandboxLaunch(input: {
     });
     pairingRef.current = false;
     finishingRef.current = false;
+    setWaitingForPi(null);
     setLinked(null);
     setHandoff(null);
     setLocalError(null);

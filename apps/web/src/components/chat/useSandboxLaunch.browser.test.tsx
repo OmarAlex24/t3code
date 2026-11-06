@@ -27,6 +27,10 @@ const mocks = vi.hoisted(() => {
     version: 0,
     snapshot: null as unknown,
     bridgeReady: false,
+    piStartModel: undefined as string | undefined,
+    // What the hook asked the sandbox to list before it sends there.
+    piReadyFor: null as unknown,
+    piReady: false,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -97,6 +101,9 @@ vi.mock(import("~/state/query"), async (original) => ({
                   id: "config-1",
                   label: "Boat small",
                   provider: "boat",
+                  ...(mocks.state.piStartModel === undefined
+                    ? {}
+                    : { pi: { startModel: mocks.state.piStartModel } }),
                 },
               ],
             }
@@ -116,6 +123,11 @@ vi.mock(import("~/state/sandboxes"), async (original) => ({
   useSandboxBridgeReady: (() => {
     useVersion();
     return mocks.state.bridgeReady;
+  }) as never,
+  useProviderInstanceReady: ((...args: Array<unknown>) => {
+    useVersion();
+    if (args[0] !== null) mocks.state.piReadyFor = args;
+    return mocks.state.piReady;
   }) as never,
 }));
 vi.mock(import("~/state/environments"), async (original) => ({
@@ -229,6 +241,9 @@ function setup() {
   {
     mocks.state.snapshot = null;
     mocks.state.bridgeReady = false;
+    mocks.state.piStartModel = undefined;
+    mocks.state.piReadyFor = null;
+    mocks.state.piReady = false;
     for (const mock of [
       mocks.launch,
       mocks.cancelLaunch,
@@ -293,6 +308,37 @@ describe("useSandboxLaunch handoff", () => {
     expect(draftProjectRef()).toEqual({ environmentId: SANDBOX_ENV, projectId: "project-sandbox" });
     const composer = useComposerDraftStore.getState().getComposerDraft(draftId);
     expect(composer?.activeProvider).not.toBe("sandboxes");
+  });
+
+  it("starts the chat on Pi with the config's model once the sandbox lists it", async () => {
+    setup();
+    mocks.state.piStartModel = "wafer/GLM-5.3";
+    mocks.state.bridgeReady = true;
+    mocks.linkHostThread.mockResolvedValue(AsyncResult.success(linked));
+    await using _screen = await render(<Harness />);
+
+    await launchToHandoff();
+    // The host's picker has no hub models, so the draft waits for the sandbox to list this one.
+    await vi.waitFor(() =>
+      expect(mocks.state.piReadyFor).toEqual([
+        SANDBOX_ENV,
+        "project-sandbox",
+        "pi",
+        "hub/wafer/GLM-5.3",
+      ]),
+    );
+    expect(onHandedOff).not.toHaveBeenCalled();
+
+    mocks.state.piReady = true;
+    mocks.state.bump();
+    await vi.waitFor(() => expect(onHandedOff).toHaveBeenCalledOnce());
+    expect(draftProjectRef()).toEqual({ environmentId: SANDBOX_ENV, projectId: "project-sandbox" });
+    const composer = useComposerDraftStore.getState().getComposerDraft(draftId);
+    expect(composer?.activeProvider).toBe("pi");
+    expect(composer?.modelSelectionByProvider.pi).toMatchObject({
+      instanceId: "pi",
+      model: "hub/wafer/GLM-5.3",
+    });
   });
 
   it("sends on the sandbox, with a warning, when the host thread cannot be linked", async () => {
