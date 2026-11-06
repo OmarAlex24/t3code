@@ -6,12 +6,17 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
+  SANDBOX_GITHUB_APP_HOMEPAGE,
+  SANDBOX_GITHUB_APP_NEW_ROUTE,
+  SANDBOX_GITHUB_APP_PASTE_REDIRECT_URL,
   sandboxGithubAppManifest,
   type SandboxToolingSettings,
 } from "@t3tools/contracts";
 
 import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "~/hooks/useSettings";
+import { readLocalApi } from "~/localApi";
 import { randomUUID } from "~/lib/utils";
+import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
@@ -22,7 +27,6 @@ import { SettingsRow } from "./settingsLayout";
 
 const STATE_KEY = "t3code:sandbox-github-app-state";
 const GITHUB_NEW_APP = "https://github.com/settings/apps/new";
-const HOMEPAGE = "https://github.com/OmarAlex24/t3code";
 const NORTHFLANK_TOKEN_DOCS = "https://northflank.com/docs/v1/application/secure/grant-api-access";
 const MAPLE_KEY_DOCS = "https://maple.dev/docs/reference/api/";
 
@@ -46,7 +50,7 @@ const writeState = (state: string | null) => {
 const redirectUrl = () =>
   window.location.protocol === "http:" || window.location.protocol === "https:"
     ? `${window.location.origin}/settings/connections`
-    : "http://127.0.0.1/t3-sandbox-github-app";
+    : SANDBOX_GITHUB_APP_PASTE_REDIRECT_URL;
 
 /** The one-time code in the address GitHub opened, or in a bare code that was pasted. */
 const githubAppCodeFrom = (text: string): { code: string; state: string | null } | null => {
@@ -78,8 +82,26 @@ const takeGithubRedirect = () => {
 
 const installUrlOf = (slug: string) => `https://github.com/apps/${slug}/installations/new`;
 
-/** Opens GitHub's new-app page with the manifest filled in, in a new tab. */
-const openManifestForm = (state: string) => {
+/**
+ * How this client opens GitHub's new-app form with the manifest filled in. A browser posts it from
+ * this page; the desktop app can only hand a URL to the user's browser, which loses a POST body,
+ * so it opens the server's page that posts it from there.
+ */
+const githubAppFormLaunch = (input: {
+  readonly inDesktopApp: boolean;
+  readonly httpBaseUrl: string | null;
+  readonly state: string;
+}): { readonly kind: "post" } | { readonly kind: "external"; readonly url: string } => {
+  if (!input.inDesktopApp || input.httpBaseUrl === null) return { kind: "post" };
+  const url = URL.parse(
+    `${SANDBOX_GITHUB_APP_NEW_ROUTE}?state=${encodeURIComponent(input.state)}`,
+    input.httpBaseUrl,
+  );
+  return url === null ? { kind: "post" } : { kind: "external", url: url.href };
+};
+
+/** Posts the manifest to GitHub's new-app page from this page, in a new tab. */
+const postManifestForm = (state: string) => {
   const form = document.createElement("form");
   form.method = "post";
   form.action = `${GITHUB_NEW_APP}?state=${encodeURIComponent(state)}`;
@@ -88,7 +110,10 @@ const openManifestForm = (state: string) => {
   input.type = "hidden";
   input.name = "manifest";
   input.value = JSON.stringify(
-    sandboxGithubAppManifest({ redirectUrl: redirectUrl(), homepageUrl: HOMEPAGE }),
+    sandboxGithubAppManifest({
+      redirectUrl: redirectUrl(),
+      homepageUrl: SANDBOX_GITHUB_APP_HOMEPAGE,
+    }),
   );
   form.append(input);
   document.body.append(form);
@@ -121,8 +146,10 @@ function GithubAppRow({
   const connectApp = useAtomCommand(serverEnvironment.sandboxesConnectGithubApp, {
     reportFailure: false,
   });
+  const httpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
   const connected = saved.githubAppId !== "" && saved.githubAppPrivateKey !== "";
-  const [waiting, setWaiting] = useState(false);
+  // How GitHub's form was opened, while the app isn't connected yet.
+  const [waiting, setWaiting] = useState<"post" | "external" | null>(null);
   const [pasted, setPasted] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [problem, setProblem] = useState<string | null>(() =>
@@ -148,7 +175,7 @@ function GithubAppRow({
       return;
     }
     writeState(null);
-    setWaiting(false);
+    setWaiting(null);
     setPasted("");
   };
 
@@ -166,9 +193,20 @@ function GithubAppRow({
   const startCreate = () => {
     const state = randomUUID();
     writeState(state);
-    openManifestForm(state);
-    setWaiting(true);
     setProblem(null);
+    const launch = githubAppFormLaunch({
+      inDesktopApp: window.desktopBridge !== undefined,
+      httpBaseUrl,
+      state,
+    });
+    setWaiting(launch.kind);
+    if (launch.kind === "post") {
+      postManifestForm(state);
+      return;
+    }
+    void readLocalApi()
+      ?.shell.openExternal(launch.url)
+      .catch(() => setProblem("Could not open your browser. Try again."));
   };
   const pastedCode = githubAppCodeFrom(pasted);
 
@@ -233,7 +271,7 @@ function GithubAppRow({
         )
       }
     >
-      {waiting && !connected ? (
+      {waiting !== null && !connected ? (
         <form
           className="space-y-2 pt-2 pb-2"
           onSubmit={(event) => {
@@ -242,8 +280,9 @@ function GithubAppRow({
           }}
         >
           <p className="text-xs text-muted-foreground">
-            On GitHub, choose Create GitHub App. The new tab comes back here and connects the app.
-            If that tab can't load, paste its address below.
+            {waiting === "post"
+              ? "On GitHub, choose Create GitHub App. The new tab comes back here and connects the app. If that tab can't load, paste its address below."
+              : "On GitHub, in your browser, choose Create GitHub App. GitHub then opens a page that won't load: copy its address and paste it below."}
           </p>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
@@ -261,7 +300,7 @@ function GithubAppRow({
                 size="xs"
                 variant="ghost"
                 disabled={connecting}
-                onClick={() => setWaiting(false)}
+                onClick={() => setWaiting(null)}
               >
                 Cancel
               </Button>
