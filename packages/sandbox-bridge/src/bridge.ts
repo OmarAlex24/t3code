@@ -21,11 +21,15 @@ import {
   type ProviderApprovalDecision,
   type ProviderApprovalOption,
   type ProviderInteractionMode,
+  ProviderRequestKind,
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MESSAGE_META,
+  SANDBOX_BRIDGE_MODEL,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
+  type ServerProvider,
   ThreadId,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
@@ -56,6 +60,7 @@ export class SandboxBridgeError extends Schema.TaggedError<SandboxBridgeError>()
 /** The host thread this bridge process serves, read through the host's MCP endpoint. */
 export interface HostThread {
   readonly threadId: ThreadId;
+  readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
 }
@@ -70,6 +75,8 @@ export interface HostMcp {
 export interface SandboxSession {
   readonly threadStop: boolean;
   readonly defaultModelSelection: ModelSelection | null;
+  /** The sandbox's providers, whose models the host's picker offers for the sandbox's thread. */
+  readonly providers: ReadonlyArray<ServerProvider>;
   /** None when the sandbox has no such thread yet. */
   readonly projection: (
     threadId: ThreadId,
@@ -105,11 +112,16 @@ export interface SandboxBridgePorts {
 export const PROBE_CLIENT_NAME = "t3-code-provider-test";
 export const SANDBOX_SESSION_PREFIX = "sandbox:";
 const DRY_RUN_SESSION_PREFIX = "sandbox-dry-run:";
-const MODEL_OPTION_VALUE = "sandbox";
+const MODEL_OPTION_VALUE = SANDBOX_BRIDGE_MODEL;
+// One short read of the sandbox's models when a session opens; a stopped sandbox must not stall it.
+const CATALOG_READ_TIMEOUT = "5 seconds";
 
 /** Sandbox chats are made only where the sandbox configs live; other clients continue them. */
 export const NOT_LINKED_MESSAGE =
   "Sandbox chats start from T3 Code on your computer (Run on → Sandbox). After that you can keep the conversation going here.";
+/** A thread the bridge served whose sandbox is gone: deleted, so its link went with it. */
+export const SANDBOX_GONE_MESSAGE =
+  "This chat's sandbox was deleted, so this message wasn't sent. The conversation stays here to read; to keep working, start a new chat from T3 Code on your computer.";
 export const unreachableMessage = (link: SandboxBridgeLink) =>
   `Sandbox ${link.sandboxId || link.label} is stopped or not answering. Resume it from T3 Code on your computer, then send again.`;
 export const waitingThought = (link: SandboxBridgeLink) =>
@@ -127,6 +139,137 @@ const modelConfigOptions: ReadonlyArray<AcpSchema.SessionConfigOption> = [
     options: [{ value: MODEL_OPTION_VALUE, name: "Sandbox agent" }],
   },
 ];
+
+const choiceOf = (
+  descriptor: Extract<
+    NonNullable<
+      NonNullable<ServerProvider["models"][number]["capabilities"]>["optionDescriptors"]
+    >[number],
+    { readonly type: "select" }
+  >,
+  picked: unknown,
+) =>
+  (typeof picked === "string" && descriptor.options.some((choice) => choice.id === picked)
+    ? picked
+    : undefined) ??
+  descriptor.currentValue ??
+  descriptor.options.find((choice) => choice.isDefault === true)?.id ??
+  descriptor.options[0]?.id;
+
+/**
+ * What the host's model picker offers for a sandbox's thread: the models of the provider that
+ * thread runs on, with that model's options (effort and the like), so the phone can pick one.
+ * The bridge's own `sandbox` value stays listed and means "whatever the sandbox has". Null when the
+ * sandbox does not list the provider.
+ */
+export const sandboxConfigOptions = (
+  providers: ReadonlyArray<ServerProvider>,
+  selection: ModelSelection | null,
+): ReadonlyArray<AcpSchema.SessionConfigOption> | null => {
+  if (selection === null) return null;
+  const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
+  const models = (provider?.models ?? []).filter((model) => model.isLegacy !== true);
+  if (models.length === 0) return null;
+  const current = models.find((model) => model.slug === selection.model);
+  const picked = new Map((selection.options ?? []).map((option) => [option.id, option.value]));
+  const options: Array<AcpSchema.SessionConfigOption> = [
+    {
+      configId: "model",
+      name: "Model",
+      category: "model",
+      type: "select",
+      currentValue: current?.slug ?? MODEL_OPTION_VALUE,
+      options: [
+        ...models.map((model) => ({ value: model.slug, name: model.name })),
+        { value: MODEL_OPTION_VALUE, name: "Sandbox default" },
+      ],
+    },
+  ];
+  for (const descriptor of (current ?? models[0])?.capabilities?.optionDescriptors ?? []) {
+    if (descriptor.type === "boolean") {
+      const value = picked.get(descriptor.id);
+      options.push({
+        configId: descriptor.id,
+        name: descriptor.label,
+        type: "boolean",
+        currentValue: typeof value === "boolean" ? value : (descriptor.currentValue ?? false),
+      });
+      continue;
+    }
+    const currentValue = choiceOf(descriptor, picked.get(descriptor.id));
+    if (currentValue === undefined) continue;
+    options.push({
+      configId: descriptor.id,
+      name: descriptor.label,
+      ...(descriptor.role === "reasoning" ? { category: "thought_level" } : {}),
+      type: "select",
+      currentValue,
+      options: descriptor.options.map((choice) => ({ value: choice.id, name: choice.label })),
+    });
+  }
+  return options;
+};
+
+export const sameConfigOptions = (
+  left: ReadonlyArray<AcpSchema.SessionConfigOption>,
+  right: ReadonlyArray<AcpSchema.SessionConfigOption>,
+) => JSON.stringify(left) === JSON.stringify(right);
+
+/** The options as a client's `session/set_config_option` leaves them. */
+export const withConfigValue = (
+  options: ReadonlyArray<AcpSchema.SessionConfigOption>,
+  configId: string,
+  value: unknown,
+): ReadonlyArray<AcpSchema.SessionConfigOption> =>
+  options.map((option) =>
+    option.configId !== configId
+      ? option
+      : option.type === "boolean" && typeof value === "boolean"
+        ? { ...option, currentValue: value }
+        : option.type === "select" && typeof value === "string"
+          ? { ...option, currentValue: value }
+          : option,
+  );
+
+const optionKey = (selection: ModelSelection) =>
+  JSON.stringify(
+    [...(selection.options ?? [])]
+      .map((option) => [option.id, option.value] as const)
+      .toSorted(([left], [right]) => left.localeCompare(right)),
+  );
+
+const sameSelection = (left: ModelSelection, right: ModelSelection) =>
+  left.instanceId === right.instanceId &&
+  left.model === right.model &&
+  optionKey(left) === optionKey(right);
+
+/**
+ * The model to give the sandbox's thread for a message sent from the host: the one picked there,
+ * on the provider the sandbox's thread runs on. Null to keep the sandbox's own, as for the
+ * bridge's `sandbox` value, a model the sandbox does not list, or one it already has.
+ */
+export const sandboxSelectionFor = (
+  host: ModelSelection | null,
+  sandbox: ModelSelection | null,
+  providers: ReadonlyArray<ServerProvider>,
+): ModelSelection | null => {
+  if (
+    host === null ||
+    sandbox === null ||
+    host.instanceId !== SANDBOX_BRIDGE_INSTANCE_ID ||
+    host.model === MODEL_OPTION_VALUE
+  ) {
+    return null;
+  }
+  const provider = providers.find((candidate) => candidate.instanceId === sandbox.instanceId);
+  if (provider?.models.some((model) => model.slug === host.model) !== true) return null;
+  const next = {
+    instanceId: sandbox.instanceId,
+    model: host.model,
+    ...(host.options === undefined || host.options.length === 0 ? {} : { options: host.options }),
+  } as ModelSelection;
+  return sameSelection(next, sandbox) ? null : next;
+};
 
 const CLAUDE_FALLBACK_MODEL: ModelSelection = {
   instanceId: "claudeAgent",
@@ -219,6 +362,66 @@ export const promptContent = (blocks: ReadonlyArray<AcpSchema.ContentBlock>): Pr
     images,
     skipped,
   };
+};
+
+const isApprovalKind = Schema.is(ProviderRequestKind);
+
+const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
+
+const isTerminalRun = (run: OrchestrationV2Run) => TERMINAL_RUN_STATUSES.has(run.status);
+
+/**
+ * Puts a sandbox's thread in the host thread's modes. Full access grants its waiting approvals
+ * (not questions) now, but its runtime mode waits for the run to end: a sandbox cuts its agent's
+ * run short on that change.
+ */
+export const modeSyncCommands = (
+  projection: OrchestrationV2ThreadProjection,
+  modes: { readonly runtimeMode: RuntimeMode; readonly interactionMode: ProviderInteractionMode },
+  commandId: () => CommandId,
+): ReadonlyArray<OrchestrationV2Command> => {
+  const threadId = projection.thread.id;
+  const holdRuntimeMode =
+    modes.runtimeMode === "full-access" && projection.runs.some((run) => !isTerminalRun(run));
+  return [
+    ...(projection.thread.runtimeMode === modes.runtimeMode || holdRuntimeMode
+      ? []
+      : [
+          {
+            type: "thread.runtime-mode.set" as const,
+            commandId: commandId(),
+            threadId,
+            runtimeMode: modes.runtimeMode,
+          },
+        ]),
+    ...(projection.thread.interactionMode === modes.interactionMode
+      ? []
+      : [
+          {
+            type: "thread.interaction-mode.set" as const,
+            commandId: commandId(),
+            threadId,
+            interactionMode: modes.interactionMode,
+          },
+        ]),
+    ...(modes.runtimeMode === "full-access"
+      ? projection.runtimeRequests
+          .filter((request) => request.status === "pending" && isApprovalKind(request.kind))
+          .map((request) => ({
+            type: "runtime-request.respond" as const,
+            commandId: commandId(),
+            threadId,
+            requestId: request.id,
+            decision: "accept" as const,
+          }))
+      : []),
+  ];
 };
 
 /** The T3 message a host prompt carries, from the `_meta` the host's ACP adapter sets. */
@@ -374,16 +577,6 @@ export const answersOf = (
   }
   return answers;
 };
-
-const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
-  "completed",
-  "interrupted",
-  "failed",
-  "cancelled",
-  "rolled_back",
-]);
-
-const isTerminalRun = (run: OrchestrationV2Run) => TERMINAL_RUN_STATUSES.has(run.status);
 
 type ToolItem = Extract<
   OrchestrationV2TurnItem,
@@ -756,6 +949,9 @@ interface BridgeSession {
   readonly threadId: ThreadId | null;
   mcp: HostMcp | null;
   cancel: Deferred.Deferred<void> | null;
+  configOptions: ReadonlyArray<AcpSchema.SessionConfigOption>;
+  /** A host thread with no sandbox link: its sandbox was deleted. */
+  readonly sandboxGone?: boolean;
 }
 
 const END_OF_TURN = { _tag: "end" } as const;
@@ -803,13 +999,37 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     }),
   );
 
+  // The sandbox's models for its thread, or none when it does not answer in time.
+  const catalogFor = Effect.fn("SandboxBridge.catalogFor")(
+    function* (threadId: ThreadId) {
+      const link = yield* ports.findLink(threadId);
+      if (Option.isNone(link)) return [];
+      const sandbox = yield* ports.connect(link.value);
+      const thread = yield* sandbox.projection(threadId);
+      const selection = Option.match(thread, {
+        onNone: () => sandbox.defaultModelSelection,
+        onSome: (projection) => projection.thread.modelSelection,
+      });
+      return sandboxConfigOptions(sandbox.providers, selection) ?? [];
+    },
+    Effect.scoped,
+    Effect.timeoutOption(CATALOG_READ_TIMEOUT),
+    Effect.map(Option.getOrElse((): ReadonlyArray<AcpSchema.SessionConfigOption> => [])),
+    Effect.orElseSucceed((): ReadonlyArray<AcpSchema.SessionConfigOption> => []),
+  );
+
   // The probe and threads no sandbox maps to get a session that only explains itself.
   const openSession = Effect.fn("SandboxBridge.openSession")(function* (
     mcp: HostMcp | null,
   ): Effect.fn.Return<string> {
     if (clientName === PROBE_CLIENT_NAME || mcp === null) {
       const sessionId = `${DRY_RUN_SESSION_PREFIX}${yield* newId}`;
-      sessions.set(sessionId, { threadId: null, mcp: null, cancel: null });
+      sessions.set(sessionId, {
+        threadId: null,
+        mcp: null,
+        cancel: null,
+        configOptions: modelConfigOptions,
+      });
       return sessionId;
     }
     const host = yield* ports.readHostThread(mcp).pipe(Effect.option);
@@ -818,17 +1038,32 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       : yield* ports.findLink(host.value.threadId).pipe(Effect.orElseSucceed(Option.none));
     if (Option.isNone(host) || Option.isNone(link)) {
       const sessionId = `${DRY_RUN_SESSION_PREFIX}${yield* newId}`;
-      sessions.set(sessionId, { threadId: null, mcp, cancel: null });
+      // No models of its own: an empty list leaves the picker with the ones a sandbox listed.
+      sessions.set(sessionId, {
+        threadId: null,
+        mcp,
+        cancel: null,
+        configOptions: [],
+        sandboxGone: Option.isSome(host),
+      });
       return sessionId;
     }
     const sessionId = sessionIdFor(host.value.threadId);
-    sessions.set(sessionId, { threadId: host.value.threadId, mcp, cancel: null });
+    sessions.set(sessionId, {
+      threadId: host.value.threadId,
+      mcp,
+      cancel: null,
+      configOptions: yield* catalogFor(host.value.threadId),
+    });
     return sessionId;
   });
 
   yield* agent.handleCreateSession((request) =>
     openSession(hostMcpOf(request.mcpServers)).pipe(
-      Effect.map((sessionId) => ({ sessionId, configOptions: modelConfigOptions })),
+      Effect.map((sessionId) => ({
+        sessionId,
+        configOptions: sessions.get(sessionId)?.configOptions ?? [],
+      })),
     ),
   );
 
@@ -844,14 +1079,32 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     }
     const existing = sessions.get(request.sessionId);
     const mcp = hostMcpOf(request.mcpServers) ?? existing?.mcp ?? null;
-    sessions.set(request.sessionId, { threadId, mcp, cancel: existing?.cancel ?? null });
-    return { configOptions: modelConfigOptions } satisfies AcpSchema.ResumeSessionResponse;
+    const configOptions =
+      existing !== undefined && existing.configOptions.length > 0
+        ? existing.configOptions
+        : yield* catalogFor(threadId);
+    sessions.set(request.sessionId, {
+      threadId,
+      mcp,
+      cancel: existing?.cancel ?? null,
+      configOptions,
+    });
+    return { configOptions } satisfies AcpSchema.ResumeSessionResponse;
   });
   yield* agent.handleResumeSession(resume);
   yield* agent.handleLoadSession(resume);
 
+  // The pick reaches the sandbox with the next message, read from the host thread then.
   yield* agent.handleSetSessionConfigOption((request) =>
-    sessionOf(request.sessionId).pipe(Effect.as({ configOptions: modelConfigOptions })),
+    Effect.gen(function* () {
+      const session = yield* sessionOf(request.sessionId);
+      session.configOptions = withConfigValue(
+        session.configOptions,
+        request.configId,
+        request.value,
+      );
+      return { configOptions: session.configOptions };
+    }),
   );
 
   yield* agent.handleCloseSession((request) =>
@@ -945,7 +1198,11 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     const sessionId = request.sessionId;
     const threadId = session.threadId;
     if (threadId === null) {
-      yield* sayOnce(sessionId, "message", NOT_LINKED_MESSAGE);
+      yield* sayOnce(
+        sessionId,
+        "message",
+        session.sandboxGone === true ? SANDBOX_GONE_MESSAGE : NOT_LINKED_MESSAGE,
+      );
       return "end_turn";
     }
     const connected = yield* connectWithRetry(sessionId, threadId).pipe(
@@ -954,7 +1211,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     if (connected === null) return "cancelled";
     if (Option.isNone(connected)) {
       if (!(yield* ports.findLink(threadId)).pipe(Option.isSome)) {
-        yield* sayOnce(sessionId, "message", NOT_LINKED_MESSAGE);
+        yield* sayOnce(sessionId, "message", SANDBOX_GONE_MESSAGE);
       }
       return "end_turn";
     }
@@ -968,7 +1225,13 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     const target = turnTargetOf(before, promptMessageOf(request._meta), content.text);
     if (target._tag === "nothing") return "end_turn";
 
+    const respondQuietly = (command: OrchestrationV2Command) =>
+      sandbox.dispatch(command).pipe(Effect.catchTags({ SandboxBridgeError: () => Effect.void }));
     let tracker: TurnTracker;
+    let sandboxSelection = Option.match(before, {
+      onNone: () => sandbox.defaultModelSelection,
+      onSome: (projection) => projection.thread.modelSelection,
+    });
     if (target._tag === "attach") {
       tracker = new TurnTracker(target.messageId, before, target.replayFrom);
     } else {
@@ -995,6 +1258,14 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
               attachments: content.images,
             });
       const commandId = CommandId.make(yield* newId);
+      // A model picked on the host (the phone's picker) goes with the message; none keeps the
+      // sandbox's, such as one picked on the computer and already sent from there.
+      const picked = sandboxSelectionFor(
+        Option.match(host, { onNone: () => null, onSome: (thread) => thread.modelSelection }),
+        sandboxSelection,
+        sandbox.providers,
+      );
+      if (picked !== null) sandboxSelection = picked;
       const dispatchMessage = sandbox.dispatch({
         type: "message.dispatch",
         commandId,
@@ -1004,6 +1275,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         messageId,
         text: content.text,
         attachments: [...attachments],
+        ...(picked === null ? {} : { modelSelection: picked }),
         dispatchMode: { type: "start_immediately" },
       });
       if (Option.isNone(before)) {
@@ -1016,7 +1288,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
             projectId: link.sandboxProjectId,
             title: content.text.slice(0, 80).trim() || "Sandbox thread",
             generateTitle: true,
-            modelSelection: sandbox.defaultModelSelection ?? CLAUDE_FALLBACK_MODEL,
+            modelSelection: sandboxSelection ?? CLAUDE_FALLBACK_MODEL,
             runtimeMode,
             interactionMode,
             workspaceStrategy: { type: "root" },
@@ -1025,26 +1297,27 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
           .pipe(Effect.catch(() => dispatchMessage));
       } else {
         // The phone's permission and plan modes are the thread's; the sandbox runs with them.
-        const thread = before.value.thread;
-        if (Option.isSome(host) && thread.runtimeMode !== runtimeMode) {
-          yield* sandbox.dispatch({
-            type: "thread.runtime-mode.set",
-            commandId: CommandId.make(yield* newId),
-            threadId,
-            runtimeMode,
-          });
-        }
-        if (Option.isSome(host) && thread.interactionMode !== interactionMode) {
-          yield* sandbox.dispatch({
-            type: "thread.interaction-mode.set",
-            commandId: CommandId.make(yield* newId),
-            threadId,
-            interactionMode,
-          });
+        if (Option.isSome(host)) {
+          const id = yield* newId;
+          let count = 0;
+          const commands = modeSyncCommands(before.value, { runtimeMode, interactionMode }, () =>
+            CommandId.make(`${id}:${count++}`),
+          );
+          for (const command of commands) {
+            yield* command.type === "runtime-request.respond"
+              ? respondQuietly(command)
+              : sandbox.dispatch(command);
+          }
         }
         yield* dispatchMessage;
       }
       tracker = new TurnTracker(messageId, before);
+    }
+    // A session opened while the sandbox was stopped gets its models now.
+    const catalog = sandboxConfigOptions(sandbox.providers, sandboxSelection);
+    if (catalog !== null && !sameConfigOptions(catalog, session.configOptions)) {
+      session.configOptions = catalog;
+      yield* update(sessionId, { sessionUpdate: "config_option_update", configOptions: catalog });
     }
 
     const withdraw = agent.client
@@ -1076,6 +1349,25 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       // The host names a command request by its command, as the desktop does.
       const command = kind === "execute" ? summary(item.prompt) : "";
       const rawInput = command === "" ? {} : { rawInput: { command } };
+      // Full access grants what the sandbox still asks for, such as a run started before it.
+      if (Option.getOrUndefined(mode) === "full-access") {
+        yield* respond({
+          type: "runtime-request.respond",
+          commandId: CommandId.make(yield* newId),
+          threadId,
+          requestId: item.requestId,
+          decision: "accept",
+        });
+        yield* update(sessionId, {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          title,
+          kind,
+          status: "completed",
+          ...rawInput,
+        });
+        return;
+      }
       yield* update(sessionId, {
         sessionUpdate: "tool_call_update",
         toolCallId,

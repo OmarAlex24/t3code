@@ -6,7 +6,7 @@
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderInteractionMode, RuntimeMode, ThreadId } from "@t3tools/contracts";
+import { ModelSelection, ProviderInteractionMode, RuntimeMode, ThreadId } from "@t3tools/contracts";
 import {
   connectSandbox,
   runSandboxBridge,
@@ -32,6 +32,7 @@ import { mcpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
 
 const HostThreadConfiguration = Schema.Struct({
   threadId: ThreadId,
+  modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
 });

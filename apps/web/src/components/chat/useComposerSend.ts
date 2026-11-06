@@ -1420,6 +1420,7 @@ export function useComposerSend(input: ComposerSendInput) {
           title,
           runtimeMode,
           interactionMode: sendInteractionMode,
+          modelSelection: ctxSelectedModelSelection,
           createdAt: messageCreatedAt,
         });
         setKeepFullHistory(routeThreadKey, false);

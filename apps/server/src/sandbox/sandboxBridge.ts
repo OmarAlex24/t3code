@@ -24,7 +24,7 @@ import {
   type ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
-import { connectSandbox } from "@t3tools/sandbox-bridge";
+import { connectSandbox, modeSyncCommands } from "@t3tools/sandbox-bridge";
 import {
   bridgeLinkSecretName,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
@@ -112,7 +112,10 @@ export const seedInstance = Effect.gen(function* () {
 export class SandboxThreadRemote extends Context.Service<
   SandboxThreadRemote,
   {
-    /** Puts the sandbox's thread in the host thread's modes; a thread with no link is skipped. */
+    /**
+     * Puts the sandbox's thread in the host thread's modes, granting its waiting approvals under
+     * full access; a thread with no link is skipped.
+     */
     readonly setModes: (
       threadId: ThreadId,
       modes: {
@@ -132,10 +135,6 @@ const layerThreadRemote = Layer.effect(
     const random = yield* SecureRandom.SecureRandom;
     const failed = (detail: string) => (cause: unknown) =>
       new SandboxProviderError({ provider: "boat", stage: "pair", detail, cause });
-    const commandId = random.uuidV4().pipe(
-      Effect.orDie,
-      Effect.map((id) => CommandId.make(`sandbox-mode-sync:${id}`)),
-    );
     const setModes = Effect.fn("SandboxThreadRemote.setModes")(function* (
       threadId: ThreadId,
       modes: {
@@ -154,22 +153,16 @@ const layerThreadRemote = Layer.effect(
         const sandbox = yield* connectSandbox(link);
         const projection = yield* sandbox.projection(threadId);
         if (Option.isNone(projection)) return;
-        const thread = projection.value.thread;
-        if (thread.runtimeMode !== modes.runtimeMode) {
-          yield* sandbox.dispatch({
-            type: "thread.runtime-mode.set",
-            commandId: yield* commandId,
-            threadId,
-            runtimeMode: modes.runtimeMode,
-          });
-        }
-        if (thread.interactionMode !== modes.interactionMode) {
-          yield* sandbox.dispatch({
-            type: "thread.interaction-mode.set",
-            commandId: yield* commandId,
-            threadId,
-            interactionMode: modes.interactionMode,
-          });
+        const id = yield* random.uuidV4().pipe(Effect.orDie);
+        let count = 0;
+        const commands = modeSyncCommands(projection.value, modes, () =>
+          CommandId.make(`sandbox-mode-sync:${id}:${count++}`),
+        );
+        for (const command of commands) {
+          // An approval answered meanwhile is refused; the rest still apply.
+          yield* sandbox
+            .dispatch(command)
+            .pipe(command.type === "runtime-request.respond" ? Effect.ignore : Effect.asVoid);
         }
       }).pipe(
         Effect.scoped,
@@ -341,6 +334,14 @@ const make = Effect.gen(function* () {
       .resume({ instanceId: stopped.instanceId })
       .pipe(Effect.ensuring(Effect.sync(() => resuming.delete(stopped.instanceId))));
   });
+  const catchUpModes = Effect.fn("SandboxBridge.catchUpModes")(function* (threadId: ThreadId) {
+    const { thread } = yield* orchestrator.getThreadRecords(threadId, []);
+    if (thread.deletedAt !== null || thread.runtimeMode !== "full-access") return;
+    yield* remote.setModes(threadId, {
+      runtimeMode: thread.runtimeMode,
+      interactionMode: thread.interactionMode,
+    });
+  });
   yield* forkParked(
     Stream.runForEach(orchestrator.streamDomainEvents, (event) => {
       // The sandbox's thread runs in the host thread's modes, so a change on either client (the
@@ -370,7 +371,16 @@ const make = Effect.gen(function* () {
       if (run.providerInstanceId !== instanceId) return Effect.void;
       if (ENDED_RUN.has(run.status)) {
         resumingRuns.delete(run.id);
-        return Effect.void;
+        // A move to full access waits out the sandbox's run (see modeSyncCommands); it lands now.
+        return catchUpModes(run.threadId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Could not move a sandbox thread to its host thread's modes", {
+              cause,
+            }),
+          ),
+          Effect.forkScoped,
+          Effect.asVoid,
+        );
       }
       if (!STARTING_RUN.has(run.status) || resumingRuns.has(run.id)) return Effect.void;
       resumingRuns.add(run.id);
