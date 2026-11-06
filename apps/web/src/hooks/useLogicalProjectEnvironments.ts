@@ -15,6 +15,7 @@ import {
 import { useProjects } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useClientSettings } from "./useSettings";
+import { isSandboxPlaceholderProject } from "../sidebarProjectGrouping";
 
 export function useLogicalProjectEnvironments(
   activeProject: EnvironmentProject | null,
@@ -62,6 +63,7 @@ export function useLogicalProjectEnvironments(
     const seen = new Set<string>();
     for (const p of allProjects) {
       if (seen.has(p.environmentId)) continue;
+      if (p !== activeProject && isSandboxPlaceholderProject(p)) continue;
       if (deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) !== logicalKey) continue;
       seen.add(p.environmentId);
       pushEnvironment(p.environmentId, p.id);
