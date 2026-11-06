@@ -267,7 +267,7 @@ the provisioner's own scope, so it outlives the RPC that started it, and reports
   `false` means automatic), a tailnet-only `access`, or Claude's endpoint resolving only to
   private or tailnet addresses (`SandboxHostAccess.endpointIsPrivate`) while a Tailscale client
   is saved. A private endpoint with no client fails `preflight`, before anything bills, with code
-  `tailscale_required` and `recovery: "set-up-tailscale"`; the card links to the Tailscale card.
+  `tailscale_required` and `recovery: "set-up-tailscale"`; the card links to Tailscale under Sandboxes → Integrations.
   A relaunch re-reads the config, so an edit made after a refusal applies.
 - **Failure policy.** A failure up to `start` destroys the machine and ends the launch with
   `recovery: "relaunch"`. A failure in `repo` or `pair` keeps the machine and waits on the
