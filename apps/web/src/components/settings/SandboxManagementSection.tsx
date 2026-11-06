@@ -502,18 +502,21 @@ function SandboxRow({
             candidate.environmentId === sandbox.environmentId && candidate.id === sandbox.threadId,
         );
   // A message still waiting in the composer has no thread yet, but its draft keeps the sandbox.
-  const hasDraft = useComposerDraftStore((state) =>
-    Object.values(state.draftThreadsByThreadKey).some(
-      (draft) => draft.threadId === sandbox.threadId && draft.promotedTo == null,
-    ),
+  const waitingDraftId = useComposerDraftStore(
+    (state) =>
+      Object.entries(state.draftThreadsByThreadKey).find(
+        ([, draft]) => draft.threadId === sandbox.threadId && draft.promotedTo == null,
+      )?.[0] ?? null,
   );
   // Only a connected sandbox can say its thread is gone; an offline one simply has not loaded it.
-  const threadGone =
+  const threadMissing =
     sandbox.threadId !== undefined &&
     thread === undefined &&
-    !hasDraft &&
     sandboxEnvironment?.connection.phase === "connected" &&
     sandboxEnvironment.serverConfig !== null;
+  const threadGone = threadMissing && waitingDraftId === null;
+  // Running and billing while the message it was started for has not reached it.
+  const messageWaiting = threadMissing && waitingDraftId !== null && sandbox.state === "running";
   const runningMinutes =
     sandbox.state === "running" ? minutesSince(sandbox.runningSince, nowMillis) : null;
   const stoppedMinutes =
@@ -683,6 +686,12 @@ function SandboxRow({
               Its thread was deleted. Delete the sandbox unless you still need its disk.
             </p>
           ) : null}
+          {messageWaiting ? (
+            <p className={warningClassName}>
+              Its first message has not reached it yet. Open the draft to send it, or delete the
+              sandbox.
+            </p>
+          ) : null}
           {nearRetention && retentionDays !== undefined && stoppedDays !== null ? (
             <p className={warningClassName}>
               {retentionWarning(provider?.label ?? sandbox.provider, retentionDays, stoppedDays)}
@@ -695,6 +704,19 @@ function SandboxRow({
           )}
         </div>
         <div className={ROW_ACTIONS_CLASSNAME}>
+          {messageWaiting && waitingDraftId !== null ? (
+            <span className="text-muted-foreground">
+              <Button
+                size="xs"
+                variant="link"
+                onClick={() =>
+                  void navigate({ to: "/draft/$draftId", params: { draftId: waitingDraftId } })
+                }
+              >
+                Open draft
+              </Button>
+            </span>
+          ) : null}
           {thread === undefined ? null : (
             <span className="text-muted-foreground">
               <Button
