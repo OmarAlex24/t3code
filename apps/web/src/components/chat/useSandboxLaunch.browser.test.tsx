@@ -3,6 +3,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   EnvironmentId,
   ProjectId,
+  ProviderInstanceId,
   SANDBOX_SETUP_STAGE_ORDER,
   type SandboxSetupSnapshot,
   ThreadId,
@@ -335,7 +336,7 @@ describe("useSandboxLaunch handoff", () => {
     expect(draftProjectRef()).toEqual({ environmentId: SANDBOX_ENV, projectId: "project-sandbox" });
     const composer = useComposerDraftStore.getState().getComposerDraft(draftId);
     expect(composer?.activeProvider).toBe("pi");
-    expect(composer?.modelSelectionByProvider.pi).toMatchObject({
+    expect(composer?.modelSelectionByProvider[ProviderInstanceId.make("pi")]).toMatchObject({
       instanceId: "pi",
       model: "hub/wafer/GLM-5.3",
     });
