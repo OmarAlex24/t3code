@@ -11,6 +11,7 @@ import { pullRequestDetailToVcsStatus } from "@t3tools/client-runtime/state/pull
 import {
   resolveEnvironmentMachineKind,
   type EnvironmentId,
+  type SandboxProviderKind,
   type ScopedThreadRef,
   type ThreadLinkedPullRequest,
   type ThreadPullRequestLink,
@@ -18,7 +19,7 @@ import {
 } from "@t3tools/contracts";
 import { FolderGit2Icon, TerminalIcon } from "lucide-react";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
-import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { EnvironmentOptionIcon } from "./EnvironmentOptionIcon";
 import { useProject } from "../state/entities";
 import {
   pullRequestListLines,
@@ -746,7 +747,14 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   );
 }
 
-export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSummary }) {
+export function ThreadRowTrailingStatus({
+  thread,
+  sandboxProvider,
+}: {
+  thread: SidebarThreadSummary;
+  /** Set when the thread runs on its own sandbox: its machine is drawn as the provider's mark. */
+  sandboxProvider: SandboxProviderKind | null;
+}) {
   const runningTerminalIds = useThreadRunningTerminalIds({
     environmentId: thread.environmentId,
     threadId: thread.id,
@@ -794,8 +802,8 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
               />
             }
           >
-            <EnvironmentMachineIcon
-              kind={remoteMachine}
+            <EnvironmentOptionIcon
+              option={{ machine: remoteMachine, sandboxProvider }}
               className="size-3 text-muted-foreground/60"
             />
           </TooltipTrigger>
