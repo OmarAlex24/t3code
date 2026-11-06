@@ -128,6 +128,7 @@ import {
   SettingsSection,
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
 } from "./settingsLayout";
+import { isSandboxPlaceholderProject } from "../../sidebarProjectGrouping";
 
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0] as const;
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
@@ -1291,7 +1292,7 @@ function ScheduledTaskEditorForm({
   const projects = scopedProjects
     .filter(
       (project) =>
-        project.archivedAt == null ||
+        (project.archivedAt == null && !isSandboxPlaceholderProject(project)) ||
         project.id === draft.projectId ||
         project.id === task?.projectId,
     )
