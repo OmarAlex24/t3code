@@ -2695,11 +2695,9 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
   ) {
     yield* releaseAbandoned(input.threadId);
     const all = yield* records.list.pipe(Effect.orDie);
+    // An expired one too: the bridge links a thread's record by any state but `deleted`.
     const existing = all.find(
-      (record) =>
-        record.threadId === input.threadId &&
-        record.state !== "deleted" &&
-        record.state !== "expired",
+      (record) => record.threadId === input.threadId && record.state !== "deleted",
     );
     if (existing !== undefined) {
       return { instanceId: existing.instanceId } satisfies SandboxLaunchResult;
