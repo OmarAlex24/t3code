@@ -273,7 +273,7 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
-import { useSandboxHostMirrors } from "../state/sandboxes";
+import { useSandboxHostMirrors, useSandboxProviderByEnvironmentId } from "../state/sandboxes";
 import {
   deleteSandboxThread,
   isSandboxThread,
@@ -1020,6 +1020,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
   );
   const environmentMachineById = useEnvironmentMachines();
+  const sandboxProviderById = useSandboxProviderByEnvironmentId();
   const projectGroupsRef = useRef(projectGroups);
   const persistedProjectScopeKeys = useUiStateStore((store) => store.sidebarProjectScopeKeys);
   const setPersistedProjectScopeKeys = useUiStateStore((store) => store.setSidebarProjectScopeKeys);
@@ -3296,6 +3297,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           environmentMachine={
                             environmentMachineById.get(thread.environmentId) ?? "server"
                           }
+                          sandboxProvider={sandboxProviderById.get(thread.environmentId) ?? null}
                           providerEntryByInstanceId={
                             providerEntriesByEnvironment.get(thread.environmentId) ??
                             EMPTY_PROVIDER_ENTRIES
@@ -3448,6 +3450,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             environmentMachine={
                               environmentMachineById.get(thread.environmentId) ?? "server"
                             }
+                            sandboxProvider={sandboxProviderById.get(thread.environmentId) ?? null}
                             scratchMachineLabel={scratchMachineLabelFor(thread)}
                             project={
                               projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??

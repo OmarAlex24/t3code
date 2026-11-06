@@ -1260,10 +1260,21 @@ export default function ChatView(props: ChatViewProps) {
     },
   });
   const logicalProjectEnvironments = sandboxLaunch.logicalProjectEnvironments;
+  // The thread's own sandbox shows its provider's mark rather than a generic machine.
+  const ownSandboxProvider =
+    activeSandbox !== undefined && !activeSandboxOnHost ? activeSandbox.provider : null;
+  const projectEnvironmentOptions =
+    ownSandboxProvider === null
+      ? logicalProjectEnvironments
+      : logicalProjectEnvironments.map((environment) =>
+          environment.environmentId === activeSandbox?.environmentId
+            ? { ...environment, sandboxProvider: ownSandboxProvider }
+            : environment,
+        );
   const pickerEnvironments =
     sandboxLaunch.options.length === 0
-      ? logicalProjectEnvironments
-      : [...logicalProjectEnvironments, ...sandboxLaunch.options];
+      ? projectEnvironmentOptions
+      : [...projectEnvironmentOptions, ...sandboxLaunch.options];
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
   // Sandbox configs, or the offer to make one, make the picker useful for a project on one machine.
   const canPickEnvironment =
