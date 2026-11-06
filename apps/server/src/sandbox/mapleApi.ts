@@ -53,7 +53,7 @@ export const makeMapleApi = Effect.gen(function* () {
     decode: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, unknown>,
   ) =>
     client
-      .execute(request)
+      .execute(request.pipe(HttpClientRequest.setHeader("user-agent", "t3code")))
       .pipe(
         Effect.flatMap(HttpClientResponse.filterStatusOk),
         Effect.flatMap(decode),

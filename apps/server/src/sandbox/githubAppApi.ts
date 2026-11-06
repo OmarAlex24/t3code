@@ -94,6 +94,8 @@ export const makeGithubAppApi = Effect.gen(function* () {
         request.pipe(
           HttpClientRequest.setHeaders({
             accept: "application/vnd.github+json",
+            // GitHub refuses requests without one with a 403.
+            "user-agent": "t3code",
             "x-github-api-version": "2022-11-28",
           }),
         ),
