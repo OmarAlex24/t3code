@@ -6524,6 +6524,10 @@ describe("SandboxProvisioner per-thread launches", () => {
               : { auth: request.headers.authorization }),
             ...(body === undefined ? {} : { body }),
           });
+          // Like GitHub, refuse a request that names no client.
+          if (request.headers["user-agent"] === undefined) {
+            return respond(request, { message: "Missing User-Agent" }, 403);
+          }
         }
         if (request.url === "https://api.github.com/repos/octo/hello/installation") {
           return options.installed === false
