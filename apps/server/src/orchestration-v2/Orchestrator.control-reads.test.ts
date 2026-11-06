@@ -1855,3 +1855,51 @@ it.effect("dispatch records the command outcome and its duration", () =>
     assert.strictEqual((yield* durations).count - durationsBefore, 1);
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("keeps a sandbox chat on the sandbox bridge whatever client asks to switch", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:sandbox-bridge-switch");
+    const bridgeSelection = { instanceId: ProviderInstanceId.make("sandboxes"), model: "sandbox" };
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-sandbox-bridge-switch"),
+      threadId,
+      projectId: ProjectId.make("project:sandbox-bridge-switch"),
+      title: "Sandbox chat",
+      modelSelection: bridgeSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    for (const command of [
+      {
+        type: "thread.model-selection.set",
+        commandId: CommandId.make("switch-sandbox-bridge-model"),
+        threadId,
+        modelSelection,
+      },
+      {
+        type: "message.dispatch",
+        commandId: CommandId.make("send-sandbox-bridge-other-model"),
+        threadId,
+        messageId: MessageId.make("message:sandbox-bridge-other-model"),
+        text: "Run this here",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "mobile",
+      },
+    ] as const) {
+      const failure = yield* orchestrator.dispatch(command).pipe(Effect.flip);
+      assert.instanceOf(failure, Orchestrator.OrchestratorDispatchError);
+      assert.include(String(failure.cause), "keeps the sandbox's agent");
+    }
+    assert.deepEqual((yield* projections.getThread(threadId)).modelSelection, bridgeSelection);
+  }).pipe(Effect.provide(layerTest)),
+);
