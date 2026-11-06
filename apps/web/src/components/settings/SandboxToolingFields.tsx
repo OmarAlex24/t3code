@@ -10,7 +10,7 @@ import {
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
-import { FieldLabel, OptIn } from "./SandboxFormParts";
+import { CompactOptIn, FieldLabel, OptIn, SubHeading } from "./SandboxFormParts";
 import { formatBytes } from "~/lib/formatBytes";
 
 type GithubMode = "off" | "app" | "legacy";
@@ -76,15 +76,18 @@ export function useSandboxToolingDraft(
     copiedClaudeMd ? "CLAUDE.md" : null,
     skills.length === 0 ? null : plural(skills.length, "skill"),
   ].filter((part): part is string => part !== null);
-  const summaryParts = [
+  const agentSummaryParts = [
     githubMode === "app"
       ? "GitHub signed in"
       : githubMode === "legacy" && host?.github === true
         ? "GitHub signed in with this machine's token"
         : null,
-    setupScript.trim() === "" ? null : "runs your setup script",
+    identity === null ? null : `commits as ${identity.name}`,
     northflank ? "Northflank signed in" : null,
     mcpServers.length === 0 ? null : plural(mcpServers.length, "MCP server"),
+  ].filter((part): part is string => part !== null);
+  const setupSummaryParts = [
+    setupScript.trim() === "" ? null : "runs your setup script",
     claudeFiles.length === 0 ? null : `copies ${claudeFiles.join(" and ")}`,
   ].filter((part): part is string => part !== null);
 
@@ -118,7 +121,8 @@ export function useSandboxToolingDraft(
     skills,
     setSkills,
     attention,
-    summaryParts,
+    agentSummaryParts,
+    setupSummaryParts,
     toConfig,
   };
 }
@@ -140,11 +144,17 @@ const mcpHint = (server: SandboxHostMcpServer) => {
   return server.reason ?? "Copied as is.";
 };
 
-function GroupHeading({ children }: { children: string }) {
-  return <p className="text-xs font-semibold text-foreground">{children}</p>;
-}
+const mcpNote = (server: SandboxHostMcpServer) =>
+  server.copy === "mint"
+    ? "own key"
+    : server.copy === "unavailable"
+      ? "can't be copied"
+      : server.headerNames.length > 0
+        ? `copies ${server.headerNames.join(", ")}`
+        : "copied as is";
 
-export function SandboxToolingFields({
+/** How sandboxes sign in to GitHub and other tools, and the MCP servers they get. */
+export function SandboxAgentToolingFields({
   draft,
   disabled,
   onOpenSettings,
@@ -186,60 +196,150 @@ export function SandboxToolingFields({
   const hostIdentity = tooling?.gitIdentity;
 
   return (
-    <div className="space-y-4 border-t border-border pt-4">
-      <GroupHeading>Agent tools</GroupHeading>
-
-      <div className="space-y-2">
-        <label className="block">
-          <FieldLabel>GitHub</FieldLabel>
-          <Select
-            value={draft.githubMode}
-            disabled={disabled}
-            onValueChange={(value) => {
-              if (value !== null) draft.setGithubMode(value);
-            }}
-          >
-            <SelectTrigger aria-label="GitHub sign-in" size="default">
-              <SelectValue>{GITHUB_LABELS[draft.githubMode]}</SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              <SelectItem value="off">{GITHUB_LABELS.off}</SelectItem>
-              <SelectItem value="app">{GITHUB_LABELS.app}</SelectItem>
-              <SelectItem value="legacy">{GITHUB_LABELS.legacy}</SelectItem>
-            </SelectPopup>
-          </Select>
-        </label>
-        <p className="text-2xs leading-relaxed text-muted-foreground">{githubHint}</p>
-      </div>
-
-      <div className="space-y-1.5">
-        <FieldLabel>Commit as</FieldLabel>
-        <div className="grid gap-2 sm:grid-cols-2">
-          <Input
-            aria-label="Git name"
-            value={draft.gitName}
-            onChange={(event) => draft.setGitName(event.target.value)}
-            placeholder={hostIdentity?.name ?? "Name"}
-            disabled={disabled}
-            spellCheck={false}
-          />
-          <Input
-            aria-label="Git email"
-            type="email"
-            value={draft.gitEmail}
-            onChange={(event) => draft.setGitEmail(event.target.value)}
-            placeholder={hostIdentity?.email ?? "Email"}
-            disabled={disabled}
-            spellCheck={false}
-          />
+    <>
+      <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+        <div className="space-y-1.5">
+          <label className="block">
+            <FieldLabel>GitHub</FieldLabel>
+            <Select
+              value={draft.githubMode}
+              disabled={disabled}
+              onValueChange={(value) => {
+                if (value !== null) draft.setGithubMode(value);
+              }}
+            >
+              <SelectTrigger aria-label="GitHub sign-in" size="default">
+                <SelectValue>{GITHUB_LABELS[draft.githubMode]}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value="off">{GITHUB_LABELS.off}</SelectItem>
+                <SelectItem value="app">{GITHUB_LABELS.app}</SelectItem>
+                <SelectItem value="legacy">{GITHUB_LABELS.legacy}</SelectItem>
+              </SelectPopup>
+            </Select>
+          </label>
+          <p className="text-2xs leading-relaxed text-muted-foreground">{githubHint}</p>
         </div>
-        <p className="text-2xs leading-relaxed text-muted-foreground">
-          {hostIdentity === undefined
-            ? "This machine has no git name and email, so enter them for commits on the sandbox."
-            : "Leave empty to use this machine's git name and email when GitHub is signed in."}
-        </p>
+
+        <div className="space-y-1.5">
+          <FieldLabel>Commit as</FieldLabel>
+          <div className="grid grid-cols-2 gap-2">
+            <Input
+              aria-label="Git name"
+              value={draft.gitName}
+              onChange={(event) => draft.setGitName(event.target.value)}
+              placeholder={hostIdentity?.name ?? "Name"}
+              disabled={disabled}
+              spellCheck={false}
+            />
+            <Input
+              aria-label="Git email"
+              type="email"
+              value={draft.gitEmail}
+              onChange={(event) => draft.setGitEmail(event.target.value)}
+              placeholder={hostIdentity?.email ?? "Email"}
+              disabled={disabled}
+              spellCheck={false}
+            />
+          </div>
+          <p className="text-2xs leading-relaxed text-muted-foreground">
+            {hostIdentity === undefined
+              ? "This machine has no git name and email, so enter them for commits on the sandbox."
+              : "Leave empty to use this machine's git name and email when GitHub is signed in."}
+          </p>
+        </div>
       </div>
 
+      <OptIn
+        checked={draft.northflank && host?.northflank === true}
+        disabled={disabled || host?.northflank !== true}
+        onCheckedChange={draft.setNorthflank}
+        title="Sign the Northflank CLI in"
+      >
+        {host?.northflank === true ? (
+          "Installs the CLI and signs it in with the token saved under Sandboxes. Every sandbox shares that token, so give it only the access sandboxes need."
+        ) : (
+          <>Needs a Northflank token saved under Sandboxes. {settingsLink("Add one")}</>
+        )}
+      </OptIn>
+    </>
+  );
+}
+
+/** The MCP servers on this machine a config's sandboxes get copies of. */
+export function SandboxMcpServerFields({
+  draft,
+  disabled,
+}: {
+  draft: ToolingDraft;
+  disabled: boolean;
+}) {
+  const tooling = draft.host?.tooling;
+  const missingMcpServers = draft.mcpServers.filter(
+    (name) => !(tooling?.mcpServers ?? []).some((server) => server.name === name),
+  );
+  return tooling === undefined || tooling.mcpServers.length === 0 ? null : (
+    <fieldset className="space-y-1.5">
+      <legend className="contents">
+        <SubHeading
+          trailing={
+            <span className="text-2xs text-muted-foreground">
+              {draft.mcpServers.length} of {tooling.mcpServers.length}
+            </span>
+          }
+        >
+          MCP servers from this machine
+        </SubHeading>
+      </legend>
+      <div className="grid gap-x-6 sm:grid-cols-2">
+        {tooling.mcpServers.map((server) => (
+          <CompactOptIn
+            key={server.name}
+            checked={server.copy !== "unavailable" && draft.mcpServers.includes(server.name)}
+            disabled={disabled || server.copy === "unavailable"}
+            onCheckedChange={(on) =>
+              draft.setMcpServers(toggled(draft.mcpServers, server.name, on))
+            }
+            title={
+              <span className="flex items-center gap-1">
+                {server.name}
+                {server.copy === "mint" ? (
+                  <KeyRoundIcon aria-label="Own key" className="size-3 text-success" />
+                ) : null}
+              </span>
+            }
+            detail={mcpNote(server)}
+            hint={`${server.host === undefined ? "" : `${server.host}. `}${mcpHint(server)}`}
+          />
+        ))}
+      </div>
+      <p className="text-2xs leading-relaxed text-muted-foreground">
+        Copied headers keep working after a sandbox is deleted. A server marked with a key gets its
+        own, revoked with the sandbox. Hover a server for details.
+      </p>
+      {missingMcpServers.length === 0 ? null : (
+        <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-warning-foreground">
+          <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
+          This machine no longer has {missingMcpServers.join(", ")}, so sandboxes won't get it.
+        </p>
+      )}
+    </fieldset>
+  );
+}
+
+/** What each sandbox installs and gets copied from this machine once it starts. */
+export function SandboxSetupToolingFields({
+  draft,
+  disabled,
+}: {
+  draft: ToolingDraft;
+  disabled: boolean;
+}) {
+  const tooling = draft.host?.tooling;
+  const copyable =
+    tooling === undefined ? 0 : tooling.skills.filter((skill) => skill.copyable).length;
+  return (
+    <>
       <div className="space-y-1.5">
         <label className="block">
           <FieldLabel
@@ -269,95 +369,50 @@ export function SandboxToolingFields({
         </p>
       </div>
 
-      <OptIn
-        checked={draft.northflank && host?.northflank === true}
-        disabled={disabled || host?.northflank !== true}
-        onCheckedChange={draft.setNorthflank}
-        title="Sign the Northflank CLI in"
-      >
-        {host?.northflank === true ? (
-          "Installs the CLI and signs it in with the token saved under Sandboxes. Every sandbox shares that token, so give it only the access sandboxes need."
-        ) : (
-          <>Needs a Northflank token saved under Sandboxes. {settingsLink("Add one")}</>
-        )}
-      </OptIn>
-
-      {tooling === undefined || tooling.mcpServers.length === 0 ? null : (
-        <fieldset className="space-y-2">
-          <legend className="mb-1.5 text-xs font-medium text-foreground">
-            MCP servers from this machine
-          </legend>
-          {tooling.mcpServers.map((server) => (
-            <OptIn
-              key={server.name}
-              checked={server.copy !== "unavailable" && draft.mcpServers.includes(server.name)}
-              disabled={disabled || server.copy === "unavailable"}
-              onCheckedChange={(on) =>
-                draft.setMcpServers(toggled(draft.mcpServers, server.name, on))
-              }
-              title={
-                <span className="flex items-center gap-1.5">
-                  <span>{server.name}</span>
-                  {server.host === undefined ? null : (
-                    <span className="font-normal text-muted-foreground">{server.host}</span>
-                  )}
-                  {server.copy === "mint" ? (
-                    <KeyRoundIcon aria-label="Own key" className="size-3 text-success" />
-                  ) : null}
-                </span>
-              }
-            >
-              {mcpHint(server)}
-            </OptIn>
-          ))}
-          {draft.mcpServers.some(
-            (name) => !tooling.mcpServers.some((server) => server.name === name),
-          ) ? (
-            <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-warning-foreground">
-              <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
-              This machine no longer has{" "}
-              {draft.mcpServers
-                .filter((name) => !tooling.mcpServers.some((server) => server.name === name))
-                .join(", ")}
-              , so sandboxes won't get it.
-            </p>
-          ) : null}
-        </fieldset>
-      )}
-
       {tooling === undefined ? null : (
-        <fieldset className="space-y-2">
-          <legend className="mb-1.5 text-xs font-medium text-foreground">Claude files</legend>
-          <OptIn
-            checked={draft.claudeMd && tooling.claudeMd}
-            disabled={disabled || !tooling.claudeMd}
-            onCheckedChange={draft.setClaudeMd}
-            title="Your CLAUDE.md"
-          >
-            {tooling.claudeMd
-              ? "Copied fresh to each new sandbox."
-              : "This machine has no ~/.claude/CLAUDE.md."}
-          </OptIn>
-          {tooling.skills.map((skill) => (
-            <OptIn
-              key={skill.name}
-              checked={skill.copyable && draft.skills.includes(skill.name)}
-              disabled={disabled || !skill.copyable}
-              onCheckedChange={(on) => draft.setSkills(toggled(draft.skills, skill.name, on))}
-              title={
-                <span className="flex items-center gap-1.5">
-                  <span>{skill.name}</span>
-                  <span className="font-normal text-muted-foreground">
-                    {formatBytes(skill.bytes)}
+        <fieldset className="space-y-1.5">
+          <legend className="contents">
+            <SubHeading
+              trailing={
+                copyable === 0 ? null : (
+                  <span className="text-2xs text-muted-foreground">
+                    {draft.skills.length} of {plural(copyable, "skill")}
                   </span>
-                </span>
+                )
               }
             >
-              {skill.copyable ? undefined : "Too large to copy."}
-            </OptIn>
-          ))}
+              Claude files
+            </SubHeading>
+          </legend>
+          <div className="grid gap-x-6 sm:grid-cols-2">
+            <CompactOptIn
+              checked={draft.claudeMd && tooling.claudeMd}
+              disabled={disabled || !tooling.claudeMd}
+              onCheckedChange={draft.setClaudeMd}
+              title="Your CLAUDE.md"
+              detail={tooling.claudeMd ? undefined : "none on this machine"}
+              hint={
+                tooling.claudeMd
+                  ? "Copied fresh to each new sandbox."
+                  : "This machine has no ~/.claude/CLAUDE.md."
+              }
+            />
+            {tooling.skills.map((skill) => (
+              <CompactOptIn
+                key={skill.name}
+                checked={skill.copyable && draft.skills.includes(skill.name)}
+                disabled={disabled || !skill.copyable}
+                onCheckedChange={(on) => draft.setSkills(toggled(draft.skills, skill.name, on))}
+                title={skill.name}
+                detail={skill.copyable ? formatBytes(skill.bytes) : "too large to copy"}
+              />
+            ))}
+          </div>
+          <p className="text-2xs leading-relaxed text-muted-foreground">
+            Copied from ~/.claude when each sandbox starts.
+          </p>
         </fieldset>
       )}
-    </div>
+    </>
   );
 }
