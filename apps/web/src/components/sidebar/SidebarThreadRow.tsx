@@ -24,6 +24,7 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type EnvironmentMachineKind,
+  type SandboxProviderKind,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 
@@ -73,7 +74,7 @@ import type { SidebarThreadSummary } from "../../types";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
-import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { EnvironmentOptionIcon } from "../EnvironmentOptionIcon";
 import {
   animateSidebarLayoutChanges,
   hasUnseenCompletion,
@@ -233,6 +234,7 @@ function SidebarThreadTooltip({
   projectDisplayName,
   environmentLabel,
   environmentMachine,
+  sandboxProvider,
   providerEntry,
   providerEntryByInstanceId,
   showInstanceBadge,
@@ -247,6 +249,7 @@ function SidebarThreadTooltip({
   projectDisplayName: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
+  sandboxProvider: SandboxProviderKind | null;
   providerEntry: SidebarProviderEntry | null;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
   showInstanceBadge: boolean;
@@ -284,9 +287,9 @@ function SidebarThreadTooltip({
         ) : null}
         {environmentLabel ? (
           <div className="flex min-w-0 items-center gap-2">
-            <EnvironmentMachineIcon
-              kind={environmentMachine}
-              className="size-3 shrink-0 stroke-muted-foreground"
+            <EnvironmentOptionIcon
+              option={{ machine: environmentMachine, sandboxProvider }}
+              className="size-3 shrink-0 text-muted-foreground"
             />
             <div className="min-w-0 truncate text-foreground/75">{environmentLabel}</div>
           </div>
@@ -560,6 +563,8 @@ type SidebarThreadRowProps = {
   currentEnvironmentId: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
+  /** Set when the thread runs on its own sandbox: its machine is drawn as the provider's mark. */
+  sandboxProvider: SandboxProviderKind | null;
   scratchMachineLabel: string | null;
   project: EnvironmentProject | null;
   projectDisplayName: string | null;
@@ -814,6 +819,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       projectDisplayName={props.projectDisplayName}
       environmentLabel={props.environmentLabel}
       environmentMachine={props.environmentMachine}
+      sandboxProvider={props.sandboxProvider}
       providerEntry={providerEntry}
       providerEntryByInstanceId={props.providerEntryByInstanceId}
       showInstanceBadge={showInstanceBadge}
@@ -1132,7 +1138,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const remoteMachineIcon =
     isRemote && !showsScratchMachine ? (
       <span className="inline-flex shrink-0 items-center text-sidebar-muted-foreground/70">
-        <EnvironmentMachineIcon aria-hidden kind={props.environmentMachine} className="size-3.5" />
+        <EnvironmentOptionIcon
+          option={{ machine: props.environmentMachine, sandboxProvider: props.sandboxProvider }}
+          className="size-3.5"
+        />
       </span>
     ) : null;
   const diff = latestRunDiff(thread);
@@ -1154,9 +1163,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         </>
       ) : showsScratchMachine ? (
         <>
-          <EnvironmentMachineIcon
-            aria-hidden
-            kind={props.environmentMachine}
+          <EnvironmentOptionIcon
+            option={{ machine: props.environmentMachine, sandboxProvider: props.sandboxProvider }}
             className="size-3 shrink-0"
           />
           <span className="min-w-0 flex-1 truncate">{props.scratchMachineLabel}</span>
@@ -1616,6 +1624,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
   projectDisplayName: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
+  sandboxProvider: SandboxProviderKind | null;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
   isHighlighted: boolean;
   isRouteActive: boolean;
@@ -1772,6 +1781,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
           projectDisplayName={props.projectDisplayName}
           environmentLabel={props.environmentLabel}
           environmentMachine={props.environmentMachine}
+          sandboxProvider={props.sandboxProvider}
           providerEntry={providerEntry}
           providerEntryByInstanceId={props.providerEntryByInstanceId}
           showInstanceBadge={showInstanceBadge}
