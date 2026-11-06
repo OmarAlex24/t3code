@@ -200,13 +200,18 @@ import { cn } from "~/lib/utils";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { useSandboxHostMirrors, useThreadSandbox } from "../state/sandboxes";
+import {
+  useSandboxHostMirrors,
+  useSandboxlessBridgeThread,
+  useThreadSandbox,
+} from "../state/sandboxes";
 import {
   ensureSandboxThreadRunning,
   isHostThreadRef,
   sandboxMirrorTarget,
   shortSandboxId,
 } from "../state/sandboxThreads";
+import { CloudOffIcon } from "lucide-react";
 import { SandboxProviderLogo } from "./settings/SandboxProviderLogo";
 import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
@@ -1042,6 +1047,11 @@ export default function ChatView(props: ChatViewProps) {
     });
   }, [activeMirrorTarget, navigate]);
   const activeSandboxStopped = activeSandbox?.state === "stopped";
+  // A chat whose sandbox was deleted keeps its conversation here, but has nowhere to send.
+  const sandboxDeleted = useSandboxlessBridgeThread(
+    activeThreadRef,
+    serverThread?.modelSelection.instanceId,
+  );
   // A legacy sandbox thread's server is off on purpose, so the session cannot be read and the
   // connection never comes up until a send or un-settle resumes it from this client.
   const legacySandboxStopped = activeSandboxStopped && !activeSandboxOnHost;
@@ -2748,7 +2758,19 @@ export default function ChatView(props: ChatViewProps) {
                   : "Its disk is kept. Sending a message resumes it.",
             },
           ]
-        : [];
+        : sandboxDeleted
+          ? [
+              {
+                id: "sandbox-deleted",
+                variant: "default",
+                group: "environment",
+                icon: <CloudOffIcon />,
+                title: "This chat's sandbox was deleted",
+                description:
+                  "The conversation stays here to read. To keep working, start a new chat on this computer or in a new sandbox.",
+              },
+            ]
+          : [];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
@@ -3792,20 +3814,25 @@ export default function ChatView(props: ChatViewProps) {
                                 }
                                 canResume={canResume}
                                 isRevertingCheckpoint={isRevertingCheckpoint}
+                                readOnlyPlaceholder={
+                                  sandboxDeleted ? "This chat is read-only now" : null
+                                }
                                 sendDisabledReason={
                                   !canOperateThread && !legacySandboxStopped
                                     ? "This connection cannot change threads."
-                                    : isEnvironmentChanging
-                                      ? "Preparing machine"
-                                      : isRevertingCheckpoint
-                                        ? "Rewinding conversation"
-                                        : feedbackUploading
-                                          ? "Sending feedback"
-                                          : threadDetailLoading
-                                            ? "Messages loading"
-                                            : worktreeSetupBlocksSend
-                                              ? "Preparing worktree"
-                                              : projectCloneSendBlockReason
+                                    : sandboxDeleted
+                                      ? "This chat's sandbox was deleted"
+                                      : isEnvironmentChanging
+                                        ? "Preparing machine"
+                                        : isRevertingCheckpoint
+                                          ? "Rewinding conversation"
+                                          : feedbackUploading
+                                            ? "Sending feedback"
+                                            : threadDetailLoading
+                                              ? "Messages loading"
+                                              : worktreeSetupBlocksSend
+                                                ? "Preparing worktree"
+                                                : projectCloneSendBlockReason
                                 }
                                 isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                                 bannerItems={
