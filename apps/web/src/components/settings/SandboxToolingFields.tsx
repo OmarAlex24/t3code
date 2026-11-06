@@ -49,6 +49,7 @@ export function useSandboxToolingDraft(
   const [gitEmail, setGitEmail] = useState(config?.gitIdentity?.email ?? "");
   const [setupScript, setSetupScript] = useState(config?.setupScript ?? "");
   const [northflank, setNorthflank] = useState(config?.northflank === true);
+  const [railway, setRailway] = useState(config?.railway === true);
   const [mcpServers, setMcpServers] = useState<ReadonlyArray<string>>(config?.mcpServers ?? []);
   const [skills, setSkills] = useState<ReadonlyArray<string>>(config?.skills ?? []);
 
@@ -68,9 +69,17 @@ export function useSandboxToolingDraft(
       ? "Connect the GitHub App under Sandboxes, or pick another GitHub option"
       : northflank && host !== undefined && host.northflank !== true
         ? "Save a Northflank token under Sandboxes, or turn off Northflank"
-        : (gitName.trim() === "") !== (gitEmail.trim() === "")
-          ? "Enter both a git name and email, or leave both empty"
-          : null;
+        : railway && host !== undefined && host.railway !== true
+          ? "Save a Railway token under Sandboxes, or turn off Railway"
+          : (gitName.trim() === "") !== (gitEmail.trim() === "")
+            ? "Enter both a git name and email, or leave both empty"
+            : null;
+
+  // Railway's MCP server signs in with the sandbox's Railway token, so it goes only with Railway.
+  const copiedMcpServers = mcpServers.filter(
+    (name) =>
+      railway || tooling?.mcpServers.find((server) => server.name === name)?.mintedBy !== "railway",
+  );
 
   const claudeFiles = [
     copiedClaudeMd ? "CLAUDE.md" : null,
@@ -84,7 +93,8 @@ export function useSandboxToolingDraft(
         : null,
     identity === null ? null : `commits as ${identity.name}`,
     northflank ? "Northflank signed in" : null,
-    mcpServers.length === 0 ? null : plural(mcpServers.length, "MCP server"),
+    railway ? "Railway signed in" : null,
+    copiedMcpServers.length === 0 ? null : plural(copiedMcpServers.length, "MCP server"),
   ].filter((part): part is string => part !== null);
   const setupSummaryParts = [
     setupScript.trim() === "" ? null : "runs your setup script",
@@ -97,7 +107,8 @@ export function useSandboxToolingDraft(
     ...(identity === null ? {} : { gitIdentity: identity }),
     ...(setupScript.trim() === "" ? {} : { setupScript }),
     ...(northflank ? { northflank: true } : {}),
-    ...(mcpServers.length === 0 ? {} : { mcpServers: [...mcpServers] }),
+    ...(railway ? { railway: true } : {}),
+    ...(copiedMcpServers.length === 0 ? {} : { mcpServers: [...copiedMcpServers] }),
     ...(copiedClaudeMd ? { claudeMd: true } : {}),
     ...(skills.length === 0 ? {} : { skills: [...skills] }),
   });
@@ -114,7 +125,10 @@ export function useSandboxToolingDraft(
     setSetupScript,
     northflank,
     setNorthflank,
+    railway,
+    setRailway,
     mcpServers,
+    copiedMcpServers,
     setMcpServers,
     claudeMd,
     setClaudeMd,
@@ -135,7 +149,7 @@ const toggled = (list: ReadonlyArray<string>, name: string, on: boolean) =>
 // What happens to a server's credentials, in the words of someone choosing it.
 const mcpHint = (server: SandboxHostMcpServer) => {
   if (server.copy === "mint") {
-    return "Gets a Maple key of its own, revoked when the sandbox is deleted.";
+    return server.reason ?? "Gets a key of its own, revoked when the sandbox is deleted.";
   }
   if (server.copy === "unavailable") return server.reason ?? "Can't be copied.";
   if (server.headerNames.length > 0) {
@@ -262,6 +276,19 @@ export function SandboxAgentToolingFields({
           <>Needs a Northflank token saved under Sandboxes. {settingsLink("Add one")}</>
         )}
       </OptIn>
+
+      <OptIn
+        checked={draft.railway && host?.railway === true}
+        disabled={disabled || host?.railway !== true}
+        onCheckedChange={draft.setRailway}
+        title="Sign the Railway CLI in"
+      >
+        {host?.railway === true ? (
+          "Installs the CLI and signs it in with a Railway token made for this sandbox alone, revoked when it's deleted. Also needed for Railway's MCP server."
+        ) : (
+          <>Needs a Railway token saved under Sandboxes. {settingsLink("Add one")}</>
+        )}
+      </OptIn>
     </>
   );
 }
@@ -284,7 +311,7 @@ export function SandboxMcpServerFields({
         <SubHeading
           trailing={
             <span className="text-2xs text-muted-foreground">
-              {draft.mcpServers.length} of {tooling.mcpServers.length}
+              {draft.copiedMcpServers.length} of {tooling.mcpServers.length}
             </span>
           }
         >
@@ -292,26 +319,38 @@ export function SandboxMcpServerFields({
         </SubHeading>
       </legend>
       <div className="grid gap-x-6 sm:grid-cols-2">
-        {tooling.mcpServers.map((server) => (
-          <CompactOptIn
-            key={server.name}
-            checked={server.copy !== "unavailable" && draft.mcpServers.includes(server.name)}
-            disabled={disabled || server.copy === "unavailable"}
-            onCheckedChange={(on) =>
-              draft.setMcpServers(toggled(draft.mcpServers, server.name, on))
-            }
-            title={
-              <span className="flex items-center gap-1">
-                {server.name}
-                {server.copy === "mint" ? (
-                  <KeyRoundIcon aria-label="Own key" className="size-3 text-success" />
-                ) : null}
-              </span>
-            }
-            detail={mcpNote(server)}
-            hint={`${server.host === undefined ? "" : `${server.host}. `}${mcpHint(server)}`}
-          />
-        ))}
+        {tooling.mcpServers.map((server) => {
+          // Signs in with the sandbox's Railway token, which only the Railway option makes.
+          const needsRailway = server.mintedBy === "railway" && !draft.railway;
+          return (
+            <CompactOptIn
+              key={server.name}
+              checked={
+                server.copy !== "unavailable" &&
+                !needsRailway &&
+                draft.mcpServers.includes(server.name)
+              }
+              disabled={disabled || server.copy === "unavailable" || needsRailway}
+              onCheckedChange={(on) =>
+                draft.setMcpServers(toggled(draft.mcpServers, server.name, on))
+              }
+              title={
+                <span className="flex items-center gap-1">
+                  {server.name}
+                  {server.copy === "mint" ? (
+                    <KeyRoundIcon aria-label="Own key" className="size-3 text-success" />
+                  ) : null}
+                </span>
+              }
+              detail={needsRailway ? "turn on Railway above" : mcpNote(server)}
+              hint={`${server.host === undefined ? "" : `${server.host}. `}${
+                needsRailway
+                  ? "Turn on Sign the Railway CLI in: this server signs in with the sandbox's own Railway token."
+                  : mcpHint(server)
+              }`}
+            />
+          );
+        })}
       </div>
       <p className="text-2xs leading-relaxed text-muted-foreground">
         Copied headers keep working after a sandbox is deleted. A server marked with a key gets its
