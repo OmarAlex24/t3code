@@ -41,6 +41,7 @@ import {
 } from "./pullRequestProjectAssignment.logic";
 import { pullRequestFilterProjects } from "@t3tools/client-runtime/pull-request-project-filter";
 import { pullRequestListEntryId } from "./pullRequestListGroups.logic";
+import { isSandboxPlaceholderProject } from "../../sidebarProjectGrouping";
 
 export interface PullRequestsSearch extends PullRequestListPreferences {
   readonly selectedUrl?: string;
@@ -81,7 +82,10 @@ export function usePullRequestScope(
   const capabilityKnown = environments.some((environment) => environment.serverConfig !== null);
   const pullRequestsSupported = environmentIds.length > 0;
   const projects = allProjects.filter(
-    (project) => !project.isScratch && environmentIds.includes(project.environmentId),
+    (project) =>
+      !project.isScratch &&
+      !isSandboxPlaceholderProject(project) &&
+      environmentIds.includes(project.environmentId),
   );
   const environmentLabels = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
