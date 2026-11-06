@@ -401,6 +401,8 @@ describe("githubAppLoginScript", () => {
         const hosts = yield* fs.readFileString(`${home}/.config/gh/hosts.yml`);
         expect(hosts).toContain(`oauth_token: ${token}`);
         expect(hosts).toContain("user: x-access-token");
+        // Marked current, so gh never tries to migrate it by asking GitHub who the token is.
+        expect(yield* fs.readFileString(`${home}/.config/gh/config.yml`)).toContain("version: 1");
         expect(((yield* fs.stat(`${home}/.config/gh/hosts.yml`)).mode & 0o777).toString(8)).toBe(
           "600",
         );
