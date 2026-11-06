@@ -32,6 +32,9 @@ sandbox must be able to reach that endpoint. When it only answers on your tailne
 each sandbox [joins your tailnet](#private-endpoints-tailscale) on its own once Tailscale is set
 up; without Tailscale, T3 Code refuses to start the sandbox and points you to its setup. You can
 also expose the endpoint publicly instead (for example with Tailscale Funnel or Cloudflare Tunnel).
+With a hub, **Set up Pi with your hub's other models** also installs the [Pi agent](./providers-pi.md)
+in each sandbox with the hub's non-Claude models, on that same key, and **Start new chats on** can
+make new chats on the config start on Pi with one of them instead of Claude.
 **Sign GitHub in with this machine's token** lets `gh` and `git` in each sandbox clone private
 repositories and push. Without it a sandbox can clone public repositories only.
 [**Let the agent use Boat**](#let-the-agent-use-boat) signs the `boat` CLI in on each Boat sandbox
