@@ -4,9 +4,11 @@ import * as NodeVM from "node:vm";
 import { vi } from "vite-plus/test";
 import {
   DEFAULT_MAX_TERMINAL_BUFFER_BYTES,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   type FilesystemBrowseEntry,
   ORCHESTRATION_V2_WS_METHODS,
+  type ServerSettings,
   ThreadId,
   ProjectId,
   type ReviewDiffPreviewInput,
@@ -49,8 +51,10 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type * as RpcSession from "../rpc/session.ts";
 import { createOrchestrationEnvironmentAtoms } from "./orchestration.ts";
 import { createReviewEnvironmentAtoms } from "./review.ts";
+import { createSandboxEnvironmentAtoms } from "./sandboxes.ts";
 import { createPreviewEnvironmentAtoms } from "./preview.ts";
 import { createFilesystemEnvironmentAtoms } from "./filesystem.ts";
+import type * as Persistence from "../platform/persistence.ts";
 import type { QueryPersistence } from "./queryPersistence.ts";
 import type { EnvironmentShellState } from "./shell.ts";
 import { createTerminalEnvironmentAtoms } from "./terminal.ts";
@@ -1362,6 +1366,51 @@ describe("environment query lifecycle", () => {
       expect(yield* readEnvironmentQuery(registry, atom)).toEqual({});
       expect(settled).toEqual([{ fork: "Fork" }, {}]);
     }),
+  );
+});
+
+describe("sandbox host facts", () => {
+  it.effect("refetch when a setting they come from changes, and only then", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let fetches = 0;
+        const harness = yield* makeEnvironmentQueryHarness(Effect.void, {
+          rpcSession: {
+            client: {
+              [WS_METHODS.sandboxesProviders]: () => Effect.sync(() => ++fetches),
+            },
+          } as unknown as RpcSession.RpcSession,
+        });
+        const settings = Atom.make<ServerSettings | null>(DEFAULT_SERVER_SETTINGS).pipe(
+          Atom.keepAlive,
+        );
+        // Host facts never read the query cache.
+        const runtime = harness.runtime as unknown as Atom.AtomRuntime<
+          EnvironmentRegistry.EnvironmentRegistry | Persistence.EnvironmentCacheStore
+        >;
+        const atom = createSandboxEnvironmentAtoms(runtime, () => settings).sandboxesProviders({
+          environmentId: QUERY_ENVIRONMENT.environmentId,
+          input: undefined,
+        });
+        const registry = yield* mountEnvironmentQuery(atom);
+        expect(yield* readEnvironmentQuery(registry, atom)).toBe(1);
+
+        // Saving the Northflank token in Settings, from this client or another one.
+        registry.set(settings, {
+          ...DEFAULT_SERVER_SETTINGS,
+          sandboxTooling: { ...DEFAULT_SERVER_SETTINGS.sandboxTooling, northflankToken: "••••" },
+        });
+        expect(yield* readEnvironmentQuery(registry, atom)).toBe(2);
+
+        registry.set(settings, {
+          ...DEFAULT_SERVER_SETTINGS,
+          sandboxTooling: { ...DEFAULT_SERVER_SETTINGS.sandboxTooling, northflankToken: "••••" },
+          hideTaggedThreads: !DEFAULT_SERVER_SETTINGS.hideTaggedThreads,
+        });
+        expect(registry.get(atom).waiting).toBe(false);
+        expect(fetches).toBe(2);
+      }),
+    ),
   );
 });
 

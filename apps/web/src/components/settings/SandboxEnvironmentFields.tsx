@@ -1,6 +1,6 @@
 import { CheckIcon, ChevronRightIcon, CircleAlertIcon, ExternalLinkIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
   AuthSettingsWriteScope,
   DEFAULT_SANDBOX_IDLE_MINUTES,
@@ -220,6 +220,9 @@ export function SandboxEnvironmentFields({
   const providersQuery = useEnvironmentQuery(
     serverEnvironment.sandboxesProviders({ environmentId, input: undefined }),
   );
+  const refreshProviders = useEffectEvent(() => providersQuery.refresh());
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- skills, MCP servers and credentials on the server change outside this client, so each opened form reads them fresh
+  useEffect(() => refreshProviders(), []);
   const saveConfig = useAtomCommand(serverEnvironment.sandboxesSaveConfig, {
     reportFailure: false,
   });
