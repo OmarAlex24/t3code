@@ -485,3 +485,155 @@ mkdir -p "$(dirname -- ${shellQuote(path)})"
 printf '%s' "$T3_FILE_CONTENT" | base64 -d >${shellQuote(path)}
 unset T3_FILE_CONTENT`,
 });
+
+/** Sets git's global name and email, so the agent can commit as the user. */
+export const gitIdentityScript = (identity: { readonly name: string; readonly email: string }) =>
+  `set -eu
+export PATH="$HOME/.local/bin:$PATH"
+git config --global user.name ${shellQuote(identity.name)}
+git config --global user.email ${shellQuote(identity.email)}`;
+
+// gh reads a token kept in hosts.yml and never asks GitHub who it belongs to, which an installation
+// token could not answer. Rewriting the file is also how a fresh token replaces an expired one.
+export const githubAppLoginScript = (token: string): SandboxScript => ({
+  secrets: { T3_GITHUB_TOKEN: token },
+  command: `set -eu
+umask 077
+export PATH="$HOME/.local/bin:$PATH"
+dir="\${GH_CONFIG_DIR:-$HOME/.config/gh}"
+mkdir -p "$dir"
+printf 'github.com:\\n    users:\\n        x-access-token:\\n            oauth_token: %s\\n    oauth_token: %s\\n    git_protocol: https\\n    user: x-access-token\\n' "$T3_GITHUB_TOKEN" "$T3_GITHUB_TOKEN" >"$dir/hosts.yml.t3-tmp"
+unset T3_GITHUB_TOKEN
+mv "$dir/hosts.yml.t3-tmp" "$dir/hosts.yml"
+if ! command -v gh >/dev/null 2>&1; then
+  echo "The GitHub CLI is not installed." >&2
+  exit 3
+fi
+gh auth setup-git --hostname github.com`,
+});
+
+const SETUP_PREFIX = "T3_SETUP:";
+
+/**
+ * Runs the config's setup script in the clone once per machine: a marker named by the script's
+ * hash makes a sandbox from a template that already ran it skip it. Prints how it went and never
+ * the script's own output, which can carry anything the script touched.
+ */
+export const setupScriptScript = (input: {
+  readonly script: string;
+  readonly hash: string;
+  readonly directory: string;
+}): SandboxScript => ({
+  secrets: { T3_SETUP_SCRIPT: base64(input.script) },
+  command: `export PATH="$HOME/.local/bin:$PATH"
+marker="$HOME/.t3/setup-scripts/${input.hash}"
+if [ -f "$marker" ]; then
+  unset T3_SETUP_SCRIPT
+  printf '${SETUP_PREFIX}skipped\\n'
+  exit 0
+fi
+mkdir -p "$HOME/.t3/setup-scripts"
+script="$(mktemp)"
+printf '%s' "$T3_SETUP_SCRIPT" | base64 -d >"$script"
+unset T3_SETUP_SCRIPT
+cd ${shellQuote(input.directory)} 2>/dev/null || cd "$HOME"
+status=0
+bash "$script" >"$HOME/.t3/setup-script.log" 2>&1 </dev/null || status=$?
+rm -f "$script"
+if [ "$status" -eq 0 ]; then
+  : >"$marker"
+  printf '${SETUP_PREFIX}ran\\n'
+else
+  printf '${SETUP_PREFIX}failed %s\\n' "$status"
+fi
+exit 0`,
+});
+
+export type SetupScriptReport =
+  | { readonly _tag: "ran" }
+  | { readonly _tag: "skipped" }
+  | { readonly _tag: "failed"; readonly exitCode: number };
+
+/** How the setup script went, or null when it printed nothing T3 recognizes. */
+export const parseSetupScriptReport = (stdout: string): SetupScriptReport | null => {
+  const line = stdout
+    .split("\n")
+    .find((candidate) => candidate.startsWith(SETUP_PREFIX))
+    ?.slice(SETUP_PREFIX.length)
+    .trim();
+  if (line === "ran" || line === "skipped") return { _tag: line };
+  const failed = line === undefined ? null : /^failed (\d+)$/u.exec(line);
+  return failed === null ? null : { _tag: "failed", exitCode: Number(failed[1]) };
+};
+
+// Names of the MCP servers T3 wrote, so a template save removes exactly those (their headers).
+const MCP_WRITTEN = `"$HOME/.t3/mcp-servers.json"`;
+
+/**
+ * Merges MCP servers into the user-scope list of Claude's ~/.claude.json, keeping everything else.
+ * Header values ride in `secrets`, never in the command.
+ */
+export const mcpServersScript = (servers: Readonly<Record<string, unknown>>): SandboxScript => ({
+  secrets: { T3_MCP_SERVERS: JSON.stringify(servers) },
+  command: `set -eu
+umask 077
+export PATH="$HOME/.local/bin:$PATH"
+mkdir -p "$HOME/.t3"
+file="\${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+node -e '
+const fs = require("node:fs");
+const [file, written] = process.argv.slice(1);
+const servers = JSON.parse(process.env.T3_MCP_SERVERS);
+let config = {};
+try {
+  config = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch (error) {
+  if (error.code !== "ENOENT") throw new Error(".claude.json is not valid JSON");
+}
+if (config === null || typeof config !== "object" || Array.isArray(config)) {
+  throw new Error(".claude.json is not an object");
+}
+const current = config.mcpServers !== null && typeof config.mcpServers === "object" ? config.mcpServers : {};
+config.mcpServers = { ...current, ...servers };
+fs.writeFileSync(file + ".t3-tmp", JSON.stringify(config, null, 2) + "\\n", { mode: 0o600 });
+fs.renameSync(file + ".t3-tmp", file);
+let names = [];
+try { names = JSON.parse(fs.readFileSync(written, "utf8")); } catch {}
+fs.writeFileSync(written, JSON.stringify([...new Set([...names, ...Object.keys(servers)])]) + "\\n", { mode: 0o600 });
+' "$file" ${MCP_WRITTEN}
+unset T3_MCP_SERVERS`,
+});
+
+// Run before a template save: the MCP servers T3 copied carry header values from this machine.
+export const MCP_SERVERS_SCRUB = `file="\${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+if [ -f ${MCP_WRITTEN} ] && [ -f "$file" ] && command -v node >/dev/null 2>&1; then
+  node -e '
+const fs = require("node:fs");
+const [file, written] = process.argv.slice(1);
+const config = JSON.parse(fs.readFileSync(file, "utf8"));
+for (const name of JSON.parse(fs.readFileSync(written, "utf8"))) delete config.mcpServers?.[name];
+fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\\n", { mode: 0o600 });
+' "$file" ${MCP_WRITTEN} >/dev/null 2>&1 || true
+fi
+rm -f ${MCP_WRITTEN}`;
+
+// The CLI keeps the token in its own config, so a failed install or login leaves nothing behind.
+export const northflankLoginScript = (token: string): SandboxScript => ({
+  secrets: { T3_NORTHFLANK_TOKEN: token },
+  command: `set -eu
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v northflank >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  npm install -g --prefix "$HOME/.local" @northflank/cli >/dev/null 2>&1 || true
+fi
+if ! command -v northflank >/dev/null 2>&1; then
+  unset T3_NORTHFLANK_TOKEN
+  echo "The Northflank CLI could not be installed." >&2
+  exit 3
+fi
+umask 077
+northflank login -n t3-sandbox -t "$T3_NORTHFLANK_TOKEN" >/dev/null 2>&1
+unset T3_NORTHFLANK_TOKEN`,
+});
+
+// Run before a template save: a copy must not inherit the Northflank login.
+export const NORTHFLANK_LOGIN_SCRUB = `rm -rf "\${NF_CONFIG_DIR:-$HOME/.northflank}"`;
