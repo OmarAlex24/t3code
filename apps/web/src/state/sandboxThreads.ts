@@ -187,12 +187,7 @@ export const isSandboxlessBridgeThread = (input: {
     (sandbox) => sandbox.threadId === input.threadRef.threadId && sandbox.state !== "deleted",
   );
 
-/**
- * Whether a host thread can send through the bridge in this project yet. Linking turns the
- * provider on for the project and the server probes it after; until then the composer would pick
- * another provider, or the placeholder model the instance lists before its probe finds `model`.
- */
-export const sandboxBridgeReady = (input: {
+interface InstanceReadyInput {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly settings: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides"> | null;
   readonly projects: ReadonlyArray<{
@@ -202,13 +197,22 @@ export const sandboxBridgeReady = (input: {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId;
   readonly model: string;
-}) => {
+}
+
+/**
+ * Whether the composer can send on `instanceId` with `model` in this project yet: the project is
+ * listed, the instance is on there and probed, and its probe found `model`. Until then the composer
+ * would pick another provider, or a placeholder model the instance lists before its probe.
+ */
+export const providerInstanceReady = (
+  input: InstanceReadyInput & { readonly instanceId: ProviderInstanceId },
+) => {
   if (input.settings === null) return false;
   const listed = input.projects.some(
     (project) => project.environmentId === input.environmentId && project.id === input.projectId,
   );
   const entry = providerInstanceEntriesFor(input.providers, input.settings, input.projectId).find(
-    (candidate) => candidate.instanceId === bridgeInstanceId,
+    (candidate) => candidate.instanceId === input.instanceId,
   );
   return (
     listed &&
@@ -217,6 +221,13 @@ export const sandboxBridgeReady = (input: {
     entry.models.some((candidate) => candidate.slug === input.model)
   );
 };
+
+/**
+ * Whether a host thread can send through the bridge in this project yet. Linking turns the
+ * provider on for the project and the server probes it after.
+ */
+export const sandboxBridgeReady = (input: InstanceReadyInput) =>
+  providerInstanceReady({ ...input, instanceId: bridgeInstanceId });
 
 const DAY_MINUTES = 24 * 60;
 // A stopped disk this close to the provider's limit gets a warning that recommends deleting it.

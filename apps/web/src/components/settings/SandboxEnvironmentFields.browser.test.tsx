@@ -445,6 +445,64 @@ describe("SandboxEnvironmentFields", () => {
     });
   });
 
+  it("offers Pi only on a hub key for Claude, and saves the model new chats start on", async () => {
+    setup({
+      host: {
+        claude: { baseUrl: "https://hub.example.test", key: "hub", privateNetwork: false },
+        piModels: ["wafer/GLM-5.3", "wafer/GLM-5.3-Flash"],
+      },
+    });
+    await using _screen = await render(fields());
+
+    await userEvent.click(section("Agent access"));
+    const pi = page.getByRole("checkbox", { name: /Set up Pi with your hub/u });
+    // Pi runs on the key the sandbox gets for Claude, so it waits for Claude.
+    await expect.element(pi).toBeDisabled();
+    await expect
+      .element(page.getByText(/turn on this machine's Claude setup first/u))
+      .toBeVisible();
+    await userEvent.click(page.getByText("Use this machine's Claude setup"));
+    await userEvent.click(page.getByText("Set up Pi with your hub's other models"));
+    await userEvent.click(page.getByRole("combobox", { name: "Start new chats on" }));
+    await userEvent.click(page.getByRole("option", { name: "Pi · wafer/GLM-5.3-Flash" }));
+    await expect
+      .element(summary("agent"))
+      .toHaveTextContent(
+        "Claude via hub.example.test · Pi with hub models, new chats on wafer/GLM-5.3-Flash",
+      );
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toMatchObject({
+      claude: { baseUrl: "https://hub.example.test" },
+      pi: { startModel: "wafer/GLM-5.3-Flash" },
+    });
+
+    // Turning Claude off takes Pi with it.
+    await userEvent.click(page.getByText("Use this machine's Claude setup"));
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig(1)).not.toHaveProperty("pi");
+  });
+
+  it("explains that Pi needs a hub when Claude's token is copied", async () => {
+    setup({
+      host: {
+        claude: { baseUrl: "https://claude.example.test", key: "copy", privateNetwork: false },
+      },
+    });
+    await using _screen = await render(
+      editing(saved({ claude: { baseUrl: "https://claude.example.test" }, pi: {} })),
+    );
+
+    await userEvent.click(section("Agent access"));
+    await expect
+      .element(page.getByRole("checkbox", { name: /Set up Pi with your hub/u }))
+      .toBeDisabled();
+    await expect
+      .element(page.getByText(/on a CLIProxyAPI hub with a management key/u))
+      .toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    expect(savedConfig()).not.toHaveProperty("pi");
+  });
+
   it("lets the agent use Boat only when asked, and only where the provider can", async () => {
     setup();
     await using _screen = await render(fields());
