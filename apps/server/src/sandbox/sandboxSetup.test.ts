@@ -11,8 +11,13 @@ import {
   claudeSettingsScript,
   endpointReachScript,
   ENSURE_TOOLS_SCRIPT,
+  githubAppLoginScript,
   githubLoginScript,
+  MCP_SERVERS_SCRUB,
+  mcpServersScript,
   parseEndpointReach,
+  parseSetupScriptReport,
+  setupScriptScript,
   parseMissingTools,
   parseTailscaleReport,
   type SandboxScript,
@@ -315,6 +320,90 @@ describe("githubLoginScript", () => {
         expect(yield* fs.readFileString(`${stub}/gh.stdin`)).toBe(token);
         expect(yield* fs.readFileString(`${stub}/gh.argv`)).not.toContain("ghp_");
         expect(yield* fs.exists(`${stub}/pwned`)).toBe(false);
+      }),
+    ),
+  );
+});
+
+describe("setupScriptScript", () => {
+  it.live(
+    "runs the script in the clone once, reports a failure's exit code, and prints no output",
+    () =>
+      withHome((home) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          yield* fs.makeDirectory(`${home}/clone`);
+          const script = "echo installing; touch ran-here; echo $((count+1)) >>$HOME/count";
+          const run = setupScriptScript({ script, hash: "abc123", directory: `${home}/clone` });
+          expect(run.command).not.toContain("installing");
+          expect(parseSetupScriptReport(yield* runIn(home, run))).toEqual({ _tag: "ran" });
+          expect(yield* fs.exists(`${home}/clone/ran-here`)).toBe(true);
+          // A machine that already ran this script (a template made after it) skips it.
+          expect(parseSetupScriptReport(yield* runIn(home, run))).toEqual({ _tag: "skipped" });
+          expect((yield* fs.readFileString(`${home}/count`)).trim()).toBe("1");
+
+          const failing = setupScriptScript({ script: "exit 7", hash: "def456", directory: home });
+          const output = yield* runIn(home, failing);
+          expect(parseSetupScriptReport(output)).toEqual({ _tag: "failed", exitCode: 7 });
+          // A failed script leaves no marker, so the next sandbox tries again.
+          expect(yield* fs.exists(`${home}/.t3/setup-scripts/def456`)).toBe(false);
+        }),
+      ),
+  );
+});
+
+describe("mcpServersScript", () => {
+  it.live("merges servers into ~/.claude.json, and the template scrub removes only those", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.writeFileString(
+          `${home}/.claude.json`,
+          JSON.stringify({
+            numStartups: 3,
+            mcpServers: { mine: { type: "http", url: "https://mine.test" } },
+          }),
+        );
+        const secret = "maple_ak_'$(touch pwned)";
+        const script = mcpServersScript({
+          maple: {
+            type: "http",
+            url: "https://api.maple.dev/mcp",
+            headers: { Authorization: `Bearer ${secret}` },
+          },
+        });
+        expect(revealsSecret(script.command, secret)).toBe(false);
+        expect(yield* runIn(home, script)).toBe("");
+        expect(yield* fs.exists(`${home}/pwned`)).toBe(false);
+        const merged = JSON.parse(yield* fs.readFileString(`${home}/.claude.json`));
+        expect(merged.numStartups).toBe(3);
+        expect(Object.keys(merged.mcpServers)).toEqual(["mine", "maple"]);
+        expect(merged.mcpServers.maple.headers.Authorization).toBe(`Bearer ${secret}`);
+
+        yield* runIn(home, MCP_SERVERS_SCRUB);
+        const scrubbed = JSON.parse(yield* fs.readFileString(`${home}/.claude.json`));
+        expect(Object.keys(scrubbed.mcpServers)).toEqual(["mine"]);
+      }),
+    ),
+  );
+});
+
+describe("githubAppLoginScript", () => {
+  it.live("writes the token to gh's hosts.yml without putting it in the command", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const token = "ghs_installation_TOKEN";
+        const script = githubAppLoginScript(token);
+        expect(revealsSecret(script.command, token)).toBe(false);
+        // No gh here: the file is still written, then the script says gh is missing.
+        yield* runIn(home, script).pipe(Effect.ignore);
+        const hosts = yield* fs.readFileString(`${home}/.config/gh/hosts.yml`);
+        expect(hosts).toContain(`oauth_token: ${token}`);
+        expect(hosts).toContain("user: x-access-token");
+        expect(((yield* fs.stat(`${home}/.config/gh/hosts.yml`)).mode & 0o777).toString(8)).toBe(
+          "600",
+        );
       }),
     ),
   );
