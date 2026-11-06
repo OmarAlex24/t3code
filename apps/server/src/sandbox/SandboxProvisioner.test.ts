@@ -5263,6 +5263,7 @@ describe("SandboxProvisioner per-thread launches", () => {
           { ...configInput, label: "  " },
           { ...configInput, size: "huge" },
           { ...configInput, access: "tailnet" as const },
+          { ...configInput, pi: {} },
         ],
         (config) => provisioner.saveConfig({ config }).pipe(Effect.flip),
       );
@@ -5270,6 +5271,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         "Enter a name for this sandbox config.",
         "Boat has no machine size huge.",
         "A tailnet-only sandbox has to join your tailnet.",
+        "Pi uses the sandbox's hub key for Claude, so turn on this machine's Claude setup too.",
       ]);
 
       yield* provisioner.deleteConfig({ configId: saved.config.id });
