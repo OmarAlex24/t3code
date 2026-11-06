@@ -1,10 +1,12 @@
-import type {
-  EnvironmentId,
-  ScopedProjectRef,
-  SidebarProjectGroupingMode,
+import {
+  isSandboxHostProjectRoot,
+  type EnvironmentId,
+  type ScopedProjectRef,
+  type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import {
   buildProjectGroups,
+  deriveProjectGroupLabel,
   derivePhysicalProjectKey,
   resolveScratchProjectScopeKey,
   type ProjectGroupingSettings,
@@ -137,6 +139,13 @@ export function buildPhysicalToLogicalProjectKeyMap(input: {
   return mapping;
 }
 
+/**
+ * An empty folder the server made only so the phone has a home for a sandbox thread's host copy.
+ * This client shows the sandbox's own thread instead, so it offers no such project.
+ */
+export const isSandboxPlaceholderProject = (project: Pick<Project, "workspaceRoot">): boolean =>
+  isSandboxHostProjectRoot(project.workspaceRoot);
+
 export function buildSidebarProjectSnapshots(input: {
   projects: ReadonlyArray<Project>;
   settings: ProjectGroupingSettings;
@@ -145,9 +154,14 @@ export function buildSidebarProjectSnapshots(input: {
   resolveEnvironmentLabel: (environmentId: EnvironmentId) => string | null;
   isDesktopLocalEnvironment?: (environmentId: EnvironmentId) => boolean;
   isWslEnvironment?: (environmentId: EnvironmentId) => boolean;
+  /** Sandbox placeholder projects to list anyway, such as one still holding a visible thread. */
+  keepSandboxPlaceholder?: (project: Project) => boolean;
 }): SidebarProjectSnapshot[] {
+  const keepPlaceholder = input.keepSandboxPlaceholder ?? (() => false);
   return buildProjectGroups({
-    projects: input.projects,
+    projects: input.projects.filter(
+      (project) => !isSandboxPlaceholderProject(project) || keepPlaceholder(project),
+    ),
     groupScratchProjects: input.groupScratchProjects ?? false,
     settings: input.settings,
     preferredEnvironmentId: input.primaryEnvironmentId,
@@ -159,12 +173,21 @@ export function buildSidebarProjectSnapshots(input: {
         environmentLabel: input.resolveEnvironmentLabel(project.environmentId),
       }),
     );
-    const representative =
+    const grouped =
       members.find(
         (member) =>
           member.environmentId === group.representative.environmentId &&
           member.id === group.representative.id,
       ) ?? members[0]!;
+    // A placeholder never stands for a real checkout it is grouped with.
+    const representative = isSandboxPlaceholderProject(grouped)
+      ? (members.find(
+          (member) =>
+            member.environmentId === grouped.environmentId && !isSandboxPlaceholderProject(member),
+        ) ??
+        members.find((member) => !isSandboxPlaceholderProject(member)) ??
+        grouped)
+      : grouped;
 
     const hasLocal =
       input.primaryEnvironmentId !== null &&
@@ -191,7 +214,10 @@ export function buildSidebarProjectSnapshots(input: {
     return {
       ...representative,
       projectKey: group.key,
-      displayName: group.label,
+      displayName:
+        representative === grouped
+          ? group.label
+          : deriveProjectGroupLabel({ representative, members }),
       groupedProjectCount: members.length,
       environmentPresence:
         hasLocal && hasRemote ? "mixed" : hasRemote ? "remote-only" : "local-only",

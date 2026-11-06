@@ -3,11 +3,20 @@ import {
   getProjectOrderKey,
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
-import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
+import {
+  buildSidebarProjectSnapshots,
+  isSandboxPlaceholderProject,
+} from "../sidebarProjectGrouping";
+import { useSandboxHostMirrors } from "../state/sandboxes";
+import { withSandboxHostMirrors } from "../state/sandboxThreads";
 import { useEnvironmentIdentities, usePrimaryEnvironmentId } from "../state/environments";
 import { useDelegatedUnderParent, useProjects, useQuietThreadShells } from "../state/entities";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
+
+const projectKeyOf = (project: { readonly environmentId: string; readonly id: string }) =>
+  `${project.environmentId}:${project.id}`;
 
 export function useSidebarProjectGroups() {
   const projects = useProjects();
@@ -32,12 +41,31 @@ export function useSidebarProjectGroups() {
   const labels = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
   );
+  // Mirrors of sandbox threads list nowhere; a placeholder still holding another thread, such as a
+  // mirror whose sandbox isn't connected, stays so that thread keeps a row.
+  const unlisted = withSandboxHostMirrors(delegatedUnderParent, useSandboxHostMirrors());
+  const placeholders = new Set(
+    projects.filter(isSandboxPlaceholderProject).map((project) => projectKeyOf(project)),
+  );
+  const placeholdersWithThreads = new Set(
+    placeholders.size === 0
+      ? []
+      : threads.flatMap((thread) => {
+          const key = `${thread.environmentId}:${thread.projectId}`;
+          return placeholders.has(key) &&
+            thread.archivedAt === null &&
+            !unlisted.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id }))
+            ? [key]
+            : [];
+        }),
+  );
   const unsortedGroups = buildSidebarProjectSnapshots({
     projects: sortOrder === "manual" ? orderedProjects : projects,
     groupScratchProjects: true,
     settings: groupingSettings,
     primaryEnvironmentId,
     resolveEnvironmentLabel: (environmentId) => labels.get(environmentId) ?? null,
+    keepSandboxPlaceholder: (project) => placeholdersWithThreads.has(projectKeyOf(project)),
   });
   return sortSidebarV2ProjectGroups(unsortedGroups, threads, sortOrder, delegatedUnderParent);
 }

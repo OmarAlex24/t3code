@@ -20,6 +20,7 @@ import {
   useVisibleThreadShells,
 } from "../state/entities";
 import { useEnvironments } from "../state/environments";
+import { isSandboxPlaceholderProject } from "../sidebarProjectGrouping";
 
 function ChatIndexRouteView() {
   const { authGateState } = Route.useRouteContext();
@@ -46,7 +47,9 @@ function IndexDraftLanding() {
 
   const mostRecentProject =
     sortScopedProjectsForSidebar(
-      projects.filter((project) => project.archivedAt == null),
+      projects.filter(
+        (project) => project.archivedAt == null && !isSandboxPlaceholderProject(project),
+      ),
       threads,
       "updated_at",
     )[0] ?? null;
