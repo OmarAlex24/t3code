@@ -10,6 +10,8 @@ import {
   type SandboxAccess,
   type SandboxCheckWorkResult,
   type SandboxConfigsResult,
+  type SandboxConnectGithubAppInput,
+  type SandboxConnectGithubAppResult,
   type SandboxCreateInput,
   type SandboxCreateResult,
   type SandboxCredentialEnvironment,
@@ -104,7 +106,15 @@ import {
   type SandboxScript,
   type SandboxTool,
   GITHUB_LOGIN_SCRUB,
+  githubAppLoginScript,
   githubLoginScript,
+  gitIdentityScript,
+  MCP_SERVERS_SCRUB,
+  mcpServersScript,
+  NORTHFLANK_LOGIN_SCRUB,
+  northflankLoginScript,
+  parseSetupScriptReport,
+  setupScriptScript,
   TAILSCALE_PROXY_URL,
   tailscaleProxyEnv,
   tailscaleScript,
@@ -125,6 +135,9 @@ import {
 } from "@t3tools/sandbox-bridge/link";
 import { makeSandboxLaunchTracker } from "./sandboxLaunches.ts";
 import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
+import { GithubAppApiError, type GithubAppCredentials, makeGithubAppApi } from "./githubAppApi.ts";
+import { makeMapleApi, mapleApiBaseUrl } from "./mapleApi.ts";
+import { describeHostMcpServer } from "./sandboxHostTooling.ts";
 import {
   type AgentEnvironment,
   layerHttpClient,
@@ -249,6 +262,8 @@ done
 rm -rf "$HOME/.t3/userdata" "$HOME/.t3/environment-label" "$HOME/.t3/usage-host-id"
 ${CLAUDE_SETTINGS_SCRUB}
 ${GITHUB_LOGIN_SCRUB}
+${MCP_SERVERS_SCRUB}
+${NORTHFLANK_LOGIN_SCRUB}
 ${tailscaleScrub()}
 rm -f "$HOME/.t3/sandbox-server.log" "$HOME/.t3/sandbox-server.pid"`;
 
@@ -405,7 +420,41 @@ interface Owned {
   deviceId?: string;
   agentEnvironment?: AgentEnvironment;
   agentKeyId?: string;
+  githubToken?: GithubToken;
+  mapleKey?: { readonly keyId: string; readonly apiBaseUrl: string };
 }
+
+/** An installation token minted for one sandbox, kept as a server secret named by `secret`. */
+interface GithubToken {
+  readonly installationId: number;
+  readonly repository: string;
+  readonly token: Redacted.Redacted<string>;
+  readonly secret: string;
+  readonly expiresAt: string;
+}
+
+/** What a thread's launch adds to provisioning: its config's tooling and its repository. */
+interface LaunchTooling {
+  readonly config: SandboxEnvironmentConfig;
+  readonly repository: { readonly owner: string; readonly name: string };
+}
+
+// The marker only has to tell one script's text from another's on the same machine.
+const scriptHash = (script: string) => {
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let index = 0; index < script.length; index += 1) {
+    const code = script.charCodeAt(index);
+    a = Math.imul(a ^ code, 0x01000193) >>> 0;
+    b = Math.imul(b ^ code, 0x5bd1e995) >>> 0;
+  }
+  return `${a.toString(16).padStart(8, "0")}${b.toString(16).padStart(8, "0")}${script.length.toString(16)}`;
+};
+
+// A minted Maple key also expires on its own, in case a revoke never reaches Maple.
+const MAPLE_KEY_SECONDS = 30 * 24 * 60 * 60;
+// A sandbox's GitHub token is replaced this long before it expires.
+const GITHUB_TOKEN_REFRESH_MS = 20 * 60 * 1000;
 
 interface Reporter {
   readonly stage: (
@@ -527,6 +576,10 @@ export class SandboxProvisioner extends Context.Service<
     readonly checkTailscale: (
       input: SandboxTailscaleCheckInput,
     ) => Effect.Effect<SandboxTailscaleCheckResult>;
+    /** Turns the manifest flow's code into the sandboxes' GitHub App and saves it on this server. */
+    readonly connectGithubApp: (
+      input: SandboxConnectGithubAppInput,
+    ) => Effect.Effect<SandboxConnectGithubAppResult, SandboxProviderError>;
     /** Stops sandboxes past their running limit and syncs every other record with its provider. */
     readonly sweep: Effect.Effect<void>;
     /**
@@ -559,6 +612,8 @@ const make = Effect.gen(function* () {
   const secretResolver = yield* SecretResolver.SecretResolver;
   const hubApi = yield* makeCliproxyApi;
   const tailscaleApi = yield* makeTailscaleApi;
+  const githubAppApi = yield* makeGithubAppApi;
+  const mapleApi = yield* makeMapleApi;
   const onHttp = Effect.provideService(HttpClient.HttpClient, httpClient);
 
   // A settings patch needs the key, and merges `settings` per field, so a save writes the key and
@@ -665,6 +720,193 @@ const make = Effect.gen(function* () {
   };
 
   const tailscaleToken = (client: TailscaleOAuthClient) => tailscaleApi.accessToken(client);
+
+  const githubAppOf = (value: ServerSettingsValue): GithubAppCredentials | undefined => {
+    const tooling = value.sandboxTooling;
+    if (tooling.githubAppId === "" || tooling.githubAppPrivateKey === "") return undefined;
+    return {
+      appId: tooling.githubAppId,
+      slug: tooling.githubAppSlug,
+      privateKey: Redacted.make(tooling.githubAppPrivateKey),
+    };
+  };
+
+  const githubInstallUrl = (slug: string) =>
+    `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
+
+  // Null when the app is not installed on the repository, which only the user can change.
+  const mintGithubToken = Effect.fn("SandboxProvisioner.mintGithubToken")(function* (
+    app: GithubAppCredentials,
+    repository: { readonly owner: string; readonly name: string },
+    knownInstallation?: number,
+  ) {
+    const installationId =
+      knownInstallation ?? (yield* githubAppApi.repositoryInstallation(app, repository));
+    if (installationId === null) return null;
+    const minted = yield* githubAppApi.createInstallationToken(
+      app,
+      installationId,
+      repository.name,
+    );
+    const secret = `sandbox-github-token-${yield* secureRandom.uuidV4()}`;
+    yield* secrets.set(secret, new TextEncoder().encode(Redacted.value(minted.token))).pipe(
+      Effect.tapError(() => githubAppApi.revokeInstallationToken(minted.token).pipe(Effect.ignore)),
+      Effect.mapError(
+        () =>
+          new GithubAppApiError({
+            detail: "Could not save the sandbox's GitHub token on this server.",
+          }),
+      ),
+    );
+    return {
+      installationId,
+      repository: `${repository.owner}/${repository.name}`,
+      token: minted.token,
+      secret,
+      expiresAt: minted.expiresAt,
+    } satisfies GithubToken;
+  });
+
+  const dropGithubToken = (token: Pick<GithubToken, "token" | "secret">) =>
+    githubAppApi
+      .revokeInstallationToken(token.token)
+      .pipe(Effect.ignore, Effect.andThen(secrets.remove(token.secret).pipe(Effect.ignore)));
+
+  const githubRecordOf = (token: GithubToken): NonNullable<SandboxRecord["githubApp"]> => ({
+    installationId: token.installationId,
+    repository: token.repository,
+    secret: token.secret,
+    expiresAt: token.expiresAt,
+  });
+
+  // Never blocks a delete. A token past its expiry is dead already, so only its secret goes.
+  const releaseGithubToken = Effect.fn("SandboxProvisioner.releaseGithubToken")(function* (
+    record: Pick<SandboxRecord, "label" | "githubApp">,
+  ) {
+    const reference = record.githubApp;
+    if (reference === undefined) return null;
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const stored = yield* secrets.get(reference.secret).pipe(Effect.orElseSucceed(Option.none));
+    const expired = now >= Date.parse(reference.expiresAt);
+    const revoked =
+      expired || Option.isNone(stored)
+        ? null
+        : yield* githubAppApi
+            .revokeInstallationToken(Redacted.make(new TextDecoder().decode(stored.value)))
+            .pipe(
+              Effect.tapError((error) =>
+                Effect.logWarning("sandbox github token revoke failed", { detail: error.detail }),
+              ),
+              Effect.exit,
+            );
+    yield* secrets.remove(reference.secret).pipe(Effect.ignore);
+    if (expired) return null;
+    return revoked !== null && Exit.isSuccess(revoked)
+      ? null
+      : `T3 Code could not revoke the GitHub token it made for ${record.label}. It stops working on its own within the hour.`;
+  });
+
+  // Never blocks a delete: a key that cannot be revoked becomes a warning naming it.
+  const releaseMapleKey = Effect.fn("SandboxProvisioner.releaseMapleKey")(function* (
+    record: Pick<SandboxRecord, "label" | "mapleKey">,
+  ) {
+    const reference = record.mapleKey;
+    if (reference === undefined) return null;
+    const warning = `T3 Code could not revoke the Maple key it made for ${record.label}. Revoke the key starting with t3-sandbox-${labelSlug(record.label)}- in Maple.`;
+    const adminKey = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
+      ?.sandboxTooling.mapleAdminKey;
+    if (adminKey === undefined || adminKey === "") return warning;
+    const revoked = yield* mapleApi
+      .revokeKey(Redacted.make(adminKey), reference.apiBaseUrl, reference.keyId)
+      .pipe(
+        Effect.tapError((error) =>
+          Effect.logWarning("sandbox maple key revoke failed", { detail: error.detail }),
+        ),
+        Effect.exit,
+      );
+    return Exit.isSuccess(revoked) ? null : warning;
+  });
+
+  /**
+   * Replaces a sandbox's GitHub token with a fresh one: mint, write it on the sandbox, then revoke
+   * the old one. A failure keeps the old token and says why.
+   */
+  const refreshGithubToken = Effect.fn("SandboxProvisioner.refreshGithubToken")(function* (
+    record: SandboxRecord,
+    run: (
+      script: string | SandboxScript,
+      timeoutSeconds: number,
+    ) => Effect.Effect<SandboxExecResult, SandboxProviderError>,
+  ): Effect.fn.Return<{
+    readonly githubApp: SandboxRecord["githubApp"];
+    readonly warning: string | null;
+  }> {
+    const reference = record.githubApp;
+    if (reference === undefined) return { githubApp: undefined, warning: null };
+    const keep = (warning: string) => ({ githubApp: reference, warning });
+    const app = githubAppOf(yield* settings.getSettings.pipe(Effect.orDie));
+    if (app === undefined) {
+      return keep("The GitHub App is no longer connected, so this sandbox's GitHub token expires.");
+    }
+    const [owner = "", name = ""] = reference.repository.split("/");
+    const minted = yield* mintGithubToken(app, { owner, name }, reference.installationId).pipe(
+      Effect.option,
+    );
+    if (Option.isNone(minted) || minted.value === null) {
+      return keep("GitHub would not renew this sandbox's token, so it expires within the hour.");
+    }
+    const token = minted.value;
+    const written = yield* run(githubAppLoginScript(Redacted.value(token.token)), 60).pipe(
+      Effect.exit,
+    );
+    if (Exit.isFailure(written)) {
+      yield* dropGithubToken(token);
+      return keep("The sandbox's GitHub token could not be renewed on the sandbox.");
+    }
+    yield* releaseGithubToken({ label: record.label, githubApp: reference });
+    return { githubApp: githubRecordOf(token), warning: null };
+  });
+
+  const connectGithubApp = Effect.fn("SandboxProvisioner.connectGithubApp")(function* (
+    input: SandboxConnectGithubAppInput,
+  ) {
+    const app = yield* githubAppApi
+      .convertManifest(input.code)
+      .pipe(
+        Effect.mapError((error) =>
+          launchConfigError(
+            error.status === 404 || error.status === 422
+              ? "GitHub no longer accepts this code. Create the app again from Settings."
+              : `Could not create the GitHub App. ${error.detail}`,
+          ),
+        ),
+      );
+    yield* settings
+      .updateSettings({
+        sandboxTooling: {
+          githubAppId: app.appId,
+          githubAppSlug: app.slug,
+          githubAppOwner: app.owner,
+          githubAppPrivateKey: Redacted.value(app.privateKey),
+        },
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new SandboxProviderError({
+              provider: "boat",
+              stage: "config",
+              detail: "Could not save the GitHub App on this server.",
+              cause,
+            }),
+        ),
+      );
+    return {
+      slug: app.slug,
+      owner: app.owner,
+      installUrl: githubInstallUrl(app.slug),
+    } satisfies SandboxConnectGithubAppResult;
+  });
 
   const checkTailscale = Effect.fn("SandboxProvisioner.checkTailscale")(function* (
     input: SandboxTailscaleCheckInput,
@@ -834,8 +1076,17 @@ const make = Effect.gen(function* () {
     const hub = hubSource(current);
     const github = Option.isSome(yield* hostAccess.githubToken);
     const tailscale = tailscaleClient(current) !== undefined;
+    const app = githubAppOf(current);
+    const tooling = {
+      ...(app === undefined
+        ? {}
+        : { githubApp: { slug: app.slug, owner: current.sandboxTooling.githubAppOwner } }),
+      northflank: current.sandboxTooling.northflankToken !== "",
+      maple: current.sandboxTooling.mapleAdminKey !== "",
+      tooling: yield* hostAccess.tooling,
+    };
     if (claude.baseUrl === undefined || (hub === undefined && claude.authToken === undefined)) {
-      return { github, tailscale } satisfies SandboxHostAccessFacts;
+      return { github, tailscale, ...tooling } satisfies SandboxHostAccessFacts;
     }
     const tailnetAddress = yield* hostAccess.endpointTailnetAddress(claude.baseUrl);
     return {
@@ -847,6 +1098,7 @@ const make = Effect.gen(function* () {
       },
       github,
       tailscale,
+      ...tooling,
     } satisfies SandboxHostAccessFacts;
   });
 
@@ -1155,6 +1407,10 @@ const make = Effect.gen(function* () {
         prepared.tailnet === undefined || owned.deviceId === undefined
           ? Effect.void
           : tailscaleApi.deleteDevice(prepared.tailnet.token, owned.deviceId).pipe(Effect.ignore),
+        owned.githubToken === undefined ? Effect.void : dropGithubToken(owned.githubToken),
+        owned.mapleKey === undefined
+          ? Effect.void
+          : releaseMapleKey({ label: prepared.label, mapleKey: owned.mapleKey }),
         records.remove(instanceId).pipe(Effect.ignore),
       ],
       { concurrency: "unbounded", discard: true },
@@ -1173,6 +1429,8 @@ const make = Effect.gen(function* () {
        * a sandbox like that would sit on Thinking while Claude retries.
        */
       readonly requireClaudeReach?: boolean;
+      /** A thread's launch: its config's GitHub and git identity choices, and its repository. */
+      readonly launch?: LaunchTooling;
     },
   ) {
     const { driver, config, label, size, input, claude, githubToken, tailnet } = prepared;
@@ -1240,10 +1498,12 @@ const make = Effect.gen(function* () {
           }),
     };
     yield* records.put(record).pipe(Effect.orDie);
-    const save = (patch: Partial<SandboxRecord>) =>
+    const save = (patch: Partial<SandboxRecord>, drop: ReadonlyArray<keyof SandboxRecord> = []) =>
       nowIso.pipe(
         Effect.map((updatedAt) => {
-          record = { ...record, ...patch, updatedAt };
+          const next: Record<string, unknown> = { ...record, ...patch, updatedAt };
+          for (const key of drop) delete next[key];
+          record = next as SandboxRecord;
           return record;
         }),
         Effect.tap((next) => records.put(next).pipe(Effect.orDie)),
@@ -1358,19 +1618,73 @@ const make = Effect.gen(function* () {
                   ),
             ),
           );
+    const launchTooling = context.launch;
+    const signInGithubApp = Effect.fn("SandboxProvisioner.signInGithubApp")(function* (
+      repository: LaunchTooling["repository"],
+    ) {
+      if (missing("gh")) return "failed" as const;
+      const app = githubAppOf(yield* settings.getSettings.pipe(Effect.orDie));
+      if (app === undefined) {
+        yield* warn(
+          "Connect the GitHub App under Sandboxes in Settings so sandboxes can use GitHub.",
+        );
+        return "failed" as const;
+      }
+      const label = `${repository.owner}/${repository.name}`;
+      const minted = yield* mintGithubToken(app, repository).pipe(Effect.result);
+      if (minted._tag === "Failure") {
+        yield* warn(`GitHub would not give this sandbox a token for ${label}.`);
+        return "failed" as const;
+      }
+      if (minted.success === null) {
+        yield* warn(
+          `The GitHub App isn't installed on ${label}. Install it at ${githubInstallUrl(app.slug)}`,
+        );
+        return "failed" as const;
+      }
+      const token = minted.success;
+      owned.githubToken = token;
+      yield* save({ githubApp: githubRecordOf(token) });
+      const login = yield* run(githubAppLoginScript(Redacted.value(token.token)), 60).pipe(
+        Effect.exit,
+      );
+      if (Exit.isSuccess(login)) return "ready" as const;
+      yield* dropGithubToken(token);
+      delete owned.githubToken;
+      yield* save({}, ["githubApp"]);
+      yield* warn("GitHub could not be signed in on the sandbox. T3 Code revoked its token.");
+      return "failed" as const;
+    });
     const githubState: SandboxSetupState =
-      githubToken === undefined
-        ? "skipped"
-        : missing("gh")
-          ? "failed"
-          : yield* run(githubLoginScript(Redacted.value(githubToken)), 60).pipe(
-              Effect.as<SandboxSetupState>("ready"),
-              Effect.catch(() =>
-                warn(
-                  "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
-                ).pipe(Effect.as<SandboxSetupState>("failed")),
-              ),
-            );
+      launchTooling?.config.githubApp === true
+        ? yield* signInGithubApp(launchTooling.repository)
+        : githubToken === undefined
+          ? "skipped"
+          : missing("gh")
+            ? "failed"
+            : yield* run(githubLoginScript(Redacted.value(githubToken)), 60).pipe(
+                Effect.as<SandboxSetupState>("ready"),
+                Effect.catch(() =>
+                  warn(
+                    "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
+                  ).pipe(Effect.as<SandboxSetupState>("failed")),
+                ),
+              );
+    // Without a name and email git refuses to commit, so GitHub alone would not let the agent push.
+    const identity =
+      launchTooling?.config.gitIdentity ??
+      (githubState === "ready" ? yield* hostAccess.gitIdentity : null);
+    if (identity !== null && !missing("git")) {
+      yield* run(gitIdentityScript(identity), 30).pipe(
+        Effect.catch(() =>
+          warn("Git's name and email could not be set on the sandbox, so commits may fail."),
+        ),
+      );
+    } else if (githubState === "ready" && identity === null) {
+      yield* warn(
+        "This machine has no git name and email to copy. Set them in the sandbox config so the agent can commit.",
+      );
+    }
     if (context.requireClaudeReach === true && unreachableClaude !== null) {
       return yield* new SandboxProviderError({
         provider: input.provider,
@@ -1810,7 +2124,7 @@ const make = Effect.gen(function* () {
             new SandboxProviderError({
               provider,
               stage: "repo",
-              detail: `Could not clone ${repository.owner}/${repository.name} on the sandbox.${machine.prepared.githubToken === undefined ? " A private repository needs the config to sign GitHub in." : ""}`,
+              detail: `Could not clone ${repository.owner}/${repository.name} on the sandbox.${machine.prepared.githubToken === undefined && machine.record().githubApp === undefined ? " A private repository needs the config to sign GitHub in." : ""}`,
               cause,
             }),
         ),
@@ -1825,6 +2139,211 @@ const make = Effect.gen(function* () {
       });
     }
     return { directory: report.directory, projectId: ProjectId.make(report.projectId) };
+  });
+
+  // Refused before anything bills: a credential the config needs that this server does not have.
+  const checkLaunchTooling = Effect.fn("SandboxProvisioner.checkLaunchTooling")(function* (
+    config: SandboxEnvironmentConfig,
+  ) {
+    const value = yield* settings.getSettings.pipe(Effect.orDie);
+    if (config.githubApp === true && githubAppOf(value) === undefined) {
+      return yield* configError(
+        config.provider,
+        "Connect the GitHub App under Sandboxes in Settings → Connections, or turn off GitHub for this config.",
+      );
+    }
+    if (config.northflank === true && value.sandboxTooling.northflankToken === "") {
+      return yield* configError(
+        config.provider,
+        "Save a Northflank token under Sandboxes in Settings → Connections, or turn off Northflank for this config.",
+      );
+    }
+  });
+
+  const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
+  // MCP servers from this machine, each Maple server with a key made for this sandbox alone.
+  const copyMcpServers = Effect.fn("SandboxProvisioner.copyMcpServers")(function* (
+    machine: Machine,
+    owned: Owned,
+    names: ReadonlyArray<string>,
+    projectRoot: string | undefined,
+    fail: (warning: string) => Effect.Effect<void>,
+  ) {
+    const entries = yield* hostAccess.mcpEntries(names, projectRoot);
+    const missingNames = names.filter((name) => !entries.some((entry) => entry.name === name));
+    if (missingNames.length > 0) {
+      yield* fail(`This machine has no MCP server named ${missingNames.join(", ")}.`);
+    }
+    const adminKey = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxTooling.mapleAdminKey;
+    const servers: Record<string, unknown> = {};
+    let maple: { readonly apiBaseUrl: string; readonly secret: Redacted.Redacted<string> } | null =
+      null;
+    for (const entry of entries) {
+      const described = describeHostMcpServer(entry, { mapleReady: adminKey !== "" });
+      if (described.copy === "unavailable") {
+        yield* fail(`${entry.name} wasn't copied. ${described.reason ?? ""}`.trim());
+        continue;
+      }
+      if (described.copy === "copy") {
+        servers[entry.name] = entry.config;
+        continue;
+      }
+      const apiBaseUrl = mapleApiBaseUrl(String(entry.config.url));
+      if (apiBaseUrl === null) continue;
+      if (maple === null) {
+        const created = yield* mapleApi
+          .createMcpKey(Redacted.make(adminKey), apiBaseUrl, {
+            name: yield* agentAccessName(machine.prepared.label),
+            expiresInSeconds: MAPLE_KEY_SECONDS,
+          })
+          .pipe(Effect.result);
+        if (created._tag === "Failure") {
+          yield* fail(
+            `Maple would not make a key for this sandbox, so ${entry.name} wasn't copied.`,
+          );
+          continue;
+        }
+        owned.mapleKey = { keyId: created.success.id, apiBaseUrl };
+        yield* machine.save({ mapleKey: owned.mapleKey });
+        maple = { apiBaseUrl, secret: created.success.secret };
+      } else if (maple.apiBaseUrl !== apiBaseUrl) {
+        yield* fail(`${entry.name} wasn't copied: a sandbox gets one Maple region.`);
+        continue;
+      }
+      const headers = isJsonObject(entry.config.headers) ? entry.config.headers : {};
+      servers[entry.name] = {
+        ...entry.config,
+        headers: { ...headers, Authorization: `Bearer ${Redacted.value(maple.secret)}` },
+      };
+    }
+    if (Object.keys(servers).length === 0) return;
+    yield* machine
+      .run(mcpServersScript(servers), 60)
+      .pipe(Effect.catch(() => fail("Claude's MCP servers could not be written on the sandbox.")));
+  });
+
+  // Each new sandbox gets CLAUDE.md and the skills as they are now: a template's older copy goes.
+  const copyClaudeFiles = Effect.fn("SandboxProvisioner.copyClaudeFiles")(function* (
+    machine: Machine,
+    input: { readonly claudeMd: boolean; readonly skills: ReadonlyArray<string> },
+    fail: (warning: string) => Effect.Effect<void>,
+  ) {
+    const read = yield* hostAccess.claudeFiles(input);
+    if (read.skipped.length > 0) {
+      yield* fail(`Not copied (missing or too large): ${read.skipped.join(", ")}.`);
+    }
+    if (read.files.length === 0) return;
+    const located = yield* machine
+      .run(`printf 'T3_CLAUDE_DIR:%s\n' "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"`, 30)
+      .pipe(
+        Effect.map(
+          (result) =>
+            result.stdout
+              .split("\n")
+              .find((line) => line.startsWith("T3_CLAUDE_DIR:"))
+              ?.slice("T3_CLAUDE_DIR:".length)
+              .trim() ?? "",
+        ),
+        Effect.orElseSucceed(() => ""),
+      );
+    if (!located.startsWith("/")) {
+      return yield* fail("CLAUDE.md and skills could not be copied to the sandbox.");
+    }
+    const destination = (path: string) => `${located}/${path}`;
+    const parents = [
+      ...new Set(read.files.map((file) => destination(file.path).replace(/\/[^/]+$/u, ""))),
+    ];
+    const prepared = yield* machine
+      .run(
+        `set -eu
+${read.skills.map((skill) => `rm -rf ${shellQuote(destination(`skills/${skill}`))}`).join("\n")}
+mkdir -p ${parents.map(shellQuote).join(" ")}`,
+        30,
+      )
+      .pipe(Effect.exit);
+    if (Exit.isFailure(prepared)) {
+      return yield* fail("CLAUDE.md and skills could not be copied to the sandbox.");
+    }
+    const { driver } = machine.prepared;
+    let failed = 0;
+    for (const file of read.files) {
+      const written = yield* (
+        driver.uploadFile === undefined
+          ? machine.run(writeFileScript(destination(file.path), file.content), 60)
+          : onHttp(
+              driver.uploadFile({
+                config: machine.config,
+                sandboxId: machine.sandboxId,
+                path: destination(file.path),
+                content: file.content,
+              }),
+            )
+      ).pipe(Effect.exit);
+      if (Exit.isFailure(written)) failed += 1;
+    }
+    if (failed > 0) {
+      yield* fail(`${failed} of ${read.files.length} Claude files could not be copied.`);
+    }
+  });
+
+  /**
+   * Runs after the clone: the config's setup script, the Northflank CLI, MCP servers, CLAUDE.md and
+   * skills. Each failure is a warning on a sandbox that otherwise works.
+   */
+  const setUpTools = Effect.fn("SandboxProvisioner.setUpTools")(function* (
+    machine: Machine,
+    owned: Owned,
+    config: SandboxEnvironmentConfig,
+    directory: string,
+    projectRoot: string | undefined,
+    warn: (warning: string) => Effect.Effect<void>,
+  ) {
+    let steps = 0;
+    let failed = 0;
+    const fail = (warning: string) =>
+      Effect.sync(() => {
+        failed += 1;
+      }).pipe(Effect.andThen(warn(warning)));
+    const script = config.setupScript?.trim() ?? "";
+    if (script !== "") {
+      steps += 1;
+      const report = yield* machine
+        .run(setupScriptScript({ script, hash: scriptHash(script), directory }), 900)
+        .pipe(
+          Effect.map((result) => parseSetupScriptReport(result.stdout)),
+          Effect.orElseSucceed(() => null),
+        );
+      if (report === null) yield* fail("Your setup script could not run on the sandbox.");
+      else if (report._tag === "failed") {
+        yield* fail(
+          `Your setup script failed (exit ${report.exitCode}). See ~/.t3/setup-script.log on the sandbox.`,
+        );
+      }
+    }
+    if (config.northflank === true) {
+      steps += 1;
+      const token = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxTooling.northflankToken;
+      yield* machine
+        .run(northflankLoginScript(token), 300)
+        .pipe(
+          Effect.catch(() =>
+            fail("The Northflank CLI could not be installed or signed in on the sandbox."),
+          ),
+        );
+    }
+    const mcpNames = config.mcpServers ?? [];
+    if (mcpNames.length > 0) {
+      steps += 1;
+      yield* copyMcpServers(machine, owned, mcpNames, projectRoot, fail);
+    }
+    const skills = config.skills ?? [];
+    if (config.claudeMd === true || skills.length > 0) {
+      steps += 1;
+      yield* copyClaudeFiles(machine, { claudeMd: config.claudeMd === true, skills }, fail);
+    }
+    return { steps, failed };
   });
 
   // Runs `effect` until it succeeds; each failure keeps the machine and waits for a retry. A cancel
@@ -1872,8 +2391,10 @@ const make = Effect.gen(function* () {
     });
     const run = Effect.gen(function* () {
       yield* reporter.stage("preflight", "running");
+      yield* checkLaunchTooling(config);
       const joinTailnet = yield* launchJoinsTailnet(config);
       const prepared = yield* prepare(createInputFor(config, input.project, joinTailnet));
+      const launchRepository = githubRepositoryOf(input.project.remoteUrl);
       yield* reporter.stage("preflight", "done");
       const owned: Owned = {};
       yield* Effect.gen(function* () {
@@ -1882,6 +2403,14 @@ const make = Effect.gen(function* () {
           owned,
           report: reporter,
           requireClaudeReach: true,
+          ...(launchRepository === null
+            ? {}
+            : {
+                launch: {
+                  config,
+                  repository: { owner: launchRepository.owner, name: launchRepository.name },
+                },
+              }),
           extras: {
             configId: config.id,
             threadId,
@@ -1930,6 +2459,25 @@ const make = Effect.gen(function* () {
             : copied.copied === 0
               ? "None to copy"
               : `${copied.copied} ${copied.copied === 1 ? "file" : "files"}`,
+        );
+
+        yield* reporter.stage("tools", "running");
+        const tools = yield* setUpTools(
+          machine,
+          owned,
+          config,
+          cloned.directory,
+          hostCopy?.workspaceRoot,
+          reporter.warn,
+        );
+        yield* reporter.stage(
+          "tools",
+          tools.steps === 0 ? "skipped" : tools.failed > 0 ? "warning" : "done",
+          tools.steps === 0
+            ? "Nothing to set up"
+            : tools.failed > 0
+              ? "Finished with warnings"
+              : null,
         );
 
         // The client pairs through `pairLaunch`, opens the project, and then completes the launch.
@@ -2433,6 +2981,8 @@ const make = Effect.gen(function* () {
           environmentWarning,
           yield* releaseHubKey(record.value),
           yield* releaseTailnetDevice(record.value),
+          yield* releaseGithubToken(record.value),
+          yield* releaseMapleKey(record.value),
         ].filter((warning): warning is string => warning !== null);
     return { warnings } satisfies SandboxDeleteResult;
   });
@@ -2613,6 +3163,17 @@ const make = Effect.gen(function* () {
         "T3 Code on this sandbox was reset, so it cannot reconnect as this environment. Delete it.",
       );
     }
+    // The token a stopped sandbox kept has most likely expired.
+    const github = yield* refreshGithubToken(record, (script, timeoutSeconds) =>
+      onHttp(
+        driver.execute({
+          config,
+          sandboxId: record.sandboxId,
+          timeoutSeconds,
+          ...asScript(script),
+        }),
+      ),
+    );
     const { stoppedAt: _stoppedAt, ...rest } = record;
     const updated: SandboxRecord = {
       ...rest,
@@ -2621,6 +3182,7 @@ const make = Effect.gen(function* () {
       updatedAt: now,
       httpBaseUrl,
       ...(rejoined.tailscale === undefined ? {} : { tailscale: rejoined.tailscale }),
+      ...(github.githubApp === undefined ? {} : { githubApp: github.githubApp }),
     };
     yield* records.put(updated).pipe(Effect.orDie);
     // The bridge reads the sandbox's address from its link, and its bearer may be near expiry.
@@ -2637,7 +3199,7 @@ const make = Effect.gen(function* () {
             ),
           );
     if (bridged.record !== updated) yield* records.put(bridged.record).pipe(Effect.orDie);
-    const warnings = [rejoined.warning, bridged.warning].filter(
+    const warnings = [rejoined.warning, github.warning, bridged.warning].filter(
       (warning): warning is string => warning !== null,
     );
     return {
@@ -2738,6 +3300,8 @@ const make = Effect.gen(function* () {
       Effect.andThen(releaseHubKey(record)),
       // The scrub logged the node out; this covers a logout that never reached Tailscale.
       Effect.andThen(releaseTailnetDevice(record)),
+      Effect.andThen(releaseGithubToken(record)),
+      Effect.andThen(releaseMapleKey(record)),
       // The template is saved either way; a sandbox that survives stays listed for a manual delete.
       Effect.catch((cause) =>
         Effect.logWarning("sandbox delete after saving a template failed", {
@@ -2992,6 +3556,46 @@ const make = Effect.gen(function* () {
     yield* abandonLaunch(record, now);
   });
 
+  // Only a sandbox that is running gets a new token: running a command on a stopped Boat machine
+  // restores it, which counts as a start. A stopped sandbox gets one when it resumes.
+  const refreshDueGithubTokens = Effect.fn("SandboxProvisioner.refreshDueGithubTokens")(function* (
+    now: DateTime.Utc,
+  ) {
+    const due = (yield* records.list.pipe(Effect.orDie)).filter(
+      (record) =>
+        record.state === "running" &&
+        record.githubApp !== undefined &&
+        !liveInstances.has(record.instanceId) &&
+        Date.parse(record.githubApp.expiresAt) - DateTime.toEpochMillis(now) <=
+          GITHUB_TOKEN_REFRESH_MS,
+    );
+    for (const record of due) {
+      if ((yield* providerStatus(record)) !== "running") continue;
+      const refreshed = yield* refreshGithubToken(record, runOnRecord(record));
+      if (refreshed.warning !== null) {
+        yield* Effect.logWarning("sandbox github token refresh failed", {
+          instanceId: record.instanceId,
+          detail: refreshed.warning,
+        });
+        continue;
+      }
+      // Not a lifecycle change, so `updatedAt` and the list order stay.
+      const current = yield* records.get(record.instanceId).pipe(Effect.orDie);
+      if (Option.isNone(current)) {
+        if (refreshed.githubApp !== undefined) {
+          yield* releaseGithubToken({ label: record.label, githubApp: refreshed.githubApp });
+        }
+        continue;
+      }
+      yield* records
+        .put({
+          ...current.value,
+          ...(refreshed.githubApp === undefined ? {} : { githubApp: refreshed.githubApp }),
+        })
+        .pipe(Effect.orDie);
+    }
+  });
+
   const sweep = Effect.gen(function* () {
     const now = yield* DateTime.now;
     const all = yield* records.list.pipe(Effect.orDie);
@@ -3041,6 +3645,7 @@ const make = Effect.gen(function* () {
       { concurrency: 4, discard: true },
     );
     yield* sweepOrphans(yield* records.list.pipe(Effect.orDie), current);
+    yield* refreshDueGithubTokens(now);
   });
 
   return SandboxProvisioner.of({
@@ -3067,6 +3672,7 @@ const make = Effect.gen(function* () {
     pairLaunch,
     completeLaunch,
     checkTailscale,
+    connectGithubApp,
     sweep,
     linkBridge,
   });
@@ -3131,5 +3737,7 @@ export const rpcHandlers = Effect.gen(function* () {
       sandboxes.completeLaunch(input),
     [WS_METHODS.sandboxesCheckTailscale]: (input: SandboxTailscaleCheckInput) =>
       sandboxes.checkTailscale(input),
+    [WS_METHODS.sandboxesConnectGithubApp]: (input: SandboxConnectGithubAppInput) =>
+      sandboxes.connectGithubApp(input),
   };
 });
