@@ -141,6 +141,13 @@ describe("SandboxEnvironmentConfig", () => {
     expect(config.envFiles).toEqual({ "omaralex24/hello-world": [".env.local"] });
     expect(config).not.toHaveProperty("projectIds");
     expect(config).not.toHaveProperty("repositories");
+    // Saved before Pi could be set up: it stays off.
+    expect(config).not.toHaveProperty("pi");
+    expect(
+      decodeSavedConfig(
+        JSON.stringify({ ...JSON.parse(saved), pi: { startModel: "wafer/GLM-5.3" } }),
+      ).pi,
+    ).toEqual({ startModel: "wafer/GLM-5.3" });
   });
 });
 

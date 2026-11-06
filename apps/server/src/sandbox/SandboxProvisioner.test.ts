@@ -3888,6 +3888,7 @@ describe("sandbox agent access", () => {
       tailnetMode?: "kernel" | "userspace";
       tailnetNode?: string;
       tokenStatus?: number;
+      hubModels?: ReadonlyArray<string>;
     } = {},
   ) => {
     const commands: Array<string> = [];
@@ -3903,6 +3904,10 @@ describe("sandbox agent access", () => {
       }
       if (request.url.startsWith("https://hub.test/")) {
         return Response.json({ status: "ok" }, { status: options.hubStatus ?? 200 });
+      }
+      // Claude's endpoint is the hub's client API, which lists models for any key it accepts.
+      if (request.url.endsWith("/v1/models") && options.hubModels !== undefined) {
+        return Response.json({ object: "list", data: options.hubModels.map((id) => ({ id })) });
       }
       if (request.url === "https://api.tailscale.com/api/v2/oauth/token") {
         return Response.json(
@@ -4059,6 +4064,104 @@ describe("sandbox agent access", () => {
       Effect.provide(
         provisionerLayer(hubSettings, repository.layer, { host, secrets: secrets.layer }),
       ),
+      Effect.provideService(HttpClient.HttpClient, client),
+    );
+  });
+
+  it.effect("sets up Pi with the hub's other models on the sandbox's own hub key", () => {
+    const requests: Array<{
+      method: string;
+      url: string;
+      body: unknown;
+      authorization?: string | undefined;
+    }> = [];
+    const options: { hubModels: ReadonlyArray<string> } = {
+      hubModels: ["claude-opus-5-5", "wafer/GLM-5.3", "GLM-5.3", "wafer/GLM-5.3-Flash"],
+    };
+    const { client, commands, secretsOf } = agentClient(requests, options);
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // The form offers the models this machine's own key lists.
+      expect((yield* provisioner.providers).host.piModels).toEqual([
+        "wafer/GLM-5.3",
+        "wafer/GLM-5.3-Flash",
+      ]);
+
+      requests.length = 0;
+      const created = yield* provisioner.create({
+        provider: "boat",
+        apiKey: "boat_test",
+        label: "Web Stack!",
+        agentAccess: {
+          claude: { baseUrl: "https://claude.example.test" },
+          pi: { startModel: "wafer/GLM-5.3-Flash" },
+        },
+      });
+      expect(created.setup.warnings).toEqual([]);
+      const key = (requests.find((request) => request.method === "PATCH")!.body as { new: string })
+        .new;
+      // The list is read with the sandbox's key, so Pi gets exactly what that key reaches.
+      expect(requests.filter((request) => request.url.endsWith("/v1/models"))).toEqual([
+        expect.objectContaining({
+          method: "GET",
+          url: "https://claude.example.test/v1/models",
+          authorization: `Bearer ${key}`,
+        }),
+      ]);
+      const [setup] = secretsOf("T3_PI_PROVIDER");
+      expect(JSON.parse(setup!.T3_PI_PROVIDER!)).toMatchObject({
+        baseUrl: "https://claude.example.test/v1",
+        apiKey: key,
+        models: [{ id: "wafer/GLM-5.3" }, { id: "wafer/GLM-5.3-Flash" }],
+      });
+      expect(JSON.parse(setup!.T3_PI_CHOICE!)).toEqual({
+        model: "wafer/GLM-5.3-Flash",
+        t3Default: { instanceId: "pi", model: "hub/wafer/GLM-5.3-Flash" },
+      });
+      expect(revealsSecret(commands, key)).toBe(false);
+      // Before T3 starts, so its first provider probe lists Pi.
+      expect(commands.findIndex((command) => command.includes("T3_PI_PROVIDER"))).toBeLessThan(
+        commands.findIndex((command) => command.includes("nohup")),
+      );
+
+      // A hub that lists nothing else leaves the sandbox working, with Claude, and says why.
+      options.hubModels = ["claude-opus-5-5"];
+      commands.length = 0;
+      const withoutPi = yield* provisioner.create({
+        provider: "boat",
+        apiKey: "boat_test",
+        agentAccess: { claude: { baseUrl: "https://claude.example.test" }, pi: {} },
+      });
+      expect(withoutPi.setup.claude).toBe("ready");
+      expect(withoutPi.setup.warnings).toEqual([
+        "Your hub lists no models besides Claude's, so Pi was not set up on the sandbox.",
+      ]);
+      expect(commands.some((command) => command.includes("T3_PI_PROVIDER"))).toBe(false);
+    }).pipe(
+      Effect.provide(provisionerLayer(hubSettings, undefined, { host })),
+      Effect.provideService(HttpClient.HttpClient, client),
+    );
+  });
+
+  it.effect("refuses Pi before anything bills when there is no hub to give it a key", () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const { client } = agentClient(requests, { hubModels: ["wafer/GLM-5.3"] });
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      // Without a hub, the form has no models to offer.
+      expect((yield* provisioner.providers).host).not.toHaveProperty("piModels");
+      const error = yield* provisioner
+        .create({
+          provider: "boat",
+          apiKey: "boat_test",
+          agentAccess: { claude: { baseUrl: "https://api.example.test" }, pi: {} },
+        })
+        .pipe(Effect.flip);
+      expect(error.stage).toBe("config");
+      expect(error.detail).toContain("Pi uses the key each sandbox gets on your CLIProxyAPI hub");
+      expect(requests.some((request) => request.url.endsWith("/sandboxes"))).toBe(false);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, memoryRepository().layer, { host })),
       Effect.provideService(HttpClient.HttpClient, client),
     );
   });
