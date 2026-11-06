@@ -1,4 +1,5 @@
 import { threadKey } from "@t3tools/client-runtime/state/entities";
+import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
   type ProjectId,
@@ -269,6 +270,12 @@ export const shortSandboxId = (sandboxId: string) => {
   return separator === -1 ? sandboxId.slice(0, 7) : sandboxId.slice(0, separator + 5);
 };
 
+/** A settle's Undo: its claim, current until something supersedes the settle, and the undo itself. */
+export interface SandboxSettleUndo {
+  readonly claim: { readonly isCurrent: () => boolean; readonly finish: () => void };
+  readonly undo: () => Promise<AtomCommandResult<unknown, unknown>>;
+}
+
 /**
  * What the thread actions ask of the one mounted sandbox coordinator. A legacy thread lives on its
  * sandbox's server, which this host never hears from, so settling, resuming and deleting the
@@ -276,8 +283,11 @@ export const shortSandboxId = (sandboxId: string) => {
  */
 export interface SandboxThreadHandlers {
   readonly isSandboxThread: (threadRef: ScopedThreadRef) => boolean;
-  /** After a settle: stops, deletes, or asks, as the thread's config says. */
-  readonly onSettled: (threadRef: ScopedThreadRef) => void;
+  /**
+   * After a settle: stops, deletes, or asks, as the thread's config says. True when it shows the
+   * settle's Undo itself, as a delayed delete does.
+   */
+  readonly onSettled: (threadRef: ScopedThreadRef, settle: SandboxSettleUndo) => boolean;
   /** Resumes a stopped sandbox and waits for its server; false when it could not. */
   readonly ensureRunning: (threadRef: ScopedThreadRef) => Promise<boolean>;
   /** Confirms, deletes the thread while its server answers, then deletes the sandbox. */
@@ -301,9 +311,8 @@ export function registerSandboxThreadHandlers(next: SandboxThreadHandlers): () =
 export const isSandboxThread = (threadRef: ScopedThreadRef) =>
   handlers?.isSandboxThread(threadRef) === true;
 
-export const notifySandboxThreadSettled = (threadRef: ScopedThreadRef) => {
-  handlers?.onSettled(threadRef);
-};
+export const notifySandboxThreadSettled = (threadRef: ScopedThreadRef, settle: SandboxSettleUndo) =>
+  handlers?.onSettled(threadRef, settle) === true;
 
 /** True when the thread has no sandbox, or its sandbox runs again. */
 export const ensureSandboxThreadRunning = async (threadRef: ScopedThreadRef) =>
