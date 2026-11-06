@@ -2659,7 +2659,8 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     );
   });
 
-  // A thread has one sandbox, so a new launch replaces what an earlier, unfinished one left.
+  // A thread has one sandbox, so a new launch replaces what an earlier, unfinished one left. A
+  // machine that cannot be deleted stops the launch: it would keep billing beside the new one.
   const releaseAbandoned = Effect.fn("SandboxProvisioner.releaseAbandoned")(function* (
     threadId: ThreadId,
   ) {
@@ -2671,15 +2672,39 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         { provider: record.provider, sandboxId: record.sandboxId, instanceId: record.instanceId },
         false,
       ).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("abandoned sandbox cleanup failed", {
-            instanceId: record.instanceId,
-            sandboxId: record.sandboxId,
-            cause,
-          }),
+        Effect.mapError(
+          (cause) =>
+            new SandboxProviderError({
+              provider: record.provider,
+              stage: "config",
+              detail: `Could not delete this thread's earlier sandbox ${record.sandboxId}, so no new one was started. Try again, or delete it under Settings → Connections → Sandboxes.`,
+              cause,
+            }),
         ),
       );
     }
+  });
+
+  /**
+   * Starts a thread's sandbox unless it already has one: a send after a lost handoff, or from a
+   * client that missed the launch, attaches to that machine instead of paying for a second.
+   */
+  const startOrAttach = Effect.fn("SandboxProvisioner.startOrAttach")(function* (
+    input: SandboxLaunchInput,
+    config: SandboxEnvironmentConfig,
+  ) {
+    yield* releaseAbandoned(input.threadId);
+    const all = yield* records.list.pipe(Effect.orDie);
+    const existing = all.find(
+      (record) =>
+        record.threadId === input.threadId &&
+        record.state !== "deleted" &&
+        record.state !== "expired",
+    );
+    if (existing !== undefined) {
+      return { instanceId: existing.instanceId } satisfies SandboxLaunchResult;
+    }
+    return yield* startLaunch(input, config);
   });
 
   const launch = Effect.fn("SandboxProvisioner.launch")(function* (input: SandboxLaunchInput) {
@@ -2707,8 +2732,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         config.provider,
       );
     }
-    yield* releaseAbandoned(input.threadId);
-    return yield* startLaunch(input, config);
+    return yield* startOrAttach(input, config);
   });
 
   const runningLaunch = (threadId: ThreadId) => {
@@ -2779,7 +2803,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
           current.config.provider,
         );
       }
-      yield* startLaunch(current.input, saved.value);
+      yield* startOrAttach(current.input, saved.value);
       return;
     }
     current.activity += 1;
