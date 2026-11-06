@@ -30,7 +30,15 @@ import {
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
-import { ConfigSection, FieldLabel, OptIn, SubHeading } from "./SandboxFormParts";
+import {
+  AccessSwitch,
+  ConfigSection,
+  DetailField,
+  Disclosure,
+  FieldLabel,
+  OptIn,
+  SubHeading,
+} from "./SandboxFormParts";
 import { piUnavailableReason, SandboxPiFields } from "./SandboxPiFields";
 import { SandboxProviderLogo } from "./SandboxProviderLogo";
 import {
@@ -250,9 +258,12 @@ export function SandboxEnvironmentFields({
       Object.entries(config?.envFiles ?? {}).map(([key, files]) => [key, files.join(", ")]),
     ),
   );
-  const [idleMinutes, setIdleMinutes] = useState(
-    config?.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES,
-  );
+  // Stored for a later idle stop; nothing reads it yet, so the form only carries it through.
+  const idleMinutes = config?.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES;
+  // Offered only to a config that already has it, so it can be turned off.
+  const offersTailnetOnly = config?.access === "tailnet";
+  const [editingEndpoint, setEditingEndpoint] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [maxRunningMinutes, setMaxRunningMinutes] = useState(
     config?.maxRunningMinutes ?? DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
   );
@@ -367,14 +378,10 @@ export function SandboxEnvironmentFields({
       ? null
       : `picked env files for ${customEnvFiles} ${customEnvFiles === 1 ? "repository" : "repositories"}`,
   ].filter((part): part is string => part !== null);
-  const [openSections, setOpenSections] = useState<ReadonlySet<ConfigSectionId>>(() => new Set());
+  // One section at a time, so the dialog stays short.
+  const [openSection, setOpenSection] = useState<ConfigSectionId | null>(null);
   const setSectionOpen = (section: ConfigSectionId, open: boolean) =>
-    setOpenSections((current) => {
-      const next = new Set(current);
-      if (open) next.add(section);
-      else next.delete(section);
-      return next;
-    });
+    setOpenSection((current) => (open ? section : current === section ? null : current));
   // Opens Agent access each time a new problem shows up, such as once the server's endpoint
   // loads; closing it again stays the user's call.
   const [shownAttention, setShownAttention] = useState<string | null>(null);
@@ -439,8 +446,6 @@ export function SandboxEnvironmentFields({
     });
     setSaving(false);
     if (result._tag === "Failure") {
-      // Most refusals are about a choice in one of the sections.
-      if (!isAtomCommandInterrupted(result)) setOpenSections(new Set(CONFIG_SECTIONS));
       reportFailure(result, "Could not save the sandbox config");
       return;
     }
@@ -665,70 +670,53 @@ export function SandboxEnvironmentFields({
               title="Machine"
               summary={capitalize(machineSummary.join(" · "))}
               attention={null}
-              open={openSections.has("machine")}
+              open={openSection === "machine"}
               onOpenChange={(open) => setSectionOpen("machine", open)}
             >
-              <div className="space-y-2">
-                <label className="block">
-                  <FieldLabel>When a chat is settled</FieldLabel>
-                  <Select
-                    value={onSettle}
-                    disabled={isSaving}
-                    onValueChange={(value) => {
-                      if (value !== null) setOnSettle(value);
-                    }}
-                  >
-                    <SelectTrigger aria-label="When a chat is settled" size="default">
-                      <SelectValue>{SETTLE_LABELS[onSettle]}</SelectValue>
-                    </SelectTrigger>
-                    <SelectPopup>
-                      <SelectItem value="ask">{SETTLE_LABELS.ask}</SelectItem>
-                      {provider.capabilities.stopResume ? (
-                        <SelectItem value="snapshot">{SETTLE_LABELS.snapshot}</SelectItem>
-                      ) : null}
-                      <SelectItem value="delete">{SETTLE_LABELS.delete}</SelectItem>
-                    </SelectPopup>
-                  </Select>
-                </label>
-                <p className="text-2xs leading-relaxed text-muted-foreground">
-                  {settleHint(onSettle, provider.label, provider.diskRetentionDays)}
-                </p>
-              </div>
               <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <label className="block">
+                    <FieldLabel>When a chat is settled</FieldLabel>
+                    <Select
+                      value={onSettle}
+                      disabled={isSaving}
+                      onValueChange={(value) => {
+                        if (value !== null) setOnSettle(value);
+                      }}
+                    >
+                      <SelectTrigger aria-label="When a chat is settled" size="default">
+                        <SelectValue>{SETTLE_LABELS[onSettle]}</SelectValue>
+                      </SelectTrigger>
+                      <SelectPopup>
+                        <SelectItem value="ask">{SETTLE_LABELS.ask}</SelectItem>
+                        {provider.capabilities.stopResume ? (
+                          <SelectItem value="snapshot">{SETTLE_LABELS.snapshot}</SelectItem>
+                        ) : null}
+                        <SelectItem value="delete">{SETTLE_LABELS.delete}</SelectItem>
+                      </SelectPopup>
+                    </Select>
+                  </label>
+                  <p className="text-2xs leading-relaxed text-muted-foreground">
+                    {settleHint(onSettle, provider.label, provider.diskRetentionDays)}
+                  </p>
+                </div>
                 <MinutesField
                   label="Running limit"
-                  hint="A sandbox that has run this long since its last start is stopped. Its disk stays until you delete it."
+                  hint="Stopped after running this long since its last start. The disk stays until you delete it."
                   value={maxRunningMinutes}
                   min={10}
                   max={43_200}
                   disabled={isSaving}
                   onChange={setMaxRunningMinutes}
                 />
-                <MinutesField
-                  label="Idle stop"
-                  hint="Saved for idle detection. For now only the running limit stops sandboxes."
-                  value={idleMinutes}
-                  min={5}
-                  max={1440}
-                  disabled={isSaving}
-                  onChange={setIdleMinutes}
-                />
               </div>
               {tailscaleReady ? (
                 <div className="space-y-2">
                   {autoJoinsTailnet ? (
-                    <div className="flex items-start gap-2.5 text-xs">
-                      <CheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-success" />
-                      <div className="space-y-0.5">
-                        <p className="font-medium text-foreground">
-                          Joins your tailnet automatically because {claudeHost} is private.
-                        </p>
-                        <p className="text-2xs leading-relaxed text-muted-foreground">
-                          Each sandbox joins as an ephemeral, tagged Tailscale device. Deleting the
-                          sandbox removes the device.
-                        </p>
-                      </div>
-                    </div>
+                    <p className="flex items-start gap-2 text-xs text-foreground">
+                      <CheckIcon aria-hidden className="mt-px size-3.5 shrink-0 text-success" />
+                      <span>Joins your tailnet automatically because {claudeHost} is private.</span>
+                    </p>
                   ) : (
                     <OptIn
                       checked={joinTailnet}
@@ -736,11 +724,10 @@ export function SandboxEnvironmentFields({
                       onCheckedChange={setJoinTailnet}
                       title="Join my tailnet"
                     >
-                      Each sandbox joins as an ephemeral, tagged Tailscale device so it can reach
-                      private endpoints. Deleting the sandbox removes the device.
+                      As an ephemeral, tagged device, removed with the sandbox.
                     </OptIn>
                   )}
-                  {joinsTailnet ? (
+                  {joinsTailnet && offersTailnetOnly ? (
                     <div className="ps-6.5">
                       <OptIn
                         checked={tailnetOnly}
@@ -748,8 +735,7 @@ export function SandboxEnvironmentFields({
                         onCheckedChange={setTailnetOnly}
                         title="Reach it only through my tailnet"
                       >
-                        No public URL. This app connects over the tailnet, so the machine running it
-                        has to be on your tailnet too.
+                        No public URL, so the machine running this app has to be on your tailnet.
                       </OptIn>
                     </div>
                   ) : null}
@@ -766,161 +752,214 @@ export function SandboxEnvironmentFields({
                   : capitalize(agentSummary.join(" · "))
               }
               attention={attention}
-              open={openSections.has("agent")}
+              open={openSection === "agent"}
               onOpenChange={(open) => setSectionOpen("agent", open)}
             >
-              {host?.claude === undefined ? null : (
-                <div className="space-y-2">
-                  <OptIn
-                    checked={useClaude}
-                    disabled={isSaving}
-                    onCheckedChange={setUseClaude}
-                    title="Use this machine's Claude setup"
-                  >
-                    {host.claude.key === "hub"
-                      ? "Adds a key for each sandbox on your CLIProxyAPI hub. Deleting the sandbox removes its key."
-                      : "Copies this machine's Claude token to each sandbox. Deleting a sandbox does not revoke it."}
-                  </OptIn>
-                  {/* Judged by the server for its own endpoint only; an edited URL is checked live. */}
-                  {!host.claude.privateNetwork ||
-                  claudeEndpoint !== host.claude.baseUrl ||
-                  tailscaleReady ? null : (
-                    <p className="flex flex-wrap items-start gap-x-1.5 ps-6.5 text-2xs leading-relaxed text-warning-foreground">
-                      <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
-                      <span className="min-w-0 flex-1">
-                        Resolves to a private address, so a sandbox has to join your tailnet to
-                        reach it.
-                        {!provider.configured ? null : (
-                          <>
-                            {" "}
-                            <button
-                              type="button"
-                              className="font-medium underline underline-offset-2 hover:text-foreground"
-                              onClick={() => {
-                                onDone();
-                                void navigate({
-                                  to: "/settings/connections",
-                                  hash: "sandbox-tailscale",
-                                });
-                              }}
-                            >
-                              Set up Tailscale
-                            </button>
-                          </>
-                        )}
-                      </span>
-                    </p>
-                  )}
-                  {useClaude ? (
-                    <label className="block ps-6.5">
-                      <FieldLabel>Claude endpoint</FieldLabel>
-                      <Input
-                        type="url"
-                        value={claudeBaseUrl ?? host.claude.baseUrl}
-                        onChange={(event) => setClaudeBaseUrl(event.target.value)}
-                        disabled={isSaving}
-                        spellCheck={false}
-                      />
-                    </label>
-                  ) : null}
-                </div>
-              )}
-              <SandboxPiFields
-                host={host}
-                unavailable={piUnavailable}
-                enabled={usePi}
-                startModel={piStartModel}
-                disabled={isSaving}
-                onEnabledChange={setUsePi}
-                onStartModelChange={setPiStartModel}
-              />
-              <SandboxAgentToolingFields
-                draft={tooling}
-                disabled={isSaving}
-                onOpenSettings={() => {
-                  onDone();
-                  void navigate({ to: "/settings/connections", hash: "sandbox-github-app" });
-                }}
-              />
-              {provider.capabilities.agentProviderAccess ? (
-                <OptIn
-                  checked={agentProviderAccess && canGiveAgentAccess}
-                  disabled={isSaving || !canGiveAgentAccess}
-                  onCheckedChange={setAgentProviderAccess}
-                  title={`Let the agent use ${provider.label}`}
-                >
-                  {canGiveAgentAccess
-                    ? "The agent can fork its own sandbox, host its ports, and delete only the forks it made. Forks bill like new sandboxes."
-                    : `Needs No credentials as the ${provider.label} environment below, so forks never receive its secrets.`}
-                </OptIn>
-              ) : null}
-              {provider.capabilities.credentialEnvironments ? (
-                <div className="space-y-2">
-                  <label className="block">
-                    <FieldLabel>{provider.label} environment</FieldLabel>
-                    <Select
-                      value={
-                        credentialEnvironment === ""
-                          ? NO_CREDENTIAL_ENVIRONMENT
-                          : credentialEnvironment
+              <div className="-mt-2.5 space-y-1">
+                <div className="divide-y divide-border/50">
+                  {host?.claude === undefined ? null : (
+                    <AccessSwitch
+                      name="Claude"
+                      state={
+                        host.claude.key === "hub"
+                          ? "Its own key on your hub, removed on delete"
+                          : "A copy of this machine's token, not revoked on delete"
                       }
-                      disabled={isSaving || environmentsQuery.isPending}
-                      onValueChange={(value) => {
-                        if (value === null) return;
-                        setCredentialEnvironment(value === NO_CREDENTIAL_ENVIRONMENT ? "" : value);
-                        setAllowCredentials(false);
-                      }}
+                      checked={useClaude}
+                      disabled={isSaving}
+                      onCheckedChange={setUseClaude}
                     >
-                      <SelectTrigger
-                        aria-label={`${provider.label} credential environment`}
-                        size="default"
-                      >
-                        <SelectValue>
-                          {selectedCredentialEnvironment?.name ?? "No credentials (recommended)"}
-                        </SelectValue>
-                      </SelectTrigger>
-                      <SelectPopup>
-                        <SelectItem value={NO_CREDENTIAL_ENVIRONMENT}>
-                          No credentials (recommended)
-                        </SelectItem>
-                        {credentialEnvironments.map((candidate) => (
-                          <SelectItem key={candidate.name} value={candidate.name}>
-                            {candidate.name}
-                            {candidate.safeForThirdParties ? " (safe for third parties)" : ""}
-                          </SelectItem>
-                        ))}
-                      </SelectPopup>
-                    </Select>
-                  </label>
-                  <p className="text-2xs leading-relaxed text-muted-foreground">
-                    {selectedCredentialEnvironment === undefined
-                      ? `No ${provider.label} secrets, GitHub token, or agent logins reach the sandboxes.`
-                      : describeCredentialEnvironment(
-                          selectedCredentialEnvironment,
-                          provider.label,
-                        )}
-                  </p>
-                  {passesCredentials ? (
-                    <Alert variant="error">
-                      <AlertDescription>
-                        <label className="flex cursor-pointer items-start gap-2">
-                          <Checkbox
-                            className="mt-0.5"
-                            checked={allowCredentials}
+                      {editingEndpoint ||
+                      claudeEndpoint === "" ||
+                      claudeEndpoint !== host.claude.baseUrl ? (
+                        <DetailField label="Endpoint">
+                          <Input
+                            type="url"
+                            size="sm"
+                            aria-label="Claude endpoint"
+                            value={claudeBaseUrl ?? host.claude.baseUrl}
+                            onChange={(event) => {
+                              setEditingEndpoint(true);
+                              setClaudeBaseUrl(event.target.value);
+                            }}
                             disabled={isSaving}
-                            onCheckedChange={(checked) => setAllowCredentials(checked === true)}
+                            spellCheck={false}
                           />
-                          <span>
-                            I understand every sandbox from this config will receive the credentials
-                            listed above.
+                        </DetailField>
+                      ) : (
+                        <DetailField label="Endpoint">
+                          <span className="flex min-w-0 items-center gap-1.5 text-xs text-foreground">
+                            <span className="truncate">{claudeEndpoint}</span>
+                            <Button
+                              variant="link"
+                              size="xs"
+                              aria-label="Edit Claude endpoint"
+                              disabled={isSaving}
+                              onClick={() => setEditingEndpoint(true)}
+                            >
+                              Edit
+                            </Button>
                           </span>
+                        </DetailField>
+                      )}
+                      {/* Judged by the server for its own endpoint only; an edited URL is checked live. */}
+                      {!host.claude.privateNetwork ||
+                      claudeEndpoint !== host.claude.baseUrl ||
+                      tailscaleReady ? null : (
+                        <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-warning-foreground">
+                          <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
+                          <span className="min-w-0 flex-1">
+                            Resolves to a private address, so sandboxes need your tailnet to reach
+                            it.
+                            {!provider.configured ? null : (
+                              <>
+                                {" "}
+                                <button
+                                  type="button"
+                                  className="font-medium underline underline-offset-2 hover:text-foreground"
+                                  onClick={() => {
+                                    onDone();
+                                    void navigate({
+                                      to: "/settings/connections",
+                                      hash: "sandbox-tailscale",
+                                    });
+                                  }}
+                                >
+                                  Set up Tailscale
+                                </button>
+                              </>
+                            )}
+                          </span>
+                        </p>
+                      )}
+                    </AccessSwitch>
+                  )}
+                  <SandboxPiFields
+                    host={host}
+                    unavailable={piUnavailable}
+                    enabled={usePi}
+                    startModel={piStartModel}
+                    disabled={isSaving}
+                    onEnabledChange={setUsePi}
+                    onStartModelChange={setPiStartModel}
+                  />
+                  <SandboxAgentToolingFields
+                    draft={tooling}
+                    disabled={isSaving}
+                    onOpenSettings={() => {
+                      onDone();
+                      void navigate({ to: "/settings/connections", hash: "sandbox-github-app" });
+                    }}
+                  />
+                  <SandboxMcpServerFields draft={tooling} disabled={isSaving} />
+                </div>
+                <button
+                  type="button"
+                  className="text-2xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  onClick={() => {
+                    onDone();
+                    void navigate({ to: "/settings/connections", hash: "sandbox-integrations" });
+                  }}
+                >
+                  Connect more in Settings
+                </button>
+              </div>
+              {provider.capabilities.agentProviderAccess ||
+              provider.capabilities.credentialEnvironments ? (
+                <div className="border-t border-border/50 pt-2">
+                  <Disclosure
+                    title="Advanced"
+                    // The acknowledgement gates saving, so it can't hide behind a fold.
+                    open={advancedOpen || (passesCredentials && !allowCredentials)}
+                    onOpenChange={setAdvancedOpen}
+                  >
+                    {provider.capabilities.agentProviderAccess ? (
+                      <AccessSwitch
+                        name={`Let the agent use ${provider.label}`}
+                        state={
+                          canGiveAgentAccess
+                            ? "It can fork its own sandbox, host its ports, and delete only the forks it made. Forks bill like new sandboxes."
+                            : `Needs No credentials as the ${provider.label} environment, so forks never get its secrets.`
+                        }
+                        checked={agentProviderAccess && canGiveAgentAccess}
+                        disabled={isSaving || !canGiveAgentAccess}
+                        onCheckedChange={setAgentProviderAccess}
+                      />
+                    ) : null}
+                    {provider.capabilities.credentialEnvironments ? (
+                      <div className="space-y-2">
+                        <label className="block">
+                          <FieldLabel>{provider.label} environment</FieldLabel>
+                          <Select
+                            value={
+                              credentialEnvironment === ""
+                                ? NO_CREDENTIAL_ENVIRONMENT
+                                : credentialEnvironment
+                            }
+                            disabled={isSaving || environmentsQuery.isPending}
+                            onValueChange={(value) => {
+                              if (value === null) return;
+                              setCredentialEnvironment(
+                                value === NO_CREDENTIAL_ENVIRONMENT ? "" : value,
+                              );
+                              setAllowCredentials(false);
+                            }}
+                          >
+                            <SelectTrigger
+                              aria-label={`${provider.label} credential environment`}
+                              size="default"
+                            >
+                              <SelectValue>
+                                {selectedCredentialEnvironment?.name ??
+                                  "No credentials (recommended)"}
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectPopup>
+                              <SelectItem value={NO_CREDENTIAL_ENVIRONMENT}>
+                                No credentials (recommended)
+                              </SelectItem>
+                              {credentialEnvironments.map((candidate) => (
+                                <SelectItem key={candidate.name} value={candidate.name}>
+                                  {candidate.name}
+                                  {candidate.safeForThirdParties ? " (safe for third parties)" : ""}
+                                </SelectItem>
+                              ))}
+                            </SelectPopup>
+                          </Select>
                         </label>
-                      </AlertDescription>
-                    </Alert>
-                  ) : null}
+                        <p className="text-2xs leading-relaxed text-muted-foreground">
+                          {selectedCredentialEnvironment === undefined
+                            ? `No ${provider.label} secrets, GitHub token, or agent logins reach the sandboxes.`
+                            : describeCredentialEnvironment(
+                                selectedCredentialEnvironment,
+                                provider.label,
+                              )}
+                        </p>
+                        {passesCredentials ? (
+                          <Alert variant="error">
+                            <AlertDescription>
+                              <label className="flex cursor-pointer items-start gap-2">
+                                <Checkbox
+                                  className="mt-0.5"
+                                  checked={allowCredentials}
+                                  disabled={isSaving}
+                                  onCheckedChange={(checked) =>
+                                    setAllowCredentials(checked === true)
+                                  }
+                                />
+                                <span>
+                                  I understand every sandbox from this config will receive the
+                                  credentials listed above.
+                                </span>
+                              </label>
+                            </AlertDescription>
+                          </Alert>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </Disclosure>
                 </div>
               ) : null}
-              <SandboxMcpServerFields draft={tooling} disabled={isSaving} />
             </ConfigSection>
             <ConfigSection
               id="setup"
@@ -931,7 +970,7 @@ export function SandboxEnvironmentFields({
                   : capitalize(setupSummary.join(" · "))
               }
               attention={null}
-              open={openSections.has("setup")}
+              open={openSection === "setup"}
               onOpenChange={(open) => setSectionOpen("setup", open)}
             >
               <SandboxSetupToolingFields draft={tooling} disabled={isSaving} />

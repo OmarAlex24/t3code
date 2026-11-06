@@ -10,13 +10,19 @@ import {
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
-import { CompactOptIn, FieldLabel, OptIn, SubHeading } from "./SandboxFormParts";
+import {
+  AccessSwitch,
+  CompactOptIn,
+  DetailField,
+  Disclosure,
+  FieldLabel,
+  SubHeading,
+} from "./SandboxFormParts";
 import { formatBytes } from "~/lib/formatBytes";
 
 type GithubMode = "off" | "app" | "legacy";
 
-const GITHUB_LABELS: Record<GithubMode, string> = {
-  off: "Off",
+const GITHUB_LABELS: Record<Exclude<GithubMode, "off">, string> = {
   app: "GitHub App (recommended)",
   legacy: "This machine's token (legacy)",
 };
@@ -167,7 +173,7 @@ const mcpNote = (server: SandboxHostMcpServer) =>
         ? `copies ${server.headerNames.join(", ")}`
         : "copied as is";
 
-/** How sandboxes sign in to GitHub and other tools, and the MCP servers they get. */
+/** How sandboxes sign in to GitHub and the CLIs this machine has credentials for. */
 export function SandboxAgentToolingFields({
   draft,
   disabled,
@@ -175,71 +181,72 @@ export function SandboxAgentToolingFields({
 }: {
   draft: ToolingDraft;
   disabled: boolean;
-  /** Closes the form and shows the Sandboxes settings, where credentials are saved. */
+  /** Closes the form and shows where the GitHub App is connected. */
   onOpenSettings: () => void;
 }) {
   const { host } = draft;
-  const tooling = host?.tooling;
-  const settingsLink = (label: string) => (
-    <button
-      type="button"
-      className="font-medium underline underline-offset-2 hover:text-foreground"
-      onClick={onOpenSettings}
-    >
-      {label}
-    </button>
-  );
-  const githubHint =
-    draft.githubMode === "app" ? (
-      host?.githubApp === undefined ? (
-        <span className="text-warning-foreground">
-          The GitHub App isn't connected yet. {settingsLink("Connect it")}
-        </span>
-      ) : (
-        `Each sandbox gets an hour-long token for its repository only, renewed while it runs and revoked when it's deleted. Pull requests show as ${host.githubApp.slug}.`
-      )
-    ) : draft.githubMode === "legacy" ? (
-      host?.github === true ? (
-        "Copies this machine's own GitHub token. Deleting a sandbox doesn't revoke it, so prefer the GitHub App."
-      ) : (
-        "This machine has no GitHub token to share."
-      )
-    ) : (
-      "Sandboxes can clone public repositories only."
-    );
-  const hostIdentity = tooling?.gitIdentity;
-
-  return (
+  const hostIdentity = host?.tooling?.gitIdentity;
+  const githubOn = draft.githubMode !== "off";
+  const identityHalfSet = (draft.gitName.trim() === "") !== (draft.gitEmail.trim() === "");
+  const showsGithub =
+    host?.githubApp !== undefined ||
+    host?.github === true ||
+    githubOn ||
+    draft.gitName !== "" ||
+    draft.gitEmail !== "";
+  const appMissing = draft.githubMode === "app" && host?.githubApp === undefined;
+  const githubState =
+    draft.githubMode === "app"
+      ? host?.githubApp === undefined
+        ? "The GitHub App isn't connected on this machine"
+        : `A token for its repository only, as ${host.githubApp.slug}`
+      : draft.githubMode === "legacy"
+        ? host?.github === true
+          ? "This machine's token, not revoked on delete"
+          : "This machine has no GitHub token to share"
+        : "Public repositories only";
+  const githubDetails = (
     <>
-      <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
-        <div className="space-y-1.5">
-          <label className="block">
-            <FieldLabel>GitHub</FieldLabel>
-            <Select
-              value={draft.githubMode}
-              disabled={disabled}
-              onValueChange={(value) => {
-                if (value !== null) draft.setGithubMode(value);
-              }}
+      <DetailField label="Sign in with">
+        <Select
+          value={draft.githubMode === "off" ? "app" : draft.githubMode}
+          disabled={disabled}
+          onValueChange={(value) => {
+            if (value !== null) draft.setGithubMode(value);
+          }}
+        >
+          <SelectTrigger aria-label="GitHub sign-in" size="sm">
+            <SelectValue>
+              {GITHUB_LABELS[draft.githubMode === "off" ? "app" : draft.githubMode]}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            <SelectItem value="app">{GITHUB_LABELS.app}</SelectItem>
+            <SelectItem value="legacy">{GITHUB_LABELS.legacy}</SelectItem>
+          </SelectPopup>
+        </Select>
+      </DetailField>
+      {appMissing ? (
+        <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-warning-foreground">
+          <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
+          <span>
+            The GitHub App isn't connected yet.{" "}
+            <button
+              type="button"
+              className="font-medium underline underline-offset-2 hover:text-foreground"
+              onClick={onOpenSettings}
             >
-              <SelectTrigger aria-label="GitHub sign-in" size="default">
-                <SelectValue>{GITHUB_LABELS[draft.githubMode]}</SelectValue>
-              </SelectTrigger>
-              <SelectPopup>
-                <SelectItem value="off">{GITHUB_LABELS.off}</SelectItem>
-                <SelectItem value="app">{GITHUB_LABELS.app}</SelectItem>
-                <SelectItem value="legacy">{GITHUB_LABELS.legacy}</SelectItem>
-              </SelectPopup>
-            </Select>
-          </label>
-          <p className="text-2xs leading-relaxed text-muted-foreground">{githubHint}</p>
-        </div>
-
-        <div className="space-y-1.5">
-          <FieldLabel>Commit as</FieldLabel>
+              Connect it
+            </button>
+          </span>
+        </p>
+      ) : null}
+      <DetailField label="Commit as">
+        <div className="space-y-1">
           <div className="grid grid-cols-2 gap-2">
             <Input
               aria-label="Git name"
+              size="sm"
               value={draft.gitName}
               onChange={(event) => draft.setGitName(event.target.value)}
               placeholder={hostIdentity?.name ?? "Name"}
@@ -248,6 +255,7 @@ export function SandboxAgentToolingFields({
             />
             <Input
               aria-label="Git email"
+              size="sm"
               type="email"
               value={draft.gitEmail}
               onChange={(event) => draft.setGitEmail(event.target.value)}
@@ -256,44 +264,79 @@ export function SandboxAgentToolingFields({
               spellCheck={false}
             />
           </div>
-          <p className="text-2xs leading-relaxed text-muted-foreground">
-            {hostIdentity === undefined
-              ? "This machine has no git name and email, so enter them for commits on the sandbox."
-              : "Leave empty to use this machine's git name and email when GitHub is signed in."}
-          </p>
+          {hostIdentity === undefined ? (
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              This machine has no git identity, so enter one for commits.
+            </p>
+          ) : null}
         </div>
-      </div>
+      </DetailField>
+    </>
+  );
 
-      <OptIn
-        checked={draft.northflank && host?.northflank === true}
-        disabled={disabled || host?.northflank !== true}
-        onCheckedChange={draft.setNorthflank}
-        title="Sign the Northflank CLI in"
-      >
-        {host?.northflank === true ? (
-          "Installs the CLI and signs it in with the token saved under Sandboxes. Every sandbox shares that token, so give it only the access sandboxes need."
-        ) : (
-          <>Needs a Northflank token saved under Sandboxes. {settingsLink("Add one")}</>
-        )}
-      </OptIn>
+  return (
+    <>
+      {showsGithub ? (
+        <div>
+          <AccessSwitch
+            name="GitHub"
+            state={githubState}
+            warning={appMissing}
+            checked={githubOn}
+            disabled={disabled}
+            onCheckedChange={(on) =>
+              draft.setGithubMode(
+                !on
+                  ? "off"
+                  : host?.githubApp === undefined && host?.github === true
+                    ? "legacy"
+                    : "app",
+              )
+            }
+          >
+            {githubDetails}
+          </AccessSwitch>
+          {/* A half-entered identity blocks saving, so it stays reachable with GitHub off. */}
+          {!githubOn && identityHalfSet ? (
+            <div className="space-y-2.5 pb-2.5">{githubDetails}</div>
+          ) : null}
+        </div>
+      ) : null}
 
-      <OptIn
-        checked={draft.railway && host?.railway === true}
-        disabled={disabled || host?.railway !== true}
-        onCheckedChange={draft.setRailway}
-        title="Sign the Railway CLI in"
-      >
-        {host?.railway === true ? (
-          "Installs the CLI and signs it in with a Railway token made for this sandbox alone, revoked when it's deleted. Also needed for Railway's MCP server."
-        ) : (
-          <>Needs a Railway token saved under Sandboxes. {settingsLink("Add one")}</>
-        )}
-      </OptIn>
+      {host?.northflank === true || draft.northflank ? (
+        <AccessSwitch
+          name="Northflank"
+          state={
+            host?.northflank === true
+              ? "Signs the CLI in with the token every sandbox shares"
+              : "No Northflank token on this machine"
+          }
+          warning={host?.northflank !== true}
+          checked={draft.northflank}
+          disabled={disabled || (host?.northflank !== true && !draft.northflank)}
+          onCheckedChange={draft.setNorthflank}
+        />
+      ) : null}
+
+      {host?.railway === true || draft.railway ? (
+        <AccessSwitch
+          name="Railway"
+          state={
+            host?.railway === true
+              ? "Signs the CLI in with its own token, revoked on delete"
+              : "No Railway token on this machine"
+          }
+          warning={host?.railway !== true}
+          checked={draft.railway}
+          disabled={disabled || (host?.railway !== true && !draft.railway)}
+          onCheckedChange={draft.setRailway}
+        />
+      ) : null}
     </>
   );
 }
 
-/** The MCP servers on this machine a config's sandboxes get copies of. */
+/** The MCP servers on this machine a config's sandboxes get copies of, folded to one row. */
 export function SandboxMcpServerFields({
   draft,
   disabled,
@@ -301,68 +344,67 @@ export function SandboxMcpServerFields({
   draft: ToolingDraft;
   disabled: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   const tooling = draft.host?.tooling;
   const missingMcpServers = draft.mcpServers.filter(
     (name) => !(tooling?.mcpServers ?? []).some((server) => server.name === name),
   );
   return tooling === undefined || tooling.mcpServers.length === 0 ? null : (
-    <fieldset className="space-y-1.5">
-      <legend className="contents">
-        <SubHeading
-          trailing={
-            <span className="text-2xs text-muted-foreground">
-              {draft.copiedMcpServers.length} of {tooling.mcpServers.length}
-            </span>
-          }
-        >
-          MCP servers from this machine
-        </SubHeading>
-      </legend>
-      <div className="grid gap-x-6 sm:grid-cols-2">
-        {tooling.mcpServers.map((server) => {
-          // Signs in with the sandbox's Railway token, which only the Railway option makes.
-          const needsRailway = server.mintedBy === "railway" && !draft.railway;
-          return (
-            <CompactOptIn
-              key={server.name}
-              checked={
-                server.copy !== "unavailable" &&
-                !needsRailway &&
-                draft.mcpServers.includes(server.name)
-              }
-              disabled={disabled || server.copy === "unavailable" || needsRailway}
-              onCheckedChange={(on) =>
-                draft.setMcpServers(toggled(draft.mcpServers, server.name, on))
-              }
-              title={
-                <span className="flex items-center gap-1">
-                  {server.name}
-                  {server.copy === "mint" ? (
-                    <KeyRoundIcon aria-label="Own key" className="size-3 text-success" />
-                  ) : null}
-                </span>
-              }
-              detail={needsRailway ? "turn on Railway above" : mcpNote(server)}
-              hint={`${server.host === undefined ? "" : `${server.host}. `}${
-                needsRailway
-                  ? "Turn on Sign the Railway CLI in: this server signs in with the sandbox's own Railway token."
-                  : mcpHint(server)
-              }`}
-            />
-          );
-        })}
-      </div>
-      <p className="text-2xs leading-relaxed text-muted-foreground">
-        Copied headers keep working after a sandbox is deleted. A server marked with a key gets its
-        own, revoked with the sandbox. Hover a server for details.
-      </p>
-      {missingMcpServers.length === 0 ? null : (
-        <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-warning-foreground">
-          <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
-          This machine no longer has {missingMcpServers.join(", ")}, so sandboxes won't get it.
-        </p>
-      )}
-    </fieldset>
+    <div className="py-2">
+      <Disclosure
+        title="MCP servers"
+        trailing={`${draft.copiedMcpServers.length} of ${tooling.mcpServers.length}`}
+        open={open}
+        onOpenChange={setOpen}
+      >
+        <fieldset aria-label="MCP servers from this machine" className="space-y-1.5 ps-5">
+          <div className="grid gap-x-6 sm:grid-cols-2">
+            {tooling.mcpServers.map((server) => {
+              // Signs in with the sandbox's Railway token, which only the Railway switch makes.
+              const needsRailway = server.mintedBy === "railway" && !draft.railway;
+              return (
+                <CompactOptIn
+                  key={server.name}
+                  checked={
+                    server.copy !== "unavailable" &&
+                    !needsRailway &&
+                    draft.mcpServers.includes(server.name)
+                  }
+                  disabled={disabled || server.copy === "unavailable" || needsRailway}
+                  onCheckedChange={(on) =>
+                    draft.setMcpServers(toggled(draft.mcpServers, server.name, on))
+                  }
+                  title={
+                    <span className="flex items-center gap-1">
+                      {server.name}
+                      {server.copy === "mint" ? (
+                        <KeyRoundIcon aria-label="Own key" className="size-3 text-success" />
+                      ) : null}
+                    </span>
+                  }
+                  detail={needsRailway ? "turn on Railway above" : mcpNote(server)}
+                  hint={`${server.host === undefined ? "" : `${server.host}. `}${
+                    needsRailway
+                      ? "Turn on Railway above: this server signs in with the sandbox's own Railway token."
+                      : mcpHint(server)
+                  }`}
+                />
+              );
+            })}
+          </div>
+          <p className="text-2xs leading-relaxed text-muted-foreground">
+            A key marks a server that gets its own, revoked with the sandbox. Copied headers keep
+            working after it's deleted.
+          </p>
+          {missingMcpServers.length === 0 ? null : (
+            <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-warning-foreground">
+              <CircleAlertIcon aria-hidden className="mt-px size-3 shrink-0" />
+              This machine no longer has {missingMcpServers.join(", ")}, so sandboxes won't get it.
+            </p>
+          )}
+        </fieldset>
+      </Disclosure>
+    </div>
   );
 }
 
