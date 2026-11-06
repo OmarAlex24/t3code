@@ -7,6 +7,8 @@ import {
   SandboxConfigsResult,
   SandboxConnectGithubAppInput,
   SandboxConnectGithubAppResult,
+  SandboxConnectRailwayInput,
+  SandboxConnectRailwayResult,
   SandboxCreateInput,
   SandboxCreateResult,
   SandboxCredentialEnvironmentsInput,
@@ -65,6 +67,7 @@ export const SANDBOX_WS_METHODS = {
   sandboxesCheckTailscale: "sandboxes.checkTailscale",
   sandboxesLinkHostThread: "sandboxes.linkHostThread",
   sandboxesConnectGithubApp: "sandboxes.connectGithubApp",
+  sandboxesConnectRailway: "sandboxes.connectRailway",
 } as const;
 
 const SandboxFailure = Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]);
@@ -218,6 +221,13 @@ const WsSandboxesConnectGithubAppRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesConn
   error: SandboxFailure,
 });
 
+// Checks a Railway token against Railway and saves it for sandboxes only when it works.
+const WsSandboxesConnectRailwayRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesConnectRailway, {
+  payload: SandboxConnectRailwayInput,
+  success: SandboxConnectRailwayResult,
+  error: SandboxFailure,
+});
+
 export const SandboxRpcs = [
   WsSandboxesProvidersRpc,
   WsSandboxesEnvironmentsRpc,
@@ -243,6 +253,7 @@ export const SandboxRpcs = [
   WsSandboxesCheckTailscaleRpc,
   WsSandboxesLinkHostThreadRpc,
   WsSandboxesConnectGithubAppRpc,
+  WsSandboxesConnectRailwayRpc,
 ] as const;
 
 // Each of these spends the saved provider key, changes billable machines, or hands out a pairing
@@ -265,4 +276,5 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesCheckTailscale]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesLinkHostThread]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesConnectGithubApp]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesConnectRailway]: AuthSettingsWriteScope,
 } as const;
