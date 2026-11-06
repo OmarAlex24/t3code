@@ -76,6 +76,8 @@ import {
   TurnItemId,
   TrimmedNonEmptyString,
   managedRuntimeModeCeilingMessage,
+  leavesSandboxBridge,
+  SANDBOX_BRIDGE_SWITCH_REFUSAL,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { modelSwitchSince } from "./modelSwitch.ts";
@@ -3493,6 +3495,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         commandType: command.type,
         cause: `Thread ${command.threadId} is deleted.`,
+      });
+    }
+    if (
+      (command.type === "thread.model-selection.set" || command.type === "provider.switch") &&
+      leavesSandboxBridge(thread.modelSelection, command.modelSelection)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: SANDBOX_BRIDGE_SWITCH_REFUSAL,
       });
     }
     if (
@@ -13667,6 +13679,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return yield* new OrchestratorSubagentThreadReadOnlyError({
             commandId: command.commandId,
             threadId: command.threadId,
+          });
+        }
+        if (leavesSandboxBridge(thread.modelSelection, command.modelSelection)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: SANDBOX_BRIDGE_SWITCH_REFUSAL,
           });
         }
         const guestSend =
