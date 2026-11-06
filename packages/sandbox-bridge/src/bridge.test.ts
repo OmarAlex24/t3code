@@ -1,5 +1,6 @@
 import {
   type MessageId,
+  type ModelSelection,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
   type OrchestrationV2Command,
@@ -33,10 +34,12 @@ import {
   answersOf,
   decisionOf,
   hostMcpOf,
-  NOT_LINKED_MESSAGE,
+  SANDBOX_GONE_MESSAGE,
   PROBE_CLIENT_NAME,
   promptText,
+  modeSyncCommands,
   runSandboxBridge,
+  sandboxSelectionFor,
   SandboxBridgeError,
   type SandboxBridgePorts,
   type SandboxSession,
@@ -68,6 +71,36 @@ const hostMcpServer = {
     { name: "T3_ACP_MCP_AUTHORIZATION", value: "Bearer host-mcp" },
   ],
 };
+
+const codexSelection = (model: string, options?: ModelSelection["options"]) =>
+  ({ instanceId: "codex", model, ...(options ? { options } : {}) }) as ModelSelection;
+const effort = {
+  id: "effort",
+  label: "Effort",
+  type: "select",
+  role: "reasoning",
+  options: [
+    { id: "medium", label: "Medium", isDefault: true },
+    { id: "high", label: "High" },
+  ],
+} as const;
+const sandboxProviders = [
+  {
+    instanceId: "codex",
+    models: [
+      {
+        slug: "gpt-5.5",
+        name: "GPT-5.5",
+        isCustom: false,
+        capabilities: { optionDescriptors: [effort] },
+      },
+      { slug: "gpt-5.5-mini", name: "GPT-5.5 Mini", isCustom: false, capabilities: null },
+      { slug: "gpt-4", name: "GPT-4", isCustom: false, isLegacy: true, capabilities: null },
+    ],
+  },
+] as unknown as SandboxSession["providers"];
+const bridgeSelection = (model: string, options?: ModelSelection["options"]) =>
+  ({ instanceId: "sandboxes", model, ...(options ? { options } : {}) }) as ModelSelection;
 
 const encoder = new TextEncoder();
 
@@ -136,9 +169,10 @@ const projection = (
   turnItems: ReadonlyArray<unknown>,
   runs: ReadonlyArray<unknown> = [],
   runtimeMode: RuntimeMode = "approval-required",
+  modelSelection: ModelSelection = codexSelection("gpt-5.5"),
 ) =>
   ({
-    thread: { runtimeMode, interactionMode: "default" },
+    thread: { runtimeMode, interactionMode: "default", modelSelection },
     turnItems,
     runs,
     runtimeRequests: [],
@@ -164,6 +198,7 @@ interface FakeSandbox {
 /** A sandbox whose thread stream the test drives; `react` answers each command it receives. */
 const makeFakeSandbox = (options: {
   readonly existing?: OrchestrationV2ThreadProjection;
+  readonly providers?: SandboxSession["providers"];
   readonly threadStop?: boolean;
   readonly react?: (
     command: { readonly type: string; readonly messageId?: MessageId | undefined },
@@ -183,6 +218,7 @@ const makeFakeSandbox = (options: {
       session: {
         threadStop: options.threadStop ?? true,
         defaultModelSelection: { instanceId: "codex", model: "gpt-5.5" } as never,
+        providers: options.providers ?? [],
         projection: () => Effect.succeed(Option.fromNullishOr(options.existing)),
         launch: (input) =>
           Effect.suspend(() => {
@@ -263,6 +299,7 @@ const withBridge = <A, E>(
     readonly fake?: FakeSandbox;
     readonly linked?: boolean;
     readonly runtimeMode?: RuntimeMode;
+    readonly hostModel?: ModelSelection;
     readonly connect?: SandboxBridgePorts["connect"];
     readonly permission?: (
       request: AcpSchema.RequestPermissionRequest,
@@ -280,6 +317,7 @@ const withBridge = <A, E>(
       readHostThread: () =>
         Effect.succeed({
           threadId,
+          modelSelection: options.hostModel ?? bridgeSelection("sandbox"),
           runtimeMode: options.runtimeMode ?? "approval-required",
           interactionMode: "default",
         }),
@@ -399,7 +437,7 @@ describe("the ACP side", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("explains itself on a thread no sandbox is linked to", () =>
+  it.effect("says plainly that a thread's sandbox is gone once its link is", () =>
     withBridge({ linked: false }, ({ acp, updates }) =>
       Effect.gen(function* () {
         const session = yield* openThread(acp);
@@ -408,9 +446,9 @@ describe("the ACP side", () => {
         assert.strictEqual(result.stopReason, "end_turn");
         // A plain reply, not an error, and no thinking left running.
         assert.deepStrictEqual(messages(updates), [
-          "Sandbox chats start from T3 Code on your computer (Run on → Sandbox). After that you can keep the conversation going here.",
+          "This chat's sandbox was deleted, so this message wasn't sent. The conversation stays here to read; to keep working, start a new chat from T3 Code on your computer.",
         ]);
-        assert.strictEqual(NOT_LINKED_MESSAGE, messages(updates)[0]);
+        assert.strictEqual(SANDBOX_GONE_MESSAGE, messages(updates)[0]);
         assert.deepStrictEqual(messages(updates, "agent_thought_chunk"), []);
         assert.deepStrictEqual(updates.at(-1)?.update, {
           sessionUpdate: "state_update",
@@ -433,6 +471,90 @@ describe("the ACP side", () => {
       }),
     ),
   );
+});
+
+describe("the sandbox's models", () => {
+  const sentModel = (fake: FakeSandbox) =>
+    fake.commands.flatMap((command) =>
+      command.type === "message.dispatch" ? [command.modelSelection ?? null] : [],
+    );
+
+  it.effect("offers the sandbox thread's models and effort, or none when it does not answer", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeSandbox({
+        providers: sandboxProviders,
+        existing: projection(
+          [],
+          [],
+          "approval-required",
+          codexSelection("gpt-5.5", [{ id: "effort", value: "high" }]),
+        ),
+      });
+      yield* withBridge({ fake }, ({ acp }) =>
+        Effect.gen(function* () {
+          const session = yield* openThread(acp);
+          const [model, level] = session.configOptions ?? [];
+          assert.deepInclude(model, { id: "model", currentValue: "gpt-5.5" });
+          assert.deepStrictEqual(
+            model?.type === "select" ? model.options.map((option) => option.name) : [],
+            ["GPT-5.5", "GPT-5.5 Mini", "Sandbox default"],
+          );
+          assert.deepInclude(level, {
+            id: "effort",
+            category: "thought_level",
+            currentValue: "high",
+          });
+        }),
+      );
+      // An empty list keeps the models a sandbox listed before, instead of a placeholder.
+      yield* withBridge({}, ({ acp }) =>
+        Effect.gen(function* () {
+          assert.deepStrictEqual((yield* openThread(acp)).configOptions, []);
+        }),
+      );
+    }),
+  );
+
+  it.effect("sends the model picked on the host with the next message, and only then", () =>
+    Effect.gen(function* () {
+      const picked = bridgeSelection("gpt-5.5-mini", [{ id: "effort", value: "high" }]);
+      const fake = yield* makeFakeSandbox({
+        providers: sandboxProviders,
+        existing: projection(
+          [userMessage("from-computer", 1, "run-0")],
+          [run("from-computer" as MessageId, "completed", "run-0")],
+        ),
+        react: answerWith("Done"),
+      });
+      yield* withBridge({ fake, hostModel: picked }, ({ acp }) =>
+        Effect.gen(function* () {
+          const session = yield* openThread(acp);
+          // A message the computer already sent keeps the model it was sent with.
+          yield* say(acp, session.sessionId, "From the computer", { messageId: "from-computer" });
+          assert.deepStrictEqual(sentModel(fake), []);
+          yield* say(acp, session.sessionId, "From the phone", { messageId: "from-phone" });
+          assert.deepStrictEqual(sentModel(fake), [
+            codexSelection("gpt-5.5-mini", [{ id: "effort", value: "high" }]),
+          ]);
+        }),
+      );
+    }),
+  );
+
+  it("keeps the sandbox's model for the bridge's own value, a model it lacks, or the same one", () => {
+    const current = codexSelection("gpt-5.5");
+    for (const host of [
+      bridgeSelection("sandbox"),
+      bridgeSelection("claude-opus-5-5"),
+      bridgeSelection("gpt-5.5"),
+    ]) {
+      assert.isNull(sandboxSelectionFor(host, current, sandboxProviders));
+    }
+    assert.deepStrictEqual(
+      sandboxSelectionFor(bridgeSelection("gpt-5.5-mini"), current, sandboxProviders),
+      codexSelection("gpt-5.5-mini"),
+    );
+  });
 });
 
 describe("forwarding a turn", () => {
@@ -554,7 +676,7 @@ describe("forwarding a turn", () => {
 
   it.effect("asks with a form when the thread is not Supervised, so its policy cannot answer", () =>
     Effect.gen(function* () {
-      const fake = yield* makeFakeSandbox({
+      const approvalTurn = makeFakeSandbox({
         react: (command, sandbox) => {
           if (command.type === "launch") {
             return Effect.forEach(
@@ -571,30 +693,134 @@ describe("forwarding a turn", () => {
             : Effect.void;
         },
       });
-      yield* withBridge(
-        {
-          fake,
-          runtimeMode: "auto",
-          elicitation: { action: "accept", content: { decision: "Allow" } },
-        },
-        ({ acp, permissions, elicitations }) =>
-          Effect.gen(function* () {
-            const session = yield* openThread(acp);
-            const result = yield* say(acp, session.sessionId, "Clean up");
-            assert.strictEqual(result.stopReason, "end_turn");
-            assert.deepStrictEqual(permissions, []);
-            assert.strictEqual(elicitations.length, 1);
-            const respond = fake.commands.find(
-              (command) => command.type === "runtime-request.respond",
-            );
-            assert.strictEqual(
-              respond?.type === "runtime-request.respond" && respond.decision,
-              "accept",
-            );
-          }),
-      );
+      // Full access grants it without asking anyone.
+      for (const [runtimeMode, asked] of [
+        ["auto", 1],
+        ["full-access", 0],
+      ] as const) {
+        const fake = yield* approvalTurn;
+        yield* withBridge(
+          {
+            fake,
+            runtimeMode,
+            elicitation: { action: "accept", content: { decision: "Allow" } },
+          },
+          ({ acp, permissions, elicitations }) =>
+            Effect.gen(function* () {
+              const session = yield* openThread(acp);
+              const result = yield* say(acp, session.sessionId, "Clean up");
+              assert.strictEqual(result.stopReason, "end_turn");
+              assert.deepStrictEqual(permissions, []);
+              assert.strictEqual(elicitations.length, asked);
+              const respond = fake.commands.find(
+                (command) => command.type === "runtime-request.respond",
+              );
+              assert.strictEqual(
+                respond?.type === "runtime-request.respond" && respond.decision,
+                "accept",
+              );
+            }),
+        );
+      }
     }),
   );
+
+  it("moves the sandbox to new modes at once, granting its waiting approvals under full access", () => {
+    const waiting = {
+      ...projection([], [], "approval-required"),
+      thread: { id: threadId, runtimeMode: "approval-required", interactionMode: "plan" },
+      runtimeRequests: [
+        { id: "req-cmd", kind: "command", status: "pending" },
+        { id: "req-ask", kind: "user_input", status: "pending" },
+        { id: "req-old", kind: "file-change", status: "resolved" },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    let count = 0;
+    const commandId = () => `cmd-${count++}` as never;
+    assert.deepStrictEqual(
+      modeSyncCommands(
+        waiting,
+        { runtimeMode: "full-access", interactionMode: "default" },
+        commandId,
+      ),
+      [
+        {
+          type: "thread.runtime-mode.set",
+          commandId: "cmd-0",
+          threadId,
+          runtimeMode: "full-access",
+        },
+        {
+          type: "thread.interaction-mode.set",
+          commandId: "cmd-1",
+          threadId,
+          interactionMode: "default",
+        },
+        {
+          type: "runtime-request.respond",
+          commandId: "cmd-2",
+          threadId,
+          requestId: "req-cmd",
+          decision: "accept",
+        },
+      ] as never,
+    );
+    assert.deepStrictEqual(
+      modeSyncCommands(
+        waiting,
+        { runtimeMode: "approval-required", interactionMode: "plan" },
+        commandId,
+      ),
+      [],
+    );
+  });
+
+  it("grants a running sandbox's approvals under full access but moves its mode after the run", () => {
+    // Changing a sandbox thread's runtime mode cuts its agent's run short.
+    const running = {
+      ...projection([], [run("msg-1" as MessageId, "running", "run-1")], "approval-required"),
+      thread: { id: threadId, runtimeMode: "approval-required", interactionMode: "default" },
+      runtimeRequests: [{ id: "req-cmd", kind: "command", status: "pending" }],
+    } as unknown as OrchestrationV2ThreadProjection;
+    let count = 0;
+    const commandId = () => `cmd-${count++}` as never;
+    assert.deepStrictEqual(
+      modeSyncCommands(
+        running,
+        { runtimeMode: "full-access", interactionMode: "default" },
+        commandId,
+      ),
+      [
+        {
+          type: "runtime-request.respond",
+          commandId: "cmd-0",
+          threadId,
+          requestId: "req-cmd",
+          decision: "accept",
+        },
+      ] as never,
+    );
+    const ended = {
+      ...running,
+      runs: [run("msg-1" as MessageId, "completed", "run-1")],
+      runtimeRequests: [],
+    } as unknown as OrchestrationV2ThreadProjection;
+    assert.deepStrictEqual(
+      modeSyncCommands(
+        ended,
+        { runtimeMode: "full-access", interactionMode: "default" },
+        commandId,
+      ),
+      [
+        {
+          type: "thread.runtime-mode.set",
+          commandId: "cmd-1",
+          threadId,
+          runtimeMode: "full-access",
+        },
+      ] as never,
+    );
+  });
 
   it.effect("closes the host's request when the approval is answered on the sandbox", () =>
     Effect.gen(function* () {

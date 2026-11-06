@@ -17,6 +17,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { type SetStateAction } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toastManager } from "../ui/toast";
+import { useSandboxModeSync } from "./useSandboxMirrorSend";
 import { resolveAppModelSelectionForInstance } from "../../modelSelection";
 import { resolveNewDraftStartFromOrigin } from "../../lib/chatThreadActions";
 import { type DraftThreadEnvMode, useComposerDraftStore } from "../../composerDraftStore";
@@ -83,12 +84,27 @@ export function useComposerSelection(input: ComposerSelectionInput) {
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const applyThreadModelPick = useApplyThreadModelPick();
+  const syncSandboxModes = useSandboxModeSync();
+  const activeThreadRef =
+    activeThread === undefined || isLocalDraftThread
+      ? null
+      : scopeThreadRef(activeThread.environmentId, activeThread.id);
 
   const handleRuntimeModeChange = (mode: RuntimeMode) => {
     if (mode === runtimeMode) return;
     setComposerDraftRuntimeMode(composerDraftTarget, mode);
     if (isLocalDraftThread) {
       setDraftThreadContext(composerDraftTarget, { runtimeMode: mode });
+    }
+    // A sandbox thread takes the mode at once; the composer then follows the thread, so a mode
+    // changed later on the phone is not undone by this pick at the next send.
+    if (activeThreadRef !== null) {
+      void syncSandboxModes(activeThreadRef, { runtimeMode: mode }).then((applied) => {
+        const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+        if (applied && draft?.runtimeMode === mode) {
+          setComposerDraftRuntimeMode(composerDraftTarget, null);
+        }
+      });
     }
     scheduleComposerFocus();
   };

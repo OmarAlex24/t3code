@@ -246,7 +246,17 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           ...AcpProviderCapabilitiesV2,
           turns: { ...AcpProviderCapabilitiesV2.turns, supportsSteeringByInterruptRestart: false },
         }
-      : AcpProviderCapabilitiesV2,
+      : options.instanceId === SANDBOX_BRIDGE_INSTANCE_ID
+        ? {
+            // The server pushes a mode change straight to the sandbox thread, so a running
+            // sandbox turn keeps going under the new mode instead of being cut off.
+            ...AcpProviderCapabilitiesV2,
+            sessions: {
+              ...AcpProviderCapabilitiesV2.sessions,
+              supportsRuntimeModeSwitchInSession: true,
+            },
+          }
+        : AcpProviderCapabilitiesV2,
     customModels: readCustomModelEntries(options.settings.customModels).map((entry) => entry.slug),
     compactViaAdvertisedCommand: true,
     promptFailure: (cause) => acpRegistryPromptFailure(registryAgentId, cause),
@@ -266,6 +276,13 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
       ? {
           registerExtensions: registerSandboxBridgeExtensions,
           promptMeta: (message) => ({ [SANDBOX_BRIDGE_MESSAGE_META]: { ...message } }),
+          // The bridge lists the sandbox's models only while the sandbox answers, and reads the
+          // pick from the thread when it sends, so a model it does not list now is no failure.
+          applyModelSelection: ({ runtime, modelSelection }) =>
+            runtime.setConfigOption("model", modelSelection.model).pipe(
+              Effect.as(modelSelection.model),
+              Effect.orElseSucceed(() => undefined),
+            ),
         }
       : {}),
     ...(isClaude
