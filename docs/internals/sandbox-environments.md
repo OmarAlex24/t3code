@@ -458,7 +458,10 @@ first runs `sandboxes.checkWork`: `git status --porcelain` and
 `git rev-list --count HEAD --not --remotes` in the record's `repoDir`, run with a 10-second command
 timeout inside a 15-second limit. A stopped sandbox, a record without `repoDir` (launched before
 the field existed), or a timeout returns `unknown`, and the client then always asks. A remembered
-`delete` skips the prompt only when the check comes back `clean`.
+`delete` skips the prompt only when the check comes back `clean`, and only after a 10-second wait
+held in client memory: the coordinator's toast takes over the settle's Undo (`settleThread` then
+skips its own notice), and an Undo, an un-settle from anywhere, or the sandbox stopping cancels
+it. A reload during the wait deletes nothing.
 
 A bridged chat keeps its conversation in the host thread. However its sandbox goes (a delete from
 the header menu or the settle prompt, the sweep, or a new launch replacing an abandoned one), the

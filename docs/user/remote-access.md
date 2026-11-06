@@ -152,11 +152,12 @@ which case it is.
 - **Keep a snapshot** stops the sandbox and keeps its disk. The provider bills for the stopped disk
   (Boat keeps it for 14 days). Sending a message in the thread resumes the sandbox, from any
   device; the first answer can take a few minutes. Un-settling the thread resumes it too.
-- **Delete the sandbox** checks the clone for uncommitted files and commits not on a remote. With
-  nothing to lose, it deletes the sandbox and a notice says what went with it. With work to lose,
-  or when the sandbox does not answer within about 10 seconds ("Couldn't check for unpushed
-  work"), it asks first. Copied env files count as uncommitted when the repository does not ignore
-  them.
+- **Delete without asking** waits 10 seconds after the settle, with **Undo** in its notice; Undo,
+  or un-settling the thread another way, keeps the sandbox. Closing the app in that time deletes
+  nothing. Then it checks the clone for uncommitted files and commits not on a remote. With nothing
+  to lose, it deletes the sandbox and a notice says what went with it. With work to lose, or when
+  the sandbox does not answer within about 10 seconds ("Couldn't check for unpushed work"), it
+  asks first. Copied env files count as uncommitted when the repository does not ignore them.
 
 Only settling from this app counts; a thread the sandbox settles on its own leaves the sandbox as
 it is. Deleting a sandbox thread asks first, names the sandbox ("Also deletes sandbox bx_46wr on

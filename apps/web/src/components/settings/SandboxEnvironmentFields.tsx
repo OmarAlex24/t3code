@@ -75,7 +75,7 @@ const describeCredentialEnvironment = (
 const SETTLE_LABELS: Record<SandboxSettleAction, string> = {
   ask: "Ask me",
   snapshot: "Keep a snapshot",
-  delete: "Delete the sandbox",
+  delete: "Delete without asking",
 };
 
 // What each choice does to the machine and the conversation on it, and what the provider bills.
@@ -92,7 +92,7 @@ const settleHint = (
     return `Stops the sandbox and keeps its disk; sending a message resumes it. ${kept}`;
   }
   if (action === "delete") {
-    return "Deletes the sandbox and the conversation on it. It checks for unpushed work first and asks you to confirm when it finds some or can't check.";
+    return "Deletes the sandbox without asking, 10 seconds after the settle; the settle's Undo cancels it. It still asks first when it finds unpushed work or can't check.";
   }
   return `Asks whether to keep a snapshot or delete the sandbox. ${kept}`;
 };
