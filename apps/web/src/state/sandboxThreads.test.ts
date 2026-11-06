@@ -17,6 +17,7 @@ import {
 
 import {
   findThreadSandbox,
+  isSandboxlessBridgeThread,
   sandboxBridgeReady,
   sandboxHostMirrors,
   sandboxMirrorOf,
@@ -142,6 +143,35 @@ describe("sandboxMirrorOf", () => {
     const linked = record({ hostProjectId: ProjectId.make("p") });
     expect(sandboxMirrorOf([linked], { environmentId: HOST, threadId }, HOST)).toBeNull();
     expect(sandboxMirrorOf([{ ...linked, state: "deleted" }], ref, HOST)).toBeNull();
+  });
+});
+
+describe("isSandboxlessBridgeThread", () => {
+  const onHost = (sandboxes: ReadonlyArray<SandboxRecord> | null, instanceId = "sandboxes") =>
+    isSandboxlessBridgeThread({
+      sandboxes,
+      threadRef: { environmentId: HOST, threadId },
+      instanceId,
+      provisionerEnvironmentId: HOST,
+    });
+
+  it("marks a bridge chat read-only once its sandbox is deleted", () => {
+    expect(onHost([])).toBe(true);
+    expect(onHost([record({ state: "deleted" })])).toBe(true);
+  });
+
+  it("leaves a chat alone while its sandbox lives, the list loads, or it is no bridge chat", () => {
+    expect(onHost([record({ state: "stopped" })])).toBe(false);
+    expect(onHost(null)).toBe(false);
+    expect(onHost([], "codex")).toBe(false);
+    expect(
+      isSandboxlessBridgeThread({
+        sandboxes: [],
+        threadRef: { environmentId: SANDBOX, threadId },
+        instanceId: "sandboxes",
+        provisionerEnvironmentId: HOST,
+      }),
+    ).toBe(false);
   });
 });
 
