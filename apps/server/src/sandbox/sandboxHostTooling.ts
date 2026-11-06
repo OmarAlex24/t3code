@@ -128,7 +128,12 @@ export const describeHostMcpServer = (
   }
   if (mapleApiBaseUrl(url.href) !== null) {
     return options.mapleReady
-      ? { ...base, copy: "mint", mintedBy: "maple" }
+      ? {
+          ...base,
+          copy: "mint",
+          mintedBy: "maple",
+          reason: "Gets a Maple key of its own, revoked when the sandbox is deleted.",
+        }
       : {
           ...base,
           copy: "unavailable",
