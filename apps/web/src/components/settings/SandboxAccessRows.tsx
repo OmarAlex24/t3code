@@ -286,6 +286,8 @@ function useGithubAppConnect(environmentId: EnvironmentId, onConnected: () => vo
   const [redirect] = useState(takeGithubRedirect);
   const handledRedirect = useRef(false);
   const connectRedirect = useEffectEvent(() => {
+    // Read once per page load: coming back to this page later must not send the code again.
+    redirectTaken = null;
     if (handledRedirect.current || redirect?.trusted !== true) return;
     handledRedirect.current = true;
     void connect(redirect.code);
@@ -656,7 +658,7 @@ export function SandboxAccessRows({ environmentId }: { readonly environmentId: E
   };
   // The tab GitHub sends back opens on the GitHub panel, so its progress or problem shows.
   const [panel, setPanel] = useState<Panel | null>(() =>
-    takeGithubRedirect() === null ? null : { id: "github", replacing: false },
+    takeGithubRedirect() === null ? null : { id: "github", replacing: connected.github },
   );
   const github = useGithubAppConnect(environmentId, () => setPanel(null));
   const open = (id: IntegrationId) => {
