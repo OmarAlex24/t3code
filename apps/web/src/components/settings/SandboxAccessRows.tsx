@@ -542,6 +542,7 @@ function RailwayRow({
               onChange={(event) => {
                 setToken(event.target.value);
                 setChoices([]);
+                setAskId(false);
               }}
               spellCheck={false}
               autoComplete="off"
