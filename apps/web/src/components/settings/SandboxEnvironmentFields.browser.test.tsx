@@ -242,8 +242,11 @@ const TOOLING_HOST = {
   },
 };
 
-const advanced = () => page.getByRole("button", { name: "Advanced" });
-const summary = () => page.getByTestId("sandbox-config-summary");
+const section = (name: "Machine" | "Agent access" | "Setup") =>
+  page.getByRole("button", { name, exact: true });
+const summary = (id: "machine" | "agent" | "setup") =>
+  page.getByTestId(`sandbox-config-summary-${id}`);
+const attention = () => page.getByTestId("sandbox-config-attention");
 
 describe("SandboxEnvironmentFields", () => {
   it("saves a config without making a machine, with the running limit it shows", async () => {
@@ -267,7 +270,7 @@ describe("SandboxEnvironmentFields", () => {
     expect(onDone).toHaveBeenCalledOnce();
   });
 
-  it("shows the name, the machine and a summary, with the rest under a closed Advanced", async () => {
+  it("shows the name and the machine, with the rest in closed sections that sum it up", async () => {
     setup({
       projects: [project(REMOTE, "hello", "git@github.com:OmarAlex24/Hello-World.git")],
     });
@@ -277,16 +280,22 @@ describe("SandboxEnvironmentFields", () => {
     await expect
       .element(page.getByRole("combobox", { name: "Sandbox machine size" }))
       .toBeVisible();
-    await expect.element(summary()).toHaveTextContent("Shares nothing from this machine");
-    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
+    await expect.element(summary("machine")).toHaveTextContent("Stops after 8 h running");
+    await expect.element(summary("agent")).toHaveTextContent("Nothing from this machine");
+    await expect.element(summary("setup")).toHaveTextContent("Copies env files only");
+    for (const name of ["Machine", "Agent access", "Setup"] as const) {
+      await expect.element(section(name)).toHaveAttribute("aria-expanded", "false");
+    }
     await expect.element(page.getByText("Use this machine's Claude setup")).not.toBeInTheDocument();
     await expect.element(page.getByText("When a chat is settled")).not.toBeInTheDocument();
     // Every GitHub project can start on every config, so there is nothing to pick.
     await expect.element(page.getByText("Projects", { exact: true })).not.toBeInTheDocument();
     await expect.element(page.getByText("OmarAlex24/Hello-World")).not.toBeInTheDocument();
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
     await expect.element(page.getByText("Use this machine's Claude setup")).toBeVisible();
+    await expect.element(page.getByText("When a chat is settled")).not.toBeInTheDocument();
+    await userEvent.click(section("Machine"));
     await expect.element(page.getByText("When a chat is settled")).toBeVisible();
     await expect.element(page.getByText("Projects", { exact: true })).not.toBeInTheDocument();
   });
@@ -305,47 +314,56 @@ describe("SandboxEnvironmentFields", () => {
     );
 
     await expect
-      .element(summary())
+      .element(summary("machine"))
       .toHaveTextContent(
-        "Claude via hub.example.test · joins your tailnet · GitHub signed in with this machine's token · agent can use Boat · keeps a snapshot when settled",
+        "Stops after 4 h running · joins your tailnet · keeps a snapshot when settled",
       );
-    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
+    await expect
+      .element(summary("agent"))
+      .toHaveTextContent(
+        "Claude via hub.example.test · GitHub signed in with this machine's token · agent can use Boat",
+      );
+    await expect.element(section("Agent access")).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("opens Advanced and says why when a private Claude endpoint has no Tailscale", async () => {
+  it("opens Agent access and says why when a private Claude endpoint has no Tailscale", async () => {
     setup();
     await using _screen = await render(
       editing(saved({ claude: { baseUrl: "https://hub.example.test" } })),
     );
 
     await expect
-      .element(summary())
+      .element(summary("agent"))
       .toHaveTextContent(
         "hub.example.test is private, so sandboxes need Tailscale to reach Claude",
       );
-    await expect.element(advanced()).toHaveAttribute("aria-expanded", "true");
+    await expect.element(section("Agent access")).toHaveAttribute("aria-expanded", "true");
+    await expect.element(section("Machine")).toHaveAttribute("aria-expanded", "false");
     await expect.element(page.getByText(/Resolves to a private address/u)).toBeVisible();
     // It stays the user's to close.
-    await userEvent.click(advanced());
-    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(section("Agent access"));
+    await expect.element(section("Agent access")).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("names a field under Advanced that needs input even after Advanced closes", async () => {
+  it("names a field that needs input even after its section closes", async () => {
     setup({ tailscale: true });
     await using _screen = await render(
       editing(saved({ claude: { baseUrl: "https://hub.example.test" } })),
     );
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
     await userEvent.fill(page.getByRole("textbox", { name: "Claude endpoint" }), "");
-    await expect.element(summary()).toHaveTextContent("Enter a Claude endpoint");
-    await userEvent.click(advanced());
-    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
-    await expect.element(summary()).toHaveTextContent("Enter a Claude endpoint");
+    await expect.element(summary("agent")).toHaveTextContent("Enter a Claude endpoint");
+    await userEvent.click(section("Agent access"));
+    await expect.element(section("Agent access")).toHaveAttribute("aria-expanded", "false");
+    await expect.element(summary("agent")).toHaveTextContent("Enter a Claude endpoint");
+    await expect
+      .element(attention())
+      .toHaveTextContent("Enter a Claude endpoint, under Agent access.");
     await expect.element(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 
-  it("opens Advanced when saving fails", async () => {
+  it("opens every section when saving fails", async () => {
     setup();
     mocks.saveConfig.mockResolvedValueOnce(
       AsyncResult.failure(
@@ -355,12 +373,14 @@ describe("SandboxEnvironmentFields", () => {
     const onErrorChange = vi.fn();
     await using _screen = await render(editing(saved(), onErrorChange));
 
-    await expect.element(advanced()).toHaveAttribute("aria-expanded", "false");
+    await expect.element(section("Machine")).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(page.getByRole("button", { name: "Save changes" }));
     expect(onErrorChange).toHaveBeenLastCalledWith(
       "A tailnet-only sandbox has to join your tailnet.",
     );
-    await expect.element(advanced()).toHaveAttribute("aria-expanded", "true");
+    for (const name of ["Machine", "Agent access", "Setup"] as const) {
+      await expect.element(section(name)).toHaveAttribute("aria-expanded", "true");
+    }
   });
 
   it("keeps a saved config's env files and drops the repositories it was once limited to", async () => {
@@ -373,7 +393,8 @@ describe("SandboxEnvironmentFields", () => {
     } as SandboxEnvironmentConfig;
     await using _screen = await render(editing(legacy));
 
-    await userEvent.click(advanced());
+    await expect.element(summary("setup")).toHaveTextContent("Picked env files for 1 repository");
+    await userEvent.click(section("Setup"));
     await expect.element(page.getByText("Projects", { exact: true })).not.toBeInTheDocument();
     await expect
       .element(page.getByRole("textbox", { name: "octo/hello" }))
@@ -390,7 +411,7 @@ describe("SandboxEnvironmentFields", () => {
     await using _screen = await render(fields());
 
     await userEvent.click(page.getByRole("button", { name: /^Vercel/u }));
-    await userEvent.click(advanced());
+    await userEvent.click(section("Machine"));
     await userEvent.fill(page.getByRole("textbox", { name: "Team (optional)" }), "acme");
     await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
     expect(mocks.saveConfig).toHaveBeenCalledWith(
@@ -407,7 +428,7 @@ describe("SandboxEnvironmentFields", () => {
     setup();
     await using _screen = await render(fields());
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
     await userEvent.click(page.getByText("Use this machine's Claude setup"));
     const privateWarning = page.getByText(/Resolves to a private address/u);
     await expect.element(privateWarning).toBeVisible();
@@ -428,7 +449,7 @@ describe("SandboxEnvironmentFields", () => {
     setup();
     await using _screen = await render(fields());
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
     await expect
       .element(page.getByText(/delete only the forks it made. Forks bill like new sandboxes./u))
       .toBeVisible();
@@ -445,7 +466,8 @@ describe("SandboxEnvironmentFields", () => {
     setup({ tailscale: true });
     await using _screen = await render(fields());
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
+    await userEvent.click(section("Machine"));
     await userEvent.click(page.getByText("Use this machine's Claude setup"));
     // Decided at each launch, so there is nothing to tick.
     await expect
@@ -465,7 +487,8 @@ describe("SandboxEnvironmentFields", () => {
     setup({ tailscale: true });
     await using _screen = await render(fields());
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
+    await userEvent.click(section("Machine"));
     await userEvent.click(page.getByText("Use this machine's Claude setup"));
     await userEvent.click(page.getByText("Reach it only through my tailnet"));
     await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
@@ -476,7 +499,7 @@ describe("SandboxEnvironmentFields", () => {
     setup({ tailscale: true });
     await using _screen = await render(fields());
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Machine"));
     const join = page.getByRole("checkbox", { name: /Join my tailnet/u });
     await expect.element(join).not.toBeChecked();
     await userEvent.click(page.getByText("Join my tailnet"));
@@ -500,8 +523,20 @@ describe("SandboxEnvironmentFields", () => {
     await userEvent.click(page.getByRole("button", { name: "Save changes" }));
     expect(savedConfig()).toMatchObject({ id: "config-1", size: "small", maxRunningMinutes: 240 });
 
-    await userEvent.click(page.getByRole("button", { name: "Delete…" }));
+    await userEvent.click(page.getByRole("button", { name: "Delete config…" }));
     expect(mocks.deleteConfig).not.toHaveBeenCalled();
+    await expect
+      .element(
+        page
+          .getByRole("group", { name: "Delete this config" })
+          .getByText(
+            "Delete Boat small? Sandboxes already made from it keep running until you delete them.",
+          ),
+      )
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Save changes" }))
+      .not.toBeInTheDocument();
     await userEvent.click(page.getByRole("button", { name: "Delete config" }));
     expect(mocks.deleteConfig).toHaveBeenCalledWith(
       expect.objectContaining({ input: { configId: "config-1" } }),
@@ -513,22 +548,37 @@ describe("SandboxEnvironmentFields", () => {
     await using _screen = await render(fields());
 
     // The GitHub App and CLAUDE.md are on by default once this machine has them.
-    await expect.element(summary()).toHaveTextContent("GitHub signed in · copies CLAUDE.md");
-    await userEvent.click(advanced());
+    await expect.element(summary("agent")).toHaveTextContent("GitHub signed in");
+    await expect.element(summary("setup")).toHaveTextContent("Copies CLAUDE.md");
+    await userEvent.click(section("Agent access"));
+    await userEvent.click(section("Setup"));
     await expect
       .element(page.getByRole("combobox", { name: "GitHub sign-in" }))
       .toHaveTextContent("GitHub App (recommended)");
     await expect
       .element(page.getByRole("textbox", { name: "Git name" }))
       .toHaveAttribute("placeholder", "Omar");
+    // One line each; what happens to a server's credentials shows on hover.
     await expect.element(page.getByRole("checkbox", { name: /railway/u })).toBeDisabled();
+    await expect.element(page.getByText("can't be copied")).toBeVisible();
     await expect
-      .element(page.getByText("Runs a program on this machine, so it can't be copied."))
-      .toBeVisible();
+      .element(page.getByRole("checkbox", { name: /railway/u }))
+      .toHaveAccessibleDescription("Runs a program on this machine, so it can't be copied.");
+    const docs = page.getByRole("checkbox", { name: /^docs/u });
+    await expect.element(page.getByText("copies X-Key")).toBeVisible();
     await expect
-      .element(page.getByText(/Copies this machine's X-Key header. Deleting the sandbox/u))
-      .toBeVisible();
+      .element(docs)
+      .toHaveAccessibleDescription(
+        "docs.example.test. Copies this machine's X-Key header. Deleting the sandbox doesn't revoke it.",
+      );
+    await userEvent.hover(page.getByText("copies X-Key"));
+    await expect
+      .poll(() => document.querySelector('[data-slot="tooltip-popup"]')?.textContent)
+      .toBe(
+        "docs.example.test. Copies this machine's X-Key header. Deleting the sandbox doesn't revoke it.",
+      );
     await expect.element(page.getByRole("checkbox", { name: /synced/u })).toBeDisabled();
+    await expect.element(page.getByText("too large to copy")).toBeVisible();
 
     await userEvent.fill(
       page.getByRole("textbox", { name: "Tools to install" }),
@@ -539,10 +589,11 @@ describe("SandboxEnvironmentFields", () => {
     await userEvent.click(page.getByText("maple", { exact: true }));
     await userEvent.click(page.getByText("frontend-design", { exact: true }));
     await expect
-      .element(summary())
-      .toHaveTextContent(
-        "GitHub signed in · runs your setup script · Northflank signed in · 2 MCP servers · copies CLAUDE.md and 1 skill",
-      );
+      .element(summary("agent"))
+      .toHaveTextContent("GitHub signed in · Northflank signed in · 2 MCP servers");
+    await expect
+      .element(summary("setup"))
+      .toHaveTextContent("Runs your setup script · copies CLAUDE.md and 1 skill");
     await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
     expect(savedConfig()).toMatchObject({
       passGithubToken: false,
@@ -569,15 +620,18 @@ describe("SandboxEnvironmentFields", () => {
       ),
     );
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
+    await userEvent.click(section("Setup"));
     await expect
       .element(page.getByRole("combobox", { name: "GitHub sign-in" }))
       .toHaveTextContent("This machine's token (legacy)");
     await expect.element(page.getByRole("checkbox", { name: /Your CLAUDE.md/u })).not.toBeChecked();
     await userEvent.fill(page.getByRole("textbox", { name: "Git name" }), "Sandbox Bot");
     await expect
-      .element(summary())
-      .toHaveTextContent("Enter both a git name and email, or leave both empty");
+      .element(attention())
+      .toHaveTextContent(
+        "Enter both a git name and email, or leave both empty, under Agent access.",
+      );
     await expect.element(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
     await userEvent.fill(page.getByRole("textbox", { name: "Git email" }), "bot@example.test");
     await userEvent.click(page.getByRole("button", { name: "Save changes" }));
@@ -598,7 +652,7 @@ describe("SandboxEnvironmentFields", () => {
     await using screen = await render(fields());
     expect(mocks.refreshProviders).toHaveBeenCalledOnce();
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
     await userEvent.click(page.getByRole("combobox", { name: "GitHub sign-in" }));
     await userEvent.click(page.getByRole("option", { name: "GitHub App (recommended)" }));
     await expect.element(page.getByText(/The GitHub App isn't connected yet./u)).toBeVisible();
@@ -612,7 +666,7 @@ describe("SandboxEnvironmentFields", () => {
     await expect
       .element(page.getByText(/The GitHub App isn't connected yet./u))
       .not.toBeInTheDocument();
-    await expect.element(summary()).not.toHaveTextContent("Connect the GitHub App");
+    await expect.element(attention()).not.toBeInTheDocument();
     await expect
       .element(page.getByRole("checkbox", { name: /Sign the Northflank CLI in/u }))
       .toBeEnabled();
@@ -623,11 +677,11 @@ describe("SandboxEnvironmentFields", () => {
     setup();
     await using _screen = await render(fields());
 
-    await userEvent.click(advanced());
+    await userEvent.click(section("Agent access"));
     await userEvent.click(page.getByRole("combobox", { name: "GitHub sign-in" }));
     await userEvent.click(page.getByRole("option", { name: "GitHub App (recommended)" }));
     await expect
-      .element(summary())
+      .element(summary("agent"))
       .toHaveTextContent("Connect the GitHub App under Sandboxes, or pick another GitHub option");
     await expect.element(page.getByText(/The GitHub App isn't connected yet./u)).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Add sandbox config" })).toBeDisabled();
