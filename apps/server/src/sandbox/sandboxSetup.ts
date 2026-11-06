@@ -505,6 +505,8 @@ mkdir -p "$dir"
 printf 'github.com:\\n    users:\\n        x-access-token:\\n            oauth_token: %s\\n    oauth_token: %s\\n    git_protocol: https\\n    user: x-access-token\\n' "$T3_GITHUB_TOKEN" "$T3_GITHUB_TOKEN" >"$dir/hosts.yml.t3-tmp"
 unset T3_GITHUB_TOKEN
 mv "$dir/hosts.yml.t3-tmp" "$dir/hosts.yml"
+# Without a version, gh "migrates" hosts.yml by asking GitHub who the token is, which fails.
+grep -qs '^version:' "$dir/config.yml" || printf '\nversion: 1\n' >>"$dir/config.yml"
 if ! command -v gh >/dev/null 2>&1; then
   echo "The GitHub CLI is not installed." >&2
   exit 3
