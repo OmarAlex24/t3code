@@ -179,8 +179,8 @@ function GithubAppRow({
       description={
         <>
           Gives each sandbox an hour-long GitHub token for its own repository, revoked when the
-          sandbox is deleted. You create the app once on your account and install it on the
-          repositories sandboxes may use.{" "}
+          sandbox is deleted. Create the app once, then install it on the repositories sandboxes may
+          use.{" "}
           <DocsLink href="https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest">
             How it works
           </DocsLink>
