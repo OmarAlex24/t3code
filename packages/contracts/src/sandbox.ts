@@ -893,6 +893,19 @@ export const SANDBOX_BRIDGE_WITHDRAW_METHOD = "_t3code/sandbox_requests_withdraw
  */
 export const isInternalProviderInstance = (instanceId: string): boolean =>
   instanceId === SANDBOX_BRIDGE_INSTANCE_ID;
+
+/** Why a sandbox chat refuses another provider: it would run on this computer, with no sandbox. */
+export const SANDBOX_BRIDGE_SWITCH_REFUSAL =
+  "This chat runs on a sandbox, so it keeps the sandbox's agent. Pick a model from the sandbox's list, or start a new chat to work on this computer.";
+
+/** Whether a selection would move a thread that runs through the sandbox bridge off it. */
+export const leavesSandboxBridge = (
+  current: { readonly instanceId: string },
+  next: { readonly instanceId: string } | undefined,
+): boolean =>
+  current.instanceId === SANDBOX_BRIDGE_INSTANCE_ID &&
+  next !== undefined &&
+  next.instanceId !== SANDBOX_BRIDGE_INSTANCE_ID;
 /** Lightweight host projects for sandbox threads live under this folder of the server's home. */
 export const SANDBOX_HOST_PROJECTS_FOLDER = "sandbox-projects";
 
