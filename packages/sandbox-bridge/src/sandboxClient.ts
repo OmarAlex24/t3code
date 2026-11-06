@@ -90,6 +90,7 @@ export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function
   return {
     threadStop: config.environment.capabilities.threadStop === true,
     defaultModelSelection: config.settings.defaultModelSelection ?? null,
+    providers: config.providers,
     projection: (threadId) =>
       client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId }).pipe(
         Effect.asSome,
