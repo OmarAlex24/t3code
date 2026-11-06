@@ -265,6 +265,7 @@ const secretResolver = Layer.succeed(SecretResolver.SecretResolver, {
       ),
     ),
   invalidate: () => Effect.void,
+  label: (provider) => Effect.succeed(provider),
 });
 
 const testLayer = provisionerLayer();
