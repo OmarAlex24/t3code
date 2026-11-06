@@ -1,8 +1,10 @@
 import { ChevronRightIcon, CircleAlertIcon } from "lucide-react";
 import { useId, type ReactNode } from "react";
 
+import { cn } from "~/lib/utils";
 import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { Switch } from "../ui/switch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 export function FieldLabel({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
@@ -98,6 +100,107 @@ export function CompactOptIn({
   );
 }
 
+/**
+ * One thing the agent gets, as a name, a line on what it means, and a switch. Its details show
+ * only while it's on.
+ */
+export function AccessSwitch({
+  name,
+  state,
+  warning = false,
+  checked,
+  disabled,
+  onCheckedChange,
+  children,
+}: {
+  name: string;
+  state: ReactNode;
+  warning?: boolean;
+  checked: boolean;
+  disabled: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  children?: ReactNode;
+}) {
+  const nameId = useId();
+  const stateId = useId();
+  return (
+    <div className="py-2.5">
+      <label className="flex cursor-pointer items-center gap-3 has-data-disabled:cursor-not-allowed">
+        <span className="min-w-0 flex-1">
+          <span id={nameId} className="block text-xs font-medium text-foreground">
+            {name}
+          </span>
+          <span
+            id={stateId}
+            className={cn(
+              "block text-pretty text-2xs leading-relaxed",
+              warning ? "text-warning-foreground" : "text-muted-foreground",
+            )}
+          >
+            {state}
+          </span>
+        </span>
+        <Switch
+          size="sm"
+          checked={checked}
+          disabled={disabled}
+          aria-labelledby={nameId}
+          aria-describedby={stateId}
+          onCheckedChange={onCheckedChange}
+        />
+      </label>
+      {checked && children !== undefined ? (
+        <div className="mt-2.5 space-y-2.5 pb-0.5">{children}</div>
+      ) : null}
+    </div>
+  );
+}
+
+/** A label beside its field on wide screens, above it on narrow ones; the field names itself. */
+export function DetailField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid gap-1 sm:grid-cols-[6.5rem_minmax(0,1fr)] sm:items-center sm:gap-3">
+      <span aria-hidden className="text-2xs text-muted-foreground">
+        {label}
+      </span>
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+/** A folded group inside a section: a quiet trigger line and what it hides. */
+export function Disclosure({
+  title,
+  trailing,
+  open,
+  onOpenChange,
+  children,
+}: {
+  title: string;
+  trailing?: ReactNode;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <Collapsible open={open} onOpenChange={onOpenChange}>
+      <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-sm py-1 text-start text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset data-panel-open:[&>svg]:rotate-90">
+        <ChevronRightIcon
+          aria-hidden
+          className="size-3.5 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none"
+        />
+        <span className="min-w-0 flex-1">{title}</span>
+        {trailing === undefined ? null : (
+          <span className="shrink-0 text-2xs font-normal text-muted-foreground">{trailing}</span>
+        )}
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        <div className="space-y-2 pt-2 pb-1">{children}</div>
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
 /** A small heading inside a config section. */
 export function SubHeading({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
   return (
@@ -166,7 +269,7 @@ export function ConfigSection({
         />
       </CollapsibleTrigger>
       <CollapsiblePanel>
-        <div className="space-y-5 border-t border-border/50 px-4 pt-4 pb-5">{children}</div>
+        <div className="space-y-4 border-t border-border/50 px-4 py-4">{children}</div>
       </CollapsiblePanel>
     </Collapsible>
   );
