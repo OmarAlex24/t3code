@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     AsyncResult.success({ config: { id: "config-1", ...request.input.config } }),
   ),
   deleteConfig: vi.fn(async () => AsyncResult.success(undefined)),
+  refreshProviders: vi.fn(() => {}),
 }));
 
 vi.mock(import("../../state/use-atom-command"), async (original) => ({
@@ -121,7 +122,7 @@ vi.mock(import("~/state/query"), async (original) => ({
         : null,
     isPending: false,
     error: null,
-    refresh: () => {},
+    refresh: atom === "providers" ? mocks.refreshProviders : () => {},
   })) as never,
 }));
 
@@ -156,6 +157,7 @@ function setup(
   mocks.projects = options.projects ?? [];
   mocks.saveConfig.mockClear();
   mocks.deleteConfig.mockClear();
+  mocks.refreshProviders.mockClear();
 }
 
 const savedConfig = (request: number = 0) =>
@@ -589,6 +591,32 @@ describe("SandboxEnvironmentFields", () => {
     });
     expect(config).not.toHaveProperty("githubApp");
     expect(config).not.toHaveProperty("claudeMd");
+  });
+
+  it("reads the server's credentials afresh when opened, and follows them while open", async () => {
+    setup();
+    await using screen = await render(fields());
+    expect(mocks.refreshProviders).toHaveBeenCalledOnce();
+
+    await userEvent.click(advanced());
+    await userEvent.click(page.getByRole("combobox", { name: "GitHub sign-in" }));
+    await userEvent.click(page.getByRole("option", { name: "GitHub App (recommended)" }));
+    await expect.element(page.getByText(/The GitHub App isn't connected yet./u)).toBeVisible();
+    await expect
+      .element(page.getByRole("checkbox", { name: /Sign the Northflank CLI in/u }))
+      .toBeDisabled();
+
+    // The app and the Northflank token were saved under Sandboxes meanwhile.
+    mocks.host = TOOLING_HOST;
+    await screen.rerender(fields());
+    await expect
+      .element(page.getByText(/The GitHub App isn't connected yet./u))
+      .not.toBeInTheDocument();
+    await expect.element(summary()).not.toHaveTextContent("Connect the GitHub App");
+    await expect
+      .element(page.getByRole("checkbox", { name: /Sign the Northflank CLI in/u }))
+      .toBeEnabled();
+    expect(mocks.refreshProviders).toHaveBeenCalledOnce();
   });
 
   it("asks to connect the GitHub App before a config can use it", async () => {

@@ -1,4 +1,4 @@
-import { type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
+import { type EnvironmentId, type ServerSettings, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { Atom } from "effect/reactivity";
 
@@ -10,13 +10,39 @@ import {
   createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
 
+/** The settings the server reads its sandbox host facts from, as one comparable value. */
+const sandboxHostSettingsKey = (
+  settings: Pick<
+    ServerSettings,
+    "sandboxProviders" | "sandboxTailscale" | "sandboxTooling" | "usageLimitSources"
+  > | null,
+): string =>
+  settings === null
+    ? ""
+    : JSON.stringify([
+        settings.sandboxProviders,
+        settings.sandboxTailscale,
+        settings.sandboxTooling,
+        settings.usageLimitSources,
+      ]);
+
 export function createSandboxEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Persistence.EnvironmentCacheStore | R, E>,
+  settingsValueAtom: (environmentId: EnvironmentId) => Atom.Atom<ServerSettings | null>,
 ) {
+  // Saving a token, the GitHub App or Tailscale changes what the host offers sandboxes. The
+  // settings push lands after the write, so a refetch then reads the new facts, whichever client
+  // made the change.
+  const sandboxHostSettingsAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => sandboxHostSettingsKey(get(settingsValueAtom(environmentId)))).pipe(
+      Atom.withLabel(`environment-data:sandboxes:host-settings:${environmentId}`),
+    ),
+  );
   const sandboxesProviders = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:sandboxes:providers",
     tag: WS_METHODS.sandboxesProviders,
     idleTtlMs: 0,
+    refreshTrigger: ({ environmentId }) => sandboxHostSettingsAtom(environmentId),
   });
   const sandboxesEnvironments = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:sandboxes:environments",
