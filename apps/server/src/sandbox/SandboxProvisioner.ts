@@ -124,6 +124,13 @@ import {
 } from "./sandboxSetup.ts";
 import { makePairingKey, pairScript, type PairReport, readPairReport } from "./sandboxPairing.ts";
 import {
+  fetchHubModels,
+  hubAgentModels,
+  PI_SETTINGS_SCRUB,
+  piHubProvider,
+  piSetupScript,
+} from "./sandboxPi.ts";
+import {
   type BridgeCredentialReport,
   bridgeCredentialScript,
   readBridgeCredential,
@@ -264,6 +271,7 @@ ${CLAUDE_SETTINGS_SCRUB}
 ${GITHUB_LOGIN_SCRUB}
 ${MCP_SERVERS_SCRUB}
 ${NORTHFLANK_LOGIN_SCRUB}
+${PI_SETTINGS_SCRUB}
 ${tailscaleScrub()}
 rm -f "$HOME/.t3/sandbox-server.log" "$HOME/.t3/sandbox-server.pid"`;
 
@@ -1089,6 +1097,14 @@ const make = Effect.gen(function* () {
       return { github, tailscale, ...tooling } satisfies SandboxHostAccessFacts;
     }
     const tailnetAddress = yield* hostAccess.endpointTailnetAddress(claude.baseUrl);
+    // What a sandbox's Pi would list, read with this machine's own key; only a hub gives Pi a key.
+    const piModels =
+      hub === undefined || claude.authToken === undefined
+        ? []
+        : yield* onHttp(fetchHubModels(claude.baseUrl, Redacted.value(claude.authToken))).pipe(
+            Effect.map(hubAgentModels),
+            Effect.orElseSucceed((): ReadonlyArray<string> => []),
+          );
     return {
       claude: {
         baseUrl: claude.baseUrl,
@@ -1099,6 +1115,7 @@ const make = Effect.gen(function* () {
       github,
       tailscale,
       ...tooling,
+      ...(piModels.length === 0 ? {} : { piModels }),
     } satisfies SandboxHostAccessFacts;
   });
 
@@ -1324,6 +1341,17 @@ const make = Effect.gen(function* () {
     // Signed in before anything bills, so a bad OAuth client costs nothing. The key itself is minted
     // just before the join, since it expires in minutes.
     const tailnet = input.joinTailnet === true ? yield* resolveTailnet(input.provider) : undefined;
+    // Pi runs on the key the sandbox gets for Claude, which only a hub mints.
+    if (
+      input.agentAccess?.pi !== undefined &&
+      (input.agentAccess.claude === undefined ||
+        hubSource(yield* settings.getSettings.pipe(Effect.orDie)) === undefined)
+    ) {
+      return yield* configError(
+        input.provider,
+        "Pi uses the key each sandbox gets on your CLIProxyAPI hub, so it needs this machine's Claude setup on a hub with a management key. Turn off Pi for this config, or add the hub's management key.",
+      );
+    }
     // Minted before anything bills, so a hub that refuses costs nothing; revoked on any failure.
     const claude = yield* resolveClaudeAccess(input, label);
     const hubKey = claude?.hubKey;
@@ -1350,6 +1378,47 @@ const make = Effect.gen(function* () {
       tailnet,
       agentAccess,
     } satisfies Prepared;
+  });
+
+  // A step that fails warns and leaves Claude as it was; the model list is read here, with the
+  // sandbox's own key, so Pi lists exactly what that key reaches.
+  const setUpPi = Effect.fn("SandboxProvisioner.setUpPi")(function* (
+    claude: ClaudeAccess,
+    startModel: string | undefined,
+    run: (
+      script: SandboxScript,
+      timeoutSeconds: number,
+    ) => Effect.Effect<SandboxExecResult, SandboxProviderError>,
+    warn: (warning: string) => Effect.Effect<void>,
+  ) {
+    const listed = yield* onHttp(fetchHubModels(claude.baseUrl, Redacted.value(claude.token))).pipe(
+      Effect.option,
+    );
+    const models = Option.isNone(listed) ? [] : hubAgentModels(listed.value);
+    const first = models[0];
+    if (first === undefined) {
+      return yield* warn(
+        Option.isNone(listed)
+          ? "T3 Code could not read your hub's models, so Pi was not set up on the sandbox."
+          : "Your hub lists no models besides Claude's, so Pi was not set up on the sandbox.",
+      );
+    }
+    const model = startModel !== undefined && models.includes(startModel) ? startModel : first;
+    if (startModel !== undefined && model !== startModel) {
+      yield* warn(`Your hub no longer lists ${startModel}, so Pi starts on ${model} instead.`);
+    }
+    yield* run(
+      piSetupScript({
+        provider: piHubProvider({
+          claudeBaseUrl: claude.baseUrl,
+          apiKey: Redacted.value(claude.token),
+          models,
+        }),
+        model,
+        startsChats: startModel !== undefined,
+      }),
+      300,
+    ).pipe(Effect.catch(() => warn("Pi could not be installed or set up on the sandbox.")));
   });
 
   // Instances with a fiber still provisioning them; the sweep leaves their records alone.
@@ -1618,6 +1687,10 @@ const make = Effect.gen(function* () {
                   ),
             ),
           );
+    const piRequest = input.agentAccess?.pi;
+    if (piRequest !== undefined && claude?.hubKey !== undefined) {
+      yield* setUpPi(claude, piRequest.startModel, run, warn);
+    }
     const launchTooling = context.launch;
     const signInGithubApp = Effect.fn("SandboxProvisioner.signInGithubApp")(function* (
       repository: LaunchTooling["repository"],
@@ -2030,7 +2103,14 @@ const make = Effect.gen(function* () {
     ...(config.credentialEnvironment === undefined
       ? {}
       : { environment: config.credentialEnvironment, allowCredentials: true }),
-    ...(config.claude === undefined ? {} : { agentAccess: { claude: config.claude } }),
+    ...(config.claude === undefined && config.pi === undefined
+      ? {}
+      : {
+          agentAccess: {
+            ...(config.claude === undefined ? {} : { claude: config.claude }),
+            ...(config.pi === undefined ? {} : { pi: config.pi }),
+          },
+        }),
     ...(config.passGithubToken ? { passGithubToken: true } : {}),
     ...(joinTailnet ? { joinTailnet: true } : {}),
     ...(config.agentProviderAccess === true ? { agentProviderAccess: true } : {}),
@@ -2755,6 +2835,12 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     if (input.config.agentProviderAccess === true) {
       const refusal = agentAccessRefusal(driver, input.config.credentialEnvironment);
       if (refusal !== null) return yield* configError(provider, refusal);
+    }
+    if (input.config.pi !== undefined && input.config.claude === undefined) {
+      return yield* configError(
+        provider,
+        "Pi uses the sandbox's hub key for Claude, so turn on this machine's Claude setup too.",
+      );
     }
     if (input.config.claude !== undefined) {
       const endpoint = URL.parse(input.config.claude.baseUrl);
