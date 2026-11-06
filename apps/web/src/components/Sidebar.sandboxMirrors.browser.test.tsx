@@ -138,6 +138,12 @@ const sandbox = (fields: Partial<SandboxRecord>): SandboxRecord => ({
   ...fields,
 });
 
+// The empty folder T3 made on the host only so the phone has a home for the mirror.
+const placeholder = {
+  ...project(HOST, "project-host", "horizon-stack"),
+  workspaceRoot: "/Users/me/.t3/userdata/sandbox-projects/OmarAlex24/horizon-stack",
+};
+
 describe("sandbox chats in the sidebar", () => {
   it("lists a sandbox chat once, as the sandbox's own thread, and keeps one from before the bridge", async () => {
     using stack = new DisposableStack();
@@ -157,7 +163,7 @@ describe("sandbox chats in the sidebar", () => {
     ];
     vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
     vi.mocked(useProjects).mockReturnValue([
-      project(HOST, "project-host", "horizon-stack"),
+      placeholder,
       project(SANDBOX, "project-sandbox", "OmarAlex24/horizon-stack"),
       project(LEGACY_SANDBOX, "project-legacy", "OmarAlex24/older-stack"),
     ]);
@@ -177,5 +183,32 @@ describe("sandbox chats in the sidebar", () => {
     await expect.element(page.getByText("An older sandbox chat").first()).toBeVisible();
     // The host's mirror is for the phone, and its project holds nothing else.
     await expect.element(page.getByText("Greeting from boat.dev")).not.toBeInTheDocument();
+  });
+
+  it("keeps a host copy listed while its sandbox's own thread isn't", async () => {
+    using stack = new DisposableStack();
+    const previousSettings = getClientSettings();
+    stack.defer(() => __setClientSettingsForTests(previousSettings));
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+      // Project folders leave out a thread whose project isn't listed.
+      boringSidebarEnabled: true,
+    });
+    mocks.sandboxes = [sandbox({ hostProjectId: ProjectId.make("project-host") })];
+    vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
+    vi.mocked(useProjects).mockReturnValue([placeholder]);
+    // The sandbox isn't connected, so its thread isn't listed.
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      shell(HOST, bridgedThreadId, "project-host", "Greeting from boat.dev"),
+    ]);
+
+    await using _screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+
+    await expect.element(page.getByText("Greeting from boat.dev").first()).toBeVisible();
   });
 });
