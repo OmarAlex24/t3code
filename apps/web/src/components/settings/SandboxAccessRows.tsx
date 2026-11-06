@@ -10,6 +10,7 @@ import {
   SANDBOX_GITHUB_APP_NEW_ROUTE,
   SANDBOX_GITHUB_APP_PASTE_REDIRECT_URL,
   sandboxGithubAppManifest,
+  type SandboxRailwayWorkspace,
   type SandboxToolingSettings,
 } from "@t3tools/contracts";
 
@@ -21,6 +22,7 @@ import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { describeSandboxFailure } from "./SandboxStartLimits";
 import { SettingsRow } from "./settingsLayout";
@@ -29,6 +31,7 @@ const STATE_KEY = "t3code:sandbox-github-app-state";
 const GITHUB_NEW_APP = "https://github.com/settings/apps/new";
 const NORTHFLANK_TOKEN_DOCS = "https://northflank.com/docs/v1/application/secure/grant-api-access";
 const MAPLE_KEY_DOCS = "https://maple.dev/docs/reference/api/";
+const RAILWAY_TOKEN_DOCS = "https://docs.railway.com/guides/public-api";
 
 const readState = () => {
   try {
@@ -411,7 +414,200 @@ function TokenRow({
   );
 }
 
-/** Where sandboxes get GitHub, Northflank and Maple credentials. Secrets arrive redacted. */
+/**
+ * The Railway token sandboxes get theirs from. The server checks it with Railway before saving,
+ * and asks for the workspace only when the token reaches more than one, or can't say which.
+ */
+function RailwayRow({
+  environmentId,
+  saved,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly saved: SandboxToolingSettings;
+}) {
+  const updateSettings = useUpdateEnvironmentSettings(environmentId);
+  const connectRailway = useAtomCommand(serverEnvironment.sandboxesConnectRailway, {
+    reportFailure: false,
+  });
+  const [editing, setEditing] = useState(false);
+  const [token, setToken] = useState("");
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [choices, setChoices] = useState<ReadonlyArray<SandboxRailwayWorkspace>>([]);
+  // The token reached no workspace it could name, so the user enters the ID.
+  const [askId, setAskId] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const connected = saved.railwayToken !== "" && saved.railwayWorkspaceId !== "";
+
+  const close = () => {
+    setEditing(false);
+    setToken("");
+    setWorkspaceId("");
+    setChoices([]);
+    setAskId(false);
+    setProblem(null);
+  };
+
+  const connect = async () => {
+    setConnecting(true);
+    setProblem(null);
+    const result = await connectRailway({
+      environmentId,
+      input: {
+        token: token.trim(),
+        ...(workspaceId.trim() === "" ? {} : { workspaceId: workspaceId.trim() }),
+      },
+    });
+    setConnecting(false);
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        setProblem(
+          describeSandboxFailure(squashAtomCommandFailure(result), "Could not save the token")
+            .description,
+        );
+      }
+      return;
+    }
+    if (result.value.saved !== undefined) {
+      close();
+      return;
+    }
+    setChoices(result.value.workspaces);
+    setAskId(result.value.workspaces.length === 0);
+    setProblem(result.value.problem);
+  };
+
+  const choiceName = choices.find((choice) => choice.id === workspaceId)?.name;
+
+  return (
+    <SettingsRow
+      id="sandbox-railway"
+      title="Railway token"
+      description={
+        <>
+          Makes a Railway token for each sandbox that signs Railway in, revoked when the sandbox is
+          deleted. Use a workspace token; it never leaves this machine.{" "}
+          <DocsLink href={RAILWAY_TOKEN_DOCS}>Tokens</DocsLink>
+        </>
+      }
+      serverScoped
+      settingKeys={["sandboxTooling"]}
+      control={
+        editing ? null : connected ? (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <CheckIcon aria-hidden className="size-3.5 text-success" />
+            <span className="truncate">{saved.railwayWorkspaceName || "Saved"}</span>
+            <span aria-hidden>·</span>
+            <Button variant="link" size="xs" onClick={() => setEditing(true)}>
+              Replace
+            </Button>
+            <span aria-hidden>·</span>
+            <Button
+              variant="link"
+              size="xs"
+              onClick={() =>
+                updateSettings({
+                  sandboxTooling: {
+                    railwayToken: "",
+                    railwayWorkspaceId: "",
+                    railwayWorkspaceName: "",
+                  },
+                })
+              }
+            >
+              Remove
+            </Button>
+          </div>
+        ) : (
+          <Button size="xs" variant="outline" onClick={() => setEditing(true)}>
+            Add
+          </Button>
+        )
+      }
+    >
+      {editing ? (
+        <form
+          className="space-y-2 pt-2 pb-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (token.trim() !== "") void connect();
+          }}
+        >
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              aria-label="Railway token"
+              type="password"
+              placeholder="Railway workspace token"
+              value={token}
+              onChange={(event) => {
+                setToken(event.target.value);
+                setChoices([]);
+              }}
+              spellCheck={false}
+              autoComplete="off"
+              disabled={connecting}
+            />
+            {choices.length > 1 ? (
+              <Select
+                value={workspaceId}
+                disabled={connecting}
+                onValueChange={(value) => {
+                  if (value !== null) setWorkspaceId(value);
+                }}
+              >
+                <SelectTrigger aria-label="Railway workspace">
+                  <SelectValue>{choiceName ?? "Pick a workspace"}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {choices.map((choice) => (
+                    <SelectItem key={choice.id} value={choice.id}>
+                      {choice.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            ) : askId ? (
+              <Input
+                aria-label="Railway workspace ID"
+                placeholder="Workspace ID"
+                value={workspaceId}
+                onChange={(event) => setWorkspaceId(event.target.value)}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={connecting}
+              />
+            ) : null}
+            <div className="flex shrink-0 items-center justify-end gap-2">
+              {connecting ? <Spinner className="size-3" /> : null}
+              <Button type="button" size="xs" variant="ghost" disabled={connecting} onClick={close}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                size="xs"
+                variant="outline"
+                disabled={
+                  connecting ||
+                  token.trim() === "" ||
+                  (choices.length > 1 && choiceName === undefined)
+                }
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+          {problem === null ? null : (
+            <p role="alert" className="text-xs text-destructive-foreground">
+              {problem}
+            </p>
+          )}
+        </form>
+      ) : null}
+    </SettingsRow>
+  );
+}
+
+/** Where sandboxes get GitHub, Northflank, Maple and Railway credentials. Secrets arrive redacted. */
 export function SandboxAccessRows({ environmentId }: { readonly environmentId: EnvironmentId }) {
   const saved = useEnvironmentSettings(environmentId, (settings) => settings.sandboxTooling);
   return (
@@ -449,6 +645,7 @@ export function SandboxAccessRows({ environmentId }: { readonly environmentId: E
         inputLabel="Maple admin key"
         placeholder="Maple admin API key"
       />
+      <RailwayRow environmentId={environmentId} saved={saved} />
     </>
   );
 }

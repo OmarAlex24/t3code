@@ -13,7 +13,15 @@ const NOTHING_SAVED = {
   githubAppPrivateKey: "",
   northflankToken: "",
   mapleAdminKey: "",
+  railwayToken: "",
+  railwayWorkspaceId: "",
+  railwayWorkspaceName: "",
 };
+
+const RAILWAY_WORKSPACES = [
+  { id: "ws_1", name: "Omar's projects" },
+  { id: "ws_2", name: "Team" },
+];
 
 const mocks = vi.hoisted(() => ({
   connect: vi.fn(
@@ -23,6 +31,19 @@ const mocks = vi.hoisted(() => ({
         owner: "octo",
         installUrl: "https://github.com/apps/t3-code-sandboxes/installations/new",
       }) as unknown,
+  ),
+  // An account token reaches two workspaces, so the server asks which one until it is told.
+  connectRailway: vi.fn(async (request: { input: { token: string; workspaceId?: string } }) =>
+    request.input.workspaceId === undefined
+      ? AsyncResult.success({
+          workspaces: RAILWAY_WORKSPACES,
+          problem: "This token reaches several workspaces. Pick the one sandboxes get tokens in.",
+        })
+      : AsyncResult.success({
+          saved: RAILWAY_WORKSPACES.find((workspace) => workspace.id === request.input.workspaceId),
+          workspaces: [],
+          problem: null,
+        }),
   ),
   update: vi.fn((_patch: unknown) => {}),
   saved: {} as Record<string, string>,
@@ -73,6 +94,7 @@ vi.mock(import("~/state/server"), async (original) => {
     serverEnvironment: {
       ...actual.serverEnvironment,
       sandboxesConnectGithubApp: mocks.connect as never,
+      sandboxesConnectRailway: mocks.connectRailway as never,
     },
   };
 });
@@ -89,6 +111,7 @@ function setup(saved: Record<string, string>) {
   mocks.saved = saved;
   mocks.openExternal.mockClear();
   mocks.connect.mockClear();
+  mocks.connectRailway.mockClear();
   mocks.update.mockClear();
   localStorage.removeItem(STATE_KEY);
 }
@@ -232,5 +255,45 @@ describe("SandboxAccessRows", () => {
     await expect.element(maple.getByText("Saved")).toBeVisible();
     await userEvent.click(maple.getByRole("button", { name: "Remove" }));
     expect(mocks.update).toHaveBeenLastCalledWith({ sandboxTooling: { mapleAdminKey: "" } });
+  });
+
+  it("checks a Railway token with the server, and asks for the workspace when there is a choice", async () => {
+    setup(NOTHING_SAVED);
+    await using _screen = await render(rows());
+
+    const railway = page.getByRole("region", { name: "Railway token" });
+    await userEvent.click(railway.getByRole("button", { name: "Add" }));
+    await userEvent.fill(railway.getByLabelText("Railway token"), "account-token");
+    await userEvent.click(railway.getByRole("button", { name: "Save" }));
+    await expect
+      .element(railway.getByText("This token reaches several workspaces.", { exact: false }))
+      .toBeVisible();
+    // The token is the server's to save, once Railway answers for a workspace.
+    expect(mocks.update).not.toHaveBeenCalled();
+
+    await expect.element(railway.getByRole("button", { name: "Save" })).toBeDisabled();
+    await userEvent.click(railway.getByRole("combobox", { name: "Railway workspace" }));
+    await userEvent.click(page.getByRole("option", { name: "Team" }));
+    await userEvent.click(railway.getByRole("button", { name: "Save" }));
+    expect(mocks.connectRailway).toHaveBeenLastCalledWith(
+      expect.objectContaining({ input: { token: "account-token", workspaceId: "ws_2" } }),
+    );
+    await expect.element(railway.getByLabelText("Railway token")).not.toBeInTheDocument();
+  });
+
+  it("shows the saved Railway workspace and removes the token with it", async () => {
+    setup({
+      ...NOTHING_SAVED,
+      railwayToken: "••••••",
+      railwayWorkspaceId: "ws_1",
+      railwayWorkspaceName: "Omar's projects",
+    });
+    await using _screen = await render(rows());
+    const railway = page.getByRole("region", { name: "Railway token" });
+    await expect.element(railway.getByText("Omar's projects")).toBeVisible();
+    await userEvent.click(railway.getByRole("button", { name: "Remove" }));
+    expect(mocks.update).toHaveBeenLastCalledWith({
+      sandboxTooling: { railwayToken: "", railwayWorkspaceId: "", railwayWorkspaceName: "" },
+    });
   });
 });

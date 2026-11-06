@@ -746,5 +746,59 @@ describe("SandboxEnvironmentFields", () => {
     await expect
       .element(page.getByRole("checkbox", { name: /Sign the Northflank CLI in/u }))
       .toBeDisabled();
+    await expect
+      .element(page.getByRole("checkbox", { name: /Sign the Railway CLI in/u }))
+      .toBeDisabled();
+  });
+
+  it("gives Railway's MCP server the sandbox's own token only with Railway turned on", async () => {
+    setup({
+      host: {
+        ...TOOLING_HOST,
+        railway: true,
+        tooling: {
+          ...TOOLING_HOST.tooling,
+          mcpServers: [
+            {
+              name: "railway",
+              scope: "user",
+              transport: "stdio",
+              headerNames: [],
+              copy: "mint",
+              mintedBy: "railway",
+              reason:
+                "Runs the Railway CLI on the sandbox with a token of its own, revoked when the sandbox is deleted.",
+            },
+          ],
+        },
+      },
+    });
+    await using _screen = await render(fields());
+    await userEvent.click(section("Agent access"));
+
+    const mcp = page.getByRole("checkbox", { name: /^railway/u });
+    await expect.element(mcp).toBeDisabled();
+    await expect.element(page.getByText("turn on Railway above")).toBeVisible();
+
+    await userEvent.click(page.getByText("Sign the Railway CLI in"));
+    await expect.element(mcp).toBeEnabled();
+    await expect
+      .element(mcp)
+      .toHaveAccessibleDescription(
+        "Runs the Railway CLI on the sandbox with a token of its own, revoked when the sandbox is deleted.",
+      );
+    await userEvent.click(page.getByText("railway", { exact: true }));
+    await expect
+      .element(summary("agent"))
+      .toHaveTextContent("GitHub signed in · Railway signed in · 1 MCP server");
+
+    // Without Railway there is no token for it to sign in with, so it does not go either.
+    await userEvent.click(page.getByText("Sign the Railway CLI in"));
+    await expect.element(mcp).not.toBeChecked();
+    await expect.element(summary("agent")).not.toHaveTextContent("MCP server");
+    await userEvent.click(page.getByText("Sign the Railway CLI in"));
+    await expect.element(mcp).toBeChecked();
+    await userEvent.click(page.getByRole("button", { name: "Add sandbox config" }));
+    expect(savedConfig()).toMatchObject({ railway: true, mcpServers: ["railway"] });
   });
 });
