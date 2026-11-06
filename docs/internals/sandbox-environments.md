@@ -184,6 +184,14 @@ server except into the sandbox.
   that names the key prefix; it never blocks the delete, because the machine is already gone.
   Without a hub, the server's token is copied and cannot be revoked by T3; a hub whose management
   key names a secret that cannot be read fails the create instead of falling back to that copy.
+- **Pi rides the same hub key.** A config's `pi` sets up the Pi agent with the hub's non-Claude
+  models ([`sandboxPi.ts`](../../apps/server/src/sandbox/sandboxPi.ts)), so it is refused without a
+  hub: a copied token could not be revoked. The host lists `/v1/models` with the sandbox's own key,
+  so Pi gets exactly what that key reaches, and a `vendor/Model` wins over the hub's bare alias for
+  it. The script writes Pi's `models.json`, makes the chosen model Pi's default, and turns on T3's
+  Pi instance before `t3 serve`, so the first probe lists it. Model limits come from a small table
+  (Wafer's catalog); unknown models keep Pi's defaults. Pi does not get the userspace tailnet proxy,
+  so a private hub reached only through it works for Claude and not for Pi.
 - **Reachable here is not reachable there.** A Claude endpoint on a tailnet or LAN address
   works from the provisioning server and times out from a cloud machine. The provisioner curls
   the endpoint from the sandbox after writing the settings; no HTTP answer at all marks Claude as
@@ -217,8 +225,8 @@ server except into the sandbox.
   the machine, and the environment only when nothing is left in it, since it is the only way to
   find a fork again. The sweep's abandoned-launch delete never touches forks. The driver hides
   `t3-sandbox-*` environments from `listEnvironments`, so they never show as credential choices.
-- **Templates do not inherit access.** The template scrub also removes the Claude endpoint, the
-  `gh` login, and the tailnet node (`tailscale logout` and its state), and a successful save revokes the source's hub key along with deleting the source.
+- **Templates do not inherit access.** The template scrub also removes the Claude endpoint, Pi's
+  hub provider, the `gh` login, and the tailnet node (`tailscale logout` and its state), and a successful save revokes the source's hub key along with deleting the source.
 - **Missing tools are installed, never required.** git, the GitHub CLI, and Claude Code are
   installed only when `command -v` cannot find them, into `~/.local/bin` where root is not
   available, and the script always exits zero and reports what is still missing. Boat ships all
@@ -335,7 +343,10 @@ without pairing with the sandbox.
   ready and the project override arrived (`sandboxBridgeReady`), so the host can create its
   thread; then it moves to the sandbox's project, keeping the model and modes the user picked, and
   sends. Past 60 seconds it sends anyway; when linking fails it sends with a warning that the
-  phone cannot follow the thread. The client stays paired with the sandbox for files, diffs and
+  phone cannot follow the thread. A config whose chats start on Pi (`pi.startModel`) cannot be
+  picked on the host, which lists no hub models, so the draft also waits for the sandbox to list
+  Pi with that model and moves onto it; the sandbox's default model is set to it too, so a chat
+  the bridge starts from the phone runs there. The client stays paired with the sandbox for files, diffs and
   terminals.
 - **One thread on the computer.** A client paired with the sandbox shows only the sandbox's own
   thread. The host thread is its mirror for the phone: `sandboxHostMirrors` lists the host threads
