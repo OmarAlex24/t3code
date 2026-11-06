@@ -3846,6 +3846,12 @@ describe("sandbox agent access", () => {
   const host = {
     claude: { baseUrl: "https://api.example.test", authToken: Redacted.make("host-claude-token") },
     githubToken: "ghp_host_token",
+    gitIdentity: { name: "Ada Lovelace", email: "ada@example.test" },
+  };
+  const noTooling = {
+    northflank: false,
+    maple: false,
+    tooling: { claudeMd: false, skills: [], mcpServers: [] },
   };
   const HUB_KEY = /^t3-sandbox-web-stack-[0-9a-f]{16}$/u;
   const TS_CLIENT_SECRET = "tskey-client-kSECRET-oauth";
@@ -3992,6 +3998,7 @@ describe("sandbox agent access", () => {
         claude: { baseUrl: "https://api.example.test", key: "hub", privateNetwork: false },
         github: true,
         tailscale: false,
+        ...noTooling,
       });
 
       const created = yield* provisioner.create({
@@ -4067,6 +4074,7 @@ describe("sandbox agent access", () => {
           claude: { baseUrl: "https://api.example.test", key: "copy", privateNetwork: false },
           github: true,
           tailscale: false,
+          ...noTooling,
         });
         const created = yield* provisioner.create({
           provider: "boat",
@@ -4086,6 +4094,10 @@ describe("sandbox agent access", () => {
           ANTHROPIC_AUTH_TOKEN: "host-claude-token",
         });
         expect(secretsOf("gh auth login")).toEqual([{ T3_GITHUB_TOKEN: "ghp_host_token" }]);
+        // Signed in, the agent can also commit: git gets this machine's name and email.
+        const identity = commands.find((command) => command.includes("git config --global"));
+        expect(identity).toContain("Ada Lovelace");
+        expect(identity).toContain("ada@example.test");
         expect(revealsSecret(commands, "host-claude-token")).toBe(false);
         expect(revealsSecret(commands, "ghp_host_token")).toBe(false);
 
@@ -5213,6 +5225,8 @@ describe("SandboxProvisioner per-thread launches", () => {
         "done",
         "done",
         "done",
+        // Nothing to set up: the config asks for no tools, MCP servers, or skills.
+        "skipped",
         "done",
       ]);
       expect(repository.records.get(instanceId)?.state).toBe("running");
@@ -6424,4 +6438,475 @@ describe("SandboxProvisioner per-thread launches", () => {
       );
     },
   );
+
+  describe("agent tooling", () => {
+    const appKey = NodeCrypto.generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const toolingSettings = {
+      sandboxTooling: {
+        githubAppId: "42",
+        githubAppSlug: "t3-sandboxes",
+        githubAppOwner: "octo",
+        githubAppPrivateKey: appKey.privateKey,
+        mapleAdminKey: "maple_admin_KEY",
+        northflankToken: "nf_shared_TOKEN",
+      },
+    } as const;
+    const toolingHost = {
+      gitIdentity: { name: "Ada Lovelace", email: "ada@example.test" },
+      mcpEntries: [
+        {
+          name: "maple",
+          scope: "user" as const,
+          config: {
+            type: "http",
+            url: "https://api.maple.dev/mcp",
+            headers: { Authorization: "Bearer host_maple_KEY" },
+          },
+        },
+        {
+          name: "docs",
+          scope: "user" as const,
+          config: { type: "http", url: "https://docs.test/mcp" },
+        },
+        { name: "local", scope: "user" as const, config: { command: "railway" } },
+      ],
+      claudeFiles: [
+        { path: "CLAUDE.md", content: "# Be kind" },
+        { path: "skills/gh-stack/SKILL.md", content: "---\nname: gh-stack\n---" },
+      ],
+    };
+    const toolingConfig = {
+      ...configInput,
+      githubApp: true,
+      setupScript: "sudo apt-get install -y postgresql-client",
+      mcpServers: ["maple", "docs", "local"],
+      claudeMd: true,
+      skills: ["gh-stack"],
+      northflank: true,
+    } as const;
+
+    interface ServiceCalls {
+      readonly calls: Array<{ method: string; url: string; auth?: string; body?: unknown }>;
+      tokens: number;
+    }
+
+    // GitHub and Maple in front of the Boat fake, plus the answers T3's own scripts look for.
+    const withServices = (
+      fake: BoatFake,
+      options: { readonly installed?: boolean; readonly setupExit?: number } = {},
+    ) => {
+      const state: ServiceCalls = { calls: [], tokens: 0 };
+      const respond = (request: HttpClientRequest.HttpClientRequest, body: unknown, status = 200) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            status === 204 ? new Response(null, { status }) : Response.json(body, { status }),
+          ),
+        );
+      const client = HttpClient.make((request) => {
+        const body =
+          request.body._tag === "Uint8Array"
+            ? JSON.parse(new TextDecoder().decode(request.body.body))
+            : undefined;
+        if (
+          request.url.startsWith("https://api.github.com/") ||
+          request.url.startsWith("https://api.maple.dev/")
+        ) {
+          state.calls.push({
+            method: request.method,
+            url: request.url,
+            ...(request.headers.authorization === undefined
+              ? {}
+              : { auth: request.headers.authorization }),
+            ...(body === undefined ? {} : { body }),
+          });
+        }
+        if (request.url === "https://api.github.com/repos/octo/hello/installation") {
+          return options.installed === false
+            ? respond(request, { message: "Not Found" }, 404)
+            : respond(request, { id: 7 });
+        }
+        if (request.url === "https://api.github.com/app/installations/7/access_tokens") {
+          state.tokens += 1;
+          return respond(
+            request,
+            { token: `ghs_SANDBOX${state.tokens}`, expires_at: "1970-01-01T01:00:00Z" },
+            201,
+          );
+        }
+        if (request.url === "https://api.github.com/installation/token")
+          return respond(request, null, 204);
+        if (request.url === "https://api.maple.dev/v2/api_keys") {
+          return respond(request, { id: "key_sandbox", secret: "maple_ak_SANDBOX" });
+        }
+        if (request.url.startsWith("https://api.maple.dev/v2/api_keys/"))
+          return respond(request, {});
+        if (request.url.endsWith("/commands")) {
+          const command: string = body?.command ?? "";
+          if (command.includes("setup-scripts")) {
+            fake.commands.push(command);
+            return respond(request, {
+              exitCode: 0,
+              stdout:
+                options.setupExit === undefined
+                  ? "T3_SETUP:ran\n"
+                  : `T3_SETUP:failed ${options.setupExit}\n`,
+              stderr: "",
+            });
+          }
+          if (command.includes("T3_CLAUDE_DIR")) {
+            fake.commands.push(command);
+            return respond(request, {
+              exitCode: 0,
+              stdout: "T3_CLAUDE_DIR:/home/boat/.claude\n",
+              stderr: "",
+            });
+          }
+        }
+        return fake.client.execute(request);
+      });
+      return { client, state };
+    };
+
+    // The fake prints no tool report, which every launch here warns about the same way.
+    const launchWarnings = (snapshot: SandboxSetupSnapshot) =>
+      snapshot.warnings.filter((warning) => !warning.startsWith("T3 Code could not check"));
+
+    // Boat writes a command's secrets to a private file through its files API; this reads them back.
+    const secretsFileWith = (fake: BoatFake, name: string) =>
+      fake.bodies
+        .map((entry) => entry.body as { path?: string; content?: string })
+        .find(
+          (body) => body.path?.startsWith("/tmp/t3-secrets-") && body.content?.includes(`${name}=`),
+        )?.content ?? "";
+
+    it.effect(
+      "gives a launched sandbox its own GitHub token, git identity, tools, MCP servers and skills, and revokes them on delete",
+      () => {
+        const fake = boatFake();
+        const services = withServices(fake);
+        const repository = memoryRepository();
+        const secrets = memorySecrets();
+        return Effect.gen(function* () {
+          const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+          const { config } = yield* provisioner.saveConfig({
+            config: toolingConfig,
+            apiKey: "boat_test",
+          });
+          const { instanceId } = yield* provisioner.launch({
+            configId: config.id,
+            threadId,
+            project,
+          });
+          const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+          expect(stageOf(waiting, "credentials")?.status).toBe("done");
+          // The stdio server is the only thing that could not go, and the card says why.
+          expect(stageOf(waiting, "tools")).toMatchObject({ status: "warning" });
+          expect(launchWarnings(waiting)).toEqual([
+            "local wasn't copied. Runs a program on this machine, so it can't be copied.",
+          ]);
+
+          // An hour-long token for this repository alone, kept as a server secret.
+          const tokenRequest = services.state.calls.find((call) =>
+            call.url.endsWith("/access_tokens"),
+          );
+          expect(tokenRequest?.body).toEqual({ repositories: ["hello"] });
+          const record = repository.records.get(instanceId)!;
+          expect(record.githubApp).toMatchObject({ installationId: 7, repository: "octo/hello" });
+          expect(new TextDecoder().decode(secrets.values.get(record.githubApp!.secret))).toBe(
+            "ghs_SANDBOX1",
+          );
+          expect(secretsFileWith(fake, "T3_GITHUB_TOKEN")).toContain("ghs_SANDBOX1");
+          expect(record.mapleKey).toEqual({
+            keyId: "key_sandbox",
+            apiBaseUrl: "https://api.maple.dev",
+          });
+
+          // Maple gets the sandbox's own key, never this machine's; the plain HTTP server copies as is.
+          const mcp = secretsFileWith(fake, "T3_MCP_SERVERS");
+          expect(mcp).toContain("maple_ak_SANDBOX");
+          expect(mcp).toContain("https://docs.test/mcp");
+          expect(mcp).not.toContain("host_maple_KEY");
+          expect(mcp).not.toContain("railway");
+          expect(secretsFileWith(fake, "T3_NORTHFLANK_TOKEN")).toContain("nf_shared_TOKEN");
+          for (const secret of [
+            "ghs_SANDBOX1",
+            "maple_ak_SANDBOX",
+            "nf_shared_TOKEN",
+            "host_maple_KEY",
+          ]) {
+            expect(fake.commands.some((command) => command.includes(secret))).toBe(false);
+          }
+
+          // The agent can commit as the user, and the setup script runs in the clone after it.
+          const step = (marker: string) =>
+            fake.commands.findIndex((command) => command.includes(marker));
+          expect(fake.commands[step("git config --global")]).toContain("Ada Lovelace");
+          expect(step("git clone")).toBeLessThan(step("setup-scripts"));
+          expect(fake.commands[step("setup-scripts")]).toContain("/home/boat/work/hello");
+          expect(fake.bodies).toContainEqual({
+            url: `https://boat.dev/api/v1/sandboxes/${boatSandboxId}/files`,
+            body: {
+              path: "/home/boat/.claude/skills/gh-stack/SKILL.md",
+              content: "---\nname: gh-stack\n---",
+            },
+          });
+          expect(fake.bodies).toContainEqual({
+            url: `https://boat.dev/api/v1/sandboxes/${boatSandboxId}/files`,
+            body: { path: "/home/boat/.claude/CLAUDE.md", content: "# Be kind" },
+          });
+
+          yield* provisioner.pairLaunch({ threadId });
+          yield* provisioner.completeLaunch({ threadId });
+          services.state.calls.length = 0;
+          const deleted = yield* provisioner.delete({
+            provider: "boat",
+            sandboxId: boatSandboxId,
+            instanceId,
+          });
+          expect(deleted.warnings).toEqual([]);
+          expect(services.state.calls).toEqual([
+            {
+              method: "DELETE",
+              url: "https://api.github.com/installation/token",
+              auth: "Bearer ghs_SANDBOX1",
+            },
+            {
+              method: "DELETE",
+              url: "https://api.maple.dev/v2/api_keys/key_sandbox",
+              auth: "Bearer maple_admin_KEY",
+            },
+          ]);
+          expect(secrets.values.has(record.githubApp!.secret)).toBe(false);
+        }).pipe(
+          Effect.provide(
+            provisionerLayer(toolingSettings, repository.layer, {
+              configs: memoryConfigs().layer,
+              host: toolingHost,
+              secrets: secrets.layer,
+            }),
+          ),
+          Effect.provideService(HttpClient.HttpClient, services.client),
+        );
+      },
+    );
+
+    it.effect(
+      "revokes what a launch minted when it fails, and warns when the app is not installed",
+      () => {
+        const fake = boatFake({ failing: { text: "auth session issue", times: 99 } });
+        const services = withServices(fake, { setupExit: 2 });
+        const repository = memoryRepository();
+        const secrets = memorySecrets();
+        return Effect.gen(function* () {
+          const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+          const { config } = yield* provisioner.saveConfig({
+            config: toolingConfig,
+            apiKey: "boat_test",
+          });
+          yield* provisioner.launch({ configId: config.id, threadId, project });
+          const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+          expect(waiting.warnings).toContain(
+            "Your setup script failed (exit 2). See ~/.t3/setup-script.log on the sandbox.",
+          );
+          services.state.calls.length = 0;
+          yield* provisioner.cancelLaunch({ threadId });
+          yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase !== "running");
+          expect(
+            services.state.calls
+              .map((call) => `${call.method} ${call.url} ${call.auth}`)
+              .toSorted(),
+          ).toEqual([
+            "DELETE https://api.github.com/installation/token Bearer ghs_SANDBOX1",
+            "DELETE https://api.maple.dev/v2/api_keys/key_sandbox Bearer maple_admin_KEY",
+          ]);
+          expect(secrets.values.size).toBe(0);
+          expect(repository.records.size).toBe(0);
+        }).pipe(
+          Effect.provide(
+            provisionerLayer(toolingSettings, repository.layer, {
+              configs: memoryConfigs().layer,
+              host: toolingHost,
+              secrets: secrets.layer,
+            }),
+          ),
+          Effect.provideService(HttpClient.HttpClient, services.client),
+        );
+      },
+    );
+
+    it.effect("tells the user to install the GitHub App on a repository it is not on", () => {
+      const fake = boatFake();
+      const services = withServices(fake, { installed: false });
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const { config } = yield* provisioner.saveConfig({
+          config: { ...configInput, githubApp: true },
+          apiKey: "boat_test",
+        });
+        yield* provisioner.launch({ configId: config.id, threadId, project });
+        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        expect(stageOf(waiting, "credentials")?.status).toBe("warning");
+        expect(launchWarnings(waiting)).toEqual([
+          "The GitHub App isn't installed on octo/hello. Install it at https://github.com/apps/t3-sandboxes/installations/new",
+        ]);
+        expect(services.state.tokens).toBe(0);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(toolingSettings, memoryRepository().layer, {
+            configs: memoryConfigs().layer,
+            host: toolingHost,
+          }),
+        ),
+        Effect.provideService(HttpClient.HttpClient, services.client),
+      );
+    });
+
+    it.effect(
+      "refuses a launch before anything bills when a credential it needs is not saved",
+      () => {
+        const fake = boatFake();
+        return Effect.gen(function* () {
+          const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+          const failures: Array<string | null> = [];
+          for (const tooling of [{ githubApp: true }, { northflank: true }] as const) {
+            const { config } = yield* provisioner.saveConfig({
+              config: { ...configInput, ...tooling },
+              apiKey: "boat_test",
+            });
+            yield* provisioner.launch({ configId: config.id, threadId, project });
+            failures.push(
+              (yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed")).error,
+            );
+          }
+          expect(failures).toEqual([
+            "Connect the GitHub App under Sandboxes in Settings → Connections, or turn off GitHub for this config.",
+            "Save a Northflank token under Sandboxes in Settings → Connections, or turn off Northflank for this config.",
+          ]);
+          expect(fake.requests.some((request) => request.endsWith("/sandboxes"))).toBe(false);
+        }).pipe(
+          Effect.provide(
+            provisionerLayer({}, memoryRepository().layer, { configs: memoryConfigs().layer }),
+          ),
+          Effect.provideService(HttpClient.HttpClient, fake.client),
+        );
+      },
+    );
+
+    it.effect(
+      "renews a running sandbox's GitHub token before it expires and revokes the old one",
+      () => {
+        const fake = boatFake({ states: { bx_stopped: "archived" } });
+        const services = withServices(fake);
+        const secrets = memorySecrets();
+        secrets.values.set("sandbox-github-token-old", new TextEncoder().encode("ghs_OLD"));
+        const record: SandboxRecord = {
+          ...runningRecord,
+          instanceId: "renewing",
+          githubApp: {
+            installationId: 7,
+            repository: "octo/hello",
+            secret: "sandbox-github-token-old",
+            // The test clock starts at the epoch: ten minutes left.
+            expiresAt: "1970-01-01T00:10:00.000Z",
+          },
+        };
+        const stopped: SandboxRecord = {
+          ...record,
+          instanceId: "stopped",
+          sandboxId: "bx_stopped",
+          state: "stopped",
+          runningSince: null,
+        };
+        const repository = memoryRepository([record, stopped]);
+        return Effect.gen(function* () {
+          const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+          yield* provisioner.sweep;
+          const renewed = repository.records.get("renewing")!;
+          expect(renewed.githubApp).toMatchObject({
+            installationId: 7,
+            expiresAt: "1970-01-01T01:00:00Z",
+          });
+          expect(new TextDecoder().decode(secrets.values.get(renewed.githubApp!.secret))).toBe(
+            "ghs_SANDBOX1",
+          );
+          expect(secrets.values.has("sandbox-github-token-old")).toBe(false);
+          // A known installation needs no lookup; the old token is revoked with itself.
+          expect(services.state.calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+            "POST https://api.github.com/app/installations/7/access_tokens",
+            "DELETE https://api.github.com/installation/token",
+          ]);
+          expect(services.state.calls[1]?.auth).toBe("Bearer ghs_OLD");
+          expect(secretsFileWith(fake, "T3_GITHUB_TOKEN")).toContain("ghs_SANDBOX1");
+          // A stopped sandbox is not woken for it.
+          expect(repository.records.get("stopped")?.githubApp?.secret).toBe(
+            "sandbox-github-token-old",
+          );
+        }).pipe(
+          Effect.provide(
+            provisionerLayer({ ...boatSettings, ...toolingSettings }, repository.layer, {
+              secrets: secrets.layer,
+            }),
+          ),
+          Effect.provideService(HttpClient.HttpClient, services.client),
+        );
+      },
+    );
+
+    it.effect(
+      "connects the GitHub App from the manifest flow's code and keeps its key on the server",
+      () => {
+        const client = HttpClient.make((request) =>
+          Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              request.url === "https://api.github.com/app-manifests/code123/conversions"
+                ? Response.json(
+                    {
+                      id: 99,
+                      slug: "t3-code-sandboxes",
+                      name: "T3 Code sandboxes",
+                      pem: "PEM_SECRET",
+                      owner: { login: "octo" },
+                    },
+                    { status: 201 },
+                  )
+                : Response.json({}, { status: 404 }),
+            ),
+          ),
+        );
+        return Effect.gen(function* () {
+          const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+          const connected = yield* provisioner.connectGithubApp({ code: "code123" });
+          expect(connected).toEqual({
+            slug: "t3-code-sandboxes",
+            owner: "octo",
+            installUrl: "https://github.com/apps/t3-code-sandboxes/installations/new",
+          });
+          const saved = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
+          expect(saved.sandboxTooling).toMatchObject({
+            githubAppId: "99",
+            githubAppSlug: "t3-code-sandboxes",
+            githubAppOwner: "octo",
+            githubAppPrivateKey: "PEM_SECRET",
+          });
+          expect((yield* provisioner.providers).host.githubApp).toEqual({
+            slug: "t3-code-sandboxes",
+            owner: "octo",
+          });
+          const expired = yield* provisioner.connectGithubApp({ code: "stale" }).pipe(Effect.flip);
+          expect(expired.detail).toBe(
+            "GitHub no longer accepts this code. Create the app again from Settings.",
+          );
+        }).pipe(
+          Effect.provide(provisionerLayer()),
+          Effect.provideService(HttpClient.HttpClient, client),
+        );
+      },
+    );
+  });
 });

@@ -121,6 +121,10 @@ export function createSandboxEnvironmentAtoms<R, E>(
           registry.update(sandboxesListRevisionAtom(environmentId), (revision) => revision + 1),
         ),
     }),
+    sandboxesConnectGithubApp: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandboxes:connect-github-app",
+      tag: WS_METHODS.sandboxesConnectGithubApp,
+    }),
     sandboxesCheckTailscale: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandboxes:check-tailscale",
       tag: WS_METHODS.sandboxesCheckTailscale,

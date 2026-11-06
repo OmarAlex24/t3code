@@ -1,7 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no DNS lookup.
 import * as NodeDnsPromises from "node:dns/promises";
 
-import { ClaudeSettings, defaultInstanceIdForDriver, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  ClaudeSettings,
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
+  type SandboxHostTooling,
+} from "@t3tools/contracts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import {
   isPrivateNetworkHost,
@@ -9,6 +14,7 @@ import {
   isTailnetHost,
   normalizeHostname,
 } from "@t3tools/shared/hostClassification";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -19,9 +25,22 @@ import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
-import { readClaudeSettingsEnv } from "../provider/Drivers/ClaudeSkills.ts";
+import {
+  readClaudeSettingsEnv,
+  resolveClaudeConfigDirPath,
+} from "../provider/Drivers/ClaudeSkills.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SourceControlDrivers from "../sourceControl/builtInDrivers.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import {
+  type ClaudeFile,
+  type HostMcpEntry,
+  listHostMcpServers,
+  listHostSkills,
+  parseClaudeMcpServers,
+  pickHostMcpEntries,
+  readClaudeFiles,
+} from "./sandboxHostTooling.ts";
 
 /** Swallowed by its caller: an unresolvable host is simply not private. */
 class HostLookupError extends Schema.TaggedError<HostLookupError>()("HostLookupError", {
@@ -45,6 +64,24 @@ export class SandboxHostAccess extends Context.Service<
     readonly endpointIsPrivate: (baseUrl: string) => Effect.Effect<boolean>;
     /** The endpoint's Tailscale address, for an access rule that lets sandboxes reach it. */
     readonly endpointTailnetAddress: (baseUrl: string) => Effect.Effect<string | null>;
+    /** What this machine has for an agent, as the config form lists it. Never a header value. */
+    readonly tooling: Effect.Effect<SandboxHostTooling>;
+    /** Git's global name and email here, or null when either is unset. */
+    readonly gitIdentity: Effect.Effect<{ readonly name: string; readonly email: string } | null>;
+    /** The MCP entries a sandbox gets for `names`, headers included; see `pickHostMcpEntries`. */
+    readonly mcpEntries: (
+      names: ReadonlyArray<string>,
+      projectRoot: string | undefined,
+    ) => Effect.Effect<ReadonlyArray<HostMcpEntry>>;
+    /** CLAUDE.md and chosen skills as files relative to the Claude folder. */
+    readonly claudeFiles: (input: {
+      readonly claudeMd: boolean;
+      readonly skills: ReadonlyArray<string>;
+    }) => Effect.Effect<{
+      readonly files: ReadonlyArray<ClaudeFile>;
+      readonly skipped: ReadonlyArray<string>;
+      readonly skills: ReadonlyArray<string>;
+    }>;
   }
 >()("t3/sandbox/SandboxHostAccess") {}
 
@@ -80,6 +117,7 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const drivers = yield* SourceControlDrivers.SourceControlDrivers;
+  const git = yield* GitVcsDriver.GitVcsDriver;
 
   // Resolved the way the default Claude instance resolves its endpoint (ClaudeProvider), so a
   // sandbox gets exactly what `claude` on this machine uses.
@@ -136,13 +174,101 @@ const make = Effect.gen(function* () {
     return tailnetAddressOf(yield* addressesOf(baseUrl));
   });
 
-  return SandboxHostAccess.of({ claude, githubToken, endpointIsPrivate, endpointTailnetAddress });
+  // Claude keeps ~/.claude.json next to its folder, or inside CLAUDE_CONFIG_DIR when one is set.
+  const claudePaths = Effect.gen(function* () {
+    const instance = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
+      ?.providerInstances[CLAUDE_INSTANCE];
+    const config = yield* decodeClaudeSettings(instance?.config ?? {}).pipe(
+      Effect.orElseSucceed(() => ({ homePath: "" })),
+    );
+    const environment = yield* mergeProviderInstanceEnvironment(instance?.environment);
+    const configDirectory = yield* resolveClaudeConfigDirPath(config, environment);
+    const home = yield* HostProcess.HomeDirectory;
+    const stateFile =
+      configDirectory === path.join(home, ".claude")
+        ? path.join(home, ".claude.json")
+        : path.join(configDirectory, ".claude.json");
+    return { configDirectory, stateFile, home };
+  }).pipe(Effect.provideService(Path.Path, path));
+
+  const readMcpEntries = Effect.gen(function* () {
+    const { stateFile } = yield* claudePaths;
+    const text = yield* fileSystem.readFileString(stateFile).pipe(Effect.orElseSucceed(() => ""));
+    return parseClaudeMcpServers(text);
+  });
+
+  const gitIdentity = Effect.gen(function* () {
+    const { home } = yield* claudePaths;
+    const read = (key: string) =>
+      git.readConfigValue(home, key).pipe(
+        Effect.map((value) => value?.trim() ?? ""),
+        Effect.orElseSucceed(() => ""),
+      );
+    const name = yield* read("user.name");
+    const email = yield* read("user.email");
+    return name === "" || email === "" ? null : { name, email };
+  });
+
+  const tooling = Effect.gen(function* () {
+    const { configDirectory } = yield* claudePaths;
+    const mapleReady =
+      ((yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))?.sandboxTooling
+        .mapleAdminKey ?? "") !== "";
+    const identity = yield* gitIdentity;
+    return {
+      ...(identity === null ? {} : { gitIdentity: identity }),
+      claudeMd: yield* fileSystem
+        .exists(path.join(configDirectory, "CLAUDE.md"))
+        .pipe(Effect.orElseSucceed(() => false)),
+      skills: yield* listHostSkills(path.join(configDirectory, "skills")),
+      mcpServers: listHostMcpServers(yield* readMcpEntries, { mapleReady }),
+    } satisfies SandboxHostTooling;
+  }).pipe(
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+    Effect.provideService(Path.Path, path),
+  );
+
+  const mcpEntries = Effect.fn("SandboxHostAccess.mcpEntries")(function* (
+    names: ReadonlyArray<string>,
+    projectRoot: string | undefined,
+  ) {
+    return pickHostMcpEntries(yield* readMcpEntries, names, projectRoot);
+  });
+
+  const claudeFiles = Effect.fn("SandboxHostAccess.claudeFiles")(function* (input: {
+    readonly claudeMd: boolean;
+    readonly skills: ReadonlyArray<string>;
+  }) {
+    const { configDirectory } = yield* claudePaths;
+    return yield* readClaudeFiles(configDirectory, input).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
+  });
+
+  return SandboxHostAccess.of({
+    claude,
+    githubToken,
+    endpointIsPrivate,
+    endpointTailnetAddress,
+    tooling,
+    gitIdentity,
+    mcpEntries,
+    claudeFiles,
+  });
 });
 
 export const layer = Layer.effect(SandboxHostAccess, make);
 
 export const layerTest = (
-  host: { readonly claude?: SandboxHostClaude; readonly githubToken?: string } = {},
+  host: {
+    readonly claude?: SandboxHostClaude;
+    readonly githubToken?: string;
+    readonly tooling?: SandboxHostTooling;
+    readonly gitIdentity?: { readonly name: string; readonly email: string };
+    readonly mcpEntries?: ReadonlyArray<HostMcpEntry>;
+    readonly claudeFiles?: ReadonlyArray<ClaudeFile>;
+  } = {},
 ) =>
   Layer.succeed(
     SandboxHostAccess,
@@ -163,6 +289,33 @@ export const layerTest = (
       ) {
         const hostname = hostnameOf(baseUrl);
         return yield* Effect.succeed(hostname === null ? null : tailnetAddressOf([hostname]));
+      }),
+      tooling: Effect.succeed(host.tooling ?? { claudeMd: false, skills: [], mcpServers: [] }),
+      gitIdentity: Effect.succeed(host.gitIdentity ?? null),
+      mcpEntries: Effect.fn("SandboxHostAccess.mcpEntries")(function* (
+        names: ReadonlyArray<string>,
+        projectRoot: string | undefined,
+      ) {
+        return yield* Effect.succeed(pickHostMcpEntries(host.mcpEntries ?? [], names, projectRoot));
+      }),
+      claudeFiles: Effect.fn("SandboxHostAccess.claudeFiles")(function* (input: {
+        readonly claudeMd: boolean;
+        readonly skills: ReadonlyArray<string>;
+      }) {
+        const files = (host.claudeFiles ?? []).filter(
+          (file) =>
+            (input.claudeMd && file.path === "CLAUDE.md") ||
+            input.skills.some((skill) => file.path.startsWith(`skills/${skill}/`)),
+        );
+        return yield* Effect.succeed({
+          files,
+          skipped: input.skills.filter(
+            (skill) => !files.some((file) => file.path.startsWith(`skills/${skill}/`)),
+          ),
+          skills: input.skills.filter((skill) =>
+            files.some((file) => file.path.startsWith(`skills/${skill}/`)),
+          ),
+        });
       }),
     }),
   );

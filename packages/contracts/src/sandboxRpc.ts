@@ -5,6 +5,8 @@ import { AuthSettingsWriteScope, EnvironmentAuthorizationError } from "./auth.ts
 import {
   SandboxCheckWorkResult,
   SandboxConfigsResult,
+  SandboxConnectGithubAppInput,
+  SandboxConnectGithubAppResult,
   SandboxCreateInput,
   SandboxCreateResult,
   SandboxCredentialEnvironmentsInput,
@@ -62,6 +64,7 @@ export const SANDBOX_WS_METHODS = {
   sandboxesCompleteLaunch: "sandboxes.completeLaunch",
   sandboxesCheckTailscale: "sandboxes.checkTailscale",
   sandboxesLinkHostThread: "sandboxes.linkHostThread",
+  sandboxesConnectGithubApp: "sandboxes.connectGithubApp",
 } as const;
 
 const SandboxFailure = Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]);
@@ -208,6 +211,13 @@ const WsSandboxesLinkHostThreadRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesLinkHo
   error: SandboxFailure,
 });
 
+// Turns the manifest flow's code into the sandboxes' GitHub App and saves its key on this server.
+const WsSandboxesConnectGithubAppRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesConnectGithubApp, {
+  payload: SandboxConnectGithubAppInput,
+  success: SandboxConnectGithubAppResult,
+  error: SandboxFailure,
+});
+
 export const SandboxRpcs = [
   WsSandboxesProvidersRpc,
   WsSandboxesEnvironmentsRpc,
@@ -232,6 +242,7 @@ export const SandboxRpcs = [
   WsSandboxesCompleteLaunchRpc,
   WsSandboxesCheckTailscaleRpc,
   WsSandboxesLinkHostThreadRpc,
+  WsSandboxesConnectGithubAppRpc,
 ] as const;
 
 // Each of these spends the saved provider key, changes billable machines, or hands out a pairing
@@ -253,4 +264,5 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesCompleteLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesCheckTailscale]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesLinkHostThread]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesConnectGithubApp]: AuthSettingsWriteScope,
 } as const;

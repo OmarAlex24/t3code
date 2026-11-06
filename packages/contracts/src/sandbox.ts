@@ -73,6 +73,50 @@ export const SandboxProviderInfo = Schema.Struct({
 export type SandboxProviderInfo = typeof SandboxProviderInfo.Type;
 
 /**
+ * How a host MCP server reaches a sandbox. `copy` copies its entry, header values included; `mint`
+ * gives each sandbox a key of its own (Maple); `unavailable` says why it cannot go (`reason`).
+ */
+export const SandboxMcpCopyMode = Schema.Literals(["copy", "mint", "unavailable"]);
+export type SandboxMcpCopyMode = typeof SandboxMcpCopyMode.Type;
+
+/** One of this machine's Claude MCP servers, by name. Never carries a header value. */
+export const SandboxHostMcpServer = Schema.Struct({
+  name: TrimmedString,
+  /** `user` is the server list in ~/.claude.json; `project` is a project's own list there. */
+  scope: Schema.Literals(["user", "project"]),
+  transport: Schema.Literals(["http", "sse", "stdio"]),
+  /** The server's host, for HTTP servers. */
+  host: Schema.optionalKey(TrimmedString),
+  headerNames: Schema.Array(TrimmedString),
+  copy: SandboxMcpCopyMode,
+  reason: Schema.optionalKey(TrimmedString),
+});
+export type SandboxHostMcpServer = typeof SandboxHostMcpServer.Type;
+
+export const SandboxHostSkill = Schema.Struct({
+  name: TrimmedString,
+  bytes: Schema.Number,
+  /** False when the skill is too large to copy. */
+  copyable: Schema.Boolean,
+});
+export type SandboxHostSkill = typeof SandboxHostSkill.Type;
+
+/** The largest skill a sandbox gets, and the most all copied skills may add up to. */
+export const SANDBOX_SKILL_MAX_BYTES = 2 * 1024 * 1024;
+export const SANDBOX_SKILLS_TOTAL_MAX_BYTES = 4 * 1024 * 1024;
+export const SANDBOX_SETUP_SCRIPT_MAX_LENGTH = 20_000;
+
+export const SandboxHostTooling = Schema.Struct({
+  /** Git's global user.name and user.email on this machine. */
+  gitIdentity: Schema.optionalKey(Schema.Struct({ name: TrimmedString, email: TrimmedString })),
+  /** ~/.claude/CLAUDE.md exists. */
+  claudeMd: Schema.Boolean,
+  skills: Schema.Array(SandboxHostSkill),
+  mcpServers: Schema.Array(SandboxHostMcpServer),
+});
+export type SandboxHostTooling = typeof SandboxHostTooling.Type;
+
+/**
  * What the provisioning server can share with a new sandbox from its own machine. Only facts:
  * the base URL is the editable default, and no key or token ever leaves the server.
  */
@@ -93,6 +137,14 @@ export const SandboxHostAccess = Schema.Struct({
   github: Schema.Boolean,
   /** A Tailscale OAuth client is saved, so a sandbox can join this tailnet. */
   tailscale: Schema.Boolean,
+  /** The GitHub App sandboxes get their own short-lived tokens from, once it is connected. */
+  githubApp: Schema.optionalKey(Schema.Struct({ slug: TrimmedString, owner: TrimmedString })),
+  /** A dedicated Northflank token is saved for sandboxes. */
+  northflank: Schema.optionalKey(Schema.Boolean),
+  /** A Maple admin key is saved, so each sandbox gets a Maple key of its own. */
+  maple: Schema.optionalKey(Schema.Boolean),
+  /** What this machine has for an agent to work with: git identity, MCP servers, skills. */
+  tooling: Schema.optionalKey(SandboxHostTooling),
 });
 export type SandboxHostAccess = typeof SandboxHostAccess.Type;
 
@@ -319,6 +371,21 @@ export const SandboxRecord = Schema.Struct({
   ),
   /** The tailnet device T3 joined the sandbox as, removed when the sandbox is deleted. */
   tailscale: Schema.optionalKey(Schema.Struct({ deviceId: TrimmedString })),
+  /**
+   * The GitHub App installation token the sandbox signs `gh` and git in with. It lasts an hour and
+   * is replaced while the sandbox runs; the token is a server secret named by `secret`, revoked
+   * when the sandbox is deleted.
+   */
+  githubApp: Schema.optionalKey(
+    Schema.Struct({
+      installationId: Schema.Number,
+      repository: TrimmedString,
+      secret: TrimmedString,
+      expiresAt: TrimmedString,
+    }),
+  ),
+  /** The Maple key made for this sandbox's MCP server, revoked when the sandbox is deleted. */
+  mapleKey: Schema.optionalKey(Schema.Struct({ keyId: TrimmedString, apiBaseUrl: TrimmedString })),
   /** Where the thread's repository was cloned, so a delete can check it for unpushed work. */
   repoDir: Schema.optionalKey(TrimmedString),
   /**
@@ -700,7 +767,29 @@ export const SandboxEnvironmentConfig = Schema.Struct({
   credentialEnvironment: Schema.optionalKey(TrimmedNonEmptyString),
   /** Points Claude in the sandbox at this server's endpoint, with a hub key or a copied token. */
   claude: Schema.optionalKey(Schema.Struct({ baseUrl: TrimmedNonEmptyString })),
+  /** Legacy: signs GitHub in with this server's own token, which deleting a sandbox cannot revoke. */
   passGithubToken: Schema.Boolean,
+  /** Signs GitHub in with an hour-long GitHub App token for the thread's repository alone. */
+  githubApp: Schema.optionalKey(Schema.Boolean),
+  /** Git's name and email on the sandbox; this server's own are copied when absent. */
+  gitIdentity: Schema.optionalKey(
+    Schema.Struct({ name: TrimmedNonEmptyString, email: TrimmedNonEmptyString }),
+  ),
+  /**
+   * A shell script run in the clone after it is made, to install the agent's tools. It runs once
+   * per machine: a sandbox from a template that already ran it skips it.
+   */
+  setupScript: Schema.optionalKey(
+    Schema.String.check(Schema.isMaxLength(SANDBOX_SETUP_SCRIPT_MAX_LENGTH)),
+  ),
+  /** Names of this server's Claude MCP servers copied into the sandbox's Claude config. */
+  mcpServers: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  /** Copies this server's ~/.claude/CLAUDE.md to the sandbox. */
+  claudeMd: Schema.optionalKey(Schema.Boolean),
+  /** Names of skills in this server's ~/.claude/skills copied to the sandbox. */
+  skills: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  /** Signs the Northflank CLI in with the dedicated token saved for sandboxes. */
+  northflank: Schema.optionalKey(Schema.Boolean),
   joinTailnet: Schema.Boolean,
   /** Lets the agent use the provider's CLI on its own sandbox; see `SandboxCreateInput`. */
   agentProviderAccess: Schema.optionalKey(Schema.Boolean),
@@ -769,6 +858,7 @@ export const SandboxSetupStageId = Schema.Literals([
   "repo",
   "env-files",
   "pair",
+  "tools",
 ]);
 export type SandboxSetupStageId = typeof SandboxSetupStageId.Type;
 
@@ -780,6 +870,7 @@ export const SANDBOX_SETUP_STAGE_ORDER: ReadonlyArray<SandboxSetupStageId> = [
   "start",
   "repo",
   "env-files",
+  "tools",
   "pair",
 ];
 
@@ -799,6 +890,8 @@ export function sandboxSetupStageLabel(id: SandboxSetupStageId): string {
       return "Clone repository";
     case "env-files":
       return "Copy env files";
+    case "tools":
+      return "Set up tools and Claude";
     case "pair":
       return "Connect and start thread";
   }
@@ -984,12 +1077,74 @@ export const SandboxTailscaleCheckResult = Schema.Struct({
 });
 export type SandboxTailscaleCheckResult = typeof SandboxTailscaleCheckResult.Type;
 
+/**
+ * What sandboxes get credentials from besides the provider key. Each secret stays on this server:
+ * the GitHub App's key and the Maple admin key only mint per-sandbox credentials, and the
+ * Northflank token is the one credential every sandbox shares.
+ */
+export const SandboxToolingSettings = Schema.Struct({
+  githubAppId: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  githubAppSlug: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  githubAppOwner: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  githubAppPrivateKey: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+    Schema.annotateKey({ settingsSecret: true }),
+  ),
+  northflankToken: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+    Schema.annotateKey({ settingsSecret: true }),
+  ),
+  mapleAdminKey: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+    Schema.annotateKey({ settingsSecret: true }),
+  ),
+});
+export type SandboxToolingSettings = typeof SandboxToolingSettings.Type;
+
+/** The repository permissions the sandboxes' GitHub App asks for. */
+const SANDBOX_GITHUB_APP_PERMISSIONS = {
+  contents: "write",
+  pull_requests: "write",
+  metadata: "read",
+} as const;
+
+/**
+ * The manifest that creates the sandboxes' GitHub App in one step on github.com. Private, with no
+ * webhook; `redirectUrl` receives the code the server turns into the app.
+ */
+export const sandboxGithubAppManifest = (input: {
+  readonly redirectUrl: string;
+  readonly homepageUrl: string;
+}) => ({
+  name: "T3 Code sandboxes",
+  url: input.homepageUrl,
+  redirect_url: input.redirectUrl,
+  description: "Gives each T3 Code sandbox an hour-long token for one repository.",
+  public: false,
+  default_permissions: SANDBOX_GITHUB_APP_PERMISSIONS,
+});
+
+export const SandboxConnectGithubAppInput = Schema.Struct({
+  /** The one-time code GitHub sent back to the manifest's redirect URL. */
+  code: TrimmedNonEmptyString,
+});
+export type SandboxConnectGithubAppInput = typeof SandboxConnectGithubAppInput.Type;
+
+export const SandboxConnectGithubAppResult = Schema.Struct({
+  slug: TrimmedString,
+  owner: TrimmedString,
+  /** Where the user installs the app on the repositories sandboxes may use. */
+  installUrl: TrimmedString,
+});
+export type SandboxConnectGithubAppResult = typeof SandboxConnectGithubAppResult.Type;
+
 export const SandboxServerSettingsFields = {
   // Sandbox provider API keys, only read by the server that provisions the sandbox.
   sandboxProviders: Schema.Record(Schema.String, SandboxSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   sandboxTailscale: SandboxTailscaleSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  sandboxTooling: SandboxToolingSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 };
 
 export const SandboxServerSettingsPatchFields = {
@@ -1001,6 +1156,17 @@ export const SandboxServerSettingsPatchFields = {
       clientId: Schema.optionalKey(TrimmedString),
       clientSecret: Schema.optionalKey(TrimmedString),
       tag: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+  /** Merges per field; a redaction marker retains a saved secret, an empty one removes it. */
+  sandboxTooling: Schema.optionalKey(
+    Schema.Struct({
+      githubAppId: Schema.optionalKey(TrimmedString),
+      githubAppSlug: Schema.optionalKey(TrimmedString),
+      githubAppOwner: Schema.optionalKey(TrimmedString),
+      githubAppPrivateKey: Schema.optionalKey(TrimmedString),
+      northflankToken: Schema.optionalKey(TrimmedString),
+      mapleAdminKey: Schema.optionalKey(TrimmedString),
     }),
   ),
 };

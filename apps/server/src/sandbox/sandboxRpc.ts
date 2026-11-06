@@ -26,6 +26,7 @@ export const SANDBOX_RPC_REQUIRED_SCOPES = {
   [WS_METHODS.sandboxesCompleteLaunch]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesCheckTailscale]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesLinkHostThread]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesConnectGithubApp]: AuthSettingsWriteScope,
 } as const;
 
 export const SANDBOX_RPC_AGGREGATES = {
@@ -52,4 +53,5 @@ export const SANDBOX_RPC_AGGREGATES = {
   [WS_METHODS.sandboxesCompleteLaunch]: "environments",
   [WS_METHODS.sandboxesCheckTailscale]: "environments",
   [WS_METHODS.sandboxesLinkHostThread]: "environments",
+  [WS_METHODS.sandboxesConnectGithubApp]: "environments",
 } as const;
