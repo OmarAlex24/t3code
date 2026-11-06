@@ -225,8 +225,20 @@ server except into the sandbox.
   the machine, and the environment only when nothing is left in it, since it is the only way to
   find a fork again. The sweep's abandoned-launch delete never touches forks. The driver hides
   `t3-sandbox-*` environments from `listEnvironments`, so they never show as credential choices.
-- **Templates do not inherit access.** The template scrub also removes the Claude endpoint, Pi's
-  hub provider, the `gh` login, and the tailnet node (`tailscale logout` and its state), and a successful save revokes the source's hub key along with deleting the source.
+- **A Railway token belongs to one sandbox.** The saved workspace token mints
+  `t3-sandbox-<sandboxId>` in its workspace ([`railwayApi.ts`](../../apps/server/src/sandbox/railwayApi.ts)).
+  Railway returns only the token's value, so every revoke lists the workspace's tokens and deletes
+  each with that name; the record names the token before the mint, so a crash in between still
+  leaves one to find, and an untracked sandbox's delete looks it up by its id. GraphQL refusals
+  arrive as HTTP 200 with `errors`. The token goes into Claude's settings `env` as
+  `RAILWAY_API_TOKEN` (the CLI reads it first and never refreshes it), so Claude and its tools get
+  it but other providers and terminals do not. A selected Railway MCP server, hosted or not, becomes
+  the sandbox's own `railway mcp` with the token in its `env`: `@railway/mcp-server` is now a shim
+  for that command, and the hosted server's OAuth sign-in cannot be reused.
+- **Templates do not inherit access.** The template scrub also removes the Claude endpoint (and
+  `RAILWAY_API_TOKEN`), Pi's hub provider, the `gh` login, `~/.railway`, and the tailnet node
+  (`tailscale logout` and its state), and a successful save revokes the source's hub key and
+  Railway token along with deleting the source.
 - **Missing tools are installed, never required.** git, the GitHub CLI, and Claude Code are
   installed only when `command -v` cannot find them, into `~/.local/bin` where root is not
   available, and the script always exits zero and reports what is still missing. Boat ships all
