@@ -3852,6 +3852,7 @@ describe("sandbox agent access", () => {
   const noTooling = {
     northflank: false,
     maple: false,
+    railway: false,
     tooling: { claudeMd: false, skills: [], mcpServers: [] },
   };
   const HUB_KEY = /^t3-sandbox-web-stack-[0-9a-f]{16}$/u;
@@ -6639,6 +6640,9 @@ describe("SandboxProvisioner per-thread launches", () => {
         githubAppPrivateKey: appKey.privateKey,
         mapleAdminKey: "maple_admin_KEY",
         northflankToken: "nf_shared_TOKEN",
+        railwayToken: "railway_ws_TOKEN",
+        railwayWorkspaceId: "ws_1",
+        railwayWorkspaceName: "Omar's projects",
       },
     } as const;
     const toolingHost = {
@@ -6659,6 +6663,12 @@ describe("SandboxProvisioner per-thread launches", () => {
           config: { type: "http", url: "https://docs.test/mcp" },
         },
         { name: "local", scope: "user" as const, config: { command: "railway" } },
+        // The hosted server signs in with OAuth; a sandbox gets the CLI's stdio server instead.
+        {
+          name: "railway",
+          scope: "user" as const,
+          config: { type: "http", url: "https://mcp.railway.com" },
+        },
       ],
       claudeFiles: [
         { path: "CLAUDE.md", content: "# Be kind" },
@@ -6669,15 +6679,21 @@ describe("SandboxProvisioner per-thread launches", () => {
       ...configInput,
       githubApp: true,
       setupScript: "sudo apt-get install -y postgresql-client",
-      mcpServers: ["maple", "docs", "local"],
+      mcpServers: ["maple", "docs", "local", "railway"],
       claudeMd: true,
       skills: ["gh-stack"],
       northflank: true,
+      railway: true,
     } as const;
+    const railwayTokenName = `t3-sandbox-${boatSandboxId}`;
 
     interface ServiceCalls {
       readonly calls: Array<{ method: string; url: string; auth?: string; body?: unknown }>;
       tokens: number;
+      /** Railway operations as `operation variables`, all sent with the saved token. */
+      readonly railway: Array<string>;
+      /** Railway answers every request with "Not Authorized". */
+      railwayDown: boolean;
     }
 
     // GitHub and Maple in front of the Boat fake, plus the answers T3's own scripts look for.
@@ -6685,7 +6701,7 @@ describe("SandboxProvisioner per-thread launches", () => {
       fake: BoatFake,
       options: { readonly installed?: boolean; readonly setupExit?: number } = {},
     ) => {
-      const state: ServiceCalls = { calls: [], tokens: 0 };
+      const state: ServiceCalls = { calls: [], tokens: 0, railway: [], railwayDown: false };
       const respond = (request: HttpClientRequest.HttpClientRequest, body: unknown, status = 200) =>
         Effect.succeed(
           HttpClientResponse.fromWeb(
@@ -6714,6 +6730,32 @@ describe("SandboxProvisioner per-thread launches", () => {
           if (request.headers["user-agent"] === undefined) {
             return respond(request, { message: "Missing User-Agent" }, 403);
           }
+        }
+        if (request.url === "https://backboard.railway.com/graphql/v2") {
+          expect(request.headers.authorization).toBe("Bearer railway_ws_TOKEN");
+          const operation = /(apiTokenCreate|workspaceApiTokenDelete|workspaceApiTokens)/u.exec(
+            body.query,
+          )?.[1];
+          state.railway.push(`${operation} ${JSON.stringify(body.variables)}`);
+          if (state.railwayDown)
+            return respond(request, { errors: [{ message: "Not Authorized" }] });
+          if (operation === "apiTokenCreate") {
+            return respond(request, { data: { apiTokenCreate: "rw_SANDBOX" } });
+          }
+          if (operation === "workspaceApiTokens") {
+            return respond(request, {
+              data: {
+                workspaceApiTokens: {
+                  edges: [
+                    { node: { id: "tok_saved", name: "t3 sandboxes" } },
+                    { node: { id: "tok_sandbox", name: railwayTokenName } },
+                  ],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            });
+          }
+          return respond(request, { data: { workspaceApiTokenDelete: true } });
         }
         if (request.url === "https://api.github.com/repos/octo/hello/installation") {
           return options.installed === false
@@ -6745,6 +6787,14 @@ describe("SandboxProvisioner per-thread launches", () => {
                 options.setupExit === undefined
                   ? "T3_SETUP:ran\n"
                   : `T3_SETUP:failed ${options.setupExit}\n`,
+              stderr: "",
+            });
+          }
+          if (command.includes("@railway/cli")) {
+            fake.commands.push(command);
+            return respond(request, {
+              exitCode: 0,
+              stdout: "T3_RAILWAY_CLI:/home/boat/.local/bin/railway\n",
               stderr: "",
             });
           }
@@ -6816,18 +6866,37 @@ describe("SandboxProvisioner per-thread launches", () => {
             apiBaseUrl: "https://api.maple.dev",
           });
 
+          // A Railway token of its own, named for the sandbox and kept as a server secret.
+          expect(services.state.railway).toEqual([
+            `apiTokenCreate {"i":{"name":"${railwayTokenName}","workspaceId":"ws_1"}}`,
+          ]);
+          expect(record.railwayToken).toMatchObject({
+            name: railwayTokenName,
+            workspaceId: "ws_1",
+          });
+          expect(new TextDecoder().decode(secrets.values.get(record.railwayToken!.secret))).toBe(
+            "rw_SANDBOX",
+          );
+          expect(secretsFileWith(fake, "T3_RAILWAY_ENV")).toContain("rw_SANDBOX");
+
           // Maple gets the sandbox's own key, never this machine's; the plain HTTP server copies as is.
           const mcp = secretsFileWith(fake, "T3_MCP_SERVERS");
           expect(mcp).toContain("maple_ak_SANDBOX");
           expect(mcp).toContain("https://docs.test/mcp");
           expect(mcp).not.toContain("host_maple_KEY");
-          expect(mcp).not.toContain("railway");
+          expect(mcp).not.toContain('"local"');
+          // Railway's MCP is the sandbox's CLI, signed in with the sandbox's token.
+          expect(mcp).toContain("/home/boat/.local/bin/railway");
+          expect(mcp).toContain("rw_SANDBOX");
+          expect(mcp).not.toContain("mcp.railway.com");
           expect(secretsFileWith(fake, "T3_NORTHFLANK_TOKEN")).toContain("nf_shared_TOKEN");
           for (const secret of [
             "ghs_SANDBOX1",
             "maple_ak_SANDBOX",
             "nf_shared_TOKEN",
             "host_maple_KEY",
+            "rw_SANDBOX",
+            "railway_ws_TOKEN",
           ]) {
             expect(fake.commands.some((command) => command.includes(secret))).toBe(false);
           }
@@ -6853,6 +6922,7 @@ describe("SandboxProvisioner per-thread launches", () => {
           yield* provisioner.pairLaunch({ threadId });
           yield* provisioner.completeLaunch({ threadId });
           services.state.calls.length = 0;
+          services.state.railway.length = 0;
           const deleted = yield* provisioner.delete({
             provider: "boat",
             sandboxId: boatSandboxId,
@@ -6872,6 +6942,12 @@ describe("SandboxProvisioner per-thread launches", () => {
             },
           ]);
           expect(secrets.values.has(record.githubApp!.secret)).toBe(false);
+          // Found by its name and revoked; the saved token is left alone.
+          expect(services.state.railway).toEqual([
+            'workspaceApiTokens {"w":"ws_1","after":null}',
+            'workspaceApiTokenDelete {"id":"tok_sandbox","w":"ws_1"}',
+          ]);
+          expect(secrets.values.has(record.railwayToken!.secret)).toBe(false);
         }).pipe(
           Effect.provide(
             provisionerLayer(toolingSettings, repository.layer, {
@@ -6914,6 +6990,9 @@ describe("SandboxProvisioner per-thread launches", () => {
             "DELETE https://api.github.com/installation/token Bearer ghs_SANDBOX1",
             "DELETE https://api.maple.dev/v2/api_keys/key_sandbox Bearer maple_admin_KEY",
           ]);
+          expect(services.state.railway.at(-1)).toBe(
+            'workspaceApiTokenDelete {"id":"tok_sandbox","w":"ws_1"}',
+          );
           expect(secrets.values.size).toBe(0);
           expect(repository.records.size).toBe(0);
         }).pipe(
@@ -6925,6 +7004,140 @@ describe("SandboxProvisioner per-thread launches", () => {
             }),
           ),
           Effect.provideService(HttpClient.HttpClient, services.client),
+        );
+      },
+    );
+
+    it.effect(
+      "warns when Railway won't revoke a sandbox's token, and revokes an untracked sandbox's by name",
+      () => {
+        const fake = boatFake();
+        const services = withServices(fake);
+        const secrets = memorySecrets();
+        secrets.values.set("sandbox-railway-token-1", new TextEncoder().encode("rw_SANDBOX"));
+        const record: SandboxRecord = {
+          ...runningRecord,
+          instanceId: "railway",
+          railwayToken: {
+            name: railwayTokenName,
+            workspaceId: "ws_1",
+            secret: "sandbox-railway-token-1",
+          },
+        };
+        const repository = memoryRepository([record]);
+        return Effect.gen(function* () {
+          const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+          services.state.railwayDown = true;
+          const deleted = yield* provisioner.delete({
+            provider: "boat",
+            sandboxId: boatSandboxId,
+            instanceId: "railway",
+          });
+          expect(deleted.warnings).toEqual([
+            `T3 Code could not revoke the Railway token it made for hello on Boat small. Delete the token named ${railwayTokenName} in Railway's workspace settings.`,
+          ]);
+          // The sandbox and this server's copy go anyway.
+          expect(repository.records.has("railway")).toBe(false);
+          expect(secrets.values.size).toBe(0);
+
+          // No record names an untracked sandbox's token, but its name is the sandbox's own.
+          services.state.railwayDown = false;
+          services.state.railway.length = 0;
+          const orphan = yield* provisioner.delete({ provider: "boat", sandboxId: boatSandboxId });
+          expect(orphan.warnings).toEqual([]);
+          expect(services.state.railway).toEqual([
+            'workspaceApiTokens {"w":"ws_1","after":null}',
+            'workspaceApiTokenDelete {"id":"tok_sandbox","w":"ws_1"}',
+          ]);
+        }).pipe(
+          Effect.provide(
+            provisionerLayer({ ...boatSettings, ...toolingSettings }, repository.layer, {
+              secrets: secrets.layer,
+            }),
+          ),
+          Effect.provideService(HttpClient.HttpClient, services.client),
+        );
+      },
+    );
+
+    it.effect(
+      "saves a Railway token only once Railway answers for its workspace, asking when there is a choice",
+      () => {
+        const workspaces: Record<string, ReadonlyArray<{ id: string; name: string }>> = {
+          "ws-token": [{ id: "ws_1", name: "Omar's projects" }],
+          "account-token": [
+            { id: "ws_1", name: "Omar's projects" },
+            { id: "ws_2", name: "Team" },
+          ],
+        };
+        const client = HttpClient.make((request) => {
+          const body =
+            request.body._tag === "Uint8Array"
+              ? JSON.parse(new TextDecoder().decode(request.body.body))
+              : {};
+          const token = request.headers.authorization?.replace("Bearer ", "") ?? "";
+          const known = workspaces[token];
+          const answer =
+            known === undefined
+              ? { errors: [{ message: "Not Authorized" }] }
+              : String(body.query).includes("apiToken {")
+                ? { data: { apiToken: { workspaces: known } } }
+                : known.some((workspace) => workspace.id === body.variables.w)
+                  ? {
+                      data: {
+                        workspace: {
+                          name: known.find((workspace) => workspace.id === body.variables.w)!.name,
+                        },
+                      },
+                    }
+                  : { errors: [{ message: "Not Authorized" }] };
+          return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(answer)));
+        });
+        return Effect.gen(function* () {
+          const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+          const service = yield* ServerSettings.ServerSettingsService;
+
+          const wrong = yield* provisioner.connectRailway({ token: "nope" });
+          expect(wrong.saved).toBeUndefined();
+          expect(wrong.problem).toContain("Railway did not accept this token.");
+
+          const several = yield* provisioner.connectRailway({ token: "account-token" });
+          expect(several).toEqual({
+            workspaces: workspaces["account-token"],
+            problem: "This token reaches several workspaces. Pick the one sandboxes get tokens in.",
+          });
+          expect((yield* service.getSettings).sandboxTooling.railwayToken).toBe("");
+          expect((yield* provisioner.providers).host.railway).toBe(false);
+
+          const picked = yield* provisioner.connectRailway({
+            token: "account-token",
+            workspaceId: "ws_2",
+          });
+          expect(picked.saved).toEqual({ id: "ws_2", name: "Team" });
+
+          const only = yield* provisioner.connectRailway({ token: "ws-token" });
+          expect(only).toEqual({
+            saved: { id: "ws_1", name: "Omar's projects" },
+            workspaces: [],
+            problem: null,
+          });
+          expect((yield* service.getSettings).sandboxTooling).toMatchObject({
+            railwayToken: "ws-token",
+            railwayWorkspaceId: "ws_1",
+            railwayWorkspaceName: "Omar's projects",
+          });
+          expect((yield* provisioner.providers).host.railway).toBe(true);
+
+          // A workspace the token can't read is refused and the saved one stays.
+          const elsewhere = yield* provisioner.connectRailway({
+            token: "ws-token",
+            workspaceId: "ws_2",
+          });
+          expect(elsewhere.saved).toBeUndefined();
+          expect((yield* service.getSettings).sandboxTooling.railwayWorkspaceId).toBe("ws_1");
+        }).pipe(
+          Effect.provide(provisionerLayer()),
+          Effect.provideService(HttpClient.HttpClient, client),
         );
       },
     );
@@ -6963,7 +7176,11 @@ describe("SandboxProvisioner per-thread launches", () => {
         return Effect.gen(function* () {
           const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
           const failures: Array<string | null> = [];
-          for (const tooling of [{ githubApp: true }, { northflank: true }] as const) {
+          for (const tooling of [
+            { githubApp: true },
+            { northflank: true },
+            { railway: true },
+          ] as const) {
             const { config } = yield* provisioner.saveConfig({
               config: { ...configInput, ...tooling },
               apiKey: "boat_test",
@@ -6976,6 +7193,7 @@ describe("SandboxProvisioner per-thread launches", () => {
           expect(failures).toEqual([
             "Connect the GitHub App under Sandboxes in Settings → Connections, or turn off GitHub for this config.",
             "Save a Northflank token under Sandboxes in Settings → Connections, or turn off Northflank for this config.",
+            "Save a Railway token under Sandboxes in Settings → Connections, or turn off Railway for this config.",
           ]);
           expect(fake.requests.some((request) => request.endsWith("/sandboxes"))).toBe(false);
         }).pipe(
