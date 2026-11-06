@@ -1,12 +1,14 @@
 import { useAtomValue } from "@effect/atom-react";
-import type {
-  EnvironmentId,
-  ProjectId,
-  SandboxProviderKind,
-  SandboxRecord,
-  ScopedThreadRef,
-  ServerSettings,
-  ThreadId,
+import {
+  type EnvironmentId,
+  type ProjectId,
+  ProviderInstanceId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  type SandboxProviderKind,
+  type SandboxRecord,
+  type ScopedThreadRef,
+  type ServerSettings,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
@@ -17,7 +19,7 @@ import { useEnvironmentQuery } from "./query";
 import {
   findThreadSandbox,
   isSandboxlessBridgeThread,
-  sandboxBridgeReady,
+  providerInstanceReady,
   sandboxHostMirrors,
 } from "./sandboxThreads";
 import { serverEnvironment } from "./server";
@@ -160,10 +162,11 @@ export function useSandboxRecords(): ReadonlyArray<SandboxRecord> {
   return list.data?.sandboxes ?? NO_SANDBOXES;
 }
 
-/** Whether a host project can send through the sandbox bridge yet; see `sandboxBridgeReady`. */
-export function useSandboxBridgeReady(
+/** Whether a project's composer can send on `instanceId` with `model`; see `providerInstanceReady`. */
+export function useProviderInstanceReady(
   environmentId: EnvironmentId | null,
   projectId: ProjectId | null,
+  instanceId: ProviderInstanceId,
   model: string | null,
 ): boolean {
   const providersByEnvironment = useEnvironmentProviders();
@@ -172,12 +175,22 @@ export function useSandboxBridgeReady(
   );
   const projects = useProjects();
   if (environmentId === null || projectId === null || model === null) return false;
-  return sandboxBridgeReady({
+  return providerInstanceReady({
     providers: providersByEnvironment.get(environmentId) ?? [],
     settings,
     projects,
     environmentId,
     projectId,
+    instanceId,
     model,
   });
 }
+
+const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
+
+/** Whether a host project can send through the sandbox bridge yet. */
+export const useSandboxBridgeReady = (
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  model: string | null,
+): boolean => useProviderInstanceReady(environmentId, projectId, bridgeInstanceId, model);
