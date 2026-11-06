@@ -1,6 +1,6 @@
 import { CheckIcon, ChevronRightIcon, CircleAlertIcon, ExternalLinkIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { useRef, useState, type ReactNode } from "react";
+import { useRef, useState } from "react";
 import {
   AuthSettingsWriteScope,
   DEFAULT_SANDBOX_IDLE_MINUTES,
@@ -31,7 +31,9 @@ import {
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { FieldLabel, OptIn } from "./SandboxFormParts";
 import { SandboxProviderLogo } from "./SandboxProviderLogo";
+import { SandboxToolingFields, useSandboxToolingDraft } from "./SandboxToolingFields";
 import { describeSandboxFailure } from "./SandboxStartLimits";
 import { useSandboxTemplates } from "./SandboxTemplates";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -64,44 +66,6 @@ const describeCredentialEnvironment = (
   ].filter((value): value is string => value !== null);
   return passes.length === 0 ? "Passes no credentials." : `Passes ${passes.join(", ")}.`;
 };
-
-function FieldLabel({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
-  return (
-    <span className="mb-1.5 flex items-center justify-between gap-2 text-xs font-medium text-foreground">
-      {children}
-      {trailing}
-    </span>
-  );
-}
-
-function OptIn({
-  checked,
-  disabled,
-  onCheckedChange,
-  title,
-  children,
-}: {
-  checked: boolean;
-  disabled: boolean;
-  onCheckedChange: (checked: boolean) => void;
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <label className="flex cursor-pointer items-start gap-2.5 has-disabled:cursor-not-allowed">
-      <Checkbox
-        className="mt-0.5"
-        checked={checked}
-        disabled={disabled}
-        onCheckedChange={(next) => onCheckedChange(next === true)}
-      />
-      <span className="min-w-0 space-y-0.5">
-        <span className="block text-xs font-medium text-foreground">{title}</span>
-        <span className="block text-2xs leading-relaxed text-muted-foreground">{children}</span>
-      </span>
-    </label>
-  );
-}
 
 const SETTLE_LABELS: Record<SandboxSettleAction, string> = {
   ask: "Ask me",
@@ -281,7 +245,6 @@ export function SandboxEnvironmentFields({
   const [claudeBaseUrl, setClaudeBaseUrl] = useState<string | null>(
     config?.claude?.baseUrl ?? null,
   );
-  const [passGithub, setPassGithub] = useState(config?.passGithubToken ?? false);
   const [agentProviderAccess, setAgentProviderAccess] = useState(
     config?.agentProviderAccess ?? false,
   );
@@ -308,6 +271,7 @@ export function SandboxEnvironmentFields({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const providers = providersQuery.data?.providers ?? EMPTY_PROVIDERS;
   const host = providersQuery.data?.host;
+  const tooling = useSandboxToolingDraft(config, host);
   const provider = providers.find((candidate) => candidate.kind === selectedKind) ?? providers[0];
   const templates = useSandboxTemplates(environmentId, provider);
   const template = templates.templates.find((candidate) => candidate.name === templateName);
@@ -362,6 +326,7 @@ export function SandboxEnvironmentFields({
     !canWriteSettings ||
     (passesCredentials && !allowCredentials) ||
     (sendsClaude && claudeEndpoint === "") ||
+    tooling.attention !== null ||
     (provider !== undefined && !provider.configured && apiKey.trim() === "");
 
   const settingsFields = provider?.settingsFields ?? [];
@@ -378,7 +343,7 @@ export function SandboxEnvironmentFields({
         ? `${claudeHost} is private, so sandboxes need Tailscale to reach Claude`
         : passesCredentials && !allowCredentials
           ? `Confirm the credentials the ${provider?.label ?? ""} environment passes`
-          : null;
+          : tooling.attention;
   const summaryParts = [
     sendsClaude ? `Claude via ${claudeHost}` : null,
     joinsTailnet
@@ -386,7 +351,7 @@ export function SandboxEnvironmentFields({
         ? "reached only through your tailnet"
         : "joins your tailnet"
       : null,
-    passGithub && host?.github === true ? "GitHub signed in" : null,
+    ...tooling.summaryParts,
     agentProviderAccess && canGiveAgentAccess && provider !== undefined
       ? `agent can use ${provider.label}`
       : null,
@@ -432,7 +397,7 @@ export function SandboxEnvironmentFields({
           ...(template === undefined ? {} : { template: template.name }),
           ...(credentialEnvironment === "" ? {} : { credentialEnvironment }),
           ...(sendsClaude ? { claude: { baseUrl: claudeEndpoint } } : {}),
-          passGithubToken: passGithub && host?.github === true,
+          ...tooling.toConfig(),
           ...(agentProviderAccess && canGiveAgentAccess ? { agentProviderAccess: true } : {}),
           ...(onSettle === "ask" ? {} : { onSettle }),
           // A tailnet-only sandbox has to ask to join; otherwise the launch decides.
@@ -785,16 +750,6 @@ export function SandboxEnvironmentFields({
                       ) : null}
                     </div>
                   ) : null}
-                  <OptIn
-                    checked={passGithub && host?.github === true}
-                    disabled={isSaving || host?.github !== true}
-                    onCheckedChange={setPassGithub}
-                    title="Sign GitHub in with this machine's token"
-                  >
-                    {host?.github === true
-                      ? "Each sandbox can then clone private repositories and push with gh and git."
-                      : "This machine has no GitHub token to share, so sandboxes can clone public repositories only."}
-                  </OptIn>
                   {provider.capabilities.agentProviderAccess ? (
                     <OptIn
                       checked={agentProviderAccess && canGiveAgentAccess}
@@ -959,6 +914,15 @@ export function SandboxEnvironmentFields({
                     ) : null}
                   </div>
                 ) : null}
+
+                <SandboxToolingFields
+                  draft={tooling}
+                  disabled={isSaving}
+                  onOpenSettings={() => {
+                    onDone();
+                    void navigate({ to: "/settings/connections", hash: "sandbox-github-app" });
+                  }}
+                />
               </div>
             </CollapsiblePanel>
           </Collapsible>
