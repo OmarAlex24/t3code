@@ -778,14 +778,17 @@ export function useThreadActions() {
     if (wokeAt !== null) {
       markThreadVisited(scopedThreadKey(target), wokeAt);
     }
-    showThreadUndoNotice({
-      action: "Settled",
-      claim: action,
-      undo: () => runUndoPlan(target, undoPlan),
-      failureTitle: "Failed to undo settle",
-    });
-    // A thread on its own sandbox: keep, delete, or ask, as its config says.
-    notifySandboxThreadSettled(target);
+    const undo = () => runUndoPlan(target, undoPlan);
+    // A thread on its own sandbox: keep, delete, or ask, as its config says. A delayed delete
+    // shows the settle's Undo in its own toast, so the plain notice would be a second Undo.
+    if (!notifySandboxThreadSettled(target, { claim: action, undo })) {
+      showThreadUndoNotice({
+        action: "Settled",
+        claim: action,
+        undo,
+        failureTitle: "Failed to undo settle",
+      });
+    }
     return result;
   };
 
