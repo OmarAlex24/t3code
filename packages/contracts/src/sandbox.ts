@@ -145,6 +145,8 @@ export const SandboxHostAccess = Schema.Struct({
   maple: Schema.optionalKey(Schema.Boolean),
   /** What this machine has for an agent to work with: git identity, MCP servers, skills. */
   tooling: Schema.optionalKey(SandboxHostTooling),
+  /** The hub's non-Claude models a sandbox's Pi would get, when Claude uses a hub that lists them. */
+  piModels: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
 });
 export type SandboxHostAccess = typeof SandboxHostAccess.Type;
 
@@ -262,6 +264,8 @@ export const SandboxCreateInput = Schema.Struct({
   agentAccess: Schema.optional(
     Schema.Struct({
       claude: Schema.optional(Schema.Struct({ baseUrl: TrimmedString })),
+      /** Sets up Pi with the hub's other models on the sandbox's hub key; needs `claude` on a hub. */
+      pi: Schema.optional(Schema.Struct({ startModel: Schema.optional(TrimmedNonEmptyString) })),
     }),
   ),
   /** Signs `gh` and git in the sandbox in with this server's GitHub token. */
@@ -790,6 +794,11 @@ export const SandboxEnvironmentConfig = Schema.Struct({
   skills: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   /** Signs the Northflank CLI in with the dedicated token saved for sandboxes. */
   northflank: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Sets up Pi with the CLIProxyAPI hub's non-Claude models, on the key the sandbox gets for Claude.
+   * With `startModel` (a hub model id), new chats on the config start on Pi with that model.
+   */
+  pi: Schema.optionalKey(Schema.Struct({ startModel: Schema.optionalKey(TrimmedNonEmptyString) })),
   joinTailnet: Schema.Boolean,
   /** Lets the agent use the provider's CLI on its own sandbox; see `SandboxCreateInput`. */
   agentProviderAccess: Schema.optionalKey(Schema.Boolean),
@@ -975,6 +984,11 @@ export type SandboxLaunchStreamEvent = typeof SandboxLaunchStreamEvent.Type;
 /** The provider instance that drives sandbox threads from the host, and its one model. */
 export const SANDBOX_BRIDGE_INSTANCE_ID = "sandboxes";
 export const SANDBOX_BRIDGE_MODEL = "sandbox";
+/** The Pi provider instance a sandbox's T3 runs, and Pi's provider id for the hub's models. */
+export const SANDBOX_PI_INSTANCE_ID = "pi";
+export const SANDBOX_PI_PROVIDER = "hub";
+/** The Pi model slug T3 uses for a hub model id, such as `hub/wafer/GLM-5.3`. */
+export const sandboxPiModelSlug = (model: string) => `${SANDBOX_PI_PROVIDER}/${model}`;
 /** The host's prompt `_meta` key naming the T3 message, so the bridge reuses its id on the sandbox. */
 export const SANDBOX_BRIDGE_MESSAGE_META = "t3code/message";
 /** The bridge's ACP notification that its open approval or question was answered on the sandbox. */
