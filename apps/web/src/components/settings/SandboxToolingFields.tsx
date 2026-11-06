@@ -243,7 +243,7 @@ export function SandboxAgentToolingFields({
       ) : null}
       <DetailField label="Commit as">
         <div className="space-y-1">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid gap-2 sm:grid-cols-2">
             <Input
               aria-label="Git name"
               size="sm"

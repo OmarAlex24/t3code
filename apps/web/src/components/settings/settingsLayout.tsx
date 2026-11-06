@@ -157,6 +157,12 @@ export function useSettingsSearchTargetId(): string | null {
   return useContext(SettingsSearchTargetContext).targetId;
 }
 
+/** For a target with no element of its own yet: the id the address names, and how to clear it. */
+export function useSettingsSearchTargetRequest() {
+  const { targetId, onTargetHandled } = useContext(SettingsSearchTargetContext);
+  return { targetId, onTargetHandled };
+}
+
 export function useSettingsSearchTarget<T extends HTMLElement>(id: string | undefined) {
   const { targetId, highlightTarget, onTargetHandled } = useContext(SettingsSearchTargetContext);
   const isSearchTarget = id !== undefined && id === targetId;
