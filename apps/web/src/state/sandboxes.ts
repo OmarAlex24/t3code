@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentId,
   ProjectId,
+  SandboxProviderKind,
   SandboxRecord,
   ScopedThreadRef,
   ServerSettings,
@@ -69,6 +70,24 @@ export function useSandboxEnvironmentIds(): ReadonlySet<EnvironmentId> {
   return new Set(
     sandboxes.flatMap((sandbox) =>
       sandbox.environmentId === null || sandbox.state === "deleted" ? [] : [sandbox.environmentId],
+    ),
+  );
+}
+
+/**
+ * The provider of each live sandbox, by its environment, so a list of threads can draw a sandbox
+ * thread's machine as its provider's mark with one lookup per row.
+ */
+export function useSandboxProviderByEnvironmentId(): ReadonlyMap<
+  EnvironmentId,
+  SandboxProviderKind
+> {
+  const sandboxes = useSandboxRecords();
+  return new Map(
+    sandboxes.flatMap((sandbox) =>
+      sandbox.environmentId === null || sandbox.state === "deleted"
+        ? []
+        : [[sandbox.environmentId, sandbox.provider] as const],
     ),
   );
 }
