@@ -21,8 +21,10 @@ import { SidebarProvider } from "./ui/sidebar";
 const HOST = EnvironmentId.make("host");
 const SANDBOX = EnvironmentId.make("sandbox-bridged");
 const LEGACY_SANDBOX = EnvironmentId.make("sandbox-legacy");
+const REMOTE = EnvironmentId.make("remote-mac");
 const bridgedThreadId = ThreadId.make("thread-bridged");
 const legacyThreadId = ThreadId.make("thread-legacy");
+const remoteThreadId = ThreadId.make("thread-remote");
 
 const mocks = vi.hoisted(() => ({ sandboxes: [] as Array<unknown> }));
 
@@ -210,5 +212,48 @@ describe("sandbox chats in the sidebar", () => {
     );
 
     await expect.element(page.getByText("Greeting from boat.dev").first()).toBeVisible();
+  });
+
+  it("draws a sandbox thread's machine as its provider's mark and a paired machine as its icon", async () => {
+    using stack = new DisposableStack();
+    const previousSettings = getClientSettings();
+    stack.defer(() => __setClientSettingsForTests(previousSettings));
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+    });
+    mocks.sandboxes = [
+      sandbox({ environmentId: LEGACY_SANDBOX, threadId: legacyThreadId, provider: "vercel" }),
+    ];
+    vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
+    vi.mocked(useProjects).mockReturnValue([
+      project(LEGACY_SANDBOX, "project-legacy", "OmarAlex24/older-stack"),
+      project(REMOTE, "project-remote", "OmarAlex24/remote-stack"),
+    ]);
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      shell(LEGACY_SANDBOX, legacyThreadId, "project-legacy", "Runs on a Vercel sandbox"),
+      shell(REMOTE, remoteThreadId, "project-remote", "Runs on a paired Mac"),
+    ]);
+
+    await using _screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+
+    const rowOf = async (title: string) => {
+      const titleText = page.getByText(title).first();
+      await expect.element(titleText).toBeVisible();
+      const row = titleText.element().closest("li[data-thread-item]");
+      expect(row).not.toBeNull();
+      return row as HTMLElement;
+    };
+    const vercelMark = 'svg[viewBox="0 0 76 65"]';
+    const sandboxRow = await rowOf("Runs on a Vercel sandbox");
+    expect(sandboxRow.querySelector(vercelMark)).not.toBeNull();
+    expect(sandboxRow.querySelector("svg.lucide-server")).toBeNull();
+    const remoteRow = await rowOf("Runs on a paired Mac");
+    expect(remoteRow.querySelector("svg.lucide-server")).not.toBeNull();
+    expect(remoteRow.querySelector(vercelMark)).toBeNull();
   });
 });
