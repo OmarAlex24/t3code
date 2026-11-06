@@ -1121,6 +1121,18 @@ const SANDBOX_GITHUB_APP_PERMISSIONS = {
   metadata: "read",
 } as const;
 
+/** The sandboxes' GitHub App's homepage on github.com. */
+export const SANDBOX_GITHUB_APP_HOMEPAGE = "https://github.com/OmarAlex24/t3code";
+
+/** Where GitHub sends a client with no web address of its own; the user pastes it back. */
+export const SANDBOX_GITHUB_APP_PASTE_REDIRECT_URL = "http://127.0.0.1/t3-sandbox-github-app";
+
+/**
+ * The server page that posts the manifest to GitHub, for clients that can only open a URL in the
+ * user's browser (the desktop app). Takes the client's `state`.
+ */
+export const SANDBOX_GITHUB_APP_NEW_ROUTE = "/api/sandbox/github-app/new";
+
 /**
  * The manifest that creates the sandboxes' GitHub App in one step on github.com. Private, with no
  * webhook; `redirectUrl` receives the code the server turns into the app.

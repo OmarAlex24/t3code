@@ -26,6 +26,16 @@ const mocks = vi.hoisted(() => ({
   ),
   update: vi.fn((_patch: unknown) => {}),
   saved: {} as Record<string, string>,
+  openExternal: vi.fn(async (_url: string) => {}),
+}));
+
+vi.mock(import("~/localApi"), async (original) => ({
+  ...(await original()),
+  readLocalApi: (() => ({ shell: { openExternal: mocks.openExternal } })) as never,
+}));
+vi.mock(import("~/state/environments"), async (original) => ({
+  ...(await original()),
+  useEnvironmentHttpBaseUrl: (() => "http://127.0.0.1:3773/") as never,
 }));
 
 vi.mock(import("../../state/use-atom-command"), async (original) => ({
@@ -77,6 +87,7 @@ const githubRow = () => page.getByRole("region", { name: "GitHub App" });
 
 function setup(saved: Record<string, string>) {
   mocks.saved = saved;
+  mocks.openExternal.mockClear();
   mocks.connect.mockClear();
   mocks.update.mockClear();
   localStorage.removeItem(STATE_KEY);
@@ -152,6 +163,28 @@ describe("SandboxAccessRows", () => {
         expect.objectContaining({ input: { code: "pasted-code" } }),
       );
     } finally {
+      submit.mockRestore();
+    }
+  });
+
+  it("in the desktop app, opens the server's manifest page in the browser instead", async () => {
+    setup(NOTHING_SAVED);
+    const submit = vi.spyOn(HTMLFormElement.prototype, "submit");
+    window.desktopBridge = {} as NonNullable<typeof window.desktopBridge>;
+    try {
+      await using _screen = await render(rows());
+      await userEvent.click(page.getByRole("button", { name: "Create the app" }));
+
+      const state = localStorage.getItem(STATE_KEY);
+      expect(mocks.openExternal).toHaveBeenCalledWith(
+        `http://127.0.0.1:3773/api/sandbox/github-app/new?state=${state}`,
+      );
+      expect(submit).not.toHaveBeenCalled();
+      await expect
+        .element(page.getByRole("textbox", { name: "Address GitHub opened" }))
+        .toBeVisible();
+    } finally {
+      delete window.desktopBridge;
       submit.mockRestore();
     }
   });

@@ -90,6 +90,7 @@ import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrid
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
 import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
+import { layerGithubAppManifestRoute } from "./sandbox/githubAppManifestRoute.ts";
 import * as DiyKit from "./diy/DiyKit.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
@@ -857,6 +858,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
     ServerHttp.layerOtlpTracesProxyRoute,
     ServerHttp.layerAssetRoute,
+    layerGithubAppManifestRoute,
     ServerHttp.layerAttachmentUploadRoute,
     GuestHttp.layer,
     DeviceHubProxy.layer,
