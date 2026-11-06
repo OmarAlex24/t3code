@@ -151,6 +151,10 @@ export function createSandboxEnvironmentAtoms<R, E>(
       label: "environment-data:sandboxes:connect-github-app",
       tag: WS_METHODS.sandboxesConnectGithubApp,
     }),
+    sandboxesConnectRailway: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandboxes:connect-railway",
+      tag: WS_METHODS.sandboxesConnectRailway,
+    }),
     sandboxesCheckTailscale: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandboxes:check-tailscale",
       tag: WS_METHODS.sandboxesCheckTailscale,

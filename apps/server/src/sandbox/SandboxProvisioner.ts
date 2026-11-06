@@ -11,6 +11,9 @@ import {
   type SandboxCheckWorkResult,
   type SandboxConfigsResult,
   type SandboxConnectGithubAppInput,
+  type SandboxConnectRailwayInput,
+  type SandboxConnectRailwayResult,
+  type SandboxRailwayWorkspace,
   type SandboxConnectGithubAppResult,
   type SandboxCreateInput,
   type SandboxCreateResult,
@@ -113,6 +116,9 @@ import {
   mcpServersScript,
   NORTHFLANK_LOGIN_SCRUB,
   northflankLoginScript,
+  parseRailwayCli,
+  RAILWAY_LOGIN_SCRUB,
+  railwayLoginScript,
   parseSetupScriptReport,
   setupScriptScript,
   TAILSCALE_PROXY_URL,
@@ -144,6 +150,7 @@ import { makeSandboxLaunchTracker } from "./sandboxLaunches.ts";
 import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
 import { GithubAppApiError, type GithubAppCredentials, makeGithubAppApi } from "./githubAppApi.ts";
 import { makeMapleApi, mapleApiBaseUrl } from "./mapleApi.ts";
+import { makeRailwayApi, railwayCredentialsOf, railwaySandboxTokenName } from "./railwayApi.ts";
 import { describeHostMcpServer } from "./sandboxHostTooling.ts";
 import {
   type AgentEnvironment,
@@ -271,6 +278,7 @@ ${CLAUDE_SETTINGS_SCRUB}
 ${GITHUB_LOGIN_SCRUB}
 ${MCP_SERVERS_SCRUB}
 ${NORTHFLANK_LOGIN_SCRUB}
+${RAILWAY_LOGIN_SCRUB}
 ${PI_SETTINGS_SCRUB}
 ${tailscaleScrub()}
 rm -f "$HOME/.t3/sandbox-server.log" "$HOME/.t3/sandbox-server.pid"`;
@@ -430,6 +438,7 @@ interface Owned {
   agentKeyId?: string;
   githubToken?: GithubToken;
   mapleKey?: { readonly keyId: string; readonly apiBaseUrl: string };
+  railwayToken?: NonNullable<SandboxRecord["railwayToken"]>;
 }
 
 /** An installation token minted for one sandbox, kept as a server secret named by `secret`. */
@@ -489,7 +498,11 @@ interface Machine {
     timeoutSeconds: number,
   ) => Effect.Effect<SandboxExecResult, SandboxProviderError>;
   readonly record: () => SandboxRecord;
-  readonly save: (patch: Partial<SandboxRecord>) => Effect.Effect<SandboxRecord>;
+  /** Merges `patch` into the record and removes the `drop` keys. */
+  readonly save: (
+    patch: Partial<SandboxRecord>,
+    drop?: ReadonlyArray<keyof SandboxRecord>,
+  ) => Effect.Effect<SandboxRecord>;
 }
 
 /** The https clone URL of a github.com remote, or null; a credential in the URL is dropped. */
@@ -588,6 +601,10 @@ export class SandboxProvisioner extends Context.Service<
     readonly connectGithubApp: (
       input: SandboxConnectGithubAppInput,
     ) => Effect.Effect<SandboxConnectGithubAppResult, SandboxProviderError>;
+    /** Checks a Railway token and the workspace it mints in, and saves both when they work. */
+    readonly connectRailway: (
+      input: SandboxConnectRailwayInput,
+    ) => Effect.Effect<SandboxConnectRailwayResult, SandboxProviderError>;
     /** Stops sandboxes past their running limit and syncs every other record with its provider. */
     readonly sweep: Effect.Effect<void>;
     /**
@@ -622,6 +639,7 @@ const make = Effect.gen(function* () {
   const tailscaleApi = yield* makeTailscaleApi;
   const githubAppApi = yield* makeGithubAppApi;
   const mapleApi = yield* makeMapleApi;
+  const railwayApi = yield* makeRailwayApi;
   const onHttp = Effect.provideService(HttpClient.HttpClient, httpClient);
 
   // A settings patch needs the key, and merges `settings` per field, so a save writes the key and
@@ -835,6 +853,48 @@ const make = Effect.gen(function* () {
     return Exit.isSuccess(revoked) ? null : warning;
   });
 
+  const savedRailway = settings.getSettings.pipe(
+    Effect.map((value) => railwayCredentialsOf(value.sandboxTooling)),
+    Effect.orElseSucceed(() => undefined),
+  );
+
+  // Never blocks a delete: a token that cannot be revoked becomes a warning naming it. Revoking
+  // looks the token up by name, so it works however long the record outlived it.
+  const releaseRailwayToken = Effect.fn("SandboxProvisioner.releaseRailwayToken")(function* (
+    record: Pick<SandboxRecord, "label" | "railwayToken">,
+  ) {
+    const reference = record.railwayToken;
+    if (reference === undefined) return null;
+    yield* secrets.remove(reference.secret).pipe(Effect.ignore);
+    const warning = `T3 Code could not revoke the Railway token it made for ${record.label}. Delete the token named ${reference.name} in Railway's workspace settings.`;
+    const saved = yield* savedRailway;
+    if (saved === undefined) return warning;
+    const revoked = yield* railwayApi
+      .deleteTokensNamed(saved.token, reference.workspaceId, reference.name)
+      .pipe(
+        Effect.tapError((error) =>
+          Effect.logWarning("sandbox railway token revoke failed", { detail: error.detail }),
+        ),
+        Effect.exit,
+      );
+    return Exit.isSuccess(revoked) ? null : warning;
+  });
+
+  // An untracked sandbox has no record to name its token, but the name is the sandbox's own.
+  const releaseOrphanRailwayToken = Effect.fn("SandboxProvisioner.releaseOrphanRailwayToken")(
+    function* (sandboxId: string) {
+      const saved = yield* savedRailway;
+      if (saved === undefined) return null;
+      const name = railwaySandboxTokenName(sandboxId);
+      const revoked = yield* railwayApi
+        .deleteTokensNamed(saved.token, saved.workspaceId, name)
+        .pipe(Effect.exit);
+      return Exit.isSuccess(revoked)
+        ? null
+        : `T3 Code could not check Railway for a token it made for ${sandboxId}. Delete any token named ${name} in Railway's workspace settings.`;
+    },
+  );
+
   /**
    * Replaces a sandbox's GitHub token with a fresh one: mint, write it on the sandbox, then revoke
    * the old one. A failure keeps the old token and says why.
@@ -914,6 +974,70 @@ const make = Effect.gen(function* () {
       owner: app.owner,
       installUrl: githubInstallUrl(app.slug),
     } satisfies SandboxConnectGithubAppResult;
+  });
+
+  // A workspace token reaches one workspace and an account token several, so the user picks only
+  // when there is a choice. Nothing is saved until Railway answers for the workspace.
+  const connectRailway = Effect.fn("SandboxProvisioner.connectRailway")(function* (
+    input: SandboxConnectRailwayInput,
+  ) {
+    const token = Redacted.make(input.token);
+    const refused = (problem: string, workspaces: ReadonlyArray<SandboxRailwayWorkspace> = []) =>
+      ({ workspaces, problem }) satisfies SandboxConnectRailwayResult;
+    let workspaceId: string;
+    if (input.workspaceId !== undefined) {
+      workspaceId = input.workspaceId;
+    } else {
+      const reached = yield* railwayApi.tokenWorkspaces(token).pipe(Effect.result);
+      if (reached._tag === "Failure") {
+        return refused(
+          reached.failure.unauthorized === true
+            ? "Railway did not accept this token. Make a workspace token in Railway's workspace settings, under Tokens."
+            : `${reached.failure.detail} If you know the workspace ID, enter it and save again.`,
+        );
+      }
+      if (reached.success.length !== 1) {
+        return refused(
+          reached.success.length === 0
+            ? "This token reaches no workspace. Enter the workspace ID, or make a workspace token."
+            : "This token reaches several workspaces. Pick the one sandboxes get tokens in.",
+          reached.success,
+        );
+      }
+      workspaceId = reached.success[0]!.id;
+    }
+    const name = yield* railwayApi.workspaceName(token, workspaceId).pipe(Effect.result);
+    if (name._tag === "Failure") {
+      return refused(
+        name.failure.unauthorized === true
+          ? "Railway did not let this token read that workspace. Check the workspace ID, or use a token made in that workspace."
+          : name.failure.detail,
+      );
+    }
+    yield* settings
+      .updateSettings({
+        sandboxTooling: {
+          railwayToken: input.token,
+          railwayWorkspaceId: workspaceId,
+          railwayWorkspaceName: name.success,
+        },
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new SandboxProviderError({
+              provider: "boat",
+              stage: "config",
+              detail: "Could not save the Railway token on this server.",
+              cause,
+            }),
+        ),
+      );
+    return {
+      saved: { id: workspaceId, name: name.success },
+      workspaces: [],
+      problem: null,
+    } satisfies SandboxConnectRailwayResult;
   });
 
   const checkTailscale = Effect.fn("SandboxProvisioner.checkTailscale")(function* (
@@ -1091,6 +1215,7 @@ const make = Effect.gen(function* () {
         : { githubApp: { slug: app.slug, owner: current.sandboxTooling.githubAppOwner } }),
       northflank: current.sandboxTooling.northflankToken !== "",
       maple: current.sandboxTooling.mapleAdminKey !== "",
+      railway: railwayCredentialsOf(current.sandboxTooling) !== undefined,
       tooling: yield* hostAccess.tooling,
     };
     if (claude.baseUrl === undefined || (hub === undefined && claude.authToken === undefined)) {
@@ -1480,6 +1605,9 @@ const make = Effect.gen(function* () {
         owned.mapleKey === undefined
           ? Effect.void
           : releaseMapleKey({ label: prepared.label, mapleKey: owned.mapleKey }),
+        owned.railwayToken === undefined
+          ? Effect.void
+          : releaseRailwayToken({ label: prepared.label, railwayToken: owned.railwayToken }),
         records.remove(instanceId).pipe(Effect.ignore),
       ],
       { concurrency: "unbounded", discard: true },
@@ -2238,6 +2366,12 @@ const make = Effect.gen(function* () {
         "Save a Northflank token under Sandboxes in Settings → Connections, or turn off Northflank for this config.",
       );
     }
+    if (config.railway === true && railwayCredentialsOf(value.sandboxTooling) === undefined) {
+      return yield* configError(
+        config.provider,
+        "Save a Railway token under Sandboxes in Settings → Connections, or turn off Railway for this config.",
+      );
+    }
   });
 
   const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -2249,6 +2383,7 @@ const make = Effect.gen(function* () {
     owned: Owned,
     names: ReadonlyArray<string>,
     projectRoot: string | undefined,
+    railway: { readonly cli: string; readonly token: string } | null,
     fail: (warning: string) => Effect.Effect<void>,
   ) {
     const entries = yield* hostAccess.mcpEntries(names, projectRoot);
@@ -2256,18 +2391,37 @@ const make = Effect.gen(function* () {
     if (missingNames.length > 0) {
       yield* fail(`This machine has no MCP server named ${missingNames.join(", ")}.`);
     }
-    const adminKey = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxTooling.mapleAdminKey;
+    const tooling = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxTooling;
+    const adminKey = tooling.mapleAdminKey;
+    const railwayReady = railwayCredentialsOf(tooling) !== undefined;
     const servers: Record<string, unknown> = {};
     let maple: { readonly apiBaseUrl: string; readonly secret: Redacted.Redacted<string> } | null =
       null;
     for (const entry of entries) {
-      const described = describeHostMcpServer(entry, { mapleReady: adminKey !== "" });
+      const described = describeHostMcpServer(entry, { mapleReady: adminKey !== "", railwayReady });
       if (described.copy === "unavailable") {
         yield* fail(`${entry.name} wasn't copied. ${described.reason ?? ""}`.trim());
         continue;
       }
       if (described.copy === "copy") {
         servers[entry.name] = entry.config;
+        continue;
+      }
+      // The sandbox's own CLI, signed in with its own token; the host's entry may be the hosted
+      // server, whose OAuth sign-in a sandbox cannot reuse.
+      if (described.mintedBy === "railway") {
+        if (railway === null) {
+          yield* fail(
+            `${entry.name} wasn't copied: it needs Railway turned on for this config and signed in on the sandbox.`,
+          );
+        } else {
+          servers[entry.name] = {
+            type: "stdio",
+            command: railway.cli,
+            args: ["mcp"],
+            env: { RAILWAY_API_TOKEN: railway.token },
+          };
+        }
         continue;
       }
       const apiBaseUrl = mapleApiBaseUrl(String(entry.config.url));
@@ -2369,8 +2523,66 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
   });
 
   /**
-   * Runs after the clone: the config's setup script, the Northflank CLI, MCP servers, CLAUDE.md and
-   * skills. Each failure is a warning on a sandbox that otherwise works.
+   * Gives the sandbox a Railway token of its own and signs the CLI in with it. The record names
+   * the token before it exists, so a crash between the two still leaves a revoke to find it.
+   * Null, after a warning, when the sandbox has no working CLI; the token is then revoked.
+   */
+  const signRailwayIn = Effect.fn("SandboxProvisioner.signRailwayIn")(function* (
+    machine: Machine,
+    owned: Owned,
+    fail: (warning: string) => Effect.Effect<void>,
+  ) {
+    const saved = yield* savedRailway;
+    if (saved === undefined) {
+      yield* fail("Save a Railway token under Sandboxes so the sandbox gets one of its own.");
+      return null;
+    }
+    const reference = {
+      name: railwaySandboxTokenName(machine.sandboxId),
+      workspaceId: saved.workspaceId,
+      secret: `sandbox-railway-token-${yield* secureRandom.uuidV4()}`,
+    };
+    owned.railwayToken = reference;
+    yield* machine.save({ railwayToken: reference });
+    const release = Effect.suspend(() =>
+      releaseRailwayToken({ label: machine.prepared.label, railwayToken: reference }),
+    ).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          delete owned.railwayToken;
+        }),
+      ),
+      Effect.andThen(machine.save({}, ["railwayToken"])),
+    );
+    const minted = yield* railwayApi
+      .createToken(saved.token, saved.workspaceId, reference.name)
+      .pipe(
+        Effect.tap((token) =>
+          secrets.set(reference.secret, new TextEncoder().encode(Redacted.value(token))),
+        ),
+        Effect.result,
+      );
+    if (minted._tag === "Failure") {
+      yield* release;
+      yield* fail("Railway would not make a token for this sandbox, so Railway isn't signed in.");
+      return null;
+    }
+    const token = Redacted.value(minted.success);
+    const cli = yield* machine.run(railwayLoginScript(token), 300).pipe(
+      Effect.map((result) => parseRailwayCli(result.stdout)),
+      Effect.orElseSucceed(() => null),
+    );
+    if (cli === null) {
+      yield* release;
+      yield* fail("The Railway CLI could not be installed or signed in on the sandbox.");
+      return null;
+    }
+    return { cli, token };
+  });
+
+  /**
+   * Runs after the clone: the config's setup script, the Railway and Northflank CLIs, MCP servers,
+   * CLAUDE.md and skills. Each failure is a warning on a sandbox that otherwise works.
    */
   const setUpTools = Effect.fn("SandboxProvisioner.setUpTools")(function* (
     machine: Machine,
@@ -2402,6 +2614,11 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         );
       }
     }
+    let railway: { readonly cli: string; readonly token: string } | null = null;
+    if (config.railway === true) {
+      steps += 1;
+      railway = yield* signRailwayIn(machine, owned, fail);
+    }
     if (config.northflank === true) {
       steps += 1;
       const token = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxTooling.northflankToken;
@@ -2416,7 +2633,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     const mcpNames = config.mcpServers ?? [];
     if (mcpNames.length > 0) {
       steps += 1;
-      yield* copyMcpServers(machine, owned, mcpNames, projectRoot, fail);
+      yield* copyMcpServers(machine, owned, mcpNames, projectRoot, railway, fail);
     }
     const skills = config.skills ?? [];
     if (config.claudeMd === true || skills.length > 0) {
@@ -3082,16 +3299,19 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       current.filter((orphan) => orphan.sandboxId !== input.sandboxId),
     );
     // A sandbox deleted outside T3 still has its key on the hub, so this runs for every record.
-    const warnings = Option.isNone(record)
-      ? []
-      : [
-          ...(agent?.warnings ?? []),
-          environmentWarning,
-          yield* releaseHubKey(record.value),
-          yield* releaseTailnetDevice(record.value),
-          yield* releaseGithubToken(record.value),
-          yield* releaseMapleKey(record.value),
-        ].filter((warning): warning is string => warning !== null);
+    const warnings = (
+      Option.isNone(record)
+        ? [yield* releaseOrphanRailwayToken(input.sandboxId)]
+        : [
+            ...(agent?.warnings ?? []),
+            environmentWarning,
+            yield* releaseHubKey(record.value),
+            yield* releaseTailnetDevice(record.value),
+            yield* releaseGithubToken(record.value),
+            yield* releaseMapleKey(record.value),
+            yield* releaseRailwayToken(record.value),
+          ]
+    ).filter((warning): warning is string => warning !== null);
     return { warnings } satisfies SandboxDeleteResult;
   });
 
@@ -3410,6 +3630,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       Effect.andThen(releaseTailnetDevice(record)),
       Effect.andThen(releaseGithubToken(record)),
       Effect.andThen(releaseMapleKey(record)),
+      Effect.andThen(releaseRailwayToken(record)),
       // The template is saved either way; a sandbox that survives stays listed for a manual delete.
       Effect.catch((cause) =>
         Effect.logWarning("sandbox delete after saving a template failed", {
@@ -3781,6 +4002,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     completeLaunch,
     checkTailscale,
     connectGithubApp,
+    connectRailway,
     sweep,
     linkBridge,
   });
@@ -3847,5 +4069,7 @@ export const rpcHandlers = Effect.gen(function* () {
       sandboxes.checkTailscale(input),
     [WS_METHODS.sandboxesConnectGithubApp]: (input: SandboxConnectGithubAppInput) =>
       sandboxes.connectGithubApp(input),
+    [WS_METHODS.sandboxesConnectRailway]: (input: SandboxConnectRailwayInput) =>
+      sandboxes.connectRailway(input),
   };
 });
