@@ -11,9 +11,11 @@ import {
   SandboxCreateInput,
   type SandboxProviderLimits,
   SandboxTemplateName,
+  SandboxToolingSettings,
 } from "./sandbox.ts";
 
 const decodeSavedConfig = Schema.decodeSync(Schema.fromJsonString(SandboxEnvironmentConfig));
+const decodeToolingSettings = Schema.decodeUnknownSync(SandboxToolingSettings);
 
 const assess = (limits: Partial<SandboxProviderLimits>) =>
   assessSandboxStart({ canStart: true, ...limits }, { providerLabel: "Boat", nowMillis: 0 });
@@ -148,6 +150,20 @@ describe("SandboxEnvironmentConfig", () => {
         JSON.stringify({ ...JSON.parse(saved), pi: { startModel: "wafer/GLM-5.3" } }),
       ).pi,
     ).toEqual({ startModel: "wafer/GLM-5.3" });
+    // Saved before Railway could be signed in: it stays off, and a newer config keeps it on.
+    expect(config).not.toHaveProperty("railway");
+    expect(decodeSavedConfig(JSON.stringify({ ...JSON.parse(saved), railway: true })).railway).toBe(
+      true,
+    );
+  });
+
+  it("reads tooling settings saved before Railway with nothing saved for it", () => {
+    expect(decodeToolingSettings({ mapleAdminKey: "maple-key" })).toMatchObject({
+      mapleAdminKey: "maple-key",
+      railwayToken: "",
+      railwayWorkspaceId: "",
+      railwayWorkspaceName: "",
+    });
   });
 });
 

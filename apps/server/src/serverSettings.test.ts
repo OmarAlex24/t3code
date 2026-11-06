@@ -1483,6 +1483,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
             githubAppPrivateKey: "github-app-key-secret",
             northflankToken: "northflank-secret",
             mapleAdminKey: "maple-secret",
+            railwayToken: "railway-secret",
+            railwayWorkspaceId: "ws_1",
           },
         });
         const values = [
@@ -1497,6 +1499,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
           "github-app-key-secret",
           "northflank-secret",
           "maple-secret",
+          "railway-secret",
         ];
         const client = ServerSettingsModule.redactServerSettingsForClient(saved, {
           secretReferences: true,

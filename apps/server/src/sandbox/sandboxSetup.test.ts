@@ -19,7 +19,10 @@ import {
   parseSetupScriptReport,
   setupScriptScript,
   parseMissingTools,
+  parseRailwayCli,
   parseTailscaleReport,
+  RAILWAY_LOGIN_SCRUB,
+  railwayLoginScript,
   type SandboxScript,
   tailscaleScript,
   tailscaleScrub,
@@ -406,6 +409,88 @@ describe("githubAppLoginScript", () => {
         expect(((yield* fs.stat(`${home}/.config/gh/hosts.yml`)).mode & 0o777).toString(8)).toBe(
           "600",
         );
+      }),
+    ),
+  );
+});
+
+describe("railwayLoginScript", () => {
+  // Only node and the system tools, so a Railway CLI on this machine can't stand in for the stub.
+  const runBare = (home: string, script: string | SandboxScript) =>
+    ChildProcessSpawner.ChildProcessSpawner.pipe(
+      Effect.flatMap((spawner) =>
+        spawner.string(
+          ChildProcess.make("sh", ["-c", asScript(script).command], {
+            cwd: home,
+            env: {
+              PATH: `${process.execPath.replace(/\/[^/]+$/u, "")}:/usr/bin:/bin`,
+              HOME: home,
+              ...asScript(script).secrets,
+            },
+            stdin: "ignore",
+          }),
+        ),
+      ),
+    );
+
+  // npm "installs" the CLI by dropping a stub where the script looks for it, or does nothing.
+  const npmStub = (home: string, installs: boolean) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.makeDirectory(`${home}/.local/bin`, { recursive: true });
+      yield* fs.writeFileString(
+        `${home}/.local/bin/npm`,
+        `#!/bin/sh\necho "$*" >"$HOME/npm.argv"\n${installs ? `printf '#!/bin/sh\\n' >"$HOME/.local/bin/railway"\nchmod 755 "$HOME/.local/bin/railway"\n` : ""}`,
+      );
+      yield* fs.chmod(`${home}/.local/bin/npm`, 0o755);
+    });
+
+  it.live(
+    "installs the CLI, puts the token in Claude's env without printing it, and the scrubs remove it",
+    () =>
+      withHome((home, file) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          yield* npmStub(home, true);
+          yield* fs.makeDirectory(`${home}/.claude`);
+          yield* fs.writeFileString(file, JSON.stringify({ env: { DISABLE_TELEMETRY: "1" } }));
+          const token = "railway-'$(touch pwned)\"";
+          const script = railwayLoginScript(token);
+          expect(revealsSecret(script.command, token)).toBe(false);
+          const stdout = yield* runBare(home, script);
+          expect(stdout).not.toContain("railway-");
+          expect(parseRailwayCli(stdout)).toBe(`${home}/.local/bin/railway`);
+          expect(yield* fs.readFileString(`${home}/npm.argv`)).toBe(
+            `install -g --prefix ${home}/.local @railway/cli\n`,
+          );
+          expect(yield* fs.exists(`${home}/pwned`)).toBe(false);
+          expect(JSON.parse(yield* fs.readFileString(file)).env).toEqual({
+            DISABLE_TELEMETRY: "1",
+            RAILWAY_API_TOKEN: token,
+          });
+
+          // A template keeps the user's settings but no Railway sign-in of either kind.
+          yield* fs.makeDirectory(`${home}/.railway`);
+          yield* fs.writeFileString(`${home}/.railway/config.json`, "{}");
+          yield* runIn(home, `${CLAUDE_SETTINGS_SCRUB}\n${RAILWAY_LOGIN_SCRUB}`);
+          expect(JSON.parse(yield* fs.readFileString(file)).env).toEqual({
+            DISABLE_TELEMETRY: "1",
+          });
+          expect(yield* fs.exists(`${home}/.railway`)).toBe(false);
+        }),
+      ),
+  );
+
+  it.live("writes nothing when the CLI will not install", () =>
+    withHome((home, file) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        yield* npmStub(home, false);
+        const stdout = yield* runBare(home, railwayLoginScript("railway-TOKEN"));
+        expect(parseRailwayCli(stdout)).toBeNull();
+        expect(yield* fs.readFileString(`${home}/npm.argv`)).toContain("@railway/cli");
+        expect(yield* fs.exists(file)).toBe(false);
+        expect(parseRailwayCli("T3_RAILWAY_CLI:railway\n")).toBeNull();
       }),
     ),
   );

@@ -38,7 +38,7 @@ const claudeJson = JSON.stringify({
 describe("host MCP servers", () => {
   it("lists each server once with how it can reach a sandbox, and never a header value", () => {
     const entries = parseClaudeMcpServers(claudeJson);
-    const listed = listHostMcpServers(entries, { mapleReady: false });
+    const listed = listHostMcpServers(entries, { mapleReady: false, railwayReady: false });
     expect(JSON.stringify(listed)).not.toContain("host_maple_KEY");
     expect(listed.map((server) => [server.name, server.copy])).toEqual([
       ["docs", "copy"],
@@ -53,11 +53,39 @@ describe("host MCP servers", () => {
       host: "docs.example.test",
       headerNames: ["X-Key"],
     });
-    // Maple is minted per sandbox once an admin key is saved, never copied with this machine's key.
+    expect(listed.find((server) => server.name === "railway")?.reason).toBe(
+      "Save a Railway token under Sandboxes so each sandbox gets its own.",
+    );
+    // Maple and Railway are minted per sandbox once a key is saved, never copied with this
+    // machine's sign-in; Railway's hosted server and its CLI's stdio server alike.
+    const ready = listHostMcpServers(entries, { mapleReady: true, railwayReady: true });
+    expect(ready.find((server) => server.name === "maple")).toMatchObject({
+      copy: "mint",
+      mintedBy: "maple",
+    });
+    expect(ready.find((server) => server.name === "railway")).toMatchObject({
+      copy: "mint",
+      mintedBy: "railway",
+    });
+    const hosted = parseClaudeMcpServers(
+      JSON.stringify({
+        mcpServers: {
+          railway: { type: "http", url: "https://mcp.railway.com" },
+          shim: { command: "npx", args: ["-y", "@railway/mcp-server"] },
+          other: { command: "railway" },
+        },
+      }),
+    );
     expect(
-      listHostMcpServers(entries, { mapleReady: true }).find((server) => server.name === "maple")
-        ?.copy,
-    ).toBe("mint");
+      listHostMcpServers(hosted, { mapleReady: false, railwayReady: true }).map((server) => [
+        server.name,
+        server.mintedBy ?? server.copy,
+      ]),
+    ).toEqual([
+      ["other", "unavailable"],
+      ["railway", "railway"],
+      ["shim", "railway"],
+    ]);
     expect(parseClaudeMcpServers("not json")).toEqual([]);
   });
 

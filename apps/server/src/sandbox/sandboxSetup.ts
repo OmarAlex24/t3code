@@ -11,25 +11,14 @@ export interface SandboxScript {
 
 const base64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
 
-// Merges into Claude's own settings `env`, which `claude` and T3's Claude provider both read, and
-// keeps every other key (Boat ships defaults there). Node is on every supported image.
-export const claudeSettingsScript = (env: {
-  readonly ANTHROPIC_BASE_URL: string;
-  readonly ANTHROPIC_AUTH_TOKEN: string;
-  readonly HTTPS_PROXY?: string;
-  readonly HTTP_PROXY?: string;
-  readonly NO_PROXY?: string;
-}): SandboxScript => ({
-  secrets: { T3_CLAUDE_ENV: JSON.stringify(env) },
-  command: `set -eu
-umask 077
-export PATH="$HOME/.local/bin:$PATH"
-dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+// Merges the JSON object in the named secret into Claude's own settings `env`, which `claude`, its
+// tools and T3's Claude provider read, keeping every other key (Boat ships defaults there).
+const mergeClaudeEnv = (variable: string) => `dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "$dir"
 node -e '
 const fs = require("node:fs");
 const file = process.argv[1];
-const env = JSON.parse(process.env.T3_CLAUDE_ENV);
+const env = JSON.parse(process.env.${variable});
 let settings = {};
 try {
   settings = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -44,7 +33,21 @@ settings.env = { ...current, ...env };
 fs.writeFileSync(file + ".t3-tmp", JSON.stringify(settings, null, 2) + "\\n", { mode: 0o600 });
 fs.renameSync(file + ".t3-tmp", file);
 ' "$dir/settings.json"
-chmod 600 "$dir/settings.json"`,
+chmod 600 "$dir/settings.json"`;
+
+// Node is on every supported image.
+export const claudeSettingsScript = (env: {
+  readonly ANTHROPIC_BASE_URL: string;
+  readonly ANTHROPIC_AUTH_TOKEN: string;
+  readonly HTTPS_PROXY?: string;
+  readonly HTTP_PROXY?: string;
+  readonly NO_PROXY?: string;
+}): SandboxScript => ({
+  secrets: { T3_CLAUDE_ENV: JSON.stringify(env) },
+  command: `set -eu
+umask 077
+export PATH="$HOME/.local/bin:$PATH"
+${mergeClaudeEnv("T3_CLAUDE_ENV")}`,
 });
 
 /** Where tailscaled's HTTP proxy listens when the sandbox cannot create a TUN device. */
@@ -68,6 +71,7 @@ const settings = JSON.parse(fs.readFileSync(file, "utf8"));
 if (settings && settings.env && typeof settings.env === "object") {
   delete settings.env.ANTHROPIC_AUTH_TOKEN;
   delete settings.env.ANTHROPIC_BASE_URL;
+  delete settings.env.RAILWAY_API_TOKEN;
   for (const [name, value] of Object.entries(${JSON.stringify(tailscaleProxyEnv)})) {
     if (settings.env[name] === value) delete settings.env[name];
   }
@@ -639,3 +643,39 @@ unset T3_NORTHFLANK_TOKEN`,
 
 // Run before a template save: a copy must not inherit the Northflank login.
 export const NORTHFLANK_LOGIN_SCRUB = `rm -rf "\${NF_CONFIG_DIR:-$HOME/.northflank}"`;
+
+const RAILWAY_CLI_PREFIX = "T3_RAILWAY_CLI:";
+
+// The CLI reads RAILWAY_API_TOKEN before its own login, never refreshes it, and Claude hands its
+// settings env to every tool it runs. Nothing is written when the CLI will not install.
+export const railwayLoginScript = (token: string): SandboxScript => ({
+  secrets: { T3_RAILWAY_ENV: JSON.stringify({ RAILWAY_API_TOKEN: token }) },
+  command: `set -eu
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v railway >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  npm install -g --prefix "$HOME/.local" @railway/cli >/dev/null 2>&1 || true
+fi
+if ! command -v railway >/dev/null 2>&1; then
+  unset T3_RAILWAY_ENV
+  echo "The Railway CLI could not be installed." >&2
+  exit 3
+fi
+umask 077
+${mergeClaudeEnv("T3_RAILWAY_ENV")}
+unset T3_RAILWAY_ENV
+printf '${RAILWAY_CLI_PREFIX}%s\\n' "$(command -v railway)"`,
+});
+
+/** Where the Railway CLI is on the sandbox, for the MCP entry; null when the script did not say. */
+export const parseRailwayCli = (stdout: string): string | null => {
+  const path = stdout
+    .split("\n")
+    .find((line) => line.startsWith(RAILWAY_CLI_PREFIX))
+    ?.slice(RAILWAY_CLI_PREFIX.length)
+    .trim();
+  return path === undefined || !path.startsWith("/") ? null : path;
+};
+
+// Run before a template save, with the Claude scrub that drops RAILWAY_API_TOKEN: a login an agent
+// made with \`railway login\` lives here.
+export const RAILWAY_LOGIN_SCRUB = `rm -rf "$HOME/.railway"`;

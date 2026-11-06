@@ -89,6 +89,8 @@ export const SandboxHostMcpServer = Schema.Struct({
   host: Schema.optionalKey(TrimmedString),
   headerNames: Schema.Array(TrimmedString),
   copy: SandboxMcpCopyMode,
+  /** Who makes the key a `mint` server gets: a Railway server also needs the config's `railway`. */
+  mintedBy: Schema.optionalKey(Schema.Literals(["maple", "railway"])),
   reason: Schema.optionalKey(TrimmedString),
 });
 export type SandboxHostMcpServer = typeof SandboxHostMcpServer.Type;
@@ -143,6 +145,8 @@ export const SandboxHostAccess = Schema.Struct({
   northflank: Schema.optionalKey(Schema.Boolean),
   /** A Maple admin key is saved, so each sandbox gets a Maple key of its own. */
   maple: Schema.optionalKey(Schema.Boolean),
+  /** A Railway workspace token is saved, so each sandbox gets a Railway token of its own. */
+  railway: Schema.optionalKey(Schema.Boolean),
   /** What this machine has for an agent to work with: git identity, MCP servers, skills. */
   tooling: Schema.optionalKey(SandboxHostTooling),
   /** The hub's non-Claude models a sandbox's Pi would get, when Claude uses a hub that lists them. */
@@ -390,6 +394,13 @@ export const SandboxRecord = Schema.Struct({
   ),
   /** The Maple key made for this sandbox's MCP server, revoked when the sandbox is deleted. */
   mapleKey: Schema.optionalKey(Schema.Struct({ keyId: TrimmedString, apiBaseUrl: TrimmedString })),
+  /**
+   * The Railway workspace token made for this sandbox, found again by its unique `name` and
+   * revoked when the sandbox is deleted. The token itself is a server secret named by `secret`.
+   */
+  railwayToken: Schema.optionalKey(
+    Schema.Struct({ name: TrimmedString, workspaceId: TrimmedString, secret: TrimmedString }),
+  ),
   /** Where the thread's repository was cloned, so a delete can check it for unpushed work. */
   repoDir: Schema.optionalKey(TrimmedString),
   /**
@@ -794,6 +805,8 @@ export const SandboxEnvironmentConfig = Schema.Struct({
   skills: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   /** Signs the Northflank CLI in with the dedicated token saved for sandboxes. */
   northflank: Schema.optionalKey(Schema.Boolean),
+  /** Signs the Railway CLI in with a workspace token made for each sandbox and revoked with it. */
+  railway: Schema.optionalKey(Schema.Boolean),
   /**
    * Sets up Pi with the CLIProxyAPI hub's non-Claude models, on the key the sandbox gets for Claude.
    * With `startModel` (a hub model id), new chats on the config start on Pi with that model.
@@ -1106,8 +1119,8 @@ export type SandboxTailscaleCheckResult = typeof SandboxTailscaleCheckResult.Typ
 
 /**
  * What sandboxes get credentials from besides the provider key. Each secret stays on this server:
- * the GitHub App's key and the Maple admin key only mint per-sandbox credentials, and the
- * Northflank token is the one credential every sandbox shares.
+ * the GitHub App's key, the Maple admin key and the Railway token only mint per-sandbox
+ * credentials, and the Northflank token is the one credential every sandbox shares.
  */
 export const SandboxToolingSettings = Schema.Struct({
   githubAppId: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1125,6 +1138,13 @@ export const SandboxToolingSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("")),
     Schema.annotateKey({ settingsSecret: true }),
   ),
+  /** A Railway workspace (or account) token that mints a token per sandbox in `railwayWorkspaceId`. */
+  railwayToken: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+    Schema.annotateKey({ settingsSecret: true }),
+  ),
+  railwayWorkspaceId: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  railwayWorkspaceName: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
 });
 export type SandboxToolingSettings = typeof SandboxToolingSettings.Type;
 
@@ -1181,6 +1201,29 @@ export const SandboxConnectGithubAppResult = Schema.Struct({
 });
 export type SandboxConnectGithubAppResult = typeof SandboxConnectGithubAppResult.Type;
 
+/**
+ * A Railway token to save for sandboxes. Without `workspaceId` the server asks Railway which
+ * workspaces the token reaches and saves it when there is exactly one.
+ */
+export const SandboxConnectRailwayInput = Schema.Struct({
+  token: TrimmedNonEmptyString,
+  workspaceId: Schema.optional(TrimmedNonEmptyString),
+});
+export type SandboxConnectRailwayInput = typeof SandboxConnectRailwayInput.Type;
+
+export const SandboxRailwayWorkspace = Schema.Struct({ id: TrimmedString, name: TrimmedString });
+export type SandboxRailwayWorkspace = typeof SandboxRailwayWorkspace.Type;
+
+export const SandboxConnectRailwayResult = Schema.Struct({
+  /** The workspace the token was saved for; absent when nothing was saved. */
+  saved: Schema.optionalKey(SandboxRailwayWorkspace),
+  /** The workspaces to pick from when the token reaches more than one. */
+  workspaces: Schema.Array(SandboxRailwayWorkspace),
+  /** Why nothing was saved, for the user; null when it was. */
+  problem: Schema.NullOr(Schema.String),
+});
+export type SandboxConnectRailwayResult = typeof SandboxConnectRailwayResult.Type;
+
 export const SandboxServerSettingsFields = {
   // Sandbox provider API keys, only read by the server that provisions the sandbox.
   sandboxProviders: Schema.Record(Schema.String, SandboxSettings).pipe(
@@ -1210,6 +1253,9 @@ export const SandboxServerSettingsPatchFields = {
       githubAppPrivateKey: Schema.optionalKey(TrimmedString),
       northflankToken: Schema.optionalKey(TrimmedString),
       mapleAdminKey: Schema.optionalKey(TrimmedString),
+      railwayToken: Schema.optionalKey(TrimmedString),
+      railwayWorkspaceId: Schema.optionalKey(TrimmedString),
+      railwayWorkspaceName: Schema.optionalKey(TrimmedString),
     }),
   ),
 };
