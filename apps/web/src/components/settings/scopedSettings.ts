@@ -739,11 +739,9 @@ async function persistScopedSettingsPlan(
   persistClient: (patch: ClientSettingsPatch) => void,
 ) {
   if (plan.hasClientWrite) persistClient(plan.clientPatch);
-  const [results] = await Promise.all([
-    Promise.allSettled(plan.serverWrites.map(persistWrite)),
-    // A sandbox follows silently: its result never reaches the toast.
-    Promise.allSettled(plan.followerWrites.map(persistWrite)),
-  ]);
+  // A sandbox follows silently: the save never waits for it, and its result never reaches the toast.
+  void Promise.allSettled(plan.followerWrites.map(persistWrite));
+  const results = await Promise.allSettled(plan.serverWrites.map(persistWrite));
   // A queued write is replanned before it is sent, so judge the write that was sent.
   const writes = results.map((result, index) =>
     result.status === "fulfilled" ? result.value.write : plan.serverWrites[index]!,

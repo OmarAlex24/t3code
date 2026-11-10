@@ -44,6 +44,8 @@ const projects = [
   project(cloneId, sandboxId, "/home/user/work/zumith-v2"),
 ];
 
+const sandboxList = vi.hoisted(() => ({ known: true }));
+
 vi.mock(import("~/state/environments"), async (original) => ({
   ...(await original()),
   useEnvironments: (() => ({ environments })) as never,
@@ -56,7 +58,7 @@ vi.mock(import("~/state/sandboxes"), async (original) => ({
     hostEnvironmentId: hostId,
     followers: [{ environmentId: sandboxId, hostProjectId, projectId: cloneId }],
     environmentIds: new Set([sandboxId]),
-    known: true,
+    known: sandboxList.known,
   }),
   useSandboxEnvironmentIds: () => new Set([sandboxId]),
 }));
@@ -91,6 +93,7 @@ describe("settings scope with a sandbox", () => {
     page.getByRole("button", { name: `Environment scope: ${label}` });
 
   it("offers the host and other machines, never the host's sandbox", async () => {
+    sandboxList.known = true;
     await using _screen = await mount({});
 
     await userEvent.click(environmentMenu("All environments"));
@@ -107,7 +110,20 @@ describe("settings scope with a sandbox", () => {
     await expect.element(page.getByText("/home/user/work/zumith-v2")).not.toBeInTheDocument();
   });
 
+  it("offers only the host until the host lists its sandboxes", async () => {
+    sandboxList.known = false;
+    await using _screen = await mount({});
+
+    await userEvent.click(environmentMenu("All environments"));
+    await expect
+      .element(page.getByRole("menuitemradio", { name: /^T3 Code Custom/ }))
+      .toBeVisible();
+    await expect.element(page.getByText("t3-machine")).not.toBeInTheDocument();
+    await expect.element(page.getByText("zumith-v2 on Boat sandbox")).not.toBeInTheDocument();
+  });
+
   it("opens a link to the sandbox on its host", async () => {
+    sandboxList.known = true;
     await using _screen = await mount({ machine: sandboxId });
     await expect.element(environmentMenu("T3 Code Custom")).toBeVisible();
 
