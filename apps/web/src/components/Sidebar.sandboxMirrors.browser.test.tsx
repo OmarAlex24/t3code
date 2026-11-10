@@ -327,6 +327,13 @@ describe("sandbox chats in the sidebar", () => {
       .toBeInTheDocument();
     // Muted until hovered, like a row that is still setting up.
     expect(frozen.querySelector("[data-sidebar-row]")?.className).toContain("opacity-70");
+    // Said in the status slot, where its last activity time would be.
+    const stoppedStatus = page.elementLocator(frozen).getByText("Stopped", { exact: true }).first();
+    await expect.element(stoppedStatus).toBeVisible();
+    expect(
+      stoppedStatus.element().closest("span")?.querySelector("svg.lucide-pause"),
+    ).not.toBeNull();
+    expect(frozen.textContent).not.toContain("9d");
 
     // The host thread the bridge drives is local, but it shows its sandbox's start.
     const waking = await rowOf("Add retries to the importer");
@@ -345,8 +352,10 @@ describe("sandbox chats in the sidebar", () => {
     await page.screenshot({ path: "__screenshots__/sandbox-state-rows-zoomed.png" });
     document.documentElement.style.zoom = "";
     await userEvent.hover(page.elementLocator(frozen.querySelector("[data-sidebar-row]")!));
-    const hint = page.getByText("Sandbox stopped · send a message to resume it");
+    const hint = page.getByText("send a message to resume it", { exact: true });
     await expect.element(hint).toBeVisible();
+    const hintLine = hint.element().parentElement!;
+    expect(hintLine.textContent).toBe("Sandbox stopped · send a message to resume it");
     // Past the hover card's fade-in, so the screenshot shows it as read.
     await expect
       .poll(() => {
@@ -357,6 +366,9 @@ describe("sandbox chats in the sidebar", () => {
         return opacity;
       })
       .toBe(1);
+    // On one line: the card makes room rather than splitting the hint.
+    expect(hintLine.getClientRects().length).toBe(1);
+    expect(hintLine.getBoundingClientRect().height).toBeLessThan(20);
     await page.screenshot({ path: "__screenshots__/sandbox-state-stopped-hover.png" });
   });
 
