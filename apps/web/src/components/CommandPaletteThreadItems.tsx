@@ -30,8 +30,8 @@ import {
   usePrimaryEnvironmentId,
 } from "../state/environments";
 import { useThreadSearch } from "../state/queries";
-import { useSandboxHostMirrors, useSandboxRowStates } from "../state/sandboxes";
-import { sandboxMirrorTarget } from "../state/sandboxThreads";
+import { useSandboxChatAliases, useSandboxRowStates } from "../state/sandboxes";
+import { sandboxChatAliasTarget } from "../state/sandboxThreads";
 import { primaryServerProvidersAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -101,13 +101,15 @@ export function useCommandPaletteThreadItems(input: {
 }) {
   const { activeThread, threadSearchQuery } = input;
   const navigate = useNavigate();
-  // A host mirror of a sandbox thread is found as the sandbox's own thread.
-  const sandboxHostMirrors = useSandboxHostMirrors();
+  // A sandbox chat is found as the one of its two threads the sidebar lists.
+  const sandboxChatAliases = useSandboxChatAliases();
   const sandboxRowState = useSandboxRowStates();
   const threads = useVisibleThreadShells().filter(
     (thread) =>
-      sandboxMirrorTarget(sandboxHostMirrors, scopeThreadRef(thread.environmentId, thread.id)) ===
-      undefined,
+      sandboxChatAliasTarget(
+        sandboxChatAliases,
+        scopeThreadRef(thread.environmentId, thread.id),
+      ) === undefined,
   );
   const { projectEnvironmentLocationById } = useEnvironmentLookups();
   const providerEntryByEnvironmentAndInstanceId = useProviderEntryByEnvironmentAndInstanceId();

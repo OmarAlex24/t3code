@@ -128,10 +128,10 @@ const listed = (threads: ReadonlyArray<ThreadEntry>, ref: ScopedThreadRef) =>
   );
 
 /**
- * The host's mirrors of sandbox threads, by the mirror's thread key, each with the sandbox's own
- * thread. The bridge drives a mirror with the sandbox thread's id so the phone can follow it; this
- * app shows the sandbox's thread instead, the one with the real model, files and terminal. Without
- * that thread listed here (a sandbox gone or not connected), the mirror is the conversation.
+ * The host's mirrors of sandbox threads that are both listed, by the mirror's thread key, each with
+ * the sandbox's own thread. The bridge drives a mirror with the sandbox thread's id so the phone can
+ * follow it, and the mirror takes the sandbox thread's title; `sandboxChatAliases` says which of the
+ * two this app shows.
  */
 export const sandboxHostMirrors = (
   sandboxes: ReadonlyArray<SandboxRecord>,
@@ -139,39 +139,93 @@ export const sandboxHostMirrors = (
   provisionerEnvironmentId: EnvironmentId | null,
 ): ReadonlyMap<string, ScopedThreadRef> => {
   const mirrors = new Map<string, ScopedThreadRef>();
-  if (provisionerEnvironmentId === null) return mirrors;
-  for (const sandbox of sandboxes) {
-    if (
-      sandbox.environmentId === null ||
-      sandbox.environmentId === provisionerEnvironmentId ||
-      sandbox.threadId === undefined ||
-      sandbox.hostProjectId === undefined ||
-      sandbox.state === "deleted"
-    ) {
-      continue;
+  for (const { real, mirror } of bridgedSandboxChats(sandboxes, provisionerEnvironmentId)) {
+    if (listed(threads, real) && listed(threads, mirror)) {
+      mirrors.set(threadKey(mirror), real);
     }
-    const real = { environmentId: sandbox.environmentId, threadId: sandbox.threadId };
-    const mirror = { environmentId: provisionerEnvironmentId, threadId: sandbox.threadId };
-    if (listed(threads, real) && listed(threads, mirror)) mirrors.set(threadKey(mirror), real);
   }
   return mirrors;
 };
 
-/** The sandbox thread a host mirror stands for; undefined for any other thread. */
-export const sandboxMirrorTarget = (
-  mirrors: ReadonlyMap<string, ScopedThreadRef>,
+/**
+ * Whether a sandbox chat shows the sandbox's own thread, with its real model, files and terminal:
+ * only while the sandbox is up, not resuming, and its server is connected. Otherwise the host's
+ * mirror stands for it: the host keeps that thread live with the whole conversation, and a message
+ * sent there waits on the host while the sandbox resumes, whatever this app does meanwhile.
+ */
+const showsSandboxOwnThread = (
+  sandbox: SandboxRecord,
+  isConnected: (environmentId: EnvironmentId) => boolean,
+) =>
+  (sandbox.state === "running" || sandbox.state === "provisioning") &&
+  sandbox.resumingSince === undefined &&
+  sandbox.environmentId !== null &&
+  isConnected(sandbox.environmentId);
+
+/**
+ * The thread of each sandbox chat that lists leave out, by key, with the one that stands for it, as
+ * `showsSandboxOwnThread` picks. Lists, the sidebar's selection and the chat view all read this, so
+ * a chat has one row and one view. A chat with no mirror listed keeps its sandbox's thread.
+ */
+export const sandboxChatAliases = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  threads: ReadonlyArray<ThreadEntry>,
+  provisionerEnvironmentId: EnvironmentId | null,
+  isConnected: (environmentId: EnvironmentId) => boolean,
+): ReadonlyMap<string, ScopedThreadRef> => {
+  const aliases = new Map<string, ScopedThreadRef>();
+  for (const { sandbox, real, mirror } of bridgedSandboxChats(
+    sandboxes,
+    provisionerEnvironmentId,
+  )) {
+    if (!listed(threads, mirror)) continue;
+    if (!showsSandboxOwnThread(sandbox, isConnected)) {
+      aliases.set(threadKey(real), mirror);
+    } else if (listed(threads, real)) {
+      aliases.set(threadKey(mirror), real);
+    }
+  }
+  return aliases;
+};
+
+/** The two threads of each sandbox chat the host could mirror. */
+const bridgedSandboxChats = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  provisionerEnvironmentId: EnvironmentId | null,
+) =>
+  provisionerEnvironmentId === null
+    ? []
+    : sandboxes.flatMap((sandbox) =>
+        sandbox.environmentId === null ||
+        sandbox.environmentId === provisionerEnvironmentId ||
+        sandbox.threadId === undefined ||
+        sandbox.hostProjectId === undefined ||
+        sandbox.state === "deleted"
+          ? []
+          : [
+              {
+                sandbox,
+                real: { environmentId: sandbox.environmentId, threadId: sandbox.threadId },
+                mirror: { environmentId: provisionerEnvironmentId, threadId: sandbox.threadId },
+              },
+            ],
+      );
+
+/** The thread a sandbox chat's other thread stands for; undefined for any other thread. */
+export const sandboxChatAliasTarget = (
+  aliases: ReadonlyMap<string, ScopedThreadRef>,
   threadRef: ScopedThreadRef,
-): ScopedThreadRef | undefined => mirrors.get(threadKey(threadRef));
+): ScopedThreadRef | undefined => aliases.get(threadKey(threadRef));
 
 /**
  * The thread keys lists leave out because another row stands for them: tasks shown under their
- * parent (`delegatedUnderParent`), and host mirrors, shown as their sandbox thread.
+ * parent (`delegatedUnderParent`), and the thread of a sandbox chat its other thread stands for.
  */
 export const withSandboxHostMirrors = (
   delegatedUnderParent: ReadonlySet<string>,
-  mirrors: ReadonlyMap<string, ScopedThreadRef>,
+  aliases: ReadonlyMap<string, ScopedThreadRef>,
 ): ReadonlySet<string> =>
-  mirrors.size === 0 ? delegatedUnderParent : new Set([...delegatedUnderParent, ...mirrors.keys()]);
+  aliases.size === 0 ? delegatedUnderParent : new Set([...delegatedUnderParent, ...aliases.keys()]);
 
 /**
  * The mirrors whose title differs from their sandbox thread's, with the title to give them, so the

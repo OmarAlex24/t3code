@@ -29,6 +29,7 @@ import {
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_MODEL,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
+  SANDBOX_RESUME_WAIT_SECONDS,
   type ServerProvider,
   ThreadId,
   type UploadChatAttachment,
@@ -104,7 +105,10 @@ export interface SandboxBridgePorts {
   readonly connect: (
     link: SandboxBridgeLink,
   ) => Effect.Effect<SandboxSession, SandboxBridgeError, Scope.Scope>;
-  /** How long a turn waits for an unreachable sandbox, such as one the host is resuming. */
+  /**
+   * How long a turn waits for an unreachable sandbox, such as one the host is resuming. By default
+   * as long as the host's slowest resume, so a message sent to a stopped sandbox goes out once it is up.
+   */
   readonly reconnectWindow?: Duration.Input;
   readonly reconnectSpacing?: Duration.Input;
 }
@@ -125,7 +129,7 @@ export const SANDBOX_GONE_MESSAGE =
 export const unreachableMessage = (link: SandboxBridgeLink) =>
   `Sandbox ${link.sandboxId || link.label} is stopped or not answering. Resume it from T3 Code on your computer, then send again.`;
 export const waitingThought = (link: SandboxBridgeLink) =>
-  `Resuming sandbox ${link.sandboxId || link.label}…`;
+  `Starting sandbox ${link.sandboxId || link.label}…`;
 export const skippedAttachmentsMessage = (names: ReadonlyArray<string>) =>
   `${names.map((name) => `"${name}"`).join(", ")} ${names.length === 1 ? "wasn't" : "weren't"} sent to the sandbox. Only images can be sent from here; attach other files from T3 Code on your computer.`;
 
@@ -1164,7 +1168,9 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     Scope.Scope
   > {
     const window = Duration.toMillis(
-      Duration.fromInputUnsafe(ports.reconnectWindow ?? "4 minutes"),
+      Duration.fromInputUnsafe(
+        ports.reconnectWindow ?? Duration.seconds(SANDBOX_RESUME_WAIT_SECONDS),
+      ),
     );
     const spacing = ports.reconnectSpacing ?? "5 seconds";
     let waited = 0;
