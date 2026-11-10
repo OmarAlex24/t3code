@@ -383,11 +383,17 @@ without pairing with the sandbox.
   on a sandbox this client is paired with, while no launch runs, links and sends on that sandbox
   (a remount or a reload), and a send for a thread whose sandbox is stopped or unreachable waits
   with a toast instead of launching.
-- **One thread on the computer.** A client paired with the sandbox shows only the sandbox's own
-  thread. The host thread is its mirror for the phone: `sandboxHostMirrors` lists the host threads
-  whose sandbox thread this client also has, the sidebar and command palette leave them out, and
-  opening one moves to the sandbox's thread. The mirror takes the sandbox thread's title. Each
-  message the composer sends on a linked sandbox thread is copied to the mirror with the same
+- **One thread on the computer.** A sandbox chat the host mirrors lists as one of its two threads.
+  `sandboxChatAliases` (in `state/sandboxThreads.ts`) shows the sandbox's own thread only while
+  `showsSandboxOwnThread`: the sandbox is running, not resuming, and its environment is connected.
+  Otherwise the host's mirror stands for it, since the host keeps it live and a send there waits on
+  the host while the sandbox resumes. The sidebar, the command palette and `ChatView`'s redirect
+  all read that one map, so the chat never has two rows. The redirect carries an unsent draft
+  across (`moveComposerPromptAndImages`) and waits while the user is scrolled back with an empty
+  composer. A chat with no mirror listed keeps its sandbox's thread and the client-side resume
+  path (`sandboxResendPending`). `sandboxHostMirrors` pairs the two threads when both are listed,
+  and the mirror takes the sandbox thread's title. Each
+  message the composer sends on a linked sandbox thread (not on the mirror) is copied to the mirror with the same
   message id and `dispatchMode: "queue"`
   ([`useSandboxMirrorSend.ts`](../../apps/web/src/components/chat/useSandboxMirrorSend.ts)), after
   setting the mirror's modes to the thread's, creating the mirror on the first message. Its bridge
@@ -402,8 +408,10 @@ without pairing with the sandbox.
 - **Placeholder projects.** A project whose root `isSandboxHostProjectRoot` matches gets no git
   status, scripts, open-in, files or terminal in the web app.
 - **Stopped sandbox.** A run starting on a `sandboxes` thread whose sandbox is stopped makes the
-  host resume it. Meanwhile the bridge retries for about four minutes, showing "Resuming sandbox
-  bx_…", then says the sandbox is not answering.
+  host resume it. Meanwhile the bridge retries for `SANDBOX_RESUME_WAIT_SECONDS` (15 minutes:
+  every step of a resume at its limit, `SANDBOX_RESUME_STEP_SECONDS`, plus a minute), showing
+  "Starting sandbox bx_…", then says the sandbox is not answering. Messages sent meanwhile queue
+  behind that run on the host, so they go out after it whether or not a client stays open.
 
 ## Lifecycle and hard limits
 
@@ -472,8 +480,9 @@ resume-on-send, and thread delete start in the client. `SandboxThreadCoordinator
 the root) registers handlers in `state/sandboxThreads.ts`. `useThreadActions.settleThread` calls
 `notifySandboxThreadSettled`, which applies the config's `onSettle` (`ask` when unset). Settles the
 sandbox's server makes on its own are not hooked, since this host is not told about them.
-`unsettleThread` and the composer's send on a stopped sandbox call `ensureSandboxThreadRunning`:
-resume, then wait for the environment to connect (4 minutes at most), then send.
+`unsettleThread` and the composer's send on a stopped sandbox with no host mirror call
+`ensureSandboxThreadRunning`: resume, then wait for the environment to connect (4 minutes at
+most), then send. A chat the host mirrors sends on the mirror instead (see above).
 
 Thread delete runs `deleteSandboxThread`. After the user confirms, it deletes the thread while the
 sandbox's server still answers, then deletes the sandbox and forgets its environment. Every delete

@@ -131,7 +131,11 @@ thread's header, opens the same thread on the sandbox.
 
 - Keep the thread **Supervised**. In another mode the sandbox's approvals cannot reach you: the
   request waits on the sandbox and the thread says so.
-- A stopped sandbox is resumed when you send; the first answer can take a few minutes.
+- While the sandbox is stopped or starting, this computer shows the chat as its thread under
+  **Sandboxes**. A message sent then waits there, marked "Starting sandbox", resumes the sandbox,
+  and goes out once it is up, even if you switch chats or close the app. Messages after it queue
+  behind it. Once the sandbox is running and connected, the chat shows the sandbox's own thread
+  again.
 - Attachments and images are not forwarded yet.
 - The thread under **Sandboxes** shows only what was sent through it; messages sent to the sandbox
   directly appear on the sandbox's own thread.

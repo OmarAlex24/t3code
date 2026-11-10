@@ -3,6 +3,7 @@ import {
   type ModelSelection,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
+  SANDBOX_RESUME_STEP_SECONDS,
   type OrchestrationV2Command,
   type OrchestrationV2ThreadLaunchInput,
   type OrchestrationV2ThreadProjection,
@@ -15,6 +16,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type * as Cause from "effect/Cause";
 import type * as Scope from "effect/Scope";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -25,6 +27,7 @@ import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as AcpAgent from "effect-acp/agent";
 import * as AcpClient from "effect-acp/client";
 import type * as AcpSchema from "effect-acp/compat";
@@ -301,6 +304,8 @@ const withBridge = <A, E>(
     readonly runtimeMode?: RuntimeMode;
     readonly hostModel?: ModelSelection;
     readonly connect?: SandboxBridgePorts["connect"];
+    /** Null waits as long as the bridge does by default, spaced as it does by default. */
+    readonly reconnectWindow?: null;
     readonly permission?: (
       request: AcpSchema.RequestPermissionRequest,
     ) => AcpSchema.RequestPermissionResponse;
@@ -328,8 +333,9 @@ const withBridge = <A, E>(
           options.fake === undefined
             ? Effect.fail(new SandboxBridgeError({ message: "no sandbox" }))
             : Effect.succeed(options.fake.session)),
-      reconnectWindow: "40 millis",
-      reconnectSpacing: "10 millis",
+      ...(options.reconnectWindow === null
+        ? {}
+        : { reconnectWindow: "40 millis", reconnectSpacing: "10 millis" }),
     };
     yield* runSandboxBridge(ports).pipe(
       Effect.provide(Layer.mergeAll(AcpAgent.layer(pipes.agent), SecureRandom.layerWebCrypto)),
@@ -1088,6 +1094,59 @@ describe("forwarding a turn", () => {
     }),
   );
 
+  it.effect("waits out a slow resume and then sends the message it was given", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeSandbox({ react: answerWith("Back up") });
+      // A machine start and T3's start at their limits: past the four minutes the bridge waited.
+      const upAt =
+        (SANDBOX_RESUME_STEP_SECONDS.machineStart + SANDBOX_RESUME_STEP_SECONDS.t3Start) * 1000 +
+        30_000;
+      const startedAt = yield* Clock.currentTimeMillis;
+      // Set once the session is open, so only the turn's own attempts count.
+      let turnRefused: Deferred.Deferred<void> | undefined;
+      yield* withBridge(
+        {
+          fake,
+          reconnectWindow: null,
+          connect: () =>
+            Clock.currentTimeMillis.pipe(
+              Effect.flatMap((now) =>
+                now - startedAt < upAt
+                  ? Effect.suspend(() =>
+                      turnRefused === undefined
+                        ? Effect.void
+                        : Deferred.succeed(turnRefused, undefined),
+                    ).pipe(
+                      Effect.andThen(
+                        Effect.fail(new SandboxBridgeError({ message: "connection refused" })),
+                      ),
+                    )
+                  : Effect.succeed(fake.session),
+              ),
+            ),
+        },
+        ({ acp, updates }) =>
+          Effect.gen(function* () {
+            const session = yield* openThread(acp);
+            const refused = yield* Deferred.make<void>();
+            turnRefused = refused;
+            const prompt = yield* say(acp, session.sessionId, "Pick this up").pipe(
+              Effect.forkScoped,
+            );
+            yield* Deferred.await(refused);
+            yield* TestClock.adjust(upAt + 10_000);
+            const result = yield* Fiber.join(prompt);
+            assert.strictEqual(result.stopReason, "end_turn");
+            assert.deepStrictEqual(messages(updates, "agent_thought_chunk"), [
+              "Starting sandbox bx_123…",
+            ]);
+            assert.strictEqual(messages(updates).join(""), "Back up");
+            assert.strictEqual(fake.launches[0]?.initialMessage?.text, "Pick this up");
+          }),
+      );
+    }),
+  );
+
   it.live("waits for a sandbox that is resuming, then reports it unreachable", () =>
     withBridge(
       { connect: () => Effect.fail(new SandboxBridgeError({ message: "connection refused" })) },
@@ -1097,7 +1156,7 @@ describe("forwarding a turn", () => {
           const result = yield* say(acp, session.sessionId, "Hello?");
           assert.strictEqual(result.stopReason, "end_turn");
           assert.deepStrictEqual(messages(updates, "agent_thought_chunk"), [
-            "Resuming sandbox bx_123…",
+            "Starting sandbox bx_123…",
           ]);
           assert.match(messages(updates).join(""), /bx_123 is stopped or not answering/u);
           assert.notMatch(messages(updates).join(""), /\bMac\b/u);

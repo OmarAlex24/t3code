@@ -8,7 +8,7 @@ import {
   buildSidebarProjectSnapshots,
   isSandboxPlaceholderProject,
 } from "../sidebarProjectGrouping";
-import { useSandboxHostMirrors } from "../state/sandboxes";
+import { useSandboxChatAliases } from "../state/sandboxes";
 import { withSandboxHostMirrors } from "../state/sandboxThreads";
 import { useEnvironmentIdentities, usePrimaryEnvironmentId } from "../state/environments";
 import { useDelegatedUnderParent, useProjects, useQuietThreadShells } from "../state/entities";
@@ -41,9 +41,9 @@ export function useSidebarProjectGroups() {
   const labels = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
   );
-  // Mirrors of sandbox threads list nowhere; a placeholder still holding another thread, such as a
-  // mirror whose sandbox isn't connected, stays so that thread keeps a row.
-  const unlisted = withSandboxHostMirrors(delegatedUnderParent, useSandboxHostMirrors());
+  // A sandbox chat lists one of its two threads; a placeholder still holding another thread, such
+  // as the mirror standing for a stopped sandbox, stays so that thread keeps a row.
+  const unlisted = withSandboxHostMirrors(delegatedUnderParent, useSandboxChatAliases());
   const placeholders = new Set(
     projects.filter(isSandboxPlaceholderProject).map((project) => projectKeyOf(project)),
   );
