@@ -4103,16 +4103,15 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
    */
   const guardAutoStop = Effect.fn("SandboxProvisioner.guardAutoStop")(function* (
     record: SandboxRecord,
+    driver: SandboxProviderDriver,
     config: SandboxProviderConfig,
     keepAlive: SandboxKeepAlive,
     autoStopAt: string | null,
     now: DateTime.Utc,
   ) {
-    const ttlMinutes = keepAliveTtlMinutes(
-      record.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES,
-      undefined,
-    );
-    const latest = DateTime.toEpochMillis(now) + (ttlMinutes + AUTO_STOP_SLACK_MINUTES) * 60_000;
+    const idleMinutes = record.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES;
+    const windowMinutes = keepAliveTtlMinutes(idleMinutes, undefined);
+    const latest = DateTime.toEpochMillis(now) + (windowMinutes + AUTO_STOP_SLACK_MINUTES) * 60_000;
     const at = autoStopAt === null ? Number.NaN : Date.parse(autoStopAt);
     if (autoStopAt !== null && (Number.isNaN(at) || at <= latest)) return;
     yield* Effect.logWarning("sandbox auto-stop moved past its idle window; resetting it", {
@@ -4120,6 +4119,13 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       sandboxId: record.sandboxId,
       autoStopAt,
     });
+    // The plan's maximum caps it as on create and resume; a trial refuses a longer TTL outright.
+    // Only read here, so a sweep with nothing to reset makes no extra call.
+    const limits =
+      driver.limits === undefined
+        ? null
+        : yield* onHttp(driver.limits({ config })).pipe(Effect.orElseSucceed(() => null));
+    const ttlMinutes = keepAliveTtlMinutes(idleMinutes, limits?.maxTtlMinutes);
     yield* onHttp(keepAlive.extend({ config, sandboxId: record.sandboxId, ttlMinutes })).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("sandbox auto-stop reset failed", {
@@ -4189,7 +4195,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       state === "running" &&
       reported?.autoStopAt !== undefined
     ) {
-      yield* guardAutoStop(record, config, keepAlive, reported.autoStopAt, now);
+      yield* guardAutoStop(record, driver, config, keepAlive, reported.autoStopAt, now);
     }
     // An abandoned launch's machine that is gone leaves only its keys, which go with the record.
     if (state === "deleted" && record.abandonedAt !== undefined) {

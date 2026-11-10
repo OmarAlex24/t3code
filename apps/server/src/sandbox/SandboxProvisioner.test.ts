@@ -3172,6 +3172,59 @@ describe("SandboxProvisioner lifecycle", () => {
     });
   });
 
+  it.effect("caps a reset auto-stop at the plan's longest TTL", () => {
+    // A trial allows 120 minutes, so a 180-minute idle window would be refused as it is.
+    const record: SandboxRecord = {
+      instanceId: "bx_trial",
+      environmentId: testEnvironmentId,
+      provider: "boat",
+      sandboxId: "bx_trial",
+      label: "Trial sandbox",
+      size: "small",
+      state: "running",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      updatedAt: "1970-01-01T00:00:00.000Z",
+      httpBaseUrl: "https://boat.example/t3",
+      runningSince: "1970-01-01T00:00:00.000Z",
+      maxRunningMinutes: 480,
+      idleMinutes: 180,
+      keepAliveKey: {
+        name: "t3-keepalive-trial",
+        id: "apk_trial",
+        expiresAt: "1970-01-31T00:00:00.000Z",
+      },
+    };
+    const repository = memoryRepository([record]);
+    const patches: Array<unknown> = [];
+    const client = HttpClient.make((request) => {
+      const reply = (body: unknown) =>
+        Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(body)));
+      if (request.url.endsWith("/limits")) return reply(trialLimits);
+      if (request.method === "PATCH") {
+        patches.push(JSON.parse(bodyTextOf(request)));
+        return reply({ ok: true });
+      }
+      return reply({
+        sandbox: { id: "bx_trial", state: "ready", archiveAfter: null, ttlSeconds: null },
+      });
+    });
+    return Effect.gen(function* () {
+      yield* SandboxProvisioner.SandboxProvisioner.pipe(
+        Effect.flatMap((provisioner) => provisioner.sweep),
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+
+      expect(patches).toEqual([{ ttlSeconds: 120 * 60 }]);
+      expect(repository.records.get("bx_trial")?.state).toBe("running");
+    });
+  });
+
   it.effect("puts back an auto-stop a sandbox's own key turned off or moved far out", () => {
     const base: SandboxRecord = {
       instanceId: "bx_off",
