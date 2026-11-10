@@ -4,7 +4,6 @@ import {
   type ProjectId,
   ProviderInstanceId,
   SANDBOX_BRIDGE_INSTANCE_ID,
-  type SandboxProviderKind,
   type SandboxRecord,
   type ScopedThreadRef,
   type ServerSettings,
@@ -22,6 +21,8 @@ import {
   isSandboxlessBridgeThread,
   providerInstanceReady,
   sandboxHostMirrors,
+  sandboxRowStates,
+  type SandboxRowState,
 } from "./sandboxThreads";
 import { serverEnvironment } from "./server";
 
@@ -136,21 +137,13 @@ export function useSandboxFollowers(): SandboxFollowers {
 }
 
 /**
- * The provider of each live sandbox, by its environment, so a list of threads can draw a sandbox
- * thread's machine as its provider's mark with one lookup per row.
+ * Each thread row's sandbox (its provider, state and any resume under way), computed once per list
+ * so a row reads it with one lookup; see `sandboxRowStates`.
  */
-export function useSandboxProviderByEnvironmentId(): ReadonlyMap<
-  EnvironmentId,
-  SandboxProviderKind
-> {
+export function useSandboxRowStates(): (threadRef: ScopedThreadRef) => SandboxRowState | null {
+  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const sandboxes = useSandboxRecords();
-  return new Map(
-    sandboxes.flatMap((sandbox) =>
-      sandbox.environmentId === null || sandbox.state === "deleted"
-        ? []
-        : [[sandbox.environmentId, sandbox.provider] as const],
-    ),
-  );
+  return sandboxRowStates(sandboxes, provisionerEnvironmentId);
 }
 
 /**

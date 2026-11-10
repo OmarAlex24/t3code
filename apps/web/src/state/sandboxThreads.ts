@@ -5,7 +5,9 @@ import {
   type ProjectId,
   ProviderInstanceId,
   SANDBOX_BRIDGE_INSTANCE_ID,
+  type SandboxLifecycleState,
   type SandboxProviderInfo,
+  type SandboxProviderKind,
   type SandboxRecord,
   type ScopedThreadRef,
   type ServerProvider,
@@ -37,6 +39,66 @@ export const findThreadSandbox = (
           sandbox.state !== "deleted",
       )
     : undefined);
+
+/** What a thread row shows of the sandbox it runs on. */
+export interface SandboxRowState {
+  readonly provider: SandboxProviderKind;
+  readonly state: SandboxLifecycleState;
+  /** When a resume began, while one runs. */
+  readonly resumingSince: string | null;
+}
+
+/** What a stopped sandbox's thread says on hover; sending is what resumes it. */
+export const SANDBOX_STOPPED_HINT = "Sandbox stopped · send a message to resume it";
+
+/** How a sandbox thread's row marks its machine: starting, stopped, or as it usually looks. */
+export type SandboxRowPhase = "starting" | "stopped" | null;
+
+export const sandboxRowPhase = (row: SandboxRowState | null): SandboxRowPhase =>
+  row === null
+    ? null
+    : row.resumingSince !== null
+      ? "starting"
+      : row.state === "stopped"
+        ? "stopped"
+        : null;
+
+/**
+ * Each row's sandbox, looked up once per list: any thread on a sandbox's own environment, and the
+ * host thread the bridge drives for it, as `findThreadSandbox` finds them. Null for other threads.
+ */
+export const sandboxRowStates = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  provisionerEnvironmentId: EnvironmentId | null,
+): ((threadRef: ScopedThreadRef) => SandboxRowState | null) => {
+  const byEnvironment = new Map<EnvironmentId, SandboxRowState>();
+  const byHostThread = new Map<ThreadId, SandboxRowState>();
+  for (const sandbox of sandboxes) {
+    if (sandbox.state === "deleted") continue;
+    const row: SandboxRowState = {
+      provider: sandbox.provider,
+      state: sandbox.state,
+      resumingSince: sandbox.resumingSince ?? null,
+    };
+    // One that answers as the host would claim every host thread.
+    if (sandbox.environmentId !== null && sandbox.environmentId !== provisionerEnvironmentId) {
+      byEnvironment.set(sandbox.environmentId, row);
+    }
+    if (
+      sandbox.threadId !== undefined &&
+      sandbox.hostProjectId !== undefined &&
+      sandbox.state !== "provisioning"
+    ) {
+      byHostThread.set(sandbox.threadId, row);
+    }
+  }
+  return (threadRef) =>
+    byEnvironment.get(threadRef.environmentId) ??
+    (threadRef.environmentId === provisionerEnvironmentId
+      ? byHostThread.get(threadRef.threadId)
+      : undefined) ??
+    null;
+};
 
 /** Whether the ref is the host thread the bridge drives rather than the sandbox's own thread. */
 export const isHostThreadRef = (sandbox: SandboxRecord, threadRef: ScopedThreadRef) =>
