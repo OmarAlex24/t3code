@@ -83,6 +83,7 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import { HttpClient, HttpClientRequest } from "effect/http";
 
 import { forkParked } from "../serverActivation.ts";
@@ -572,6 +573,11 @@ export class SandboxProvisioner extends Context.Service<
      * replacing an abandoned one. The bridge keeps the chat of a linked one.
      */
     readonly removed: Stream.Stream<SandboxRecord>;
+    /**
+     * A revision that moves when records change with no client action: a resume starting or
+     * ending, or the sweep seeing a provider stop. Clients refetch the list on each.
+     */
+    readonly listChanges: Stream.Stream<number>;
     readonly environments: (
       input: SandboxCredentialEnvironmentsInput,
     ) => Effect.Effect<SandboxCredentialEnvironmentsResult, SandboxProviderError>;
@@ -3388,6 +3394,11 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
 
   const orphans = yield* Ref.make<ReadonlyArray<SandboxOrphan>>([]);
   const removedRecords = yield* PubSub.unbounded<SandboxRecord>();
+  const listRevision = yield* SubscriptionRef.make(0);
+  const listChanged = SubscriptionRef.update(listRevision, (revision) => revision + 1);
+  // The resumes this process runs, by instance, with when each began. A `resumingSince` on a
+  // record not in here was left by a server that stopped mid-resume.
+  const resumingNow = new Map<string, string>();
 
   // Revokes the agent's key first, so no fork starts while the rest goes. Forks are deleted only
   // when the user deletes their sandbox; the environment goes only once nothing is left in it,
@@ -3602,6 +3613,8 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       updatedAt: now,
     };
     yield* records.put(updated).pipe(Effect.orDie);
+    // Other clients and windows show the thread as stopped without waiting on their refresh.
+    yield* listChanged;
     return { sandbox: updated } satisfies SandboxStopResult;
   });
 
@@ -3741,9 +3754,51 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     return { keepAliveKey: undefined, warning: keepAliveFailed(record.maxRunningMinutes) };
   });
 
+  const markResuming = Effect.fn("SandboxProvisioner.markResuming")(function* (
+    instanceId: string,
+    since: string,
+  ) {
+    resumingNow.set(instanceId, since);
+    const stored = yield* records.get(instanceId);
+    if (Option.isSome(stored)) {
+      yield* records.put({ ...stored.value, resumingSince: since, updatedAt: since });
+    }
+    yield* listChanged;
+  }, Effect.orDie);
+
+  // A resume writes its record without the mark when it gets that far; this covers the rest.
+  const endResuming = Effect.fn("SandboxProvisioner.endResuming")(function* (
+    instanceId: string,
+    since: string,
+  ) {
+    if (resumingNow.get(instanceId) === since) resumingNow.delete(instanceId);
+    const stored = yield* records.get(instanceId);
+    if (Option.isSome(stored) && stored.value.resumingSince === since) {
+      const { resumingSince: _resumingSince, ...rest } = stored.value;
+      yield* records.put(rest);
+    }
+    yield* listChanged;
+  }, Effect.orDie);
+
   const resume = Effect.fn("SandboxProvisioner.resume")(function* (input: SandboxLifecycleInput) {
     const record = yield* readRecord(input.instanceId);
     const driver = findDriver(record.provider);
+    const since = yield* nowIso;
+    // One that cannot resume fails at once, with nothing to show as starting.
+    if (record.state === "expired" || record.state === "deleted" || driver.resume === undefined) {
+      return yield* resumeMarked(record, driver, since);
+    }
+    yield* markResuming(record.instanceId, since);
+    return yield* resumeMarked(record, driver, since).pipe(
+      Effect.ensuring(endResuming(record.instanceId, since)),
+    );
+  });
+
+  const resumeMarked = Effect.fn("SandboxProvisioner.resumeMarked")(function* (
+    record: SandboxRecord,
+    driver: SandboxProviderDriver,
+    now: string,
+  ) {
     if (record.state === "expired" || record.state === "deleted") {
       return yield* new SandboxProviderError({
         provider: record.provider,
@@ -3758,7 +3813,6 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     if (driver.resume === undefined) {
       return yield* configError(record.provider, "This provider cannot resume a sandbox.");
     }
-    const now = yield* nowIso;
     const config = yield* recordConfig(driver, record);
     // Providers such as Boat count a resume as a start, so it gets the same preflight as create.
     const limits = yield* preflightStart(driver, config, undefined);
@@ -4138,11 +4192,20 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
   });
 
   const sweepRecord = Effect.fn("SandboxProvisioner.sweepRecord")(function* (
-    record: SandboxRecord,
+    listed: SandboxRecord,
     config: SandboxProviderConfig,
     cost: SandboxUsage | undefined,
     now: DateTime.Utc,
   ) {
+    // A resume in flight decides the state; the limit must not stop the machine it is starting.
+    if (resumingNow.has(listed.instanceId)) return;
+    let record = listed;
+    if (listed.resumingSince !== undefined) {
+      const { resumingSince: _resumingSince, ...rest } = listed;
+      record = rest;
+      yield* putIfUnchanged(listed, record);
+      yield* listChanged;
+    }
     const driver = findDriver(record.provider);
     const nowText = DateTime.formatIso(now);
     const withCost: SandboxRecord =
@@ -4155,6 +4218,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     ) {
       return yield* onHttp(driver.stop({ config, sandboxId: record.sandboxId })).pipe(
         Effect.andThen(putIfUnchanged(record, withState(withCost, "stopped", nowText))),
+        Effect.andThen(listChanged),
         Effect.catch((cause) =>
           Effect.logWarning("sandbox running limit stop failed", {
             instanceId: record.instanceId,
@@ -4203,6 +4267,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     }
     if (state !== record.state) {
       yield* putIfUnchanged(record, withState(withCost, state, nowText));
+      yield* listChanged;
     } else if (
       withCost.costDollars !== record.costDollars ||
       withCost.costSince !== record.costSince
@@ -4442,6 +4507,9 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     create,
     delete: remove,
     removed: Stream.fromPubSub(removedRecords),
+    listChanges: SubscriptionRef.changes(listRevision).pipe(
+      Stream.filter((revision) => revision > 0),
+    ),
     environments,
     limits,
     list,
@@ -4501,6 +4569,7 @@ export const rpcHandlers = Effect.gen(function* () {
     [WS_METHODS.sandboxesCreate]: (input: SandboxCreateInput) => sandboxes.create(input),
     [WS_METHODS.sandboxesDelete]: (input: SandboxDeleteInput) => sandboxes.delete(input),
     [WS_METHODS.sandboxesList]: () => sandboxes.list,
+    [WS_METHODS.sandboxesSubscribeListChanges]: () => sandboxes.listChanges,
     [WS_METHODS.sandboxesStop]: (input: SandboxLifecycleInput) => sandboxes.stop(input),
     [WS_METHODS.sandboxesResume]: (input: SandboxLifecycleInput) => sandboxes.resume(input),
     [WS_METHODS.sandboxesCheckWork]: (input: SandboxLifecycleInput) => sandboxes.checkWork(input),

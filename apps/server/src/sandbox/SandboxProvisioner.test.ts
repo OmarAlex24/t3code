@@ -3085,6 +3085,8 @@ describe("SandboxProvisioner lifecycle", () => {
       expect(failure).toMatchObject({ stage: "config", code: "billing_required" });
       expect(requests).toEqual(["GET https://boat.dev/api/v1/limits"]);
       expect(repository.byEnvironment(testEnvironmentId)?.state).toBe("stopped");
+      // A resume that fails clears its mark, whatever step it failed at.
+      expect(repository.byEnvironment(testEnvironmentId)?.resumingSince).toBeUndefined();
     });
   });
 
@@ -5922,6 +5924,105 @@ describe("SandboxProvisioner per-thread launches", () => {
       );
     }),
   );
+
+  it.effect("marks a sandbox as starting while a resume runs and tells clients each change", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const reached = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "t3 serve", until, reached } });
+      const stopped: SandboxRecord = {
+        instanceId: "resumed",
+        environmentId: testEnvironmentId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "hello on Boat small",
+        size: "small",
+        state: "stopped",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        runningSince: null,
+        stoppedAt: "1970-01-01T00:00:00.000Z",
+        maxRunningMinutes: 480,
+      };
+      const repository = memoryRepository([stopped]);
+      yield* Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const revisions: Array<number> = [];
+        const watching = yield* Stream.runForEach(provisioner.listChanges, (revision) =>
+          Effect.sync(() => revisions.push(revision)),
+        ).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("42 seconds");
+        const resuming = yield* provisioner
+          .resume({ instanceId: "resumed" })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(reached);
+        expect(repository.records.get("resumed")).toMatchObject({
+          state: "stopped",
+          resumingSince: "1970-01-01T00:00:42.000Z",
+        });
+        expect(revisions).toEqual([1]);
+
+        yield* Deferred.succeed(until, undefined);
+        yield* Fiber.join(resuming);
+        expect(repository.records.get("resumed")?.state).toBe("running");
+        expect(repository.records.get("resumed")?.resumingSince).toBeUndefined();
+        expect(revisions).toEqual([1, 2]);
+        yield* Fiber.interrupt(watching);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
+  it.effect("clears the starting mark when a resume fails or a server died mid-resume", () => {
+    const fake = boatFake({ failing: { text: "t3 serve", times: 1 } });
+    const base: SandboxRecord = {
+      instanceId: "failed",
+      environmentId: testEnvironmentId,
+      provider: "boat",
+      sandboxId: boatSandboxId,
+      label: "hello on Boat small",
+      size: "small",
+      state: "stopped",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      updatedAt: "1970-01-01T00:00:00.000Z",
+      httpBaseUrl: "https://boat.example/t3",
+      runningSince: null,
+      maxRunningMinutes: 480,
+    };
+    // Left by a server that stopped while it resumed this one.
+    const stale: SandboxRecord = {
+      ...base,
+      instanceId: "stale",
+      environmentId: EnvironmentId.make("22222222-2222-4222-8222-222222222222"),
+      sandboxId: "bx_stale",
+      resumingSince: "1969-12-31T23:00:00.000Z",
+    };
+    const repository = memoryRepository([base, stale]);
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const failure = yield* provisioner.resume({ instanceId: "failed" }).pipe(Effect.flip);
+      expect(failure.detail).toBe("The sandbox resumed, but T3 Code did not start on it.");
+      expect(repository.records.get("failed")?.state).toBe("error");
+      expect(repository.records.get("failed")?.resumingSince).toBeUndefined();
+
+      yield* provisioner.sweep;
+      expect(repository.records.get("stale")?.resumingSince).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({ sandboxProviders: { boat: { apiKey: "boat_test" } } }, repository.layer),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
 
   const bridgeIssues = (fake: BoatFake) =>
     fake.commands.filter((command) => command.includes("--label t3-sandbox-bridge"));
