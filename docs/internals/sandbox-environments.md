@@ -150,9 +150,10 @@ two: Claude's endpoint and token, and the server's github.com token. `SandboxPro
 tells clients only whether each exists and which Claude path applies; values never leave the
 server except into the sandbox.
 
-- **A sandbox follows the host's settings.** Before `t3 serve` the provisioner merges the host's
-  followed settings into the sandbox's `$HOME/.t3/userdata/settings.json`, over what setup wrote
-  there (Pi and bridge instances survive).
+- **A sandbox follows the host's settings.** Once T3 is installed, before the tailnet, Claude, Pi
+  and `t3 serve`, the provisioner merges the host's followed settings into the sandbox's
+  `$HOME/.t3/userdata/settings.json`; Pi setup then merges its provider instance and default model
+  into the same file, keeping them.
   [`sandboxSettings.ts`](../../packages/contracts/src/sandboxSettings.ts) classifies every server
   setting as followed or host-only, and its test fails when a new setting is in neither list, so a
   new setting stays on the host until someone decides it can follow.
@@ -416,10 +417,12 @@ so the web app lists it under Settings → Environments only (`useSandboxEnviron
 record, launching ones included). It is not offered where a project is added, in the settings
 scope or project settings, in usage and its price overrides, in limit notices, or in provider
 updates; a settings scope link that names it opens its host. Usage counts the sandbox's spend
-under the host. Settings the user saves on the host through the settings scope, including "All environments",
-repeat on the host's sandboxes (`useSandboxFollowers`, `ScopeTargets.followers`), limited to the
-followed keys and without a toast of their own. A project override follows to the sandbox's clone
-of that project; an override made before the sandbox existed is not copied at create.
+under the host. Settings the user saves on the host through the settings scope, including "All
+environments", repeat on the host's connected sandboxes (`useSandboxFollowers`,
+`ScopeTargets.followers`), limited to the followed keys; the save neither waits for them nor
+reports them, and neither does the shared-settings sync that writes every machine. A stopped
+sandbox keeps what it had. A project override follows to the sandbox's clone of that project; an
+override made before the sandbox existed is not copied at create.
 
 `maxRunningMinutes` (480 by default, clamped to the provider's `maxTtlMinutes`) limits how long a
 sandbox runs since its last start (`runningSince`); a resume starts the count again. The sweep runs
