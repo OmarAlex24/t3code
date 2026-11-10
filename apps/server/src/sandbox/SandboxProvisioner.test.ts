@@ -765,6 +765,36 @@ describe("boatDriver", () => {
       }).pipe(Effect.provideService(HttpClient.HttpClient, client));
     },
   );
+
+  it.effect("reads a sandbox's auto-stop with its state", () => {
+    const config = { apiKey: "boat_test", settings: {} };
+    let sandbox: unknown = {};
+    const client = recording([], (request) =>
+      request.url.endsWith("/sandboxes/bx_gone")
+        ? Response.json({ ok: false, code: "not_found" }, { status: 404 })
+        : Response.json({ sandbox }),
+    );
+    const keepAlive = boatDriver.keepAlive!;
+    const read = (sandboxId: string) => keepAlive.status({ config, sandboxId });
+    return Effect.gen(function* () {
+      sandbox = {
+        id: boatSandboxId,
+        state: "ready",
+        archiveAfter: "2026-01-01T00:35:00.000Z",
+        ttlSeconds: 2100,
+      };
+      expect(yield* read(boatSandboxId)).toEqual({
+        status: "running",
+        autoStopAt: "2026-01-01T00:35:00.000Z",
+      });
+      // Off is null; a Boat that leaves the field out says nothing.
+      sandbox = { id: boatSandboxId, state: "ready", archiveAfter: null, ttlSeconds: null };
+      expect(yield* read(boatSandboxId)).toEqual({ status: "running", autoStopAt: null });
+      sandbox = { id: boatSandboxId, state: "archived" };
+      expect(yield* read(boatSandboxId)).toEqual({ status: "stopped" });
+      expect(yield* read("bx_gone")).toEqual({ status: "deleted" });
+    }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+  });
 });
 
 describe("celestoDriver", () => {
@@ -3139,6 +3169,124 @@ describe("SandboxProvisioner lifecycle", () => {
       ]);
       // One provider call per record per sweep: the limit stop replaces the status check.
       expect(requests).not.toContain(`GET https://boat.dev/api/v1/sandboxes/${boatSandboxId}`);
+    });
+  });
+
+  it.effect("puts back an auto-stop a sandbox's own key turned off or moved far out", () => {
+    const base: SandboxRecord = {
+      instanceId: "bx_off",
+      environmentId: testEnvironmentId,
+      provider: "boat",
+      sandboxId: "bx_off",
+      label: "Kept sandbox",
+      size: "small",
+      state: "running",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      updatedAt: "1970-01-01T00:00:00.000Z",
+      httpBaseUrl: "https://boat.example/t3",
+      runningSince: "1970-01-01T00:00:00.000Z",
+      maxRunningMinutes: 480,
+      idleMinutes: 30,
+      keepAliveKey: {
+        name: "t3-keepalive-kept",
+        id: "apk_kept",
+        expiresAt: "1970-01-31T00:00:00.000Z",
+      },
+    };
+    const record = (sandboxId: string, digit: string, plain = false) => {
+      const { keepAliveKey: _key, idleMinutes: _idle, ...withoutKeepAlive } = base;
+      return {
+        ...(plain ? withoutKeepAlive : base),
+        instanceId: sandboxId,
+        sandboxId,
+        environmentId: EnvironmentId.make(
+          `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`,
+        ),
+      } satisfies SandboxRecord;
+    };
+    // What Boat says of each sandbox's auto-stop; a missing key is a Boat that does not say.
+    const archiveAfter: Record<string, string | null | undefined> = {
+      // An agent sent `ttlSeconds: null` with the sandbox's key.
+      bx_off: null,
+      // Or a TTL far past the idle window the loop ever sets.
+      bx_far: "1970-01-01T08:00:00.000Z",
+      // The loop's own deadline, and one at the edge of the slack.
+      bx_loop: "1970-01-01T00:35:00.000Z",
+      bx_edge: "1970-01-01T00:45:00.000Z",
+      bx_unsaid: undefined,
+      // No keep-alive key: its running limit applies, and its auto-stop is not this check's.
+      bx_plain: null,
+    };
+    const repository = memoryRepository([
+      base,
+      record("bx_far", "2"),
+      record("bx_loop", "3"),
+      record("bx_edge", "4"),
+      record("bx_unsaid", "5"),
+      record("bx_plain", "6", true),
+    ]);
+    const patches: Array<{
+      readonly url: string;
+      readonly body: unknown;
+      readonly authorization: string | undefined;
+    }> = [];
+    const client = HttpClient.make((request) => {
+      const id = /\/sandboxes\/(bx_[a-z]+)$/u.exec(request.url)?.[1];
+      if (request.method === "PATCH") {
+        patches.push({
+          url: request.url,
+          body: JSON.parse(bodyTextOf(request)),
+          authorization: request.headers.authorization,
+        });
+        return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ ok: true })));
+      }
+      if (request.method === "GET" && id !== undefined) {
+        const after = archiveAfter[id];
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({
+              sandbox: {
+                id,
+                state: "ready",
+                ...(after === undefined ? {} : { archiveAfter: after, ttlSeconds: null }),
+              },
+            }),
+          ),
+        );
+      }
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(request, Response.json({ ok: false }, { status: 404 })),
+      );
+    });
+    return Effect.gen(function* () {
+      yield* SandboxProvisioner.SandboxProvisioner.pipe(
+        Effect.flatMap((provisioner) => provisioner.sweep),
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+
+      // Back to the idle window plus one check, with the host's own key.
+      expect(patches.toSorted((a, b) => a.url.localeCompare(b.url))).toEqual([
+        {
+          url: "https://boat.dev/api/v1/sandboxes/bx_far",
+          body: { ttlSeconds: 2100 },
+          authorization: "Bearer boat_test",
+        },
+        {
+          url: "https://boat.dev/api/v1/sandboxes/bx_off",
+          body: { ttlSeconds: 2100 },
+          authorization: "Bearer boat_test",
+        },
+      ]);
+      for (const id of Object.keys(archiveAfter)) {
+        expect(repository.records.get(id)?.state).toBe("running");
+      }
     });
   });
 

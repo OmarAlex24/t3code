@@ -66,8 +66,19 @@ const BoatLifecycle = Schema.Struct({
     state: Schema.String,
     error: Schema.optionalKey(Schema.NullOr(Schema.String)),
     dataExpiredAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
+    /** When the auto-stop fires; null while it is off. */
+    archiveAfter: Schema.optionalKey(Schema.NullOr(Schema.String)),
+    ttlSeconds: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   }),
 });
+
+// Boat drops a stopped sandbox's disk 14 days after the stop; resume then fails.
+const lifecycleStatus = (
+  sandbox: typeof BoatLifecycle.Type.sandbox,
+): SandboxProviderStatus | null =>
+  sandbox.state === "archived" && sandbox.dataExpiredAt
+    ? "expired"
+    : (BOAT_STATUS[sandbox.state] ?? null);
 
 const BoatSandboxList = Schema.Struct({
   sandboxes: Schema.Array(
@@ -735,6 +746,17 @@ const keepAlive: SandboxKeepAlive = {
       ),
     }).pipe(Effect.asVoid),
   extendRequest: (sandboxId) => ({ method: "PATCH", url: sandboxPath(sandboxId) }),
+  status: (input) =>
+    getLifecycle(input.config.apiKey, input.sandboxId).pipe(
+      Effect.map(({ sandbox }) => ({
+        status: lifecycleStatus(sandbox),
+        ...(sandbox.archiveAfter === undefined ? {} : { autoStopAt: sandbox.archiveAfter }),
+      })),
+      Effect.catchIf(
+        (error) => error.code === "not_found",
+        () => Effect.succeed({ status: "deleted" as const }),
+      ),
+    ),
 };
 
 export const boatDriver: SandboxProviderDriver = {
@@ -909,21 +931,8 @@ export const boatDriver: SandboxProviderDriver = {
     return {};
   }),
   status: (input) =>
-    requestJson({
-      provider: "boat",
-      stage: "start",
-      schema: BoatLifecycle,
-      request: authorize(
-        HttpClientRequest.get(`${BOAT_API_BASE}/sandboxes/${encodeURIComponent(input.sandboxId)}`),
-        input.config.apiKey,
-      ),
-    }).pipe(
-      Effect.map(({ sandbox }): SandboxProviderStatus | null =>
-        // Boat drops a stopped sandbox's disk 14 days after the stop; resume then fails.
-        sandbox.state === "archived" && sandbox.dataExpiredAt
-          ? "expired"
-          : (BOAT_STATUS[sandbox.state] ?? null),
-      ),
+    getLifecycle(input.config.apiKey, input.sandboxId).pipe(
+      Effect.map(({ sandbox }) => lifecycleStatus(sandbox)),
       Effect.catchIf(
         (error) => error.code === "not_found",
         () => Effect.succeed("deleted" as const),

@@ -155,6 +155,18 @@ export interface SandboxKeepAlive {
     readonly method: "PATCH";
     readonly url: string;
   };
+  /**
+   * `status`'s answer plus the auto-stop the sandbox's key can move: an ISO time, null when it is
+   * off, absent when the provider does not say. The sweep reads it in place of `status`.
+   */
+  readonly status: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly sandboxId: string;
+  }) => Effect.Effect<
+    { readonly status: SandboxProviderStatus | null; readonly autoStopAt?: string | null },
+    SandboxProviderError,
+    HttpClient.HttpClient
+  >;
 }
 
 export interface SandboxProviderDriver {
