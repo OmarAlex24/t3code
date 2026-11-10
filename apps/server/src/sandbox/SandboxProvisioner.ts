@@ -494,6 +494,8 @@ const GITHUB_TOKEN_REFRESH_MS = 20 * 60 * 1000;
 // to expiry, so a sandbox stopped for weeks comes back with a working one.
 const KEEP_ALIVE_KEY_MINUTES = 30 * 24 * 60;
 const KEEP_ALIVE_RENEW_BEFORE_MS = 7 * 24 * 60 * 60 * 1000;
+// How far past its idle window a sandbox's auto-stop may sit before the sweep resets it.
+const AUTO_STOP_SLACK_MINUTES = 10;
 
 /**
  * The auto-stop a sandbox that keeps itself up gets: its idle window plus one check, so work that
@@ -4073,6 +4075,41 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     );
   };
 
+  /**
+   * The sandbox's key can move its own auto-stop, and agents on it can read the key. Its loop only
+   * ever sets the idle window from now, so an auto-stop that is off or further out was set by
+   * something else, and the host's key puts it back.
+   */
+  const guardAutoStop = Effect.fn("SandboxProvisioner.guardAutoStop")(function* (
+    record: SandboxRecord,
+    config: SandboxProviderConfig,
+    keepAlive: SandboxKeepAlive,
+    autoStopAt: string | null,
+    now: DateTime.Utc,
+  ) {
+    const ttlMinutes = keepAliveTtlMinutes(
+      record.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES,
+      undefined,
+    );
+    const latest = DateTime.toEpochMillis(now) + (ttlMinutes + AUTO_STOP_SLACK_MINUTES) * 60_000;
+    const at = autoStopAt === null ? Number.NaN : Date.parse(autoStopAt);
+    if (autoStopAt !== null && (Number.isNaN(at) || at <= latest)) return;
+    yield* Effect.logWarning("sandbox auto-stop moved past its idle window; resetting it", {
+      instanceId: record.instanceId,
+      sandboxId: record.sandboxId,
+      autoStopAt,
+    });
+    yield* onHttp(keepAlive.extend({ config, sandboxId: record.sandboxId, ttlMinutes })).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("sandbox auto-stop reset failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }),
+      ),
+    );
+  });
+
   const sweepRecord = Effect.fn("SandboxProvisioner.sweepRecord")(function* (
     record: SandboxRecord,
     config: SandboxProviderConfig,
@@ -4100,20 +4137,39 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         ),
       );
     }
+    const keepAlive = keepsItselfUp(record) ? driver.keepAlive : undefined;
+    const read: Effect.Effect<
+      { readonly status: SandboxProviderStatus | null; readonly autoStopAt?: string | null } | null,
+      SandboxProviderError,
+      HttpClient.HttpClient
+    > =
+      keepAlive !== undefined
+        ? keepAlive.status({ config, sandboxId: record.sandboxId })
+        : driver.status === undefined
+          ? Effect.succeed(null)
+          : driver
+              .status({ config, sandboxId: record.sandboxId })
+              .pipe(Effect.map((status) => ({ status })));
     // An unreachable provider says nothing about the machine, so the record keeps its state.
-    const status =
-      driver.status === undefined
-        ? null
-        : yield* onHttp(driver.status({ config, sandboxId: record.sandboxId })).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("sandbox status check failed", {
-                instanceId: record.instanceId,
-                sandboxId: record.sandboxId,
-                cause,
-              }).pipe(Effect.as(null)),
-            ),
-          );
+    const reported = yield* onHttp(read).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("sandbox status check failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+    const status = reported?.status ?? null;
     const state = reconcileState(record.state, status);
+    if (
+      keepAlive !== undefined &&
+      record.state === "running" &&
+      state === "running" &&
+      reported?.autoStopAt !== undefined
+    ) {
+      yield* guardAutoStop(record, config, keepAlive, reported.autoStopAt, now);
+    }
     // An abandoned launch's machine that is gone leaves only its keys, which go with the record.
     if (state === "deleted" && record.abandonedAt !== undefined) {
       return yield* releaseRecord(record);
