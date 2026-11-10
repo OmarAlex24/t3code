@@ -15,6 +15,7 @@ import { Atom } from "effect/reactivity";
 import { environmentCatalog } from "../connection/catalog";
 import { useProjects, useQuietThreadShells } from "./entities";
 import { useEnvironmentProviders, usePrimaryEnvironmentId } from "./environments";
+import { useEnvironmentPresentation } from "./presentation";
 import { useEnvironmentQuery } from "./query";
 import {
   findThreadSandbox,
@@ -74,6 +75,64 @@ export function useSandboxEnvironmentIds(): ReadonlySet<EnvironmentId> {
       sandbox.environmentId === null || sandbox.state === "deleted" ? [] : [sandbox.environmentId],
     ),
   );
+}
+
+/** `presentations` without the sandboxes in `sandboxEnvironmentIds`, or itself when none is in it. */
+export function withoutSandboxes<T>(
+  presentations: ReadonlyMap<EnvironmentId, T>,
+  sandboxEnvironmentIds: ReadonlySet<EnvironmentId>,
+): ReadonlyMap<EnvironmentId, T> {
+  return [...presentations.keys()].some((id) => sandboxEnvironmentIds.has(id))
+    ? new Map([...presentations].filter(([id]) => !sandboxEnvironmentIds.has(id)))
+    : presentations;
+}
+
+/** A live sandbox as a follower of its host: never a choice, written to with it. */
+export interface SandboxFollower {
+  readonly environmentId: EnvironmentId;
+  /** The host project the sandbox was launched for, and the sandbox's own clone of it. */
+  readonly hostProjectId: ProjectId | null;
+  readonly projectId: ProjectId | null;
+}
+
+export interface SandboxFollowers {
+  readonly hostEnvironmentId: EnvironmentId | null;
+  readonly followers: ReadonlyArray<SandboxFollower>;
+  readonly environmentIds: ReadonlySet<EnvironmentId>;
+  /** False until the host answers its sandbox list, when a sandbox looks like any remote. */
+  readonly known: boolean;
+}
+
+/** Sandboxes as followers of the host that provisioned them; see `SandboxFollower`. */
+export function useSandboxFollowers(): SandboxFollowers {
+  const hostEnvironmentId = useSandboxProvisionerEnvironmentId();
+  const list = useEnvironmentQuery(
+    hostEnvironmentId === null
+      ? null
+      : serverEnvironment.sandboxesList({ environmentId: hostEnvironmentId, input: undefined }),
+  );
+  const hostPhase = useEnvironmentPresentation(hostEnvironmentId).presentation?.connection.phase;
+  const followers = (list.data?.sandboxes ?? NO_SANDBOXES).flatMap((sandbox) =>
+    sandbox.environmentId === null || sandbox.state === "deleted"
+      ? []
+      : [
+          {
+            environmentId: sandbox.environmentId,
+            hostProjectId: sandbox.projectId ?? sandbox.hostProjectId ?? null,
+            projectId: sandbox.sandboxProjectId ?? null,
+          },
+        ],
+  );
+  return {
+    hostEnvironmentId,
+    followers,
+    environmentIds: new Set(followers.map((follower) => follower.environmentId)),
+    known:
+      hostEnvironmentId === null ||
+      list.data !== null ||
+      list.error !== null ||
+      hostPhase !== "connected",
+  };
 }
 
 /**

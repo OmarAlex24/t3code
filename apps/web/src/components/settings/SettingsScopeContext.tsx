@@ -5,10 +5,15 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { createContext, type ReactNode, useContext } from "react";
 
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
+import { useSandboxFollowers } from "../../state/sandboxes";
 import { getProjectFileQueryAtom, optimisticFileAtom } from "../files/projectFilesQueryState";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { resolveScopedSettingsTargets, selectScopedSettingsEnvironments } from "./scopedSettings";
-import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope";
+import {
+  normalizeSandboxScopeSearch,
+  resolveSettingsScope,
+  type SettingsScopeSearch,
+} from "./settingsScope";
 import { selectSingleEnvironmentScope } from "./settingsScopeAxis";
 
 type ProjectFileMember = readonly [
@@ -55,19 +60,31 @@ function useMemberProjectFiles(scope: ReturnType<typeof resolveSettingsScope>) {
   );
 }
 
+/**
+ * A thread's sandbox is never a choice here: it is left out of every environment and project list
+ * and written to with its host (`scope.followers`).
+ */
 function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironment: boolean) {
-  const groups = useSettingsProjectGroups();
-  const { environments: availableEnvironments } = useEnvironments();
+  const sandboxes = useSandboxFollowers();
+  const { groups, withHidden } = useSettingsProjectGroups(sandboxes.environmentIds);
+  const { environments } = useEnvironments();
+  const availableEnvironments = environments.filter(
+    (environment) => !sandboxes.environmentIds.has(environment.environmentId),
+  );
+  const followerEnvironments = environments.filter((environment) =>
+    sandboxes.environmentIds.has(environment.environmentId),
+  );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const normalized = normalizeSandboxScopeSearch(rawSearch, groups, withHidden, sandboxes);
   const search = singleEnvironment
     ? selectSingleEnvironmentScope(
-        rawSearch,
-        resolveSettingsScope(rawSearch, groups, availableEnvironments),
+        normalized,
+        resolveSettingsScope(normalized, groups, availableEnvironments),
         availableEnvironments,
         primaryEnvironmentId,
       )
-    : rawSearch;
-  const scope = resolveSettingsScope(search, groups, availableEnvironments);
+    : normalized;
+  const scope = resolveSettingsScope(search, groups, availableEnvironments, sandboxes);
   const projectFiles = useMemberProjectFiles(scope);
   const selected = selectScopedSettingsEnvironments(
     scope,
@@ -79,7 +96,19 @@ function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironm
     targets.find((candidate) => candidate.environmentId === selected.environment?.environmentId) ??
     targets[0] ??
     null;
-  return { scope, groups, search, ...selected, targets, target };
+  return {
+    scope,
+    groups,
+    search,
+    ...selected,
+    targets,
+    target,
+    availableEnvironments,
+    followerEnvironments,
+    hostEnvironmentId: sandboxes.hostEnvironmentId,
+    sandboxFollowers: sandboxes.followers,
+    sandboxesKnown: sandboxes.known,
+  };
 }
 
 const SettingsScopeContext = createContext<
