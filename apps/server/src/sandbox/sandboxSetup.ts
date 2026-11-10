@@ -803,6 +803,8 @@ start)
   # A transient user unit outlives the command that starts it where systemd runs T3 itself.
   if command -v systemd-run >/dev/null 2>&1; then
     [ -n "\${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    # Started a moment ago and not yet at its pidfile.
+    systemctl --user is-active --quiet t3-sandbox-keepalive.service 2>/dev/null && exit 0
     systemctl --user reset-failed t3-sandbox-keepalive.service >/dev/null 2>&1 || true
     if systemd-run --user --quiet --collect --unit=t3-sandbox-keepalive sh "$dir/loop.sh" run >/dev/null 2>&1; then
       exit 0
