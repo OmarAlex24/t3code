@@ -4,7 +4,9 @@ A sandbox provider turns an API key into a T3 environment the same way a user wo
 hand: it creates a machine, starts `t3 serve` on port `3773`, exposes that port on a public HTTPS
 origin (or only on the tailnet), and mints a pairing token. The client registers the returned
 origin and token as an ordinary bearer environment, so projects, providers, terminals, and
-reconnects use the existing remote path. Nothing downstream knows the machine is a sandbox.
+reconnects use the existing remote path. The sandbox's own server does not know it is one; only
+the client does, and it shows the machine as part of its host (see
+[Lifecycle and hard limits](#lifecycle-and-hard-limits)).
 
 Each thread on a sandbox gets its own machine. The server the user configures sandboxes on (the
 host) is only the control plane: it keeps the configs, provisions a machine per thread, streams
@@ -142,11 +144,24 @@ Three details apply to every provider:
 
 ## What a sandbox gets from this server
 
-A sandbox starts with none of the provisioning server's credentials. The create form can opt into
+A sandbox starts with none of the provisioning server's credentials, and with the server's settings
+only where they mean the same off the host. The create form can opt into
 two: Claude's endpoint and token, and the server's github.com token. `SandboxProvidersResult.host`
 tells clients only whether each exists and which Claude path applies; values never leave the
 server except into the sandbox.
 
+- **A sandbox follows the host's settings.** Once T3 is installed, before the tailnet, Claude, Pi
+  and `t3 serve`, the provisioner merges the host's followed settings into the sandbox's
+  `$HOME/.t3/userdata/settings.json`; Pi setup then merges its provider instance and default model
+  into the same file, keeping them.
+  [`sandboxSettings.ts`](../../packages/contracts/src/sandboxSettings.ts) classifies every server
+  setting as followed or host-only, and its test fails when a new setting is in neither list, so a
+  new setting stays on the host until someone decides it can follow.
+  Host-only means secrets and secret references, host paths and hardware, the host's identity and
+  links, settings keyed by the host's project ids, the default and fallback models Pi setup sets,
+  and the thread environment mode. The seed holds only followed values that differ from the
+  defaults, so a sandbox on an older T3 that cannot decode a new value loses less. A failed seed
+  is a warning on the create result.
 - **Setup runs before `t3 serve`.** The server's Claude status probe reads Claude's settings when
   the server starts, so writing them first lets the new environment report Claude ready on its
   first probe rather than signed out until the next refresh. Install, tool checks, Claude, and
@@ -398,8 +413,16 @@ the provisioner picks before create, since the environment id is only known once
 the machine. Environments stay the source of truth for connection details; the record only adds
 what the provider needs to act on the machine (provider, sandbox id, size, credential environment)
 and the thread, config, and project it belongs to. A sandbox's environment is that thread's machine,
-so the web app lists it under Settings → Environments only, never where a project is added
-(`useSandboxEnvironmentIds`, from every record, launching ones included).
+so the web app lists it under Settings → Environments only (`useSandboxEnvironmentIds`, from every
+record, launching ones included). It is not offered where a project is added, in the settings
+scope or project settings, in usage and its price overrides, in limit notices, or in provider
+updates; a settings scope link that names it opens its host. Usage counts the sandbox's spend
+under the host. Settings the user saves on the host through the settings scope, including "All
+environments", repeat on the host's connected sandboxes (`useSandboxFollowers`,
+`ScopeTargets.followers`), limited to the followed keys; the save neither waits for them nor
+reports them, and neither does the shared-settings sync that writes every machine. A stopped
+sandbox keeps what it had. A project override follows to the sandbox's clone of that project; an
+override made before the sandbox existed is not copied at create.
 
 `maxRunningMinutes` (480 by default, clamped to the provider's `maxTtlMinutes`) limits how long a
 sandbox runs since its last start (`runningSince`); a resume starts the count again. The sweep runs

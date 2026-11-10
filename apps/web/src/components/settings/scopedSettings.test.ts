@@ -611,6 +611,7 @@ describe("null patches at project scope", () => {
       label: "fleet",
       members: [{ id: projectId, environmentId } as never],
       environmentIds: [environmentId],
+      followers: [],
     };
     const environments = [
       {
@@ -683,6 +684,7 @@ describe("partial object patches at project scope", () => {
         label: "fleet",
         members: [member as never],
         environmentIds: [environmentId],
+        followers: [],
       },
       [
         {
@@ -782,5 +784,101 @@ describe("model selection patches at project scope", () => {
       optionsPlan.serverWrites[0]?.patch.projectSettingsOverrides?.[projectId]
         ?.textGenerationModelSelection,
     ).toEqual({ ...saved, options });
+  });
+});
+
+describe("sandbox followers", () => {
+  const sandbox = environment("Sandbox");
+  const sandboxProjectId = ProjectId.make("sandbox-clone");
+  const sandboxes = {
+    hostEnvironmentId: laptop.environmentId,
+    followers: [
+      {
+        environmentId: sandbox.environmentId,
+        hostProjectId: laptopProjectId,
+        projectId: sandboxProjectId,
+      },
+    ],
+  };
+  const patch = { branchNamePrefix: "ada", worktreesDirectory: "/Users/ada/trees" };
+
+  it("repeats the host's followed settings on its sandboxes and reports only the host's", () => {
+    const scope = resolveSettingsScope({}, [], environments, sandboxes);
+    const plan = planScopedSettingsPatch(scope, environments, patch, [sandbox]);
+    expect(plan.serverWrites.map((write) => write.environmentId)).toEqual([
+      laptop.environmentId,
+      server.environmentId,
+    ]);
+    expect(plan.followerWrites).toEqual([
+      expect.objectContaining({
+        environmentId: sandbox.environmentId,
+        patch: { branchNamePrefix: "ada" },
+      }),
+    ]);
+    // A setting that stays on the host, or a scope without the host, reaches no sandbox.
+    expect(
+      planScopedSettingsPatch(scope, environments, { worktreesDirectory: "/x" }, [sandbox])
+        .followerWrites,
+    ).toEqual([]);
+    expect(
+      planScopedSettingsPatch(
+        resolveSettingsScope({ machine: server.environmentId }, [], environments, sandboxes),
+        environments,
+        patch,
+        [sandbox],
+      ).followerWrites,
+    ).toEqual([]);
+  });
+
+  it("repeats a host project's override on the sandbox's clone of it", () => {
+    const scope = resolveSettingsScope(
+      { project: group.projectKey },
+      [group],
+      environments,
+      sandboxes,
+    );
+    expect(
+      planScopedSettingsPatch(scope, environments, { branchNamePrefix: "ada" }, [sandbox])
+        .followerWrites,
+    ).toEqual([
+      expect.objectContaining({
+        environmentId: sandbox.environmentId,
+        patch: { projectSettingsOverrides: { [sandboxProjectId]: { branchNamePrefix: "ada" } } },
+      }),
+    ]);
+    // Pi owns a sandbox's default model.
+    expect(
+      planScopedSettingsPatch(
+        scope,
+        environments,
+        { defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt" } },
+        [sandbox],
+      ).followerWrites,
+    ).toEqual([]);
+  });
+
+  it("never waits for or reports a sandbox's write", async () => {
+    const scope = resolveSettingsScope({}, [], [laptop], sandboxes);
+    const plan = planScopedSettingsPatch(scope, [laptop], { branchNamePrefix: "ada" }, [sandbox]);
+    const writes: EnvironmentId[] = [];
+    const result = await persistScopedSettingsPatch(
+      plan,
+      async ({ environmentId, input }) => {
+        writes.push(environmentId);
+        // A sandbox that went away answers only when it reconnects, if ever.
+        return environmentId === sandbox.environmentId
+          ? new Promise<never>(() => {})
+          : {
+              _tag: "Success" as const,
+              value: applyServerSettingsPatch(laptop.serverConfig!.settings, input.patch),
+            };
+      },
+      () => {},
+    );
+    expect(writes).toContain(sandbox.environmentId);
+    expect(result.failedEnvironments).toEqual([]);
+    expect(result.savedEnvironments.map((write) => write.environmentId)).toEqual([
+      laptop.environmentId,
+    ]);
   });
 });

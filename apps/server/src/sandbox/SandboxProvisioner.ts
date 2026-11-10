@@ -124,10 +124,12 @@ import {
   TAILSCALE_PROXY_URL,
   tailscaleProxyEnv,
   tailscaleScript,
+  t3SettingsSeedScript,
   tailscaleScrub,
   workCheckScript,
   writeFileScript,
 } from "./sandboxSetup.ts";
+import { sandboxSettingsSeed } from "./sandboxSettingsSeed.ts";
 import { makePairingKey, pairScript, type PairReport, readPairReport } from "./sandboxPairing.ts";
 import {
   fetchHubModels,
@@ -1752,6 +1754,20 @@ const make = Effect.gen(function* () {
 
     yield* report.stage("credentials", "running");
     const credentialWarnings = warnings.length;
+    // Before Pi, whose instance and default model the seed never carries, and before `t3 serve`.
+    const seed = yield* settings.getSettings.pipe(
+      Effect.flatMap(sandboxSettingsSeed),
+      Effect.option,
+    );
+    if (Option.isNone(seed)) {
+      yield* warn("T3 Code could not read this machine's settings to copy them to the sandbox.");
+    } else if (Object.keys(seed.value).length > 0) {
+      yield* run(t3SettingsSeedScript(seed.value), 60).pipe(
+        Effect.catch(() =>
+          warn("This machine's T3 Code settings could not be copied to the sandbox."),
+        ),
+      );
+    }
     // Joined before Claude's settings are written, since a userspace tailnet needs Claude's proxy.
     const tailnetJoin =
       tailnet === undefined ? null : yield* onHttp(joinTailnet(tailnet, label, run));
