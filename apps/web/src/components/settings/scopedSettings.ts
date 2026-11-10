@@ -10,6 +10,8 @@ import {
   type ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
+  isSandboxFollowedServerSettingKey,
+  pickSandboxFollowedSettings,
   ServerSettings,
   type T3ProjectFile,
   type ServerSettingsPatch,
@@ -24,7 +26,8 @@ import {
 import * as Equal from "effect/Equal";
 import * as Cause from "effect/Cause";
 
-import type { ResolvedSettingsScope } from "./settingsScope";
+import type { SandboxFollower } from "../../state/sandboxes";
+import type { ResolvedSettingsScope, ScopeFollowerTarget } from "./settingsScope";
 
 export type ScopedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
 
@@ -176,8 +179,13 @@ interface ScopedServerWrite {
   readonly previous: ServerSettings;
 }
 
+interface ProjectOverrideMember {
+  readonly environmentId: EnvironmentId;
+  readonly id: ProjectId;
+}
+
 function projectOverrideWrites(
-  scope: Extract<ResolvedSettingsScope, { kind: "project" | "checkout" }>,
+  members: readonly ProjectOverrideMember[],
   environments: readonly ScopedSettingsEnvironment[],
   update: (
     current: ProjectSettingsOverrides,
@@ -187,7 +195,7 @@ function projectOverrideWrites(
 ): ScopedServerWrite[] {
   const byId = new Map(environments.map((environment) => [environment.environmentId, environment]));
   const writes = new Map<EnvironmentId, ScopedServerWrite>();
-  for (const member of scope.members) {
+  for (const member of members) {
     const environment = byId.get(member.environmentId);
     if (!environment?.serverConfig || environment.connection.phase !== "connected") {
       continue;
@@ -217,10 +225,126 @@ function forDestination(previous: ServerSettings, patch: ServerSettingsPatch): S
   return { ...rest, ...idleCompactionPatch(previous, idleCompaction) };
 }
 
+// Override entries store whole objects; complete partial patches from each target's effective value.
+const projectOverrideUpdate =
+  (serverPatch: ServerSettingsPatch) =>
+  (current: ProjectSettingsOverrides, settings: ServerSettings, projectId: ProjectId) => {
+    const effective = resolveProjectSettings(settings, projectId).settings;
+    const next: Record<string, unknown> = { ...current };
+    for (const [key, value] of Object.entries<unknown>(serverPatch)) {
+      if (key === "worktreeCleanup" && serverPatch.worktreeCleanup?.mode === "custom") {
+        next[key] = {
+          mode: "custom",
+          rules: {
+            ...resolveWorktreeCleanup(settings, projectId),
+            ...serverPatch.worktreeCleanup.rules,
+          },
+        };
+        continue;
+      }
+      // Inherit sends null; remove overrides whose keys cannot store null.
+      if (
+        value === null &&
+        !isNullableProjectSettingsOverride(key as ProjectScopedServerSettingKey)
+      ) {
+        delete next[key];
+        continue;
+      }
+      const base: unknown = effective[key as keyof ServerSettings];
+      // A new model must not inherit the previous model's options.
+      if (
+        isPlainObject(value) &&
+        isPlainObject(base) &&
+        (key === "defaultModelSelection" ||
+          key === "sourceControlWriterModelSelection" ||
+          key === "reviewGuideModelSelection" ||
+          key === "textGenerationModelSelection") &&
+        (value.instanceId !== undefined || value.model !== undefined)
+      ) {
+        next[key] = { instanceId: base.instanceId, model: base.model, ...value };
+        continue;
+      }
+      next[key] = isPlainObject(value) && isPlainObject(base) ? { ...base, ...value } : value;
+    }
+    return next as ProjectSettingsOverrides;
+  };
+
+function environmentWrite(
+  environment: ScopedSettingsEnvironment,
+  serverPatch: ServerSettingsPatch,
+): ScopedServerWrite[] {
+  const previous = environment.serverConfig?.settings;
+  if (!previous) return [];
+  return [
+    {
+      environmentId: environment.environmentId,
+      label: environment.label,
+      previous,
+      patch: forDestination(
+        previous,
+        previous.worktreeCleanup != null &&
+          serverPatch.storageCleanup &&
+          Object.keys(serverPatch.storageCleanup).some((key) => key.startsWith("worktree"))
+          ? {
+              ...serverPatch,
+              worktreeCleanup: {
+                mode: "custom",
+                rules: {
+                  ...resolveWorktreeCleanup(previous, null),
+                  ...Object.fromEntries(
+                    Object.entries(serverPatch.storageCleanup).filter(([key]) =>
+                      key.startsWith("worktree"),
+                    ),
+                  ),
+                },
+              },
+            }
+          : serverPatch,
+      ),
+    },
+  ];
+}
+
+const followerProjectMembers = (followers: readonly ScopeFollowerTarget[]) =>
+  followers.flatMap(({ environmentId, projectId }) =>
+    projectId === null ? [] : [{ environmentId, id: projectId }],
+  );
+
+/**
+ * What the host's sandboxes get of a write the host gets: only the settings they follow, on the
+ * environment or on their clone of the host's project. Never reported; a sandbox is not a choice.
+ */
+function followerWrites(
+  scope: ResolvedSettingsScope,
+  followerEnvironments: readonly ScopedSettingsEnvironment[],
+  serverPatch: ServerSettingsPatch,
+): ScopedServerWrite[] {
+  const followed = pickSandboxFollowedSettings(serverPatch);
+  if (Object.keys(followed).length === 0) return [];
+  if (scope.kind === "project" || scope.kind === "checkout") {
+    return projectOverrideWrites(
+      followerProjectMembers(scope.followers),
+      followerEnvironments,
+      projectOverrideUpdate(followed),
+    );
+  }
+  const ids = new Set(
+    scope.followers.flatMap((follower) =>
+      follower.projectId === null ? [follower.environmentId] : [],
+    ),
+  );
+  return followerEnvironments
+    .filter(
+      (environment) => ids.has(environment.environmentId) && isConnectedWithConfig(environment),
+    )
+    .flatMap((environment) => environmentWrite(environment, followed));
+}
+
 export function planScopedSettingsPatch(
   scope: ResolvedSettingsScope,
   environments: readonly ScopedSettingsEnvironment[],
   patch: ScopedSettingsPatch,
+  followerEnvironments: readonly ScopedSettingsEnvironment[] = [],
 ) {
   const clientPatch = Object.fromEntries(
     Object.entries(patch).filter(([key]) => CLIENT_KEYS.has(key) && !SERVER_KEYS.has(key)),
@@ -240,84 +364,11 @@ export function planScopedSettingsPatch(
       : isProjectScope
         ? unscopableKeys.length > 0
           ? []
-          : projectOverrideWrites(scope, environments, (current, settings, projectId) => {
-              // Override entries store whole objects; complete partial patches from each target's effective
-              // value.
-              const effective = resolveProjectSettings(settings, projectId).settings;
-              const next: Record<string, unknown> = { ...current };
-              for (const [key, value] of Object.entries<unknown>(serverPatch)) {
-                if (key === "worktreeCleanup" && serverPatch.worktreeCleanup?.mode === "custom") {
-                  next[key] = {
-                    mode: "custom",
-                    rules: {
-                      ...resolveWorktreeCleanup(settings, projectId),
-                      ...serverPatch.worktreeCleanup.rules,
-                    },
-                  };
-                  continue;
-                }
-                // Inherit sends null; remove overrides whose keys cannot store null.
-                if (
-                  value === null &&
-                  !isNullableProjectSettingsOverride(key as ProjectScopedServerSettingKey)
-                ) {
-                  delete next[key];
-                  continue;
-                }
-                const base: unknown = effective[key as keyof ServerSettings];
-                // A new model must not inherit the previous model's options.
-                if (
-                  isPlainObject(value) &&
-                  isPlainObject(base) &&
-                  (key === "defaultModelSelection" ||
-                    key === "sourceControlWriterModelSelection" ||
-                    key === "reviewGuideModelSelection" ||
-                    key === "textGenerationModelSelection") &&
-                  (value.instanceId !== undefined || value.model !== undefined)
-                ) {
-                  next[key] = { instanceId: base.instanceId, model: base.model, ...value };
-                  continue;
-                }
-                next[key] =
-                  isPlainObject(value) && isPlainObject(base) ? { ...base, ...value } : value;
-              }
-              return next as ProjectSettingsOverrides;
-            })
+          : projectOverrideWrites(scope.members, environments, projectOverrideUpdate(serverPatch))
         : scope.kind === "all" || scope.kind === "environment"
-          ? connectedEnvironments.flatMap((environment) => {
-              const previous = environment.serverConfig?.settings;
-              if (!previous) return [];
-              return [
-                {
-                  environmentId: environment.environmentId,
-                  label: environment.label,
-                  previous,
-                  patch: forDestination(
-                    previous,
-                    previous.worktreeCleanup != null &&
-                      serverPatch.storageCleanup &&
-                      Object.keys(serverPatch.storageCleanup).some((key) =>
-                        key.startsWith("worktree"),
-                      )
-                      ? {
-                          ...serverPatch,
-                          worktreeCleanup: {
-                            mode: "custom",
-                            rules: {
-                              ...resolveWorktreeCleanup(previous, null),
-                              ...Object.fromEntries(
-                                Object.entries(serverPatch.storageCleanup).filter(([key]) =>
-                                  key.startsWith("worktree"),
-                                ),
-                              ),
-                            },
-                          },
-                        }
-                      : serverPatch,
-                  ),
-                },
-              ];
-            })
+          ? connectedEnvironments.flatMap((environment) =>
+              environmentWrite(environment, serverPatch),
+            )
           : [];
   const hasClientWrite = Object.keys(clientPatch).length > 0;
   const hasWrite = hasClientWrite || serverWrites.length > 0;
@@ -331,24 +382,42 @@ export function planScopedSettingsPatch(
           : isProjectScope
             ? "Connect the selected checkouts, or update their environments, to save a project override."
             : `Connect ${scope.kind === "environment" ? scope.label : "an environment"} to save this setting.`;
-  return { clientPatch, hasClientWrite, serverWrites, unavailableReason };
+  return {
+    clientPatch,
+    hasClientWrite,
+    serverWrites,
+    followerWrites:
+      serverWrites.length === 0 ? [] : followerWrites(scope, followerEnvironments, serverPatch),
+    unavailableReason,
+  };
 }
 
 export function planScopedSettingsClear(
   scope: ResolvedSettingsScope,
   environments: readonly ScopedSettingsEnvironment[],
   keys: readonly ProjectScopedServerSettingKey[],
+  followerEnvironments: readonly ScopedSettingsEnvironment[] = [],
 ) {
-  const serverWrites =
-    scope.kind === "project" || scope.kind === "checkout"
-      ? projectOverrideWrites(scope, environments, (_current, settings, projectId) =>
-          clearProjectSettingsOverrides(settings, projectId, keys),
-        )
-      : [];
+  const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
+  const serverWrites = isProjectScope
+    ? projectOverrideWrites(scope.members, environments, (_current, settings, projectId) =>
+        clearProjectSettingsOverrides(settings, projectId, keys),
+      )
+    : [];
+  const followedKeys = keys.filter(isSandboxFollowedServerSettingKey);
   return {
     clientPatch: {} as ClientSettingsPatch,
     hasClientWrite: false,
     serverWrites,
+    followerWrites:
+      serverWrites.length === 0 || followedKeys.length === 0
+        ? []
+        : projectOverrideWrites(
+            followerProjectMembers(scope.followers),
+            followerEnvironments,
+            (_current, settings, projectId) =>
+              clearProjectSettingsOverrides(settings, projectId, followedKeys),
+          ),
     unavailableReason:
       serverWrites.length > 0
         ? null
@@ -382,6 +451,11 @@ export function planProjectOverridesClear(
   environments: readonly ScopedSettingsEnvironment[],
   entries: readonly ProjectOverrideEntry[],
   keys: readonly ProjectScopedServerSettingKey[],
+  sandboxes: {
+    readonly hostEnvironmentId: EnvironmentId | null;
+    readonly followers: readonly SandboxFollower[];
+    readonly environments: readonly ScopedSettingsEnvironment[];
+  } = { hostEnvironmentId: null, followers: [], environments: [] },
 ) {
   const byId = new Map(environments.map((environment) => [environment.environmentId, environment]));
   const writes = new Map<EnvironmentId, ScopedServerWrite>();
@@ -403,10 +477,31 @@ export function planProjectOverridesClear(
     });
   }
   const serverWrites = [...writes.values()];
+  const followedKeys = keys.filter(isSandboxFollowedServerSettingKey);
+  const hostProjects = new Set(
+    entries.flatMap((entry) =>
+      entry.environmentId === sandboxes.hostEnvironmentId && writes.has(entry.environmentId)
+        ? [entry.projectId]
+        : [],
+    ),
+  );
   return {
     clientPatch: {} as ClientSettingsPatch,
     hasClientWrite: false,
     serverWrites,
+    followerWrites:
+      followedKeys.length === 0
+        ? []
+        : projectOverrideWrites(
+            sandboxes.followers.flatMap(({ environmentId, hostProjectId, projectId }) =>
+              projectId !== null && hostProjectId !== null && hostProjects.has(hostProjectId)
+                ? [{ environmentId, id: projectId }]
+                : [],
+            ),
+            sandboxes.environments,
+            (_current, settings, projectId) =>
+              clearProjectSettingsOverrides(settings, projectId, followedKeys),
+          ),
     unavailableReason:
       serverWrites.length > 0 ? null : "Connect the environments to reset these overrides.",
   };
@@ -455,11 +550,19 @@ export async function persistScopedSettingsPatch(
   persistClient: (patch: ClientSettingsPatch) => void,
 ) {
   if (plan.hasClientWrite) persistClient(plan.clientPatch);
-  const results = await Promise.allSettled(
-    plan.serverWrites.map(({ environmentId, patch }) =>
-      persistServer({ environmentId, input: { patch } }),
+  const [results] = await Promise.all([
+    Promise.allSettled(
+      plan.serverWrites.map(({ environmentId, patch }) =>
+        persistServer({ environmentId, input: { patch } }),
+      ),
     ),
-  );
+    // A sandbox follows silently: its result never reaches the toast.
+    Promise.allSettled(
+      plan.followerWrites.map(({ environmentId, patch }) =>
+        persistServer({ environmentId, input: { patch } }),
+      ),
+    ),
+  ]);
   const saved = (index: number) => {
     const result = results[index];
     return (

@@ -98,11 +98,14 @@ function useRunScopedPlan() {
 }
 
 export function useUpdateScopedSettings() {
-  const { scope, environments } = useSettingsScope();
+  const { scope, environments, followerEnvironments } = useSettingsScope();
   const run = useRunScopedPlan();
   /** `onFailed` runs when any target rejects or drops the patch, so a draft can fall back. */
   return (patch: ScopedSettingsPatch, options?: { readonly onFailed?: () => void }) =>
-    run(planScopedSettingsPatch(scope, environments, patch), options?.onFailed);
+    run(
+      planScopedSettingsPatch(scope, environments, patch, followerEnvironments),
+      options?.onFailed,
+    );
 }
 
 export function useClearScopedSettings() {
@@ -110,7 +113,14 @@ export function useClearScopedSettings() {
   const run = useRunScopedPlan();
   return (keys: readonly ProjectScopedServerSettingKey[]) => {
     if (context === null) return;
-    run(planScopedSettingsClear(context.scope, context.environments, keys));
+    run(
+      planScopedSettingsClear(
+        context.scope,
+        context.environments,
+        keys,
+        context.followerEnvironments,
+      ),
+    );
   };
 }
 
@@ -122,7 +132,13 @@ export function useClearProjectOverrides() {
     keys: readonly ProjectScopedServerSettingKey[],
   ) => {
     if (context === null) return;
-    run(planProjectOverridesClear(context.environments, entries, keys));
+    run(
+      planProjectOverridesClear(context.environments, entries, keys, {
+        hostEnvironmentId: context.hostEnvironmentId,
+        followers: context.sandboxFollowers,
+        environments: context.followerEnvironments,
+      }),
+    );
   };
 }
 
