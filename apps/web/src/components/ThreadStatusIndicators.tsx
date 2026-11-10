@@ -12,7 +12,6 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import {
   resolveEnvironmentMachineKind,
   type EnvironmentId,
-  type SandboxProviderKind,
   type ScopedThreadRef,
   type ThreadLinkedPullRequest,
   type ThreadPullRequestLink,
@@ -36,6 +35,11 @@ import { cn } from "../lib/utils";
 import { revealThreadTerminal } from "../lib/revealThreadTerminal";
 
 import { useEnvironmentQuery } from "../state/query";
+import {
+  SANDBOX_STOPPED_HINT,
+  type SandboxRowState,
+  sandboxRowPhase,
+} from "../state/sandboxThreads";
 import { linkedPullRequestDetailAtom, useSharedPullRequestSummary } from "../state/pullRequests";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { vcsEnvironment } from "../state/vcs";
@@ -785,11 +789,14 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
 
 export function ThreadRowTrailingStatus({
   thread,
-  sandboxProvider,
+  sandbox,
 }: {
   thread: SidebarThreadSummary;
-  /** Set when the thread runs on its own sandbox: its machine is drawn as the provider's mark. */
-  sandboxProvider: SandboxProviderKind | null;
+  /**
+   * Set when the thread runs on a sandbox, its own or the one the bridge drives for this host
+   * thread: its machine is drawn as the provider's mark, with the sandbox's state.
+   */
+  sandbox: SandboxRowState | null;
 }) {
   const runningTerminalIds = useThreadRunningTerminalIds({
     environmentId: thread.environmentId,
@@ -802,8 +809,17 @@ export function ThreadRowTrailingStatus({
   const threadEnvironmentLabel = isRemoteThread ? (remoteEnvLabel ?? "Remote") : null;
   const remoteMachine = resolveEnvironmentMachineKind(environment?.serverConfig ?? null);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
+  const sandboxPhase = sandboxRowPhase(sandbox);
+  // A host thread the bridge drives is local, but its machine is the sandbox.
+  const showsMachine = isRemoteThread || sandbox !== null;
+  const machineLabel =
+    sandboxPhase === "stopped"
+      ? SANDBOX_STOPPED_HINT
+      : sandboxPhase === "starting"
+        ? "Starting sandbox"
+        : (threadEnvironmentLabel ?? "Sandbox");
 
-  if (!terminalStatus && !isRemoteThread) {
+  if (!terminalStatus && !showsMachine) {
     return null;
   }
 
@@ -828,22 +844,21 @@ export function ThreadRowTrailingStatus({
           <TooltipPopup side="top">{terminalStatus.label}</TooltipPopup>
         </Tooltip>
       ) : null}
-      {isRemoteThread ? (
+      {showsMachine ? (
         <Tooltip>
           <TooltipTrigger
             render={
-              <span
-                aria-label={threadEnvironmentLabel ?? "Remote"}
-                className="inline-flex items-center justify-center"
-              />
+              <span aria-label={machineLabel} className="inline-flex items-center justify-center" />
             }
           >
             <EnvironmentOptionIcon
-              option={{ machine: remoteMachine, sandboxProvider }}
+              option={{ machine: remoteMachine, sandboxProvider: sandbox?.provider ?? null }}
+              sandboxPhase={sandboxPhase}
+              badgeRingClassName="ring-popover"
               className="size-3 text-muted-foreground/60"
             />
           </TooltipTrigger>
-          <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
+          <TooltipPopup side="top">{machineLabel}</TooltipPopup>
         </Tooltip>
       ) : null}
     </span>

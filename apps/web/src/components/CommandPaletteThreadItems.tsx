@@ -30,7 +30,7 @@ import {
   usePrimaryEnvironmentId,
 } from "../state/environments";
 import { useThreadSearch } from "../state/queries";
-import { useSandboxHostMirrors, useSandboxProviderByEnvironmentId } from "../state/sandboxes";
+import { useSandboxHostMirrors, useSandboxRowStates } from "../state/sandboxes";
 import { sandboxMirrorTarget } from "../state/sandboxThreads";
 import { primaryServerProvidersAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
@@ -104,7 +104,7 @@ export function useCommandPaletteThreadItems(input: {
   const delegatedUnderParent = useDelegatedUnderParent();
   // A host mirror of a sandbox thread is found as the sandbox's own thread.
   const sandboxHostMirrors = useSandboxHostMirrors();
-  const sandboxProviderById = useSandboxProviderByEnvironmentId();
+  const sandboxRowState = useSandboxRowStates();
   const threads = useVisibleThreadShells().filter(
     (thread) =>
       sandboxMirrorTarget(sandboxHostMirrors, scopeThreadRef(thread.environmentId, thread.id)) ===
@@ -141,7 +141,7 @@ export function useCommandPaletteThreadItems(input: {
         />
         <ThreadRowTrailingStatus
           thread={thread}
-          sandboxProvider={sandboxProviderById.get(thread.environmentId) ?? null}
+          sandbox={sandboxRowState(scopeThreadRef(thread.environmentId, thread.id))}
         />
       </>
     ),

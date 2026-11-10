@@ -23,6 +23,8 @@ import {
   sandboxMirrorOf,
   sandboxMirrorTarget,
   sandboxMirrorTitleUpdates,
+  sandboxRowPhase,
+  sandboxRowStates,
   withSandboxHostMirrors,
 } from "./sandboxThreads";
 
@@ -61,6 +63,59 @@ describe("findThreadSandbox", () => {
     const linked = record({ hostProjectId: ProjectId.make("project-host") });
     const other = { environmentId: EnvironmentId.make("other"), threadId };
     expect(findThreadSandbox([linked], other, HOST)).toBeUndefined();
+  });
+});
+
+describe("sandboxRowStates", () => {
+  const hostRef = { environmentId: HOST, threadId };
+  const sandboxRef = { environmentId: SANDBOX, threadId };
+  const linked = (fields: Partial<SandboxRecord> = {}) =>
+    record({ provider: "boat", hostProjectId: ProjectId.make("project-host"), ...fields });
+
+  it("gives the sandbox's own thread and the host thread its bridge drives the same state", () => {
+    const rows = sandboxRowStates([linked({ state: "stopped" })], HOST);
+    const stopped = { provider: "boat", state: "stopped", resumingSince: null };
+    expect(rows(sandboxRef)).toEqual(stopped);
+    expect(rows(hostRef)).toEqual(stopped);
+    // Any thread on the sandbox, such as a subagent's, runs on that machine too.
+    expect(rows({ environmentId: SANDBOX, threadId: ThreadId.make("child") })).toEqual(stopped);
+  });
+
+  it("carries a resume under way", () => {
+    const rows = sandboxRowStates([linked({ resumingSince: "2026-11-10T00:00:00.000Z" })], HOST);
+    expect(rows(hostRef)?.resumingSince).toBe("2026-11-10T00:00:00.000Z");
+    expect(sandboxRowPhase(rows(hostRef))).toBe("starting");
+  });
+
+  it("leaves other threads, deleted sandboxes and unlinked host threads alone", () => {
+    expect(sandboxRowStates([linked({ state: "deleted" })], HOST)(sandboxRef)).toBeNull();
+    expect(sandboxRowStates([record({ provider: "boat" })], HOST)(hostRef)).toBeNull();
+    expect(sandboxRowStates([linked({ state: "provisioning" })], HOST)(hostRef)).toBeNull();
+    const other = { environmentId: EnvironmentId.make("other"), threadId };
+    expect(sandboxRowStates([linked()], HOST)(other)).toBeNull();
+    // A record that answers as the host must not claim the host's own threads.
+    const self = sandboxRowStates(
+      [record({ environmentId: HOST, threadId: ThreadId.make("x") })],
+      HOST,
+    );
+    expect(self({ environmentId: HOST, threadId: ThreadId.make("y") })).toBeNull();
+  });
+});
+
+describe("sandboxRowPhase", () => {
+  const row = (state: SandboxRecord["state"], resumingSince: string | null = null) => ({
+    provider: "boat" as const,
+    state,
+    resumingSince,
+  });
+
+  it("is starting during a resume, stopped while stopped, and nothing otherwise", () => {
+    expect(sandboxRowPhase(row("stopped", "2026-11-10T00:00:00.000Z"))).toBe("starting");
+    expect(sandboxRowPhase(row("stopped"))).toBe("stopped");
+    expect(sandboxRowPhase(row("running"))).toBeNull();
+    // An expired disk cannot resume, so it is not offered as a stopped thread.
+    expect(sandboxRowPhase(row("expired"))).toBeNull();
+    expect(sandboxRowPhase(null)).toBeNull();
   });
 });
 

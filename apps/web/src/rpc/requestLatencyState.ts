@@ -28,17 +28,26 @@ interface PendingRpcAckRequest {
 const pendingRpcAckRequests = new Map<string, PendingRpcAckRequest>();
 // Background reports nobody waits on. A busy host delays them first, and warning
 // about a request the user never made does not say what is wrong. A sign-in wait
-// lasts as long as the user takes on the forge.
+// lasts as long as the user takes on the forge. A sandbox start waits on its machine for
+// minutes, and the sandbox's own row, banner or setup card shows that progress.
 const untrackedRpcAckMethods = new Set<string>([
   WS_METHODS.serverGetUsageSummary,
   WS_METHODS.serverReportClientActivity,
   WS_METHODS.sourceControlSignInWait,
+  WS_METHODS.sandboxesResume,
+  WS_METHODS.sandboxesCreate,
+  WS_METHODS.sandboxesCompleteLaunch,
+  WS_METHODS.sandboxesPairLaunch,
 ]);
+// Calls that wait on installs, background work, or commands on a sandbox.
 const longRunningRpcAckMethods = new Set<string>([
   WS_METHODS.serverUpdateProvider,
   WS_METHODS.serverRefreshProviders,
   WS_METHODS.serverUpdateServer,
   WS_METHODS.vcsRefreshStatus,
+  WS_METHODS.sandboxesLinkHostThread,
+  WS_METHODS.sandboxesDelete,
+  WS_METHODS.sandboxesSaveTemplate,
 ]);
 
 const slowRpcAckRequestsAtom = Atom.make<ReadonlyArray<SlowRpcAckRequest>>([]).pipe(
@@ -54,7 +63,7 @@ function getSlowRpcAckRequestsValue(): ReadonlyArray<SlowRpcAckRequest> {
   return appAtomRegistry.get(slowRpcAckRequestsAtom);
 }
 
-function shouldTrackRpcAck(method: string): boolean {
+export function shouldTrackRpcAck(method: string): boolean {
   return (
     !method.includes("subscribe") &&
     !method.startsWith("pullRequests.") &&
@@ -62,7 +71,7 @@ function shouldTrackRpcAck(method: string): boolean {
   );
 }
 
-function rpcAckThresholdMs(method: string): number {
+export function rpcAckThresholdMs(method: string): number {
   return longRunningRpcAckMethods.has(method)
     ? Math.max(slowRpcAckThresholdMs, LONG_RUNNING_RPC_ACK_THRESHOLD_MS)
     : slowRpcAckThresholdMs;
