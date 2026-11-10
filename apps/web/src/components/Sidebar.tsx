@@ -278,8 +278,10 @@ import {
 import { useSandboxHostMirrors, useSandboxProviderByEnvironmentId } from "../state/sandboxes";
 import {
   deleteSandboxThread,
+  deleteThreadSandbox,
   isSandboxThread,
   sandboxMirrorTarget,
+  threadSandboxUnavailableReason,
   withSandboxHostMirrors,
 } from "../state/sandboxThreads";
 
@@ -2689,6 +2691,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 canShareWithGuestAtom(threadRef.environmentId),
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+              sandboxUnavailable: threadSandboxUnavailableReason(threadRef),
               supports: {
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -2881,6 +2884,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }
             return;
           }
+          case "delete-sandbox":
+            await deleteThreadSandbox(threadRef);
+            return;
           case "delete": {
             // Its own confirmation names the sandbox that goes with it.
             if (isSandboxThread(threadRef)) {
