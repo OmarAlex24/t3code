@@ -75,6 +75,7 @@ import {
   type ServerProvider,
   type ScopedThreadRef,
   type ThreadId,
+  type OrchestrationV2Milestone,
   ProviderInteractionMode,
   resolveIdleCompaction,
   RuntimeMode,
@@ -394,6 +395,7 @@ import {
 import { useDraftHeroLayoutTransition } from "./chat/useDraftHeroLayoutTransition";
 import { useLocalDispatchState } from "./chat/useLocalDispatchState";
 import { ThreadMilestonesView } from "./chat/ThreadMilestonesView";
+import { formatMilestoneCommentPrefix } from "@t3tools/client-runtime/state/thread-milestone-board";
 import { selectThreadViewMode, useThreadViewModeStore } from "../threadViewModeStore";
 import { draftFanoutSelectionsAtom, draftSendState } from "./chat/chatViewSend";
 import {
@@ -2873,6 +2875,16 @@ export default function ChatView(props: ChatViewProps) {
   const timelineEntryReveal =
     chatReveal !== null && chatReveal.threadKey === activeThreadKey ? chatReveal : null;
   const milestonesShortcutLabel = shortcutLabelForCommand(keybindings, "milestones.toggle");
+  const milestoneTurnItems = serverVisibleTurnItems.map(({ item }) => item);
+  // A comment goes through the composer, so it queues or steers like any message you send.
+  const commentOnMilestoneStable = useStableCallback((milestone: OrchestrationV2Milestone) => {
+    const composer = composerRef.current;
+    if (!composer) return;
+    if (!composer.readSnapshot().value.startsWith("Re: milestone ")) {
+      composer.insertTextAtEnd(formatMilestoneCommentPrefix(milestone));
+    }
+    composer.focusAtEnd();
+  });
   const openSubagentStable = useStableCallback((childThreadId: ThreadId) => {
     if (activeThreadRef !== null) {
       useRightPanelStore.getState().openSubagent(activeThreadRef, childThreadId);
@@ -3626,13 +3638,21 @@ export default function ChatView(props: ChatViewProps) {
                   <ThreadMilestonesView
                     threadRef={activeThreadRef}
                     projection={serverProjection}
-                    awaitingUser={
-                      activePendingApproval !== null ||
-                      activePendingUserInput !== null ||
-                      activeThreadShell?.hasPendingUserInput === true
+                    turnItems={milestoneTurnItems}
+                    coordinatorAsk={
+                      activePendingApproval !== null
+                        ? { kind: "approval" }
+                        : activePendingUserInput !== null ||
+                            activeThreadShell?.hasPendingUserInput === true
+                          ? {
+                              kind: "input",
+                              question: activePendingUserInput?.questions[0]?.question ?? null,
+                            }
+                          : null
                     }
                     bottomInset={composerReservedHeight}
                     onOpenThread={openSubagentStable}
+                    onComment={canOperateThread ? commentOnMilestoneStable : null}
                   />
                 ) : (
                   <ThreadTimeline
