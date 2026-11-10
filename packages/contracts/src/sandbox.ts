@@ -246,6 +246,25 @@ export const SandboxAccess = Schema.Literals(["public", "tailnet"]);
 export type SandboxAccess = typeof SandboxAccess.Type;
 
 export const DEFAULT_SANDBOX_MAX_RUNNING_MINUTES = 480;
+
+/**
+ * The longest each step of a sandbox resume may take on the host: the provider starting the
+ * machine (every driver polls 90 times, 2 seconds apart), installing a keep-alive key, rejoining a
+ * tailnet, and starting T3 Code on it.
+ */
+export const SANDBOX_RESUME_STEP_SECONDS = {
+  machineStart: 180,
+  keepAlive: 60,
+  tailnetRejoin: 420,
+  t3Start: 180,
+} as const;
+
+/**
+ * How long a turn on a sandbox chat's host thread waits for its resuming sandbox to answer: every
+ * step at its longest, and a minute for the provider calls between them and the connection.
+ */
+export const SANDBOX_RESUME_WAIT_SECONDS =
+  Object.values(SANDBOX_RESUME_STEP_SECONDS).reduce((total, seconds) => total + seconds, 0) + 60;
 export const DEFAULT_SANDBOX_IDLE_MINUTES = 30;
 export const SandboxMaxRunningMinutes = Schema.Int.check(
   Schema.isBetween({ minimum: 10, maximum: 43200 }),

@@ -13,14 +13,18 @@ import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { useProjects, useQuietThreadShells } from "./entities";
-import { useEnvironmentProviders, usePrimaryEnvironmentId } from "./environments";
+import {
+  useConnectedEnvironmentIds,
+  useEnvironmentProviders,
+  usePrimaryEnvironmentId,
+} from "./environments";
 import { useEnvironmentPresentation } from "./presentation";
 import { useEnvironmentQuery } from "./query";
 import {
   findThreadSandbox,
   isSandboxlessBridgeThread,
   providerInstanceReady,
-  sandboxHostMirrors,
+  sandboxChatAliases,
   sandboxRowStates,
   type SandboxRowState,
 } from "./sandboxThreads";
@@ -190,12 +194,18 @@ export function useSandboxlessBridgeThread(
   );
 }
 
-/** The host's mirrors of sandbox threads, by thread key; see `sandboxHostMirrors`. */
-export function useSandboxHostMirrors(): ReadonlyMap<string, ScopedThreadRef> {
+/**
+ * The thread of each sandbox chat that its other thread stands for, by thread key, from whether
+ * the sandbox runs and its server is connected; see `sandboxChatAliases`.
+ */
+export function useSandboxChatAliases(): ReadonlyMap<string, ScopedThreadRef> {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const threads = useQuietThreadShells();
   const sandboxes = useSandboxRecords();
-  return sandboxHostMirrors(sandboxes, threads, provisionerEnvironmentId);
+  const connected = useConnectedEnvironmentIds();
+  return sandboxChatAliases(sandboxes, threads, provisionerEnvironmentId, (environmentId) =>
+    connected.includes(environmentId),
+  );
 }
 
 const NO_SANDBOXES: ReadonlyArray<SandboxRecord> = [];

@@ -71,6 +71,9 @@ export function useSandboxMirrorSend() {
   });
 
   return useStableCallback(async (threadRef: ScopedThreadRef, message: SandboxMirrorMessage) => {
+    // A send on the host's mirror is already the phone's copy, and its run delivers it to the
+    // sandbox; copying it again would send it twice.
+    if (threadRef.environmentId === provisionerEnvironmentId) return;
     const pending = pendingLinks.get(threadKey(threadRef));
     const target =
       sandboxMirrorOf(sandboxes, threadRef, provisionerEnvironmentId) ??
