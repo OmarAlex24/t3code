@@ -1,3 +1,4 @@
+import { secondTick } from "@t3tools/client-runtime/clock";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   DEFAULT_CLIENT_SETTINGS,
@@ -10,6 +11,7 @@ import {
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
+import "~/index.css";
 import { render } from "../../test/render";
 import { dismissContextMenu } from "../contextMenuFallback";
 import { registerSandboxThreadHandlers } from "../state/sandboxThreads";
@@ -257,6 +259,105 @@ describe("sandbox chats in the sidebar", () => {
     const remoteRow = await rowOf("Runs on a paired Mac");
     expect(remoteRow.querySelector("svg.lucide-server")).not.toBeNull();
     expect(remoteRow.querySelector(vercelMark)).toBeNull();
+  });
+
+  it("marks a stopped sandbox's thread frozen and one resuming as starting, on its own row or a host mirror", async () => {
+    using stack = new DisposableStack();
+    const previousSettings = getClientSettings();
+    stack.defer(() => __setClientSettingsForTests(previousSettings));
+    // Begun 42 seconds ago by the clock the elapsed time reads.
+    const resumingSince = new Date(secondTick.getSnapshot() - 42_000).toISOString();
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+    });
+    mocks.sandboxes = [
+      sandbox({
+        hostProjectId: ProjectId.make("project-host"),
+        state: "stopped",
+        runningSince: null,
+        stoppedAt: "2026-11-10T11:00:00.000Z",
+      }),
+      // Its own thread is not listed (its server is still off), so the host's mirror stands in.
+      sandbox({
+        instanceId: "instance-2",
+        environmentId: LEGACY_SANDBOX,
+        threadId: legacyThreadId,
+        sandboxId: "bx_9kq2wxyz",
+        hostProjectId: ProjectId.make("project-host"),
+        state: "stopped",
+        runningSince: null,
+        resumingSince,
+      }),
+    ];
+    vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
+    vi.mocked(useProjects).mockReturnValue([
+      placeholder,
+      project(SANDBOX, "project-sandbox", "OmarAlex24/horizon-stack"),
+      project(REMOTE, "project-remote", "OmarAlex24/remote-stack"),
+    ]);
+    // Wide enough for the desktop sidebar, so the screenshots show it as users see it.
+    await page.viewport(1100, 640);
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      shell(SANDBOX, bridgedThreadId, "project-sandbox", "Refactor the billing worker"),
+      shell(HOST, legacyThreadId, "project-host", "Add retries to the importer"),
+      shell(REMOTE, remoteThreadId, "project-remote", "Runs on a paired Mac"),
+    ]);
+
+    await using _screen = await render(
+      <SidebarProvider>
+        {/* The app's sidebar column, so rows lay out and paint as they do there. */}
+        <div className="flex h-[600px] w-80 flex-col bg-sidebar text-sidebar-foreground">
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </div>
+      </SidebarProvider>,
+    );
+
+    const rowOf = async (title: string) => {
+      const titleText = page.getByText(title).first();
+      await expect.element(titleText).toBeVisible();
+      const row = titleText.element().closest("li[data-thread-item]");
+      expect(row).not.toBeNull();
+      return row as HTMLElement;
+    };
+    const frozen = await rowOf("Refactor the billing worker");
+    expect(frozen.querySelector('[data-sandbox-phase="stopped"] svg.lucide-pause')).not.toBeNull();
+    await expect
+      .element(page.getByRole("button", { name: /^Refactor the billing worker, Sandbox stopped/ }))
+      .toBeInTheDocument();
+    // Muted until hovered, like a row that is still setting up.
+    expect(frozen.querySelector("[data-sidebar-row]")?.className).toContain("opacity-70");
+
+    // The host thread the bridge drives is local, but it shows its sandbox's start.
+    const waking = await rowOf("Add retries to the importer");
+    expect(waking.textContent).toMatch(/Starting sandbox4\ds/);
+    expect(waking.querySelector('[data-sandbox-phase="stopped"]')).toBeNull();
+    expect(waking.querySelector(".motion-safe\\:animate-status-pulse")).not.toBeNull();
+
+    // A paired machine is no sandbox, so it keeps its usual look.
+    const remote = await rowOf("Runs on a paired Mac");
+    expect(remote.querySelector("[data-sandbox-phase]")).toBeNull();
+    expect(remote.textContent).not.toContain("Starting sandbox");
+
+    await page.screenshot({ path: "__screenshots__/sandbox-state-rows.png" });
+    // Up close, where the badge on the provider's mark can be checked.
+    document.documentElement.style.zoom = "3";
+    await page.screenshot({ path: "__screenshots__/sandbox-state-rows-zoomed.png" });
+    document.documentElement.style.zoom = "";
+    await userEvent.hover(page.elementLocator(frozen.querySelector("[data-sidebar-row]")!));
+    const hint = page.getByText("Sandbox stopped · send a message to resume it");
+    await expect.element(hint).toBeVisible();
+    // Past the hover card's fade-in, so the screenshot shows it as read.
+    await expect
+      .poll(() => {
+        let opacity = 1;
+        for (let node: Element | null = hint.element(); node !== null; node = node.parentElement) {
+          opacity *= Number(getComputedStyle(node).opacity);
+        }
+        return opacity;
+      })
+      .toBe(1);
+    await page.screenshot({ path: "__screenshots__/sandbox-state-stopped-hover.png" });
   });
 
   it("offers deleting a sandbox deleted outside T3 Code from its thread's menu, and says why the rest is off", async () => {
