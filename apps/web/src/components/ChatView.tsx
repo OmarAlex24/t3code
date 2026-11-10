@@ -340,6 +340,7 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { SandboxStartingTitle } from "./chat/SandboxStartingTitle";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
@@ -2758,22 +2759,36 @@ export default function ChatView(props: ChatViewProps) {
       freshSessionAvailable && freshSessionArmed && activePendingApproval === null
         ? [freshSessionBannerItem(() => disarmFreshSession(routeThreadKey))]
         : [];
+    const sandboxStartingSince = activeSandbox?.resumingSince ?? null;
     const sandboxItems: ComposerBannerStackItem[] =
-      activeSandbox !== undefined && (activeSandboxStopped || sandboxResendPending)
+      activeSandbox !== undefined &&
+      (activeSandboxStopped || sandboxResendPending || sandboxStartingSince !== null)
         ? [
             {
               id: `sandbox-stopped:${activeSandbox.instanceId}`,
               variant: "default",
               group: "environment",
               icon: <SandboxProviderLogo kind={activeSandbox.provider} />,
-              title: sandboxResendPending
-                ? `Resuming sandbox ${shortSandboxId(activeSandbox.sandboxId)}`
-                : `Sandbox ${shortSandboxId(activeSandbox.sandboxId)} is stopped`,
+              // The server's resume says when it began, whoever started it (this client, another,
+              // or the bridge for a run on the host).
+              title:
+                sandboxStartingSince !== null ? (
+                  <SandboxStartingTitle
+                    sandboxId={activeSandbox.sandboxId}
+                    startedAt={sandboxStartingSince}
+                  />
+                ) : sandboxResendPending ? (
+                  `Resuming sandbox ${shortSandboxId(activeSandbox.sandboxId)}`
+                ) : (
+                  `Sandbox ${shortSandboxId(activeSandbox.sandboxId)} is stopped`
+                ),
               description: sandboxResendPending
                 ? "Your message sends once it is running again."
-                : activeSandboxOnHost
-                  ? "Its disk is kept. Sending a message resumes it; the first answer can take a few minutes."
-                  : "Its disk is kept. Sending a message resumes it.",
+                : sandboxStartingSince !== null
+                  ? "It is coming back with its disk as it was. This can take a few minutes."
+                  : activeSandboxOnHost
+                    ? "Its disk is kept. Sending a message resumes it; the first answer can take a few minutes."
+                    : "Its disk is kept. Sending a message resumes it.",
             },
           ]
         : sandboxDeleted

@@ -275,7 +275,7 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
-import { useSandboxHostMirrors, useSandboxProviderByEnvironmentId } from "../state/sandboxes";
+import { useSandboxHostMirrors, useSandboxRowStates } from "../state/sandboxes";
 import {
   deleteSandboxThread,
   deleteThreadSandbox,
@@ -1031,7 +1031,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     routeTarget?.kind === "draft" ? store.getPromotedDraftRedirect(routeTarget.draftId) : null,
   );
   const environmentMachineById = useEnvironmentMachines();
-  const sandboxProviderById = useSandboxProviderByEnvironmentId();
+  // Each row's sandbox, its own or the one a host thread's bridge drives, looked up once per list.
+  const sandboxRowState = useSandboxRowStates();
   const projectGroupsRef = useRef(projectGroups);
   const persistedProjectScopeKeys = useUiStateStore((store) => store.sidebarProjectScopeKeys);
   const setPersistedProjectScopeKeys = useUiStateStore((store) => store.setSidebarProjectScopeKeys);
@@ -3285,7 +3286,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           environmentMachine={
                             environmentMachineById.get(thread.environmentId) ?? "server"
                           }
-                          sandboxProvider={sandboxProviderById.get(thread.environmentId) ?? null}
+                          sandbox={sandboxRowState(scopeThreadRef(thread.environmentId, thread.id))}
                           providerEntryByInstanceId={
                             providerEntriesByEnvironment.get(thread.environmentId) ??
                             EMPTY_PROVIDER_ENTRIES
@@ -3483,7 +3484,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             environmentMachine={
                               environmentMachineById.get(thread.environmentId) ?? "server"
                             }
-                            sandboxProvider={sandboxProviderById.get(thread.environmentId) ?? null}
+                            sandbox={sandboxRowState(
+                              scopeThreadRef(thread.environmentId, thread.id),
+                            )}
                             scratchMachineLabel={scratchMachineLabelFor(thread)}
                             project={
                               projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??

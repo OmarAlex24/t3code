@@ -30,7 +30,6 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type EnvironmentMachineKind,
-  type SandboxProviderKind,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 
@@ -81,6 +80,11 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { EnvironmentOptionIcon } from "../EnvironmentOptionIcon";
+import {
+  SANDBOX_STOPPED_HINT,
+  type SandboxRowState,
+  sandboxRowPhase,
+} from "../../state/sandboxThreads";
 import {
   animateSidebarLayoutChanges,
   hasUnseenCompletion,
@@ -237,7 +241,7 @@ function SidebarThreadTooltip({
   projectDisplayName,
   environmentLabel,
   environmentMachine,
-  sandboxProvider,
+  sandbox,
   providerEntry,
   providerEntryByInstanceId,
   showInstanceBadge,
@@ -252,7 +256,7 @@ function SidebarThreadTooltip({
   projectDisplayName: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
-  sandboxProvider: SandboxProviderKind | null;
+  sandbox: SandboxRowState | null;
   providerEntry: SidebarProviderEntry | null;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
   showInstanceBadge: boolean;
@@ -266,6 +270,7 @@ function SidebarThreadTooltip({
   terminalProcessCount: number;
 }) {
   const driverKind = providerEntry?.driverKind ?? null;
+  const sandboxPhase = sandboxRowPhase(sandbox);
   const previousProviderNames = thread.providerInstanceHistory
     .filter((instanceId) => instanceId !== modelInstanceId)
     .map((instanceId) => providerEntryByInstanceId.get(instanceId)?.displayName ?? instanceId);
@@ -291,10 +296,30 @@ function SidebarThreadTooltip({
         {environmentLabel ? (
           <div className="flex min-w-0 items-center gap-2">
             <EnvironmentOptionIcon
-              option={{ machine: environmentMachine, sandboxProvider }}
+              option={{ machine: environmentMachine, sandboxProvider: sandbox?.provider ?? null }}
               className="size-3 shrink-0 text-muted-foreground"
             />
             <div className="min-w-0 truncate text-foreground/75">{environmentLabel}</div>
+          </div>
+        ) : null}
+        {sandboxPhase !== null && sandbox !== null ? (
+          <div className="flex min-w-0 items-start gap-2">
+            <EnvironmentOptionIcon
+              option={{ machine: environmentMachine, sandboxProvider: sandbox.provider }}
+              sandboxPhase={sandboxPhase}
+              badgeRingClassName="ring-popover"
+              className="mt-0.5 size-3 shrink-0"
+            />
+            {/* The hint is what to do next, so it wraps rather than cut off. */}
+            <div className="min-w-0 flex-1 wrap-break-word text-foreground/75">
+              {sandboxPhase === "stopped" ? SANDBOX_STOPPED_HINT : "Starting sandbox"}
+              {sandboxPhase === "starting" ? (
+                <>
+                  {" · "}
+                  <WorkingDuration startedAt={sandbox.resumingSince} />
+                </>
+              ) : null}
+            </div>
           </div>
         ) : null}
         {thread.branch ? (
@@ -573,8 +598,11 @@ type SidebarThreadRowProps = {
   currentEnvironmentId: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
-  /** Set when the thread runs on its own sandbox: its machine is drawn as the provider's mark. */
-  sandboxProvider: SandboxProviderKind | null;
+  /**
+   * Set when the thread runs on a sandbox, its own or the one the bridge drives for this host
+   * thread: its machine is drawn as the provider's mark, with the sandbox's state.
+   */
+  sandbox: SandboxRowState | null;
   scratchMachineLabel: string | null;
   project: EnvironmentProject | null;
   projectDisplayName: string | null;
@@ -734,6 +762,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
+  const sandboxPhase = sandboxRowPhase(props.sandbox);
+  const sandboxProvider = props.sandbox?.provider ?? null;
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
   const wokeAtDate = props.wokeAt === null ? null : parseTimestampDate(props.wokeAt);
   const isWoke =
@@ -747,67 +777,74 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isActive: props.isActive,
     isSelected,
   });
+  // A starting sandbox comes first: a run waiting on it says nothing more until it is up.
   const topStatus =
-    status === "preparing" || status === "working"
+    sandboxPhase === "starting"
       ? {
-          label:
-            status === "preparing"
-              ? "Setting up"
-              : thread.goal?.status === "active"
-                ? "Goal"
-                : "Working",
+          label: "Starting sandbox",
           icon: "working" as const,
           className: "text-info-foreground",
         }
-      : status === "waiting"
+      : status === "preparing" || status === "working"
         ? {
-            label: "Waiting",
-            icon: "waiting" as const,
-            className: "text-muted-foreground",
+            label:
+              status === "preparing"
+                ? "Setting up"
+                : thread.goal?.status === "active"
+                  ? "Goal"
+                  : "Working",
+            icon: "working" as const,
+            className: "text-info-foreground",
           }
-        : status === "approval"
+        : status === "waiting"
           ? {
-              label: "Approval",
-              icon: "approval" as const,
-              className: "text-warning-foreground",
+              label: "Waiting",
+              icon: "waiting" as const,
+              className: "text-muted-foreground",
             }
-          : status === "input"
+          : status === "approval"
             ? {
-                label: "Input",
-                icon: "input" as const,
-                className: "text-indigo-600 dark:text-indigo-300",
+                label: "Approval",
+                icon: "approval" as const,
+                className: "text-warning-foreground",
               }
-            : status === "request"
+            : status === "input"
               ? {
-                  label: "Request",
-                  icon: "request" as const,
-                  className: "text-guest-foreground",
+                  label: "Input",
+                  icon: "input" as const,
+                  className: "text-indigo-600 dark:text-indigo-300",
                 }
-              : status === "limited"
+              : status === "request"
                 ? {
-                    label: "Limited",
-                    icon: "failed" as const,
-                    className: "text-warning-foreground",
+                    label: "Request",
+                    icon: "request" as const,
+                    className: "text-guest-foreground",
                   }
-                : status === "failed"
+                : status === "limited"
                   ? {
-                      label: "Failed",
+                      label: "Limited",
                       icon: "failed" as const,
-                      className: "text-error-foreground",
+                      className: "text-warning-foreground",
                     }
-                  : isWoke
+                  : status === "failed"
                     ? {
-                        label: "Woke",
-                        icon: "woke" as const,
-                        className: "text-warning-foreground",
+                        label: "Failed",
+                        icon: "failed" as const,
+                        className: "text-error-foreground",
                       }
-                    : isUnread
+                    : isWoke
                       ? {
-                          label: "Done",
-                          icon: "done" as const,
-                          className: "text-success-foreground",
+                          label: "Woke",
+                          icon: "woke" as const,
+                          className: "text-warning-foreground",
                         }
-                      : null;
+                      : isUnread
+                        ? {
+                            label: "Done",
+                            icon: "done" as const,
+                            className: "text-success-foreground",
+                          }
+                        : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
@@ -840,7 +877,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       projectDisplayName={props.projectDisplayName}
       environmentLabel={props.environmentLabel}
       environmentMachine={props.environmentMachine}
-      sandboxProvider={props.sandboxProvider}
+      sandbox={props.sandbox}
       providerEntry={providerEntry}
       providerEntryByInstanceId={props.providerEntryByInstanceId}
       showInstanceBadge={showInstanceBadge}
@@ -989,8 +1026,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           : shouldRecede
             ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
             : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
-    shouldRecede &&
-      (status === "preparing" || status === "working") &&
+    ((shouldRecede && (status === "preparing" || status === "working")) ||
+      // A stopped sandbox's thread is frozen until a message resumes it.
+      (sandboxPhase === "stopped" && !props.isActive && !isSelected)) &&
       "opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none",
     isFileDragOver && "ring-1 ring-inset ring-primary/70",
     isFileDragOver && !props.isActive && !isSelected && "bg-sidebar-row-hover",
@@ -1031,7 +1069,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
-    statusLabel: topStatus?.label ?? null,
+    statusLabel: topStatus?.label ?? (sandboxPhase === "stopped" ? "Sandbox stopped" : null),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
@@ -1156,11 +1194,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     )
   ) : null;
 
+  // A host thread the bridge drives is local, but its machine is the sandbox.
   const remoteMachineIcon =
-    isRemote && !showsScratchMachine ? (
+    (isRemote || props.sandbox !== null) && !showsScratchMachine ? (
       <span className="inline-flex shrink-0 items-center text-sidebar-muted-foreground/70">
         <EnvironmentOptionIcon
-          option={{ machine: props.environmentMachine, sandboxProvider: props.sandboxProvider }}
+          option={{ machine: props.environmentMachine, sandboxProvider }}
+          sandboxPhase={sandboxPhase}
+          badgeRingClassName="ring-sidebar"
           className="size-3.5"
         />
       </span>
@@ -1185,7 +1226,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ) : showsScratchMachine ? (
         <>
           <EnvironmentOptionIcon
-            option={{ machine: props.environmentMachine, sandboxProvider: props.sandboxProvider }}
+            option={{ machine: props.environmentMachine, sandboxProvider }}
+            sandboxPhase={sandboxPhase}
+            badgeRingClassName="ring-sidebar"
             className="size-3 shrink-0"
           />
           <span className="min-w-0 flex-1 truncate">{props.scratchMachineLabel}</span>
@@ -1213,6 +1256,21 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       </span>
     </div>
   );
+  // One-line rows have no machine icons, so a sandbox that is not running as usual gets its own.
+  const sandboxPhaseMark =
+    sandboxPhase === null ? null : (
+      <span
+        aria-hidden
+        className="inline-flex shrink-0 items-center text-sidebar-muted-foreground/70"
+      >
+        <EnvironmentOptionIcon
+          option={{ machine: props.environmentMachine, sandboxProvider }}
+          sandboxPhase={sandboxPhase}
+          badgeRingClassName="ring-sidebar"
+          className="size-3.5"
+        />
+      </span>
+    );
   const titleLineIcons = metaLineEmpty ? (
     <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
       {remoteMachineIcon}
@@ -1283,7 +1341,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               )}
               {draftIndicator}
               {title}
-              {multiline ? titleLineIcons : null}
+              {multiline ? titleLineIcons : sandboxPhaseMark}
               {pinIndicator}
               {multiline ? null : terminalStatusIcon}
               {isRegeneratingTitle ? (
@@ -1530,7 +1588,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                             BackgroundThreadAnnouncer and the open thread's
                             timeline speak status changes instead. */}
                           {topStatus.label}
-                          {status === "preparing" || status === "working" ? (
+                          {sandboxPhase === "starting" ? (
+                            <span aria-hidden>
+                              <WorkingDuration startedAt={props.sandbox?.resumingSince ?? null} />
+                            </span>
+                          ) : status === "preparing" || status === "working" ? (
                             <span aria-hidden>
                               <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
                             </span>
@@ -1645,7 +1707,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
   projectDisplayName: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
-  sandboxProvider: SandboxProviderKind | null;
+  sandbox: SandboxRowState | null;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
   isHighlighted: boolean;
   isRouteActive: boolean;
@@ -1817,7 +1879,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
           projectDisplayName={props.projectDisplayName}
           environmentLabel={props.environmentLabel}
           environmentMachine={props.environmentMachine}
-          sandboxProvider={props.sandboxProvider}
+          sandbox={props.sandbox}
           providerEntry={providerEntry}
           providerEntryByInstanceId={props.providerEntryByInstanceId}
           showInstanceBadge={showInstanceBadge}
