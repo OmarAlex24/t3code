@@ -1,4 +1,5 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon, XIcon } from "lucide-react";
@@ -7,8 +8,11 @@ import { useEffect } from "react";
 import { ComposerHandleContext } from "../../composerHandleContext";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
 import { hostRightPanel } from "../../rightPanelStore";
-import { useQuietThreadShell } from "../../state/entities";
-import { useEnvironmentShellHasSnapshot } from "../../state/shell";
+import {
+  useQuietThreadProjection,
+  useQuietThreadShell,
+  useThreadStatus,
+} from "../../state/entities";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import ChatView from "../ChatView";
 import { Button } from "../ui/button";
@@ -29,17 +33,20 @@ export default function SubagentPane(props: {
     () => hostRightPanel(scopeThreadRef(parentRef.environmentId, threadId), parentRef),
     [parentRef, threadId],
   );
+  // Idle subagents are left out of the shell, so the thread detail decides whether it exists.
   const shell = useQuietThreadShell(threadRef);
-  const snapshotLoaded = useEnvironmentShellHasSnapshot(parentRef.environmentId);
+  const deleted = useThreadStatus(threadRef) === "deleted";
+  const subagentTitle = useQuietThreadProjection(parentRef)?.projection.subagents.find(
+    (subagent) => subagent.childThreadId === threadId,
+  )?.title;
+  const title = shell?.title ?? (subagentTitle ? formatSubagentDisplayTitle(subagentTitle) : null);
   const navigate = useNavigate();
 
   return (
     // Marked as a side pane so the coordinator's chat ignores keys and drops that start here.
     <div data-side-chat-pane className="flex h-full min-h-0 flex-col">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border pr-1 pl-3">
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">
-          {shell?.title ?? "Subagent"}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{title ?? "Subagent"}</span>
         <Tooltip>
           <TooltipTrigger
             render={
@@ -47,7 +54,7 @@ export default function SubagentPane(props: {
                 variant="ghost"
                 size="icon-xs"
                 aria-label="Open full chat"
-                disabled={shell === null}
+                disabled={deleted}
                 onClick={() =>
                   void navigate({
                     to: "/$environmentId/$threadId",
@@ -65,10 +72,8 @@ export default function SubagentPane(props: {
           <XIcon />
         </Button>
       </div>
-      {shell === null ? (
-        snapshotLoaded ? (
-          <p className="p-3 text-xs text-muted-foreground">This subagent's chat is gone.</p>
-        ) : null
+      {deleted ? (
+        <p className="p-3 text-xs text-muted-foreground">This subagent's chat is gone.</p>
       ) : (
         <BackgroundThreadContext value>
           <ComposerHandleContext value={null}>
