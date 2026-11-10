@@ -1,0 +1,194 @@
+import * as DateTime from "effect/DateTime";
+import type {
+  OrchestrationV2Milestone,
+  OrchestrationV2Subagent,
+  OrchestrationV2ThreadProjection,
+} from "@t3tools/contracts";
+import { copySorted } from "@t3tools/shared/Array";
+
+import { isActiveSubagentStatus } from "./subagentRuntime.ts";
+import { resolveActiveThreadRun } from "./threadWorkflows.ts";
+
+type Projection = Pick<OrchestrationV2ThreadProjection, "runs" | "subagents" | "milestones">;
+type Run = Projection["runs"][number];
+type Subagent = OrchestrationV2Subagent;
+
+/** A user turn on the spine, with the agents it started that no milestone claims. */
+export interface MilestoneGraphTurn {
+  readonly run: Run;
+  readonly agents: ReadonlyArray<Subagent>;
+}
+
+export interface MilestoneGraphNode {
+  readonly milestone: OrchestrationV2Milestone;
+  readonly agents: ReadonlyArray<Subagent>;
+  /** Turns the user started while this milestone was active, in order. */
+  readonly turns: ReadonlyArray<MilestoneGraphTurn>;
+}
+
+export interface MilestoneGraphEarlierSet {
+  readonly setId: OrchestrationV2Milestone["setId"];
+  readonly milestones: ReadonlyArray<OrchestrationV2Milestone>;
+  readonly agentCount: number;
+}
+
+export type MilestoneCoordinatorStatus = "working" | "waiting" | "idle" | "failed" | "interrupted";
+
+export interface MilestoneCoordinator {
+  readonly status: MilestoneCoordinatorStatus;
+  readonly liveAgents: number;
+}
+
+export type ThreadMilestoneGraph =
+  | { readonly mode: "empty" }
+  | {
+      readonly mode: "turns";
+      readonly turns: ReadonlyArray<MilestoneGraphTurn>;
+      readonly coordinator: MilestoneCoordinator;
+    }
+  | {
+      readonly mode: "milestones";
+      /** The first turn, with the agents that ran before any plan. */
+      readonly root: MilestoneGraphTurn | null;
+      readonly earlierSets: ReadonlyArray<MilestoneGraphEarlierSet>;
+      readonly milestones: ReadonlyArray<MilestoneGraphNode>;
+      readonly coordinator: MilestoneCoordinator;
+      readonly summary: {
+        /** 1-based position of the active milestone, or how many are done. */
+        readonly position: number;
+        readonly total: number;
+        readonly changes: number;
+        readonly startedAt: DateTime.Utc | null;
+      };
+    };
+
+const startKey = (subagent: Subagent) =>
+  DateTime.toEpochMillis(subagent.startedAt ?? subagent.updatedAt);
+
+function coordinatorOf(projection: Projection, live: number): MilestoneCoordinator {
+  if (resolveActiveThreadRun(projection) !== null) {
+    return { status: live > 0 ? "waiting" : "working", liveAgents: live };
+  }
+  const latest = projection.runs.reduce<Run | null>(
+    (current, run) =>
+      run.status !== "rolled_back" && (current === null || run.ordinal > current.ordinal)
+        ? run
+        : current,
+    null,
+  );
+  const status: MilestoneCoordinatorStatus =
+    latest?.status === "failed"
+      ? "failed"
+      : latest?.status === "interrupted" || latest?.status === "cancelled"
+        ? "interrupted"
+        : "idle";
+  return { status, liveAgents: live };
+}
+
+/** The milestone that was active when `at` happened, by its start and end. */
+function milestoneActiveAt(
+  milestones: ReadonlyArray<OrchestrationV2Milestone>,
+  at: DateTime.Utc,
+): OrchestrationV2Milestone | undefined {
+  const time = DateTime.toEpochMillis(at);
+  return milestones.findLast(
+    (milestone) =>
+      milestone.startedAt !== null && DateTime.toEpochMillis(milestone.startedAt) <= time,
+  );
+}
+
+/**
+ * The coordinator's spine: milestones with the agents and user turns that belong to each, or one
+ * node per user turn on a thread that never planned. Subagents keep the milestone they were
+ * stamped with; one whose milestone is gone (rolled back) falls to its turn.
+ */
+export function deriveThreadMilestoneGraph(projection: Projection): ThreadMilestoneGraph {
+  const rolledBack = new Set(
+    projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
+  );
+  const runs = copySorted(
+    projection.runs.filter((run) => !rolledBack.has(run.id)),
+    (left, right) => left.ordinal - right.ordinal,
+  );
+  const subagents = copySorted(
+    projection.subagents.filter(
+      (subagent) => subagent.runId === null || !rolledBack.has(subagent.runId),
+    ),
+    (left, right) => startKey(left) - startKey(right) || left.id.localeCompare(right.id),
+  );
+  const live = subagents.filter((subagent) => isActiveSubagentStatus(subagent.status)).length;
+  const coordinator = coordinatorOf(projection, live);
+  if (runs.length === 0 && projection.milestones.length === 0) return { mode: "empty" };
+
+  const milestoneIds = new Set(projection.milestones.map((milestone) => milestone.id));
+  const byMilestone = new Map<string, Array<Subagent>>();
+  const byRun = new Map<string, Array<Subagent>>();
+  for (const subagent of subagents) {
+    if (subagent.milestoneId !== undefined && milestoneIds.has(subagent.milestoneId)) {
+      byMilestone.set(subagent.milestoneId, [
+        ...(byMilestone.get(subagent.milestoneId) ?? []),
+        subagent,
+      ]);
+    } else if (subagent.runId !== null) {
+      byRun.set(subagent.runId, [...(byRun.get(subagent.runId) ?? []), subagent]);
+    }
+  }
+  const turnOf = (run: Run): MilestoneGraphTurn => ({ run, agents: byRun.get(run.id) ?? [] });
+
+  if (projection.milestones.length === 0) {
+    return { mode: "turns", turns: runs.map(turnOf), coordinator };
+  }
+
+  const currentSetId = projection.milestones.at(-1)!.setId;
+  const current = projection.milestones.filter((milestone) => milestone.setId === currentSetId);
+  const [rootRun, ...laterRuns] = runs;
+  const turnsByMilestone = new Map<string, Array<MilestoneGraphTurn>>();
+  const rootAgents = rootRun === undefined ? [] : [...turnOf(rootRun).agents];
+  for (const run of laterRuns) {
+    const owner = milestoneActiveAt(projection.milestones, run.requestedAt);
+    if (owner === undefined) {
+      rootAgents.push(...turnOf(run).agents);
+    } else if (owner.setId === currentSetId) {
+      turnsByMilestone.set(owner.id, [...(turnsByMilestone.get(owner.id) ?? []), turnOf(run)]);
+    }
+  }
+
+  const earlierSets: Array<MilestoneGraphEarlierSet> = [];
+  for (const milestone of projection.milestones) {
+    if (milestone.setId === currentSetId) continue;
+    const last = earlierSets.at(-1);
+    const agentCount = byMilestone.get(milestone.id)?.length ?? 0;
+    if (last?.setId === milestone.setId) {
+      earlierSets[earlierSets.length - 1] = {
+        ...last,
+        milestones: [...last.milestones, milestone],
+        agentCount: last.agentCount + agentCount,
+      };
+    } else {
+      earlierSets.push({ setId: milestone.setId, milestones: [milestone], agentCount });
+    }
+  }
+
+  const counted = current.filter((milestone) => milestone.status !== "dropped");
+  const activeIndex = counted.findIndex((milestone) => milestone.status === "active");
+  return {
+    mode: "milestones",
+    root: rootRun === undefined ? null : { run: rootRun, agents: rootAgents },
+    earlierSets,
+    milestones: current.map((milestone) => ({
+      milestone,
+      agents: byMilestone.get(milestone.id) ?? [],
+      turns: turnsByMilestone.get(milestone.id) ?? [],
+    })),
+    coordinator,
+    summary: {
+      position:
+        activeIndex === -1
+          ? counted.filter((milestone) => milestone.status === "done").length
+          : activeIndex + 1,
+      total: counted.length,
+      changes: current.filter((milestone) => milestone.revision !== undefined).length,
+      startedAt: current[0]?.startedAt ?? rootRun?.startedAt ?? null,
+    },
+  };
+}
