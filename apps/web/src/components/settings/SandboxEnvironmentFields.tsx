@@ -126,6 +126,7 @@ const formatMinutes = (minutes: number) => {
 function MinutesField({
   label,
   hint,
+  unit = "minutes",
   value,
   min,
   max,
@@ -134,6 +135,7 @@ function MinutesField({
 }: {
   label: string;
   hint: string;
+  unit?: string;
   value: number;
   min: number;
   max: number;
@@ -162,7 +164,7 @@ function MinutesField({
             <NumberFieldIncrement aria-label={`Increase ${label.toLowerCase()}`} />
           </NumberFieldGroup>
         </NumberField>
-        <span className="text-xs text-muted-foreground">minutes</span>
+        <span className="text-xs text-muted-foreground">{unit}</span>
       </div>
       <p className="text-2xs leading-relaxed text-muted-foreground">{hint}</p>
     </div>
@@ -258,8 +260,13 @@ export function SandboxEnvironmentFields({
       Object.entries(config?.envFiles ?? {}).map(([key, files]) => [key, files.join(", ")]),
     ),
   );
-  // Stored for a later idle stop; nothing reads it yet, so the form only carries it through.
-  const idleMinutes = config?.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES;
+  const [idleMinutes, setIdleMinutes] = useState(
+    config?.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES,
+  );
+  // Null is no hard limit: a sandbox that keeps itself up runs as long as its threads work.
+  const [runningCapMinutes, setRunningCapMinutes] = useState<number | null>(
+    config?.runningCapMinutes ?? null,
+  );
   // Offered only to a config that already has it, so it can be turned off.
   const offersTailnetOnly = config?.access === "tailnet";
   const [editingEndpoint, setEditingEndpoint] = useState(false);
@@ -347,8 +354,15 @@ export function SandboxEnvironmentFields({
         : passesCredentials && !allowCredentials
           ? `Confirm the credentials the ${provider?.label ?? ""} environment passes`
           : tooling.attention;
+  // Where the provider keeps a sandbox up while it works, the running limit is only a fallback.
+  const keepsItselfUp = provider?.capabilities.keepAlive === true;
   const machineSummary = [
-    `stops after ${formatMinutes(maxRunningMinutes)} running`,
+    ...(keepsItselfUp
+      ? [
+          `stops after ${formatMinutes(idleMinutes)} without work`,
+          runningCapMinutes === null ? null : `at most ${formatMinutes(runningCapMinutes)} running`,
+        ]
+      : [`stops after ${formatMinutes(maxRunningMinutes)} running`]),
     joinsTailnet
       ? tailnetOnly
         ? "reached only through your tailnet"
@@ -433,6 +447,7 @@ export function SandboxEnvironmentFields({
           ),
           idleMinutes,
           maxRunningMinutes,
+          ...(keepsItselfUp && runningCapMinutes !== null ? { runningCapMinutes } : {}),
         },
         ...(apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
         ...(settingsFields.length === 0
@@ -700,16 +715,57 @@ export function SandboxEnvironmentFields({
                     {settleHint(onSettle, provider.label, provider.diskRetentionDays)}
                   </p>
                 </div>
-                <MinutesField
-                  label="Running limit"
-                  hint="Stopped after running this long since its last start. The disk stays until you delete it."
-                  value={maxRunningMinutes}
-                  min={10}
-                  max={43_200}
-                  disabled={isSaving}
-                  onChange={setMaxRunningMinutes}
-                />
+                {keepsItselfUp ? (
+                  <MinutesField
+                    label="Stop when idle"
+                    hint="Keeps running while any of its threads work, even with this app closed, and stops this long after they finish. The disk stays until you delete it."
+                    unit="min without work"
+                    value={idleMinutes}
+                    min={5}
+                    max={1440}
+                    disabled={isSaving}
+                    onChange={setIdleMinutes}
+                  />
+                ) : (
+                  <MinutesField
+                    label="Running limit"
+                    hint="Stopped after running this long since its last start. The disk stays until you delete it."
+                    value={maxRunningMinutes}
+                    min={10}
+                    max={43_200}
+                    disabled={isSaving}
+                    onChange={setMaxRunningMinutes}
+                  />
+                )}
               </div>
+              {keepsItselfUp ? (
+                <div className="space-y-2">
+                  <OptIn
+                    checked={runningCapMinutes !== null}
+                    disabled={isSaving}
+                    onCheckedChange={(checked) =>
+                      setRunningCapMinutes(checked ? maxRunningMinutes : null)
+                    }
+                    title="Hard limit"
+                  >
+                    Stops the sandbox after running this long since its last start, even while its
+                    threads work.
+                  </OptIn>
+                  {runningCapMinutes === null ? null : (
+                    <div className="ps-6.5">
+                      <MinutesField
+                        label="Hard limit"
+                        hint="Sending a message resumes it."
+                        value={runningCapMinutes}
+                        min={10}
+                        max={43_200}
+                        disabled={isSaving}
+                        onChange={setRunningCapMinutes}
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : null}
               {tailscaleReady ? (
                 <div className="space-y-2">
                   {autoJoinsTailnet ? (
