@@ -9,6 +9,8 @@ import { render } from "../../../test/render";
 
 const mocks = vi.hoisted(() => ({
   tailscaleClientId: "",
+  /** Whether Boat says its sandboxes keep themselves up while they work. */
+  keepAlive: false,
   host: {} as Record<string, unknown>,
   projects: [] as Array<Record<string, unknown>>,
   saveConfig: vi.fn(async (request: { input: { config: Record<string, unknown> } }) =>
@@ -80,6 +82,7 @@ vi.mock(import("~/state/query"), async (original) => ({
                   credentialEnvironments: false,
                   agentProviderAccess: true,
                   templates: false,
+                  keepAlive: mocks.keepAlive,
                 },
               },
               {
@@ -151,9 +154,11 @@ function setup(
     tailscale?: boolean;
     projects?: Array<Record<string, unknown>>;
     host?: Record<string, unknown>;
+    keepAlive?: boolean;
   } = {},
 ) {
   mocks.tailscaleClientId = options.tailscale === true ? "kCLIENT" : "";
+  mocks.keepAlive = options.keepAlive ?? false;
   mocks.host = options.host ?? {};
   mocks.projects = options.projects ?? [];
   mocks.saveConfig.mockClear();
@@ -303,9 +308,30 @@ describe("SandboxEnvironmentFields", () => {
     await expect.element(page.getByText("When a chat is settled")).toBeVisible();
     await expect.element(section("Agent access")).toHaveAttribute("aria-expanded", "false");
     await expect.element(access("Claude")).not.toBeInTheDocument();
-    // The idle stop does nothing yet, so it is not offered.
-    await expect.element(page.getByText("Idle stop")).not.toBeInTheDocument();
+    // A provider that cannot keep a sandbox up while it works has only the running limit.
+    await expect.element(page.getByText("Stop when idle")).not.toBeInTheDocument();
     await expect.element(page.getByText("Projects", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("stops a sandbox that keeps itself up when idle, with an optional hard limit", async () => {
+    setup({ keepAlive: true });
+    await using _screen = await render(editing(saved({ idleMinutes: 45 })));
+
+    await expect.element(summary("machine")).toHaveTextContent("Stops after 45 min without work");
+    await userEvent.click(section("Machine"));
+    await expect.element(page.getByText("Running limit")).not.toBeInTheDocument();
+    await userEvent.fill(page.getByRole("textbox", { name: "Stop when idle in minutes" }), "60");
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    // No hard limit until asked for: it runs as long as its threads work.
+    expect(savedConfig()).toMatchObject({ idleMinutes: 60, maxRunningMinutes: 240 });
+    expect(savedConfig()).not.toHaveProperty("runningCapMinutes");
+
+    await userEvent.click(page.getByRole("checkbox", { name: /Hard limit/u }));
+    await expect
+      .element(summary("machine"))
+      .toHaveTextContent("Stops after 1 h without work · at most 4 h running");
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    expect(savedConfig(1)).toMatchObject({ idleMinutes: 60, runningCapMinutes: 240 });
   });
 
   it("sums up what a saved config's sandboxes get from this machine", async () => {
