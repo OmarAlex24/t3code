@@ -550,19 +550,17 @@ export async function persistScopedSettingsPatch(
   persistClient: (patch: ClientSettingsPatch) => void,
 ) {
   if (plan.hasClientWrite) persistClient(plan.clientPatch);
-  const [results] = await Promise.all([
-    Promise.allSettled(
-      plan.serverWrites.map(({ environmentId, patch }) =>
-        persistServer({ environmentId, input: { patch } }),
-      ),
+  // A sandbox follows silently: the save never waits for it, and its result never reaches the toast.
+  void Promise.allSettled(
+    plan.followerWrites.map(({ environmentId, patch }) =>
+      persistServer({ environmentId, input: { patch } }),
     ),
-    // A sandbox follows silently: its result never reaches the toast.
-    Promise.allSettled(
-      plan.followerWrites.map(({ environmentId, patch }) =>
-        persistServer({ environmentId, input: { patch } }),
-      ),
+  );
+  const results = await Promise.allSettled(
+    plan.serverWrites.map(({ environmentId, patch }) =>
+      persistServer({ environmentId, input: { patch } }),
     ),
-  ]);
+  );
   const saved = (index: number) => {
     const result = results[index];
     return (
