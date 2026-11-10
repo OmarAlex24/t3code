@@ -959,6 +959,7 @@ const make = Effect.gen(function* () {
     readonly sandboxId: string;
     readonly name: string;
     readonly ttlMinutes: number;
+    readonly maxRunningMinutes: number;
     readonly projectRoot: string | undefined;
     readonly run: (
       script: SandboxScript,
@@ -994,6 +995,7 @@ const make = Effect.gen(function* () {
           key: Redacted.value(minted.value.secret),
           extend: keepAlive.extendRequest(sandboxId),
           ttlSeconds: input.ttlMinutes * 60,
+          maxRunningMinutes: input.maxRunningMinutes,
           port: input.driver.serverPort,
           projectRoot: input.projectRoot,
         }),
@@ -2306,6 +2308,7 @@ const make = Effect.gen(function* () {
       sandboxId: machine.sandboxId,
       name,
       ttlMinutes: keepAliveTtlMinutes(idleMinutes, maxTtlMinutes),
+      maxRunningMinutes,
       projectRoot,
       run: machine.run,
       owned,
@@ -3695,6 +3698,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       sandboxId: record.sandboxId,
       name: yield* keepAliveKeyName(record.label),
       ttlMinutes,
+      maxRunningMinutes: record.maxRunningMinutes,
       projectRoot: record.repoDir,
       run: (script, timeoutSeconds) =>
         onHttp(driver.execute({ config, sandboxId: record.sandboxId, timeoutSeconds, ...script })),
