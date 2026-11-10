@@ -74,4 +74,29 @@ describe("buildThreadActionMenuItems", () => {
     expect(items.find((item) => item.id === "archive")?.disabled).toBe(true);
     expect(items.find((item) => item.id === "turn-into-project")?.disabled).toBe(true);
   });
+
+  it("says why a sandbox thread cannot change and offers deleting its sandbox", () => {
+    const items = buildThreadActionMenuItems({
+      ...baseState,
+      canOperate: false,
+      sandboxUnavailable: "The sandbox no longer exists",
+    });
+    expect(items[0]).toEqual({
+      id: "sandbox-unavailable",
+      label: "The sandbox no longer exists",
+      disabled: true,
+    });
+    expect(items.at(-1)).toMatchObject({ id: "delete-sandbox", label: "Delete sandbox…" });
+    expect(items.at(-1)?.disabled).not.toBe(true);
+    expect(items.find((item) => item.id === "delete")?.disabled).toBe(true);
+  });
+
+  it("leaves an operable thread's menu as it was, sandbox or not", () => {
+    expect(
+      buildThreadActionMenuItems({ ...baseState, sandboxUnavailable: "The sandbox is stopped" }),
+    ).toEqual(buildThreadActionMenuItems(baseState));
+    expect(
+      buildThreadActionMenuItems({ ...baseState, canOperate: false, sandboxUnavailable: null }),
+    ).toEqual(buildThreadActionMenuItems({ ...baseState, canOperate: false }));
+  });
 });
