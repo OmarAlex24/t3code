@@ -71,8 +71,11 @@ function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironm
   const availableEnvironments = environments.filter(
     (environment) => !sandboxes.environmentIds.has(environment.environmentId),
   );
-  const followerEnvironments = environments.filter((environment) =>
-    sandboxes.environmentIds.has(environment.environmentId),
+  // A stopped sandbox keeps what it had; a write to it would only wait for a reconnect.
+  const followerEnvironments = environments.filter(
+    (environment) =>
+      sandboxes.environmentIds.has(environment.environmentId) &&
+      environment.connection.phase === "connected",
   );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const normalized = normalizeSandboxScopeSearch(rawSearch, groups, withHidden, sandboxes);

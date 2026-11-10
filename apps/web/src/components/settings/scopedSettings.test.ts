@@ -892,7 +892,7 @@ describe("sandbox followers", () => {
     ).toEqual([]);
   });
 
-  it("never reports a sandbox that refused the write", async () => {
+  it("never waits for or reports a sandbox's write", async () => {
     const scope = resolveSettingsScope({}, [], [laptop], sandboxes);
     const plan = planScopedSettingsPatch(
       scope,
@@ -900,17 +900,22 @@ describe("sandbox followers", () => {
       { branchNamePrefix: "ada" },
       { followerEnvironments: [sandbox] },
     );
+    const writes: EnvironmentId[] = [];
     const result = await persistScopedSettingsPatch(
       plan,
-      async ({ environmentId, input }) =>
-        environmentId === sandbox.environmentId
-          ? { _tag: "Failure" as const, cause: Cause.fail(new Error("offline")) }
+      async ({ environmentId, input }) => {
+        writes.push(environmentId);
+        // A sandbox that went away answers only when it reconnects, if ever.
+        return environmentId === sandbox.environmentId
+          ? new Promise<never>(() => {})
           : {
               _tag: "Success" as const,
               value: applyServerSettingsPatch(laptop.serverConfig!.settings, input.patch),
-            },
+            };
+      },
       () => {},
     );
+    expect(writes).toContain(sandbox.environmentId);
     expect(result.failedEnvironments).toEqual([]);
     expect(result.savedEnvironments.map((write) => write.environmentId)).toEqual([
       laptop.environmentId,

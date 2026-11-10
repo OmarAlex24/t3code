@@ -52,6 +52,7 @@ import { isHostedStaticApp } from "~/hostedPairing";
 import { environmentCatalog } from "~/connection/catalog";
 import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
+import { useSandboxEnvironmentIds } from "~/state/sandboxes";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useTheme } from "./useTheme";
 import {
@@ -626,6 +627,8 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
     return result;
   };
   const sharedSettingsSyncTargetIds = useSharedSettingsSyncTargetIds(true);
+  // A thread's sandbox takes shared settings too, but the user never hears about it.
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
   const updateSettings = (
     patch: UnifiedSettingsPatch,
     options?: { readonly onFailed?: () => void; readonly onSaved?: () => void },
@@ -693,7 +696,7 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
               readEnvironmentScope(targetId, scope),
             )
           ) {
-            deniedLabels.push(target?.label ?? targetId);
+            if (!sandboxEnvironmentIds.has(targetId)) deniedLabels.push(target?.label ?? targetId);
             continue;
           }
           writes.push({
@@ -712,12 +715,16 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
         } else {
           void Promise.all(
             writes.map(async (request) => ({
+              environmentId: request.environmentId,
               label:
                 environments.find((target) => target.environmentId === request.environmentId)
                   ?.label ?? request.environmentId,
               result: await persist(request),
             })),
-          ).then((outcomes) => {
+          ).then((all) => {
+            const outcomes = all.filter(
+              ({ environmentId }) => !sandboxEnvironmentIds.has(environmentId),
+            );
             if (
               deniedLabels.length > 0 ||
               outcomes.some(({ result }) => result._tag === "Failure")
