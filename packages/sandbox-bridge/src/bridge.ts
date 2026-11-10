@@ -34,6 +34,7 @@ import {
   ThreadId,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Duration from "effect/Duration";
@@ -48,7 +49,7 @@ import * as AcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
 import type * as AcpSchema from "effect-acp/schema";
 
-import type { SandboxBridgeLink } from "./link.ts";
+import type { SandboxBridgeLink, SandboxBridgeResumeFailure } from "./link.ts";
 
 export class SandboxBridgeError extends Schema.TaggedError<SandboxBridgeError>()(
   "SandboxBridgeError",
@@ -111,6 +112,10 @@ export interface SandboxBridgePorts {
    */
   readonly reconnectWindow?: Duration.Input;
   readonly reconnectSpacing?: Duration.Input;
+  /** The host's word that its resume of this thread's sandbox failed; none while it may still come up. */
+  readonly findResumeFailure?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<SandboxBridgeResumeFailure>, SandboxBridgeError>;
 }
 
 export const PROBE_CLIENT_NAME = "t3-code-provider-test";
@@ -130,6 +135,8 @@ export const unreachableMessage = (link: SandboxBridgeLink) =>
   `Sandbox ${link.sandboxId || link.label} is stopped or not answering. Resume it from T3 Code on your computer, then send again.`;
 export const waitingThought = (link: SandboxBridgeLink) =>
   `Starting sandbox ${link.sandboxId || link.label}…`;
+export const resumeFailedMessage = (link: SandboxBridgeLink, reason: string) =>
+  `Couldn't start sandbox ${link.sandboxId || link.label}: ${reason.trim().replace(/[.\s]+$/u, "") || "the resume failed"}. Send again to retry.`;
 export const skippedAttachmentsMessage = (names: ReadonlyArray<string>) =>
   `${names.map((name) => `"${name}"`).join(", ")} ${names.length === 1 ? "wasn't" : "weren't"} sent to the sandbox. Only images can be sent from here; attach other files from T3 Code on your computer.`;
 
@@ -1159,9 +1166,31 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     }),
   );
 
+  /**
+   * The host's failed resume, when it covers this turn: the message was waiting when it failed, or,
+   * for a prompt with no message id, the failure came after the turn began.
+   */
+  const resumeFailureFor = (
+    threadId: ThreadId,
+    message: PromptMessage | null,
+    turnStartedAt: number,
+  ) =>
+    (ports.findResumeFailure?.(threadId) ?? Effect.succeedNone).pipe(
+      Effect.map(
+        Option.filter((failure) =>
+          message === null
+            ? failure.failedAt >= turnStartedAt
+            : failure.messageIds.includes(message.messageId),
+        ),
+      ),
+      // An unreadable marker never ends a turn; the window still bounds the wait.
+      Effect.orElseSucceed(() => Option.none<SandboxBridgeResumeFailure>()),
+    );
+
   const connectWithRetry = Effect.fn("SandboxBridge.connect")(function* (
     sessionId: string,
     threadId: ThreadId,
+    message: PromptMessage | null,
   ): Effect.fn.Return<
     Option.Option<{ readonly link: SandboxBridgeLink; readonly sandbox: SandboxSession }>,
     SandboxBridgeError | AcpError.AcpError,
@@ -1173,6 +1202,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       ),
     );
     const spacing = ports.reconnectSpacing ?? "5 seconds";
+    const turnStartedAt = yield* Clock.currentTimeMillis;
     let waited = 0;
     let announced = false;
     let lastLink: SandboxBridgeLink | null = null;
@@ -1183,6 +1213,11 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       const connected = yield* ports.connect(link.value).pipe(Effect.option);
       if (Option.isSome(connected)) {
         return Option.some({ link: link.value, sandbox: connected.value });
+      }
+      const failure = yield* resumeFailureFor(threadId, message, turnStartedAt);
+      if (Option.isSome(failure)) {
+        yield* sayOnce(sessionId, "message", resumeFailedMessage(link.value, failure.value.reason));
+        return Option.none();
       }
       if (waited >= window) break;
       if (!announced) {
@@ -1211,9 +1246,11 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       );
       return "end_turn";
     }
-    const connected = yield* connectWithRetry(sessionId, threadId).pipe(
-      Effect.raceFirst(Deferred.await(cancel).pipe(Effect.as(null))),
-    );
+    const connected = yield* connectWithRetry(
+      sessionId,
+      threadId,
+      promptMessageOf(request._meta),
+    ).pipe(Effect.raceFirst(Deferred.await(cancel).pipe(Effect.as(null))));
     if (connected === null) return "cancelled";
     if (Option.isNone(connected)) {
       if (!(yield* ports.findLink(threadId)).pipe(Option.isSome)) {
