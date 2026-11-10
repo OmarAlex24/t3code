@@ -46,6 +46,7 @@ import {
   ClockIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
+  PauseIcon,
   PinIcon,
   PinOffIcon,
   ShieldQuestionIcon,
@@ -81,7 +82,8 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { EnvironmentOptionIcon } from "../EnvironmentOptionIcon";
 import {
-  SANDBOX_STOPPED_HINT,
+  SANDBOX_RESUME_HINT,
+  SANDBOX_STOPPED_LABEL,
   type SandboxRowState,
   sandboxRowPhase,
 } from "../../state/sandboxThreads";
@@ -275,9 +277,16 @@ function SidebarThreadTooltip({
     .map((instanceId) => providerEntryByInstanceId.get(instanceId)?.displayName ?? instanceId);
   const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
   return (
-    <ThreadHoverCardPopup side="right" align="start" sideOffset={4}>
+    <ThreadHoverCardPopup
+      side="right"
+      align="start"
+      sideOffset={4}
+      // Room for the sandbox hint on one line.
+      className={sandboxPhase === null ? undefined : "max-w-96"}
+    >
       <ThreadHoverCard
         title={thread.title}
+        className={sandboxPhase === null ? undefined : "max-w-96"}
         footer={
           supportsMultiplePullRequests && thread.pullRequests.length > 0 ? (
             <div className="border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
@@ -309,9 +318,17 @@ function SidebarThreadTooltip({
               badgeRingClassName="ring-popover"
               className="mt-0.5 size-3 shrink-0"
             />
-            {/* The hint is what to do next, so it wraps rather than cut off. */}
-            <div className="min-w-0 flex-1 wrap-break-word text-foreground/75">
-              {sandboxPhase === "stopped" ? SANDBOX_STOPPED_HINT : "Starting sandbox"}
+            {/* The hint is what to do next, so it wraps rather than cut off, and only between
+              its two halves: the popup's balanced wrap would split it mid-phrase. */}
+            <div className="min-w-0 flex-1 text-pretty text-foreground/75">
+              {sandboxPhase === "stopped" ? (
+                <>
+                  <span className="whitespace-nowrap">{SANDBOX_STOPPED_LABEL} ·</span>{" "}
+                  <span className="whitespace-nowrap">{SANDBOX_RESUME_HINT}</span>
+                </>
+              ) : (
+                "Starting sandbox"
+              )}
               {sandboxPhase === "starting" ? (
                 <>
                   {" · "}
@@ -562,6 +579,7 @@ const TOP_STATUS_ICONS = {
   failed: CircleAlertIcon,
   done: CircleCheckIcon,
   woke: AlarmClockIcon,
+  paused: PauseIcon,
 } as const;
 
 function TopStatusIcon(props: { icon: keyof typeof TOP_STATUS_ICONS; className: string }) {
@@ -770,7 +788,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isActive: props.isActive,
     isSelected,
   });
-  // A starting sandbox comes first: a run waiting on it says nothing more until it is up.
+  // A sandbox's machine comes first: a run waiting on it says nothing more until it is up, and
+  // nothing on a stopped one moves until a message resumes it.
   const topStatus =
     sandboxPhase === "starting"
       ? {
@@ -778,66 +797,72 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           icon: "working" as const,
           className: "text-info-foreground",
         }
-      : status === "preparing" || status === "working"
+      : sandboxPhase === "stopped"
         ? {
-            label:
-              status === "preparing"
-                ? "Setting up"
-                : thread.goal?.status === "active"
-                  ? "Goal"
-                  : "Working",
-            icon: "working" as const,
-            className: "text-info-foreground",
+            label: "Stopped",
+            icon: "paused" as const,
+            className: "text-muted-foreground",
           }
-        : status === "waiting"
+        : status === "preparing" || status === "working"
           ? {
-              label: "Waiting",
-              icon: "waiting" as const,
-              className: "text-muted-foreground",
+              label:
+                status === "preparing"
+                  ? "Setting up"
+                  : thread.goal?.status === "active"
+                    ? "Goal"
+                    : "Working",
+              icon: "working" as const,
+              className: "text-info-foreground",
             }
-          : status === "approval"
+          : status === "waiting"
             ? {
-                label: "Approval",
-                icon: "approval" as const,
-                className: "text-warning-foreground",
+                label: "Waiting",
+                icon: "waiting" as const,
+                className: "text-muted-foreground",
               }
-            : status === "input"
+            : status === "approval"
               ? {
-                  label: "Input",
-                  icon: "input" as const,
-                  className: "text-indigo-600 dark:text-indigo-300",
+                  label: "Approval",
+                  icon: "approval" as const,
+                  className: "text-warning-foreground",
                 }
-              : status === "request"
+              : status === "input"
                 ? {
-                    label: "Request",
-                    icon: "request" as const,
-                    className: "text-guest-foreground",
+                    label: "Input",
+                    icon: "input" as const,
+                    className: "text-indigo-600 dark:text-indigo-300",
                   }
-                : status === "limited"
+                : status === "request"
                   ? {
-                      label: "Limited",
-                      icon: "failed" as const,
-                      className: "text-warning-foreground",
+                      label: "Request",
+                      icon: "request" as const,
+                      className: "text-guest-foreground",
                     }
-                  : status === "failed"
+                  : status === "limited"
                     ? {
-                        label: "Failed",
+                        label: "Limited",
                         icon: "failed" as const,
-                        className: "text-error-foreground",
+                        className: "text-warning-foreground",
                       }
-                    : isWoke
+                    : status === "failed"
                       ? {
-                          label: "Woke",
-                          icon: "woke" as const,
-                          className: "text-warning-foreground",
+                          label: "Failed",
+                          icon: "failed" as const,
+                          className: "text-error-foreground",
                         }
-                      : isUnread
+                      : isWoke
                         ? {
-                            label: "Done",
-                            icon: "done" as const,
-                            className: "text-success-foreground",
+                            label: "Woke",
+                            icon: "woke" as const,
+                            className: "text-warning-foreground",
                           }
-                        : null;
+                        : isUnread
+                          ? {
+                              label: "Done",
+                              icon: "done" as const,
+                              className: "text-success-foreground",
+                            }
+                          : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
@@ -1062,7 +1087,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
-    statusLabel: topStatus?.label ?? (sandboxPhase === "stopped" ? "Sandbox stopped" : null),
+    statusLabel: sandboxPhase === "stopped" ? SANDBOX_STOPPED_LABEL : (topStatus?.label ?? null),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
