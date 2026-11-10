@@ -21,6 +21,7 @@ const state = vi.hoisted(() => ({
   granted: new Set<string>(),
   effects: [] as string[],
   completed: deferred<void>(),
+  sandboxReason: null as string | null,
   show: vi.fn<
     (
       items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>>,
@@ -118,6 +119,12 @@ vi.mock("./useSettings", () => ({
       timestampFormat: "12-hour",
     }),
 }));
+vi.mock("../state/sandboxThreads", () => ({
+  isSandboxThread: () => false,
+  deleteSandboxThread: vi.fn(),
+  threadSandboxUnavailableReason: () => state.sandboxReason,
+  deleteThreadSandbox: async () => recordEffect("delete-sandbox"),
+}));
 vi.mock("./useThreadActions", () => ({
   canTurnThreadIntoProject: () => false,
   useThreadActions: () =>
@@ -161,6 +168,7 @@ const createMenu = (options: { readonly onFind?: (threadRef: typeof target) => v
 beforeEach(() => {
   state.granted = new Set(["primary"]);
   state.effects = [];
+  state.sandboxReason = null;
   state.completed = deferred<void>();
   state.show.mockReset().mockResolvedValue(null);
 });
@@ -192,5 +200,16 @@ describe("thread menu permissions", () => {
     expect(items[0]?.disabled).not.toBe(true);
     expect(state.effects).toEqual(["find"]);
     expect(onFind).toHaveBeenCalledExactlyOnceWith(target);
+  });
+
+  it("deletes the sandbox of a thread whose sandbox is gone, without its server", async () => {
+    state.sandboxReason = "The sandbox no longer exists";
+    state.show.mockResolvedValue("delete-sandbox");
+    createMenu().openMenu(position);
+    await state.completed.promise;
+    const items = state.show.mock.calls[0]![0];
+    expect(items[0]).toMatchObject({ id: "sandbox-unavailable", disabled: true });
+    expect(items.some((item) => item.id === "delete-sandbox")).toBe(true);
+    expect(state.effects).toEqual(["delete-sandbox"]);
   });
 });

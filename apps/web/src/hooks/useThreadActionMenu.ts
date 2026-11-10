@@ -47,7 +47,12 @@ import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { canTurnThreadIntoProject, useThreadActions } from "./useThreadActions";
-import { deleteSandboxThread, isSandboxThread } from "../state/sandboxThreads";
+import {
+  deleteSandboxThread,
+  deleteThreadSandbox,
+  isSandboxThread,
+  threadSandboxUnavailableReason,
+} from "../state/sandboxThreads";
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -150,6 +155,7 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         canShareWithGuest,
         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+        sandboxUnavailable: threadSandboxUnavailableReason(threadRef),
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -325,6 +331,9 @@ export function useThreadActionMenu(input: {
           }
           return;
         }
+        case "delete-sandbox":
+          await deleteThreadSandbox(threadRef);
+          return;
         case "delete": {
           // Its own confirmation names the sandbox that goes with it.
           if (isSandboxThread(threadRef)) {

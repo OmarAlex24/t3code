@@ -650,6 +650,10 @@ export function SandboxThreadCoordinator() {
     (threadRef: ScopedThreadRef) => findSandbox(threadRef) !== undefined,
   );
 
+  const sandboxState = useStableCallback(
+    (threadRef: ScopedThreadRef) => findSandbox(threadRef)?.state,
+  );
+
   const deleteOnly = useStableCallback((threadRef: ScopedThreadRef) => {
     const sandbox = findSandbox(threadRef);
     return sandbox === undefined ? Promise.resolve() : startDelete(sandbox, threadRef, "menu");
@@ -660,12 +664,13 @@ export function SandboxThreadCoordinator() {
     () =>
       registerSandboxThreadHandlers({
         isSandboxThread,
+        sandboxState,
         onSettled,
         ensureRunning,
         deleteThreadAndSandbox,
         deleteSandbox: deleteOnly,
       }),
-    [isSandboxThread, onSettled, ensureRunning, deleteThreadAndSandbox, deleteOnly],
+    [isSandboxThread, sandboxState, onSettled, ensureRunning, deleteThreadAndSandbox, deleteOnly],
   );
 
   const open = prompts[0];

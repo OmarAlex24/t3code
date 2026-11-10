@@ -27,7 +27,9 @@ export type ThreadActionMenuId =
   | "copy-thread"
   | "copy-thread-id"
   | "archive"
-  | "delete";
+  | "delete"
+  | "sandbox-unavailable"
+  | "delete-sandbox";
 
 export type DraftActionMenuId =
   | "copy"
@@ -95,6 +97,11 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /**
+   * Why the thread's sandbox cannot take its changes, such as one deleted outside T3 Code. Without
+   * `canOperate`, the menu says so and offers deleting the sandbox, which the host does.
+   */
+  readonly sandboxUnavailable?: string | null;
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -110,6 +117,8 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
     "copy-branch",
     "copy-thread",
     "copy-thread-id",
+    "sandbox-unavailable",
+    "delete-sandbox",
   ].includes(action);
 }
 
@@ -252,17 +261,23 @@ export function buildThreadActionMenuItems(
       icon: "trash",
     },
   ];
-  return state.canOperate
-    ? items
-    : items.map((item) =>
-        threadActionRequiresOperate(item.id)
-          ? {
-              ...item,
-              disabled: true,
-              ...(item.children
-                ? { children: item.children.map((child) => ({ ...child, disabled: true })) }
-                : {}),
-            }
-          : item,
-      );
+  if (state.canOperate) return items;
+  const disabled = items.map((item) =>
+    threadActionRequiresOperate(item.id)
+      ? {
+          ...item,
+          disabled: true,
+          ...(item.children
+            ? { children: item.children.map((child) => ({ ...child, disabled: true })) }
+            : {}),
+        }
+      : item,
+  );
+  if (!state.sandboxUnavailable) return disabled;
+  const [first, ...rest] = disabled;
+  return [
+    { id: "sandbox-unavailable", label: state.sandboxUnavailable, disabled: true },
+    ...(first ? [{ ...first, separatorBefore: true }, ...rest] : []),
+    { id: "delete-sandbox", label: "Delete sandbox…", destructive: true, icon: "trash" },
+  ];
 }
