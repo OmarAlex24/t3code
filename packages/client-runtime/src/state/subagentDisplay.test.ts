@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { subagentDetailPreview } from "./subagentDisplay.js";
+import { plainSubagentDetail, subagentDetailPreview } from "./subagentDisplay.js";
 
 describe("subagentDetailPreview", () => {
   it("prefers progress for live work and results for settled work", () => {
@@ -11,6 +11,38 @@ describe("subagentDetailPreview", () => {
       subagentDetailPreview({ status: "failed", progress: "Last progress", result: " " }),
     ).toBe("Last progress");
     expect(subagentDetailPreview({ status: "pending" })).toBeNull();
+  });
+
+  it("drops the tool list Claude puts before a result", () => {
+    expect(
+      subagentDetailPreview({
+        status: "completed",
+        result: "<tools-used-before-summary>Bash, Read</tools-used-before-summary>\n\n## Summary",
+      }),
+    ).toBe("## Summary");
+  });
+});
+
+describe("plainSubagentDetail", () => {
+  it.each([
+    [
+      "leading tag block and heading",
+      "<tools-used-before-summary>Bash, Read</tools-used-before-summary>\n\n## Resumen\n\nHay un método.",
+      "Resumen Hay un método.",
+    ],
+    [
+      "escaped tag block",
+      "&lt;tools-used-before-summary&gt;Bash&lt;/tools-used-before-summary&gt; Done",
+      "Done",
+    ],
+    ["markup later in the text", "Renders <b>bold</b> now", "Renders <b>bold</b> now"],
+    [
+      "links, code and bullets",
+      "- Read [auth](./auth.ts)\n- Ran `vp test`",
+      "Read auth Ran vp test",
+    ],
+  ])("%s", (_name, text, expected) => {
+    expect(plainSubagentDetail(text)).toBe(expected);
   });
 });
 
