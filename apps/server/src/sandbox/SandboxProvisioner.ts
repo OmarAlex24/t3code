@@ -1,5 +1,6 @@
 import {
   assessSandboxStart,
+  DEFAULT_SANDBOX_IDLE_MINUTES,
   DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
   DEFAULT_SANDBOX_TAILSCALE_TAG,
   ExecutionEnvironmentDescriptor,
@@ -112,6 +113,9 @@ import {
   githubAppLoginScript,
   githubLoginScript,
   gitIdentityScript,
+  KEEP_ALIVE_INTERVAL_SECONDS,
+  KEEP_ALIVE_SCRUB,
+  KEEP_ALIVE_START,
   MCP_SERVERS_SCRUB,
   mcpServersScript,
   NORTHFLANK_LOGIN_SCRUB,
@@ -120,6 +124,7 @@ import {
   RAILWAY_LOGIN_SCRUB,
   railwayLoginScript,
   parseSetupScriptReport,
+  sandboxKeepAliveScript,
   setupScriptScript,
   TAILSCALE_PROXY_URL,
   tailscaleProxyEnv,
@@ -161,6 +166,7 @@ import {
   type SandboxAgentAccess,
   shellQuote,
   type SandboxExecResult,
+  type SandboxKeepAlive,
   type SandboxProviderConfig,
   type SandboxProviderDriver,
   type SandboxProviderStatus,
@@ -235,12 +241,15 @@ if ! command -v t3 >/dev/null 2>&1; then
   exit 1
 fi`;
 
+// Also starts the keep-alive loop, which a stop ends: every resume runs this, whether T3 itself
+// comes back through systemd or nohup.
 const startScript = (serveEnvironment: Readonly<Record<string, string>> | undefined) => `set -eu
 export PATH="$HOME/.local/bin:$PATH"
 if ! command -v t3 >/dev/null 2>&1; then
   echo "The t3 CLI is missing." >&2
   exit 1
 fi
+${KEEP_ALIVE_START}
 ${serveScript(serveEnvironment)}`;
 
 // A template copies the disk, and T3's userdata holds the environment id, auth sessions, and secrets:
@@ -275,6 +284,7 @@ while answering; do
   fi
   sleep 1
 done
+${KEEP_ALIVE_SCRUB}
 rm -rf "$HOME/.t3/userdata" "$HOME/.t3/environment-label" "$HOME/.t3/usage-host-id"
 ${CLAUDE_SETTINGS_SCRUB}
 ${GITHUB_LOGIN_SCRUB}
@@ -419,6 +429,11 @@ interface Prepared {
   readonly label: string;
   readonly size: string;
   readonly maxRunningMinutes: number;
+  /** With keep-alive: the provider stops the sandbox this long after its work ends. */
+  readonly idleMinutes: number;
+  readonly runningCapMinutes: number | undefined;
+  /** The longest auto-stop the provider's plan allows, when it says. */
+  readonly maxTtlMinutes: number | undefined;
   readonly template: string | undefined;
   readonly access: SandboxAccess;
   readonly installCommand: string;
@@ -441,6 +456,7 @@ interface Owned {
   githubToken?: GithubToken;
   mapleKey?: { readonly keyId: string; readonly apiBaseUrl: string };
   railwayToken?: NonNullable<SandboxRecord["railwayToken"]>;
+  keepAliveKeyId?: string;
 }
 
 /** An installation token minted for one sandbox, kept as a server secret named by `secret`. */
@@ -474,6 +490,23 @@ const scriptHash = (script: string) => {
 const MAPLE_KEY_SECONDS = 30 * 24 * 60 * 60;
 // A sandbox's GitHub token is replaced this long before it expires.
 const GITHUB_TOKEN_REFRESH_MS = 20 * 60 * 1000;
+// A keep-alive key outlives any one running stretch and is replaced on a resume once it is close
+// to expiry, so a sandbox stopped for weeks comes back with a working one.
+const KEEP_ALIVE_KEY_MINUTES = 30 * 24 * 60;
+const KEEP_ALIVE_RENEW_BEFORE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The auto-stop a sandbox that keeps itself up gets: its idle window plus one check, so work that
+ * ends just after a check still gets the whole window. A plan's maximum lowers it.
+ */
+const keepAliveTtlMinutes = (idleMinutes: number, maxTtlMinutes: number | undefined) =>
+  Math.min(idleMinutes + KEEP_ALIVE_INTERVAL_SECONDS / 60, maxTtlMinutes ?? Infinity);
+
+const formatRunningLimit = (minutes: number) =>
+  minutes % 60 === 0 ? `${minutes / 60} h` : `${minutes} min`;
+
+// Only a key that got minted makes a sandbox keep itself up; a bare name is a mint that never ended.
+const keepsItselfUp = (record: SandboxRecord) => record.keepAliveKey?.id !== undefined;
 
 interface Reporter {
   readonly stage: (
@@ -882,6 +915,104 @@ const make = Effect.gen(function* () {
     return Exit.isSuccess(revoked) ? null : warning;
   });
 
+  // Never blocks a delete: a key that cannot be revoked becomes a warning naming it.
+  const releaseKeepAliveKey = Effect.fn("SandboxProvisioner.releaseKeepAliveKey")(function* (
+    driver: SandboxProviderDriver,
+    config: Option.Option<SandboxProviderConfig>,
+    record: Pick<SandboxRecord, "label" | "keepAliveKey">,
+  ) {
+    const reference = record.keepAliveKey;
+    if (reference === undefined) return null;
+    const name = driver.info.label;
+    const warning = `T3 Code could not revoke the ${name} key ${record.label} kept itself running with. Revoke the key named ${reference.name} in ${name}.`;
+    if (reference.id === undefined || driver.keepAlive === undefined || Option.isNone(config)) {
+      return warning;
+    }
+    const revoked = yield* onHttp(
+      driver.keepAlive.revokeKey({ config: config.value, keyId: reference.id }),
+    ).pipe(
+      Effect.tapError((error) =>
+        Effect.logWarning("sandbox keep-alive key revoke failed", { detail: error.detail }),
+      ),
+      Effect.exit,
+    );
+    return Exit.isSuccess(revoked) ? null : warning;
+  });
+
+  // Unique per key, so a key Boat lists says which sandbox it keeps up.
+  const keepAliveKeyName = Effect.fn("SandboxProvisioner.keepAliveKeyName")(function* (
+    label: string,
+  ) {
+    const hex = (yield* secureRandom.uuidV4()).replaceAll("-", "");
+    return `t3-keepalive-${labelSlug(label)}-${hex.slice(0, 8)}`;
+  });
+
+  /**
+   * Mints a key scoped to the sandbox and writes it, the idle window, and the loop that uses them
+   * on the sandbox, which starts the loop. Null when either fails; a key that did not get onto the
+   * sandbox is revoked. T3 never keeps the key itself, only its id to revoke it.
+   */
+  const mintKeepAlive = Effect.fn("SandboxProvisioner.mintKeepAlive")(function* (input: {
+    readonly driver: SandboxProviderDriver;
+    readonly keepAlive: SandboxKeepAlive;
+    readonly config: SandboxProviderConfig;
+    readonly sandboxId: string;
+    readonly name: string;
+    readonly ttlMinutes: number;
+    readonly projectRoot: string | undefined;
+    readonly run: (
+      script: SandboxScript,
+      timeoutSeconds: number,
+    ) => Effect.Effect<SandboxExecResult, SandboxProviderError>;
+    readonly owned?: Owned | undefined;
+  }) {
+    const { keepAlive, config, sandboxId } = input;
+    const minted = yield* onHttp(
+      keepAlive.mintKey({
+        config,
+        sandboxId,
+        name: input.name,
+        ttlMinutes: KEEP_ALIVE_KEY_MINUTES,
+      }),
+    ).pipe(
+      Effect.tapError((error) =>
+        Effect.logWarning("sandbox keep-alive key mint failed", { detail: error.detail }),
+      ),
+      Effect.option,
+    );
+    if (Option.isNone(minted)) return null;
+    const keyId = minted.value.id;
+    if (input.owned !== undefined) input.owned.keepAliveKeyId = keyId;
+    const expiresAt = DateTime.formatIso(
+      DateTime.makeUnsafe(
+        DateTime.toEpochMillis(yield* DateTime.now) + KEEP_ALIVE_KEY_MINUTES * 60_000,
+      ),
+    );
+    const written = yield* input
+      .run(
+        sandboxKeepAliveScript({
+          key: Redacted.value(minted.value.secret),
+          extend: keepAlive.extendRequest(sandboxId),
+          ttlSeconds: input.ttlMinutes * 60,
+          port: input.driver.serverPort,
+          projectRoot: input.projectRoot,
+        }),
+        60,
+      )
+      .pipe(Effect.exit);
+    if (Exit.isFailure(written)) {
+      yield* onHttp(keepAlive.revokeKey({ config, keyId })).pipe(Effect.ignore);
+      if (input.owned !== undefined) delete input.owned.keepAliveKeyId;
+      return null;
+    }
+    return { name: input.name, id: keyId, expiresAt } satisfies NonNullable<
+      SandboxRecord["keepAliveKey"]
+    >;
+  });
+
+  const keepAliveFailed = (maxRunningMinutes: number) =>
+    `This sandbox could not be set up to stay on while its agents work, so it stops ${formatRunningLimit(maxRunningMinutes)} after it starts.`;
+
   // An untracked sandbox has no record to name its token, but the name is the sandbox's own.
   const releaseOrphanRailwayToken = Effect.fn("SandboxProvisioner.releaseOrphanRailwayToken")(
     function* (sandboxId: string) {
@@ -1266,6 +1397,7 @@ const make = Effect.gen(function* () {
             driver.deleteTemplate !== undefined &&
             driver.stop !== undefined,
           agentProviderAccess: driver.agentAccess !== undefined,
+          keepAlive: driver.keepAlive !== undefined,
         },
       })),
       host: yield* hostAccessFacts,
@@ -1495,6 +1627,9 @@ const make = Effect.gen(function* () {
       label,
       size,
       maxRunningMinutes,
+      idleMinutes: input.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES,
+      runningCapMinutes: input.runningCapMinutes,
+      maxTtlMinutes: limits?.maxTtlMinutes,
       template,
       access,
       installCommand,
@@ -1610,6 +1745,14 @@ const make = Effect.gen(function* () {
         owned.railwayToken === undefined
           ? Effect.void
           : releaseRailwayToken({ label: prepared.label, railwayToken: owned.railwayToken }),
+        prepared.driver.keepAlive === undefined || owned.keepAliveKeyId === undefined
+          ? Effect.void
+          : onHttp(
+              prepared.driver.keepAlive.revokeKey({
+                config: owned.sandbox?.config ?? prepared.config,
+                keyId: owned.keepAliveKeyId,
+              }),
+            ).pipe(Effect.ignore),
         records.remove(instanceId).pipe(Effect.ignore),
       ],
       { concurrency: "unbounded", discard: true },
@@ -1679,6 +1822,14 @@ const make = Effect.gen(function* () {
       access: prepared.access,
       runningSince: createdAt,
       maxRunningMinutes: prepared.maxRunningMinutes,
+      ...(driver.keepAlive === undefined || context.extras.threadId === undefined
+        ? {}
+        : {
+            idleMinutes: prepared.idleMinutes,
+            ...(prepared.runningCapMinutes === undefined
+              ? {}
+              : { runningCapMinutes: prepared.runningCapMinutes }),
+          }),
       ...(input.environment === undefined ? {} : { credentialEnvironment: input.environment }),
       ...(prepared.template === undefined ? {} : { template: prepared.template }),
       ...(Object.keys(sandboxConfig.settings).length === 0
@@ -2131,6 +2282,61 @@ const make = Effect.gen(function* () {
     return fiber;
   });
 
+  /**
+   * Lets a thread's new sandbox keep itself up while its threads work. The record names the key
+   * before it is minted, so a crash in between still says which key to revoke. The auto-stop stays
+   * at the running limit through setup; `keepAliveFromNow` moves it to the idle window after that.
+   * False, after a warning, when it cannot: the sandbox keeps the running limit.
+   */
+  const setUpKeepAlive = Effect.fn("SandboxProvisioner.setUpKeepAlive")(function* (
+    machine: Machine,
+    owned: Owned,
+    projectRoot: string | undefined,
+    warn: (warning: string) => Effect.Effect<void>,
+  ) {
+    const { driver, label, idleMinutes, maxTtlMinutes, maxRunningMinutes } = machine.prepared;
+    const keepAlive = driver.keepAlive;
+    if (keepAlive === undefined) return false;
+    const name = yield* keepAliveKeyName(label);
+    yield* machine.save({ keepAliveKey: { name } });
+    const installed = yield* mintKeepAlive({
+      driver,
+      keepAlive,
+      config: machine.config,
+      sandboxId: machine.sandboxId,
+      name,
+      ttlMinutes: keepAliveTtlMinutes(idleMinutes, maxTtlMinutes),
+      projectRoot,
+      run: machine.run,
+      owned,
+    });
+    if (installed === null) {
+      yield* machine.save({}, ["keepAliveKey"]);
+      yield* warn(keepAliveFailed(maxRunningMinutes));
+      return false;
+    }
+    yield* machine.save({ keepAliveKey: installed });
+    return true;
+  });
+
+  // A failure leaves the running limit's auto-stop, which the sandbox's own checks still move.
+  const keepAliveFromNow = (
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+    sandboxId: string,
+    ttlMinutes: number,
+  ) =>
+    driver.keepAlive === undefined
+      ? Effect.void
+      : onHttp(driver.keepAlive.extend({ config, sandboxId, ttlMinutes })).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("sandbox keep-alive auto-stop update failed", {
+              sandboxId,
+              detail: error.detail,
+            }),
+          ),
+        );
+
   const create = Effect.fn("SandboxProvisioner.create")(function* (input: SandboxCreateInput) {
     const prepared = yield* prepare(input);
     const instanceId = yield* secureRandom.uuidV4();
@@ -2242,6 +2448,10 @@ const make = Effect.gen(function* () {
     label: `${project.title} on ${config.label}`,
     size: config.size,
     maxRunningMinutes: config.maxRunningMinutes,
+    idleMinutes: config.idleMinutes,
+    ...(config.runningCapMinutes === undefined
+      ? {}
+      : { runningCapMinutes: config.runningCapMinutes }),
     access: config.access,
     ...(config.template === undefined ? {} : { template: config.template }),
     ...(config.credentialEnvironment === undefined
@@ -2793,12 +3003,23 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
               : null,
         );
 
+        const keptAlive = yield* setUpKeepAlive(machine, owned, cloned.directory, reporter.warn);
+
         // The client pairs through `pairLaunch`, opens the project, and then completes the launch.
         launch.ready = { machine, projectId: cloned.projectId };
         yield* reporter.stage("pair", "running", null);
         yield* tracker.update(threadId, { awaitingHandoff: true });
         yield* awaitClient(launch, Deferred.await(handoff));
         yield* machine.save({ state: "running" });
+        // Setup is over, so from here the sandbox stops once its threads have been idle a while.
+        if (keptAlive) {
+          yield* keepAliveFromNow(
+            prepared.driver,
+            machine.config,
+            machine.sandboxId,
+            keepAliveTtlMinutes(prepared.idleMinutes, prepared.maxTtlMinutes),
+          );
+        }
         // Only the host's bridge (and so the phone) needs this; the client's own pairing is done.
         yield* ensureBridge(machine.record(), machine.run).pipe(
           Effect.flatMap((bridge) => machine.save({ bridge })),
@@ -3326,6 +3547,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
             yield* releaseGithubToken(record.value),
             yield* releaseMapleKey(record.value),
             yield* releaseRailwayToken(record.value),
+            yield* releaseKeepAliveKey(driver, config, record.value),
           ]
     ).filter((warning): warning is string => warning !== null);
     return { warnings } satisfies SandboxDeleteResult;
@@ -3421,6 +3643,77 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     } satisfies SandboxCheckWorkResult;
   });
 
+  // A sandbox made before keep-alive has no idle window of its own, so its config's applies.
+  const keepAliveSettingsOf = Effect.fn("SandboxProvisioner.keepAliveSettingsOf")(function* (
+    record: SandboxRecord,
+  ) {
+    if (record.idleMinutes !== undefined) {
+      return { idleMinutes: record.idleMinutes, runningCapMinutes: record.runningCapMinutes };
+    }
+    const saved =
+      record.configId === undefined
+        ? Option.none<SandboxEnvironmentConfig>()
+        : yield* configStore.get(record.configId).pipe(Effect.orElseSucceed(Option.none));
+    return Option.match(saved, {
+      onNone: () => ({
+        idleMinutes: DEFAULT_SANDBOX_IDLE_MINUTES,
+        runningCapMinutes: undefined as number | undefined,
+      }),
+      onSome: (config) => ({
+        idleMinutes: config.idleMinutes,
+        runningCapMinutes: config.runningCapMinutes,
+      }),
+    });
+  });
+
+  /**
+   * Runs on a resume before T3 starts, which starts the loop: renews a key close to its expiry, or
+   * gives a sandbox made before keep-alive its first one. A failure keeps a key that still works,
+   * or leaves the sandbox on its running limit, and says so.
+   */
+  const resumeKeepAlive = Effect.fn("SandboxProvisioner.resumeKeepAlive")(function* (
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+    record: SandboxRecord,
+    ttlMinutes: number,
+  ): Effect.fn.Return<{
+    readonly keepAliveKey: SandboxRecord["keepAliveKey"];
+    readonly warning: string | null;
+  }> {
+    const keepAlive = driver.keepAlive;
+    const current = record.keepAliveKey;
+    if (keepAlive === undefined) return { keepAliveKey: current, warning: null };
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const expiresAt = Date.parse(current?.expiresAt ?? "");
+    if (current?.id !== undefined && expiresAt - now > KEEP_ALIVE_RENEW_BEFORE_MS) {
+      return { keepAliveKey: current, warning: null };
+    }
+    const installed = yield* mintKeepAlive({
+      driver,
+      keepAlive,
+      config,
+      sandboxId: record.sandboxId,
+      name: yield* keepAliveKeyName(record.label),
+      ttlMinutes,
+      projectRoot: record.repoDir,
+      run: (script, timeoutSeconds) =>
+        onHttp(driver.execute({ config, sandboxId: record.sandboxId, timeoutSeconds, ...script })),
+    });
+    if (installed !== null) {
+      if (current?.id !== undefined) {
+        yield* onHttp(keepAlive.revokeKey({ config, keyId: current.id })).pipe(Effect.ignore);
+      }
+      return { keepAliveKey: installed, warning: null };
+    }
+    if (current?.id !== undefined && expiresAt > now) {
+      return {
+        keepAliveKey: current,
+        warning: `T3 Code could not renew the key this sandbox keeps itself running with. It works until ${current.expiresAt}.`,
+      };
+    }
+    return { keepAliveKey: undefined, warning: keepAliveFailed(record.maxRunningMinutes) };
+  });
+
   const resume = Effect.fn("SandboxProvisioner.resume")(function* (input: SandboxLifecycleInput) {
     const record = yield* readRecord(input.instanceId);
     const driver = findDriver(record.provider);
@@ -3442,19 +3735,41 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     const config = yield* recordConfig(driver, record);
     // Providers such as Boat count a resume as a start, so it gets the same preflight as create.
     const limits = yield* preflightStart(driver, config, undefined);
+    // Only a thread's sandbox keeps itself up; one a template is saved from keeps the running limit.
+    const keepAliveSettings =
+      driver.keepAlive === undefined || record.threadId === undefined
+        ? undefined
+        : yield* keepAliveSettingsOf(record);
+    const idleTtl =
+      keepAliveSettings === undefined
+        ? undefined
+        : keepAliveTtlMinutes(keepAliveSettings.idleMinutes, limits?.maxTtlMinutes);
+    const runningTtl = Math.min(record.maxRunningMinutes, limits?.maxTtlMinutes ?? Infinity);
+    const wasKeptAlive = idleTtl !== undefined && keepsItselfUp(record);
     const resumed = yield* onHttp(
       driver.resume({
         config,
         sandboxId: record.sandboxId,
-        // The running limit restarts with the sandbox; the provider's own TTL backs it up.
-        ttlMinutes: Math.min(record.maxRunningMinutes, limits?.maxTtlMinutes ?? Infinity),
+        // The running limit restarts with the sandbox and the provider's own TTL backs it up; a
+        // sandbox that keeps itself up gets its idle window, which its own checks then move.
+        ttlMinutes: wasKeptAlive ? idleTtl : runningTtl,
       }),
     );
+    // What the record says of keep-alive from here, so an error state does not lose a new key.
+    let withKeepAlive = (next: SandboxRecord): SandboxRecord => next;
     const httpBaseUrl =
       record.access === "tailnet" ? record.httpBaseUrl : (resumed.publicUrl ?? record.httpBaseUrl);
     const errored = (detail: string, cause?: unknown) =>
       records
-        .put({ ...record, state: "error", runningSince: now, updatedAt: now, httpBaseUrl })
+        .put(
+          withKeepAlive({
+            ...record,
+            state: "error",
+            runningSince: now,
+            updatedAt: now,
+            httpBaseUrl,
+          }),
+        )
         .pipe(
           Effect.orDie,
           Effect.andThen(
@@ -3478,6 +3793,28 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         }),
       ),
     );
+    const kept =
+      keepAliveSettings === undefined || idleTtl === undefined
+        ? { keepAliveKey: record.keepAliveKey, warning: null }
+        : yield* resumeKeepAlive(driver, config, record, idleTtl);
+    if (keepAliveSettings !== undefined) {
+      withKeepAlive = (next) => {
+        const {
+          keepAliveKey: _keepAliveKey,
+          idleMinutes: _idleMinutes,
+          runningCapMinutes: _runningCapMinutes,
+          ...rest
+        } = next;
+        return {
+          ...rest,
+          idleMinutes: keepAliveSettings.idleMinutes,
+          ...(keepAliveSettings.runningCapMinutes === undefined
+            ? {}
+            : { runningCapMinutes: keepAliveSettings.runningCapMinutes }),
+          ...(kept.keepAliveKey === undefined ? {} : { keepAliveKey: kept.keepAliveKey }),
+        };
+      };
+    }
     yield* onHttp(
       driver.execute({
         config,
@@ -3490,6 +3827,16 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         errored("The sandbox resumed, but T3 Code did not start on it.", cause),
       ),
     );
+    // A key set up just now moves the auto-stop to the idle window; one lost falls back to the limit.
+    const keptAlive = kept.keepAliveKey?.id !== undefined && idleTtl !== undefined;
+    if (keptAlive !== wasKeptAlive) {
+      yield* keepAliveFromNow(
+        driver,
+        config,
+        record.sandboxId,
+        keptAlive && idleTtl !== undefined ? idleTtl : runningTtl,
+      );
+    }
     // Saving a template resets T3 on its source; one that failed to save comes back as a different
     // environment, which the client's saved connection cannot reach.
     const described = yield* onHttp(
@@ -3519,7 +3866,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       ),
     );
     const { stoppedAt: _stoppedAt, ...rest } = record;
-    const updated: SandboxRecord = {
+    const updated: SandboxRecord = withKeepAlive({
       ...rest,
       state: "running",
       runningSince: now,
@@ -3527,7 +3874,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       httpBaseUrl,
       ...(rejoined.tailscale === undefined ? {} : { tailscale: rejoined.tailscale }),
       ...(github.githubApp === undefined ? {} : { githubApp: github.githubApp }),
-    };
+    });
     yield* records.put(updated).pipe(Effect.orDie);
     // The bridge reads the sandbox's address from its link, and its bearer may be near expiry.
     const bridged =
@@ -3543,7 +3890,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
             ),
           );
     if (bridged.record !== updated) yield* records.put(bridged.record).pipe(Effect.orDie);
-    const warnings = [rejoined.warning, github.warning, bridged.warning].filter(
+    const warnings = [rejoined.warning, kept.warning, github.warning, bridged.warning].filter(
       (warning): warning is string => warning !== null,
     );
     return {
@@ -3647,6 +3994,8 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       Effect.andThen(releaseGithubToken(record)),
       Effect.andThen(releaseMapleKey(record)),
       Effect.andThen(releaseRailwayToken(record)),
+      // The scrub stopped the loop and removed the key from the disk; Boat still holds it.
+      Effect.andThen(releaseKeepAliveKey(driver, Option.some(config), record)),
       // The template is saved either way; a sandbox that survives stays listed for a manual delete.
       Effect.catch((cause) =>
         Effect.logWarning("sandbox delete after saving a template failed", {
@@ -3704,13 +4053,21 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     return { ...record, state, updatedAt: now };
   };
 
-  // Idle stop (each config's `idleMinutes`) lands next to this check; it needs the sandbox's own
-  // activity, which the host does not see yet.
-  const pastRunningLimit = (record: SandboxRecord, now: DateTime.Utc) =>
-    record.runningSince !== null &&
-    DateTime.toEpochMillis(now) -
-      DateTime.toEpochMillis(DateTime.makeUnsafe(record.runningSince)) >=
-      record.maxRunningMinutes * 60_000;
+  // A sandbox that keeps itself up stops on the provider's idle deadline instead, so only its
+  // optional cap applies; the status check then sees the provider's stop.
+  const pastRunningLimit = (record: SandboxRecord, now: DateTime.Utc) => {
+    const limit =
+      keepsItselfUp(record) && findDriver(record.provider).keepAlive !== undefined
+        ? record.runningCapMinutes
+        : record.maxRunningMinutes;
+    return (
+      limit !== undefined &&
+      record.runningSince !== null &&
+      DateTime.toEpochMillis(now) -
+        DateTime.toEpochMillis(DateTime.makeUnsafe(record.runningSince)) >=
+        limit * 60_000
+    );
+  };
 
   const sweepRecord = Effect.fn("SandboxProvisioner.sweepRecord")(function* (
     record: SandboxRecord,

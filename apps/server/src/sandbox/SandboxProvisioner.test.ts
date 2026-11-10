@@ -5056,6 +5056,7 @@ describe("SandboxProvisioner per-thread launches", () => {
   });
 
   const agentKeySecret = "boat_scoped_SECRET";
+  const keepAliveKeySecret = "boat_keepalive_SECRET";
 
   const boatFake = (
     options: {
@@ -5068,6 +5069,8 @@ describe("SandboxProvisioner per-thread launches", () => {
       readonly endpointStatus?: string;
       /** How Boat answers the scoped-key check: a key without account admin rights is refused. */
       readonly scopedKeys?: "admin" | "limited" | "wide";
+      /** How Boat scopes a keep-alive key: `wide` reaches every sandbox; `refused` fails the mint. */
+      readonly keepAliveKeys?: "exact" | "wide" | "refused";
       readonly inEnvironments?: BoatFake["inEnvironments"];
       /** What the work check prints; a clean clone by default. */
       readonly work?: string;
@@ -5081,6 +5084,7 @@ describe("SandboxProvisioner per-thread launches", () => {
   ): BoatFake => {
     const states = options.states ?? {};
     let minted = 0;
+    let keepAliveMinted = 0;
     const requests: Array<string> = [];
     const commands: Array<string> = [];
     const bodies: Array<{ readonly url: string; readonly body: unknown }> = [];
@@ -5115,6 +5119,29 @@ describe("SandboxProvisioner per-thread launches", () => {
           return options.scopedKeys === "limited"
             ? respond(request, { code: "api_key_action_forbidden" }, 403)
             : respond(request, { code: "api_key_sandbox_forbidden" }, 403);
+        }
+        // A keep-alive key may move the sandbox's auto-stop; the agent's may not.
+        if (body.actions?.includes("sandbox.update") === true) {
+          if (options.keepAliveKeys === "refused") {
+            return respond(request, { code: "api_key_action_forbidden" }, 403);
+          }
+          const id = `apk_keepalive${++keepAliveMinted}`;
+          keys.add(id);
+          return respond(
+            request,
+            {
+              ok: true,
+              secret: `${keepAliveKeySecret}${keepAliveMinted}`,
+              apiKey: {
+                id,
+                scope: {
+                  sandboxes: options.keepAliveKeys === "wide" ? "*" : body.sandboxIds,
+                  environments: [],
+                },
+              },
+            },
+            201,
+          );
         }
         keys.add("apk_agent1");
         return respond(
@@ -5179,7 +5206,7 @@ describe("SandboxProvisioner per-thread launches", () => {
             ? "T3_REPO_DIR: /home/boat/work/hello\nT3_REPO_PROJECT: project-remote\n"
             : options.endpointStatus !== undefined && command.includes("T3_ENDPOINT_STATUS")
               ? `T3_ENDPOINT_STATUS:${options.endpointStatus}\n`
-              : command.includes("auth session issue")
+              : command.includes("--label t3-sandbox-bridge")
                 ? bridgeOutput(command, {
                     sessionId: `bridge-session-${++minted}`,
                     token: bridgeToken,
@@ -5388,7 +5415,7 @@ describe("SandboxProvisioner per-thread launches", () => {
   });
 
   const bridgeIssues = (fake: BoatFake) =>
-    fake.commands.filter((command) => command.includes("auth session issue"));
+    fake.commands.filter((command) => command.includes("--label t3-sandbox-bridge"));
 
   const bridgeLinkOf = (secrets: ReturnType<typeof memorySecrets>) => {
     const stored = secrets.values.get(bridgeLinkSecretName(threadId));
@@ -5787,6 +5814,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         "DELETE https://boat.dev/api/v1/sandboxes/bx_fork1",
         `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
         "DELETE https://boat.dev/api/v1/environments/env-1",
+        "DELETE https://boat.dev/api/v1/api-keys/apk_keepalive1",
       ]);
       expect(fake.keys.size).toBe(0);
       expect(fake.environments.map((candidate) => candidate.name)).toEqual(["base"]);
@@ -5877,7 +5905,8 @@ describe("SandboxProvisioner per-thread launches", () => {
       expect(waiting.warnings).toContain(
         "The Boat CLI could not be signed in on the sandbox, so the agent cannot use Boat. T3 Code revoked its key.",
       );
-      expect(fake.keys.size).toBe(0);
+      // Only the key the running sandbox keeps itself up with is left.
+      expect([...fake.keys]).toEqual(["apk_keepalive1"]);
       // The sandbox still runs in its environment, so the record keeps it without a key.
       expect(repository.records.get(instanceId)?.agentProviderAccess).toEqual({
         environmentId: "env-1",
@@ -5904,7 +5933,7 @@ describe("SandboxProvisioner per-thread launches", () => {
       expect(waiting.warnings).toContain(
         "T3 Code could not make a Boat key for the agent, so it cannot use Boat on this sandbox.",
       );
-      expect(fake.keys.size).toBe(0);
+      expect([...fake.keys]).toEqual(["apk_keepalive1"]);
       expect(fake.commands.some((command) => command.includes("boat login"))).toBe(false);
       expect(repository.records.get(instanceId)?.agentProviderAccess?.keyId).toBeUndefined();
     }).pipe(
@@ -6091,7 +6120,10 @@ describe("SandboxProvisioner per-thread launches", () => {
         (snapshot) => snapshot.phase === "cancelled",
       );
       expect(stageOf(cancelled, "pair")?.status).toBe("skipped");
-      expect(deletes(fake)).toEqual([`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`]);
+      expect(deletes(fake)).toEqual([
+        `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        "DELETE https://boat.dev/api/v1/api-keys/apk_keepalive1",
+      ]);
       expect(repository.records.size).toBe(0);
     }).pipe(
       Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
@@ -6314,7 +6346,10 @@ describe("SandboxProvisioner per-thread launches", () => {
       expect(failed).toMatchObject({ instanceId, recovery: "relaunch" });
       expect(failed.error).toContain("Nothing connected to this sandbox for 10 minutes");
       expect(stageOf(failed, "pair")?.status).toBe("failed");
-      expect(deletes(fake)).toEqual([`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`]);
+      expect(deletes(fake)).toEqual([
+        `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        "DELETE https://boat.dev/api/v1/api-keys/apk_keepalive1",
+      ]);
       expect(repository.records.size).toBe(0);
       // A late completion finds nothing to finish.
       expect((yield* provisioner.completeLaunch({ threadId }).pipe(Effect.flip)).detail).toContain(
@@ -6978,7 +7013,7 @@ describe("SandboxProvisioner per-thread launches", () => {
     it.effect(
       "revokes what a launch minted when it fails, and warns when the app is not installed",
       () => {
-        const fake = boatFake({ failing: { text: "auth session issue", times: 99 } });
+        const fake = boatFake({ failing: { text: "--label t3-sandbox-bridge", times: 99 } });
         const services = withServices(fake, { setupExit: 2 });
         const repository = memoryRepository();
         const secrets = memorySecrets();
