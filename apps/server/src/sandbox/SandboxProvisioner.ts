@@ -3671,6 +3671,21 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     });
   });
 
+  // A resume writes its record once it ends; the keep-alive key cannot wait that long to be named.
+  const saveKeepAliveKey = Effect.fn("SandboxProvisioner.saveKeepAliveKey")(function* (
+    instanceId: string,
+    key: SandboxRecord["keepAliveKey"],
+  ) {
+    const stored = yield* records.get(instanceId);
+    if (Option.isNone(stored)) return;
+    const { keepAliveKey: _keepAliveKey, ...rest } = stored.value;
+    yield* records.put({
+      ...rest,
+      ...(key === undefined ? {} : { keepAliveKey: key }),
+      updatedAt: yield* nowIso,
+    });
+  }, Effect.orDie);
+
   /**
    * Runs on a resume before T3 starts, which starts the loop: renews a key close to its expiry, or
    * gives a sandbox made before keep-alive its first one. A failure keeps a key that still works,
@@ -3693,12 +3708,16 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     if (current?.id !== undefined && expiresAt - now > KEEP_ALIVE_RENEW_BEFORE_MS) {
       return { keepAliveKey: current, warning: null };
     }
+    const name = yield* keepAliveKeyName(record.label);
+    // As on a launch, the record names a first key before it is minted, so a crash in between
+    // still says which key to revoke. A renewal keeps the working key recorded until then.
+    if (current?.id === undefined) yield* saveKeepAliveKey(record.instanceId, { name });
     const installed = yield* mintKeepAlive({
       driver,
       keepAlive,
       config,
       sandboxId: record.sandboxId,
-      name: yield* keepAliveKeyName(record.label),
+      name,
       ttlMinutes,
       maxRunningMinutes: record.maxRunningMinutes,
       projectRoot: record.repoDir,
@@ -3706,11 +3725,13 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         onHttp(driver.execute({ config, sandboxId: record.sandboxId, timeoutSeconds, ...script })),
     });
     if (installed !== null) {
+      yield* saveKeepAliveKey(record.instanceId, installed);
       if (current?.id !== undefined) {
         yield* onHttp(keepAlive.revokeKey({ config, keyId: current.id })).pipe(Effect.ignore);
       }
       return { keepAliveKey: installed, warning: null };
     }
+    if (current?.id === undefined) yield* saveKeepAliveKey(record.instanceId, undefined);
     if (current?.id !== undefined && expiresAt > now) {
       return {
         keepAliveKey: current,
