@@ -516,7 +516,8 @@ describe("sandboxKeepAliveScript", () => {
           .writeFileString(`${bin}/${name}`, text)
           .pipe(Effect.andThen(fs.chmod(`${bin}/${name}`, 0o755)));
       yield* write("systemd-run", `#!/bin/sh\necho "$*" >"$HOME/systemd-run.argv"\n`);
-      yield* write("systemctl", "#!/bin/sh\nexit 0\n");
+      // No unit is running yet; `is-active` says so the way systemd does.
+      yield* write("systemctl", '#!/bin/sh\ncase "$*" in *is-active*) exit 3 ;; esac\n');
       yield* write(
         "t3",
         `#!/bin/sh
