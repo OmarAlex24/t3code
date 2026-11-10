@@ -18,6 +18,7 @@ import {
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -54,10 +55,16 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as ServerConfig from "../config.ts";
 
 const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-orchestrator-" }).pipe(
+      Layer.provideMerge(NodeServices.layer),
+    ),
+  ),
 );
 
 /** A task delegated here always has a local child thread. */
@@ -328,6 +335,38 @@ describe("orchestrator MCP toolkit", () => {
                 Effect.provideService(McpSchema.McpServerClient, client),
               );
 
+          const milestoneTool = server.tools.find(({ tool }) => tool.name === "t3_milestone");
+          const enabledWhen = Context.getOrUndefined(
+            milestoneTool!.annotations,
+            McpSchema.EnabledWhen,
+          );
+          const visibleTo = (scope: McpInvocationContext.McpInvocationScope) =>
+            Effect.sync(() =>
+              enabledWhen!({
+                protocolVersion: client.protocolVersion,
+                capabilities: client.clientCapabilities,
+                clientInfo: client.clientInfo,
+              }),
+            ).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, scope));
+          expect(yield* visibleTo(invocation)).toBe(true);
+          expect(
+            yield* visibleTo({ ...invocation, thread: { ...invocation.thread!, subagent: true } }),
+          ).toBe(false);
+          const plan = {
+            action: "plan",
+            titles: ["Delegate", "Follow up"],
+            clientRequestId: "milestone-plan-1",
+          };
+          const planned = yield* invoke("t3_milestone", plan);
+          expect(planned.structuredContent).toEqual({ state: "m1 active · 1/2 · next m2" });
+          expect((yield* invoke("t3_milestone", plan)).structuredContent).toEqual(
+            planned.structuredContent,
+          );
+          expect(yield* invoke("t3_milestone", { action: "start", id: "m9" })).toMatchObject({
+            isError: true,
+            content: [{ text: expect.stringContaining("No milestone m9.") }],
+          });
+
           const delegationStartSequence =
             yield* orchestrator.getThreadEventSequence(parentThreadId);
           const delegatedCall = yield* invoke("delegate_task", {
@@ -381,6 +420,11 @@ describe("orchestrator MCP toolkit", () => {
             latestTerminalResultContextTransferId: null,
           });
           expect(delegated.resultContextTransferId).not.toBeNull();
+
+          expect(
+            (yield* invoke("t3_milestone", { action: "start", note: "delegated" }))
+              .structuredContent,
+          ).toEqual({ state: "m2 active · 2/2" });
 
           const delegatedChild = yield* orchestrator.getThreadProjection(
             localChild(delegated.childThreadId),
@@ -443,6 +487,17 @@ describe("orchestrator MCP toolkit", () => {
           );
           expect(followupTasks).toHaveLength(2);
           expect(followupTasks.every((task) => task.result === null)).toBe(true);
+          // Each subagent keeps the milestone that was active when it started.
+          const parentNow = yield* orchestrator.getThreadProjection(parentThreadId);
+          expect(
+            parentNow.subagents.find((task) => task.id === delegated.taskId)?.milestoneId,
+          ).toBe("m1");
+          expect(followupTasks.map((task) => task.milestoneId)).toEqual(["m2", "m2"]);
+          expect(
+            parentNow.turnItems
+              .filter((item) => item.type === "milestone")
+              .map((item) => item.type === "milestone" && item.event),
+          ).toEqual(["plan", "started"]);
           expect(followupTasks.map((task) => task.id)).toEqual([
             runningFollowup.taskId,
             queuedFollowup.taskId,
@@ -555,6 +610,20 @@ describe("orchestrator MCP toolkit", () => {
               ),
             );
           const finishedParent = yield* orchestrator.getThreadProjection(parentThreadId);
+          // The finished child thread has no running turn to mark milestones from.
+          expect(
+            yield* invoke(
+              "t3_milestone",
+              { action: "done" },
+              {
+                ...invocation,
+                thread: { ...invocation.thread!, threadId: localChild(delegated.childThreadId) },
+              },
+            ),
+          ).toMatchObject({
+            isError: true,
+            content: [{ text: expect.stringContaining("parent_not_active") }],
+          });
           expect(
             finishedParent.subagents.find((task) => task.id === followupTasks[0]!.id)?.status,
           ).toBe("interrupted");

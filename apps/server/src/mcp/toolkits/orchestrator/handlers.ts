@@ -10,6 +10,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+import * as ThreadMilestoneMcpService from "../../ThreadMilestoneMcpService.ts";
 
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads((input) =>
@@ -79,6 +80,13 @@ const handlers = {
               }),
           ),
         );
+    }),
+  ),
+  t3_milestone: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* ThreadMilestoneMcpService.ThreadMilestoneMcpService;
+      return yield* service.apply(scope, input);
     }),
   ),
   schedule_task: McpToolAccess.either(

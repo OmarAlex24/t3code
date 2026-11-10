@@ -144,6 +144,7 @@ const THREAD_SNAPSHOT: OrchestrationV2ThreadDetailSnapshot = {
     runtimeRequests: [],
     messages: [],
     plans: [],
+    milestones: [],
     turnItems: [],
     checkpointScopes: [],
     checkpoints: [],
