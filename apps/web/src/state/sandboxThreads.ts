@@ -48,8 +48,10 @@ export interface SandboxRowState {
   readonly resumingSince: string | null;
 }
 
+export const SANDBOX_STOPPED_LABEL = "Sandbox stopped";
+export const SANDBOX_RESUME_HINT = "send a message to resume it";
 /** What a stopped sandbox's thread says on hover; sending is what resumes it. */
-export const SANDBOX_STOPPED_HINT = "Sandbox stopped · send a message to resume it";
+export const SANDBOX_STOPPED_HINT = `${SANDBOX_STOPPED_LABEL} · ${SANDBOX_RESUME_HINT}`;
 
 /** How a sandbox thread's row marks its machine: starting, stopped, or as it usually looks. */
 export type SandboxRowPhase = "starting" | "stopped" | null;
