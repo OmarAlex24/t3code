@@ -383,6 +383,10 @@
       "types": "./src/state/threadMilestoneGraph.ts",
       "default": "./src/state/threadMilestoneGraph.ts"
     },
+    "./state/thread-milestone-board": {
+      "types": "./src/state/threadMilestoneBoard.ts",
+      "default": "./src/state/threadMilestoneBoard.ts"
+    },
     "./state/thread-undo": {
       "types": "./src/state/threadUndo.ts",
       "default": "./src/state/threadUndo.ts"
