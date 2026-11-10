@@ -723,7 +723,7 @@ const BUSY_STATUSES = ["queued", "preparing", "starting", "running"] as const;
 
 // `t3 thread list` leaves out subagents, so the official server's MCP endpoint is asked for busy
 // threads (subagents included) with an `mcp-client` session the CLI mints; the CLI's list is the
-// fallback, and nothing readable counts as idle. Tokens go in `curl -H @file`, never in argv.
+// fallback. With neither, the running limit applies. Tokens go in `curl -H @file`, never in argv.
 const keepAliveLoop = (port: number) => `#!/bin/sh
 dir="${KEEP_ALIVE_DIR}"
 export PATH="$HOME/.local/bin:$PATH"
@@ -784,18 +784,32 @@ cli_state() {
   t3 thread list --project "$PROJECT_ROOT" --json >"$dir/out" 2>/dev/null || return 1
   if grep -Eq '"status":"(${BUSY_STATUSES.join("|")})"' "$dir/out"; then echo busy; else echo idle; fi
 }
+extend() {
+  curl -sS -m 30 -o /dev/null -w '%{http_code}' -X "$EXTEND_METHOD" -H @"$dir/boat-auth" \\
+    -H 'content-type: application/json' -d "{\\"ttlSeconds\\":$TTL_SECONDS}" "$EXTEND_URL" 2>/dev/null
+}
+# Whether this loop, which starts with T3 on every resume, has run less than the running limit.
+within_running_limit() {
+  started="$(cat "$dir/started" 2>/dev/null || true)"
+  case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(( $(date +%s) - started ))" -lt "$(( \${MAX_RUNNING_MINUTES:-0} * 60 ))" ]
+}
 tick() {
   [ -s "$dir/boat-auth" ] && [ -s "$dir/config" ] || return 1
   . "$dir/config"
   state="$(mcp_state || cli_state || echo unknown)"
   rm -f "$dir/out" "$dir/head"
+  # A T3 that answers neither way (a changed CLI, say) must not stop a sandbox that may be working,
+  # so it stays up as it would have before keep-alive: until the running limit.
+  if [ "$state" = unknown ]; then
+    if within_running_limit; then note "unknown extend $(extend)"; else note unknown; fi
+    return 0
+  fi
   if [ "$state" != busy ]; then
     note "$state"
     return 0
   fi
-  code="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X "$EXTEND_METHOD" -H @"$dir/boat-auth" \\
-    -H 'content-type: application/json' -d "{\\"ttlSeconds\\":$TTL_SECONDS}" "$EXTEND_URL" 2>/dev/null)"
-  note "busy extend $code"
+  note "busy extend $(extend)"
 }
 case "\${1:-}" in
 start)
@@ -826,6 +840,7 @@ run)
   other="$(loop_pid)"
   [ -n "$other" ] && [ "$other" != "$$" ] && exit 0
   echo "$$" >"$dir/pid"
+  date +%s >"$dir/started"
   while tick; do sleep "\${INTERVAL_SECONDS:-${KEEP_ALIVE_INTERVAL_SECONDS}}"; done
   ;;
 *) exit 64 ;;
@@ -841,6 +856,8 @@ export const sandboxKeepAliveScript = (input: {
   readonly key: string;
   readonly extend: { readonly method: string; readonly url: string };
   readonly ttlSeconds: number;
+  /** How long the loop keeps the sandbox up after a start while it cannot tell whether work runs. */
+  readonly maxRunningMinutes: number;
   readonly port: number;
   readonly projectRoot?: string | undefined;
 }): SandboxScript => ({
@@ -856,6 +873,7 @@ cat >"$dir/config.tmp" <<'T3_KEEPALIVE_CONFIG'
 EXTEND_METHOD=${shellQuote(input.extend.method)}
 EXTEND_URL=${shellQuote(input.extend.url)}
 TTL_SECONDS=${Math.max(60, Math.round(input.ttlSeconds))}
+MAX_RUNNING_MINUTES=${Math.max(0, Math.round(input.maxRunningMinutes))}
 PROJECT_ROOT=${shellQuote(input.projectRoot ?? "")}
 T3_KEEPALIVE_CONFIG
 mv "$dir/config.tmp" "$dir/config"
