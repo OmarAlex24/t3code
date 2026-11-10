@@ -1334,7 +1334,7 @@ export function useComposerSend(input: ComposerSendInput) {
           attachmentCount: turnAttachmentsResult.value.length,
           title,
           runtimeMode,
-          interactionMode: sendInteractionMode,
+          interactionMode: DEFAULT_INTERACTION_MODE,
           modelSelection: ctxSelectedModelSelection,
           createdAt: messageCreatedAt,
         });
