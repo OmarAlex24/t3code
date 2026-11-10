@@ -86,6 +86,7 @@ describe("buildThreadActionMenuItems", () => {
       label: "The sandbox no longer exists",
       disabled: true,
     });
+    expect(items[1]).toMatchObject({ id: "pin", disabled: true, separatorBefore: true });
     expect(items.at(-1)).toMatchObject({ id: "delete-sandbox", label: "Delete sandbox…" });
     expect(items.at(-1)?.disabled).not.toBe(true);
     expect(items.find((item) => item.id === "delete")?.disabled).toBe(true);
