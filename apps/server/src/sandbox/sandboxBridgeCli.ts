@@ -15,8 +15,10 @@ import {
 } from "@t3tools/sandbox-bridge";
 import {
   bridgeLinkSecretName,
+  bridgeResumeFailureSecretName,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
   SandboxBridgeLinkJson,
+  SandboxBridgeResumeFailureJson,
 } from "@t3tools/sandbox-bridge/link";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
@@ -40,6 +42,7 @@ const decodeHostThread = Schema.decodeUnknownEffect(
   Schema.Struct({ structuredContent: HostThreadConfiguration }),
 );
 const decodeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
+const decodeResumeFailure = Schema.decodeEffect(SandboxBridgeResumeFailureJson);
 
 const program = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
@@ -67,6 +70,23 @@ const program = Effect.gen(function* () {
           (cause) =>
             new SandboxBridgeError({
               message: "Could not read this thread's sandbox link.",
+              cause,
+            }),
+        ),
+      ),
+    findResumeFailure: (threadId) =>
+      secrets.get(bridgeResumeFailureSecretName(threadId)).pipe(
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.succeedNone,
+            onSome: (bytes) =>
+              decodeResumeFailure(new TextDecoder().decode(bytes)).pipe(Effect.asSome),
+          }),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new SandboxBridgeError({
+              message: "Could not read whether this thread's sandbox failed to start.",
               cause,
             }),
         ),

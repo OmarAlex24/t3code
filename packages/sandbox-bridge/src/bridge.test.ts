@@ -50,7 +50,7 @@ import {
   toolTitleOf,
   TurnTracker,
 } from "./bridge.ts";
-import type { SandboxBridgeLink } from "./link.ts";
+import type { SandboxBridgeLink, SandboxBridgeResumeFailure } from "./link.ts";
 
 const threadId = ThreadId.make("thread-sandbox-1");
 const sandboxProjectId = ProjectId.make("project-on-sandbox");
@@ -304,6 +304,7 @@ const withBridge = <A, E>(
     readonly runtimeMode?: RuntimeMode;
     readonly hostModel?: ModelSelection;
     readonly connect?: SandboxBridgePorts["connect"];
+    readonly findResumeFailure?: SandboxBridgePorts["findResumeFailure"];
     /** Null waits as long as the bridge does by default, spaced as it does by default. */
     readonly reconnectWindow?: null;
     readonly permission?: (
@@ -333,6 +334,9 @@ const withBridge = <A, E>(
           options.fake === undefined
             ? Effect.fail(new SandboxBridgeError({ message: "no sandbox" }))
             : Effect.succeed(options.fake.session)),
+      ...(options.findResumeFailure === undefined
+        ? {}
+        : { findResumeFailure: options.findResumeFailure }),
       ...(options.reconnectWindow === null
         ? {}
         : { reconnectWindow: "40 millis", reconnectSpacing: "10 millis" }),
@@ -1142,6 +1146,67 @@ describe("forwarding a turn", () => {
             ]);
             assert.strictEqual(messages(updates).join(""), "Back up");
             assert.strictEqual(fake.launches[0]?.initialMessage?.text, "Pick this up");
+          }),
+      );
+    }),
+  );
+
+  it.effect("ends the turn at once when the host's resume of its sandbox failed", () =>
+    Effect.gen(function* () {
+      let failure = Option.none<SandboxBridgeResumeFailure>();
+      let attempts = 0;
+      // Set once the session is open, so only the turn's own attempts count.
+      let turnRefused: Deferred.Deferred<void> | undefined;
+      yield* withBridge(
+        {
+          // As long as the bridge waits by default: only the host's word can end the turn early.
+          reconnectWindow: null,
+          connect: () =>
+            Effect.suspend(() => {
+              attempts++;
+              return turnRefused === undefined
+                ? Effect.void
+                : Deferred.succeed(turnRefused, undefined);
+            }).pipe(
+              Effect.andThen(
+                Effect.fail(new SandboxBridgeError({ message: "connection refused" })),
+              ),
+            ),
+          findResumeFailure: () => Effect.sync(() => failure),
+        },
+        ({ acp, updates }) =>
+          Effect.gen(function* () {
+            const session = yield* openThread(acp);
+            // A failure from an earlier message does not end this one.
+            failure = Option.some({
+              reason: "An earlier attempt failed",
+              messageIds: ["message-earlier"],
+              failedAt: 0,
+            });
+            const refused = yield* Deferred.make<void>();
+            turnRefused = refused;
+            const prompt = yield* say(acp, session.sessionId, "Pick this up", {
+              messageId: "message-1",
+            }).pipe(Effect.forkScoped);
+            yield* Deferred.await(refused);
+            yield* TestClock.adjust("30 seconds");
+            assert.isTrue(attempts > 2);
+            assert.isUndefined(prompt.pollUnsafe());
+
+            failure = Option.some({
+              reason: "Boat refused to start bx_123.",
+              messageIds: ["message-1"],
+              failedAt: 1,
+            });
+            yield* TestClock.adjust("5 seconds");
+            const result = yield* Fiber.join(prompt);
+            assert.strictEqual(result.stopReason, "end_turn");
+            assert.deepStrictEqual(messages(updates, "agent_thought_chunk"), [
+              "Starting sandbox bx_123…",
+            ]);
+            assert.deepStrictEqual(messages(updates), [
+              "Couldn't start sandbox bx_123: Boat refused to start bx_123. Send again to retry.",
+            ]);
           }),
       );
     }),

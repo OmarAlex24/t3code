@@ -7,10 +7,15 @@ import {
   ProjectId,
   ProviderInstanceId,
   SANDBOX_BRIDGE_INSTANCE_ID,
+  SandboxProviderError,
   type SandboxRecord,
   ThreadId,
 } from "@t3tools/contracts";
-import { SANDBOX_BRIDGE_SECRETS_DIR_ENV } from "@t3tools/sandbox-bridge/link";
+import {
+  bridgeResumeFailureSecretName,
+  SANDBOX_BRIDGE_SECRETS_DIR_ENV,
+  SandboxBridgeResumeFailureJson,
+} from "@t3tools/sandbox-bridge/link";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -18,9 +23,11 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { describe, expect } from "vite-plus/test";
 
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -30,6 +37,7 @@ import * as SandboxBridge from "./sandboxBridge.ts";
 import * as SandboxProvisioner from "./SandboxProvisioner.ts";
 
 const threadId = ThreadId.make("thread-on-sandbox");
+const decodeResumeFailure = Schema.decodeEffect(SandboxBridgeResumeFailureJson);
 const instanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
 
 const record = (overrides: Partial<SandboxRecord> = {}): SandboxRecord =>
@@ -66,7 +74,15 @@ interface Harness {
     readonly settledAt: string | null;
     readonly runtimeMode?: string;
   };
-  hostRuns: Array<{ readonly id: string; readonly status: string }>;
+  hostRuns: Array<{
+    readonly id: string;
+    readonly status: string;
+    readonly userMessageId?: string;
+  }>;
+  /** Set to make the next resumes fail with this reason. */
+  resumeFails?: string;
+  /** The name of every secret the bridge writes, once written. */
+  readonly secretWrites: Queue.Queue<string>;
 }
 
 const makeHarness = Effect.gen(function* () {
@@ -89,6 +105,7 @@ const makeHarness = Effect.gen(function* () {
     }>(),
     hostThread: { instanceId: SANDBOX_BRIDGE_INSTANCE_ID, settledAt: null },
     hostRuns: [],
+    secretWrites: yield* Queue.unbounded<string>(),
   };
   const provisionerService: Partial<SandboxProvisioner.SandboxProvisioner["Service"]> = {
     list: Effect.sync(() => ({ sandboxes: harness.records, orphans: [] })),
@@ -99,9 +116,14 @@ const makeHarness = Effect.gen(function* () {
       }),
     removed: Stream.fromQueue(harness.removals),
     resume: (input) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         harness.resumed.push(input.instanceId);
-        return { sandbox: record(), httpBaseUrl: "https://sandbox.example" };
+        const reason = harness.resumeFails;
+        return reason === undefined
+          ? Effect.succeed({ sandbox: record(), httpBaseUrl: "https://sandbox.example" })
+          : Effect.fail(
+              new SandboxProviderError({ provider: "boat", stage: "start", detail: reason }),
+            );
       }).pipe(Effect.tap(() => Queue.offer(harness.resumes, input.instanceId))),
   };
   const provisioner = Layer.succeed(
@@ -196,6 +218,22 @@ const makeHarness = Effect.gen(function* () {
         }),
       ),
     ),
+    // The real store, telling the test when the bridge has written to it.
+    Layer.provideMerge(
+      Layer.effect(
+        ServerSecretStore.ServerSecretStore,
+        Effect.gen(function* () {
+          const store = yield* ServerSecretStore.make;
+          return {
+            ...store,
+            set: (name: string, value: Uint8Array) =>
+              store
+                .set(name, value)
+                .pipe(Effect.andThen(Queue.offer(harness.secretWrites, name)), Effect.asVoid),
+          };
+        }),
+      ),
+    ),
     Layer.provideMerge(ServerConfig.layerTest("/tmp", { prefix: "t3-sandbox-bridge-" })),
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
@@ -211,6 +249,7 @@ const withHarness = <A, E>(
     | SandboxBridge.SandboxBridge
     | ServerSettings.ServerSettingsService
     | ServerConfig.ServerConfig
+    | ServerSecretStore.ServerSecretStore
     | Path.Path
   >,
 ) =>
@@ -462,5 +501,55 @@ describe("SandboxBridge", () => {
         expect(harness.resumed).toEqual(["sandbox-1", "sandbox-2"]);
       }),
     ),
+  );
+
+  it.effect(
+    "tells the bridge which waiting turns a failed resume ends, and retries on the next",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          harness.records.push(record({ state: "stopped" }));
+          harness.resumeFails = "Boat refused to start bx_1.";
+          harness.hostRuns = [
+            { id: "run-1", status: "starting", userMessageId: "message-1" },
+            // Behind the active turn: it asks for a resume of its own when it starts.
+            { id: "run-2", status: "queued", userMessageId: "message-2" },
+            { id: "run-0", status: "completed", userMessageId: "message-0" },
+          ];
+          yield* SandboxBridge.SandboxBridge;
+          const secrets = yield* ServerSecretStore.ServerSecretStore;
+          const name = bridgeResumeFailureSecretName(threadId);
+          const readFailure = secrets.get(name).pipe(
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.succeedNone,
+                onSome: (bytes) =>
+                  decodeResumeFailure(new TextDecoder().decode(bytes)).pipe(Effect.asSome),
+              }),
+            ),
+          );
+          const run = (id: string, status: string) =>
+            ({
+              type: "run.updated",
+              threadId,
+              payload: { id, threadId, providerInstanceId: instanceId, status },
+            }) as unknown as OrchestrationV2DomainEvent;
+
+          yield* Queue.offer(harness.events, run("run-1", "starting"));
+          expect(yield* Queue.take(harness.secretWrites)).toBe(name);
+          const failure = yield* readFailure;
+          expect(Option.getOrThrow(failure)).toMatchObject({
+            reason: "Boat refused to start bx_1.",
+            messageIds: ["message-1"],
+          });
+
+          // The next turn tries again, and the old failure no longer speaks for it.
+          harness.resumeFails = undefined;
+          yield* Queue.offer(harness.events, run("run-2", "starting"));
+          yield* Queue.take(harness.resumes);
+          expect(yield* readFailure).toEqual(Option.none());
+          expect(harness.resumed).toEqual(["sandbox-1", "sandbox-1"]);
+        }),
+      ),
   );
 });

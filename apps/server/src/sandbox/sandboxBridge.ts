@@ -27,10 +27,14 @@ import {
 import { connectSandbox, modeSyncCommands } from "@t3tools/sandbox-bridge";
 import {
   bridgeLinkSecretName,
+  bridgeResumeFailureSecretName,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
   SandboxBridgeLinkJson,
+  SandboxBridgeResumeFailureJson,
 } from "@t3tools/sandbox-bridge/link";
 import { resolveSelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
@@ -39,6 +43,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/http";
 
@@ -191,6 +196,11 @@ export class SandboxBridge extends Context.Service<
 // Statuses of a run that is about to need its sandbox.
 const STARTING_RUN = new Set(["preparing", "queued", "starting", "running"]);
 const ENDED_RUN = new Set(["completed", "interrupted", "failed", "cancelled", "rolled_back"]);
+// Statuses of a run whose turn is at the bridge, waiting for the sandbox to answer. A queued run
+// is not there yet: it starts a resume of its own when its turn comes.
+const AT_BRIDGE_RUN = new Set(["starting", "running"]);
+
+const encodeResumeFailure = Schema.encodeEffect(SandboxBridgeResumeFailureJson);
 
 // Keeps a path segment a single plain folder name, whatever the remote called it.
 const folderName = (segment: string) => {
@@ -208,6 +218,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const fileSystem = yield* FileSystem.FileSystem;
   const remote = yield* SandboxThreadRemote;
+  const secrets = yield* ServerSecretStore.ServerSecretStore;
 
   yield* seedInstance.pipe(
     Effect.catchCause((cause) =>
@@ -320,19 +331,65 @@ const make = Effect.gen(function* () {
     } satisfies SandboxLinkHostThreadResult;
   });
 
+  const clearResumeFailure = (threadId: ThreadId) =>
+    secrets.remove(bridgeResumeFailureSecretName(threadId)).pipe(Effect.ignore);
+
+  // Tells the bridge the turns waiting on this resume can stop waiting, and why.
+  const recordResumeFailure = Effect.fn("SandboxBridge.recordResumeFailure")(function* (
+    threadId: ThreadId,
+    reason: string,
+  ) {
+    const { runs } = yield* orchestrator.getThreadRecords(threadId, ["runs"]);
+    const json = yield* encodeResumeFailure({
+      reason,
+      messageIds: runs
+        .filter((run) => AT_BRIDGE_RUN.has(run.status))
+        .map((run) => run.userMessageId),
+      failedAt: yield* Clock.currentTimeMillis,
+    });
+    yield* secrets.set(bridgeResumeFailureSecretName(threadId), new TextEncoder().encode(json));
+  });
+
   // A turn on a stopped sandbox's thread resumes it; the bridge waits for it to answer meanwhile.
   const resumingRuns = new Set<string>();
   const resuming = new Set<string>();
+  // Starting a resume and recording one's failure take turns, so a turn that arrives as a resume
+  // fails is either named in the failure or starts the next attempt, never neither.
+  const resumeTurns = yield* Semaphore.make(1);
   const resumeFor = Effect.fn("SandboxBridge.resumeFor")(function* (threadId: ThreadId) {
     const { sandboxes } = yield* provisioner.list;
     const stopped = sandboxes.find(
       (record) => record.threadId === threadId && record.state === "stopped",
     );
-    if (stopped === undefined || resuming.has(stopped.instanceId)) return;
-    resuming.add(stopped.instanceId);
-    yield* provisioner
-      .resume({ instanceId: stopped.instanceId })
-      .pipe(Effect.ensuring(Effect.sync(() => resuming.delete(stopped.instanceId))));
+    if (stopped === undefined) return;
+    const started = yield* Effect.gen(function* () {
+      if (resuming.has(stopped.instanceId)) return false;
+      resuming.add(stopped.instanceId);
+      // A new attempt: an earlier failure no longer speaks for the turns waiting now.
+      yield* clearResumeFailure(threadId);
+      return true;
+    }).pipe(resumeTurns.withPermits(1));
+    if (!started) return;
+    yield* provisioner.resume({ instanceId: stopped.instanceId }).pipe(
+      Effect.tapCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : recordResumeFailure(
+              threadId,
+              Option.match(Cause.findErrorOption(cause), {
+                onNone: () => "something went wrong while it started",
+                onSome: (error) => error.detail,
+              }),
+            ).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Could not tell the sandbox bridge a resume failed", { cause }),
+              ),
+              Effect.ensuring(Effect.sync(() => resuming.delete(stopped.instanceId))),
+              resumeTurns.withPermits(1),
+            ),
+      ),
+      Effect.ensuring(Effect.sync(() => resuming.delete(stopped.instanceId))),
+    );
   });
   const catchUpModes = Effect.fn("SandboxBridge.catchUpModes")(function* (threadId: ThreadId) {
     const { thread } = yield* orchestrator.getThreadRecords(threadId, []);
@@ -425,7 +482,8 @@ const make = Effect.gen(function* () {
     Stream.runForEach(provisioner.removed, (record) =>
       record.threadId === undefined || record.hostProjectId === undefined
         ? Effect.void
-        : releaseHostThread(record.threadId).pipe(
+        : clearResumeFailure(record.threadId).pipe(
+            Effect.andThen(releaseHostThread(record.threadId)),
             Effect.catchCause((cause) =>
               Effect.logWarning("Could not settle a deleted sandbox's host thread", { cause }),
             ),
