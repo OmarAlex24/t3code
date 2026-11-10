@@ -713,3 +713,164 @@ export const parseRailwayCli = (stdout: string): string | null => {
 // Run before a template save, with the Claude scrub that drops RAILWAY_API_TOKEN: a login an agent
 // made with \`railway login\` lives here.
 export const RAILWAY_LOGIN_SCRUB = `rm -rf "$HOME/.railway"`;
+
+const KEEP_ALIVE_DIR = `$HOME/.t3/userdata/sandbox-keepalive`;
+/** How often the sandbox checks for work; the provider's deadline is the idle window past a check. */
+export const KEEP_ALIVE_INTERVAL_SECONDS = 300;
+
+// A thread in one of these is working; `waiting` waits on the user, so it counts as idle.
+const BUSY_STATUSES = ["queued", "preparing", "starting", "running"] as const;
+
+// `t3 thread list` leaves out subagents, so the official server's MCP endpoint is asked for busy
+// threads (subagents included) with an `mcp-client` session the CLI mints; the CLI's list is the
+// fallback, and nothing readable counts as idle. Tokens go in `curl -H @file`, never in argv.
+const keepAliveLoop = (port: number) => `#!/bin/sh
+dir="${KEEP_ALIVE_DIR}"
+export PATH="$HOME/.local/bin:$PATH"
+umask 077
+origin="http://127.0.0.1:${port}"
+loop_pid() {
+  pid="$(cat "$dir/pid" 2>/dev/null || true)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null &&
+    tr '\\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q 'sandbox-keepalive/loop.sh run' &&
+    printf '%s' "$pid"
+}
+note() {
+  printf '%s %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$dir/log"
+  tail -n 100 "$dir/log" >"$dir/log.tmp" 2>/dev/null && mv "$dir/log.tmp" "$dir/log"
+}
+mint_session() {
+  old="$(cat "$dir/mcp-session" 2>/dev/null || true)"
+  if [ -n "$old" ]; then t3 auth session revoke "$old" >/dev/null 2>&1 || true; fi
+  rm -f "$dir/mcp-auth" "$dir/mcp-session"
+  t3 auth session issue --subject mcp-client --scope orchestration:read --ttl 30d \\
+    --label t3-sandbox-keepalive --json >"$dir/issued" 2>/dev/null || { rm -f "$dir/issued"; return 1; }
+  token="$(sed -n 's/^  "token": "\\([^"]*\\)".*/\\1/p' "$dir/issued" | head -n 1)"
+  sed -n 's/^  "sessionId": "\\([^"]*\\)".*/\\1/p' "$dir/issued" | head -n 1 >"$dir/mcp-session"
+  rm -f "$dir/issued"
+  [ -n "$token" ] || return 1
+  printf 'Authorization: Bearer %s\\n' "$token" >"$dir/mcp-auth"
+}
+mcp() {
+  curl -sS -m 30 -o "$dir/out" -D "$dir/head" -w '%{http_code}' -H @"$dir/mcp-auth" -H @"$dir/mcp-headers" \\
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \\
+    -d "$1" "$origin/mcp" 2>/dev/null
+}
+# Prints busy or idle, or fails when the server cannot say.
+mcp_state() {
+  [ -s "$dir/mcp-auth" ] || mint_session || return 1
+  : >"$dir/mcp-headers"
+  init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t3-sandbox-keepalive","version":"1"}}}'
+  code="$(mcp "$init")"
+  if [ "$code" = 401 ]; then
+    mint_session || return 1
+    code="$(mcp "$init")"
+  fi
+  [ "$code" = 200 ] || return 1
+  sid="$(sed -n 's/^[Mm][Cc][Pp]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]-[Ii][Dd]: *\\([^[:space:]]*\\).*/\\1/p' "$dir/head" | head -n 1)"
+  version="$(grep -o '"protocolVersion":"[^"]*"' "$dir/out" | head -n 1 | cut -d'"' -f4)"
+  printf 'mcp-session-id: %s\\nmcp-protocol-version: %s\\n' "$sid" "\${version:-2025-06-18}" >"$dir/mcp-headers"
+  mcp '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+  code="$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"t3_thread_list","arguments":{"allProjects":true,"includeSubagents":true,"statuses":${JSON.stringify(BUSY_STATUSES)},"limit":1}}}')"
+  [ -n "$sid" ] && curl -sS -m 10 -o /dev/null -X DELETE -H @"$dir/mcp-auth" -H @"$dir/mcp-headers" "$origin/mcp" >/dev/null 2>&1
+  [ "$code" = 200 ] && grep -q '"isError":false' "$dir/out" || return 1
+  grep -q '"threads":\\[\\]' "$dir/out" && { echo idle; return 0; }
+  # A server that ignores the status filter answers with any thread; only a busy one counts.
+  first="$(grep -o '"status":"[a-z_]*"' "$dir/out" | head -n 1 | cut -d'"' -f4)"
+  case "$first" in ${BUSY_STATUSES.join("|")}) echo busy ;; *) return 1 ;; esac
+}
+cli_state() {
+  [ -n "\${PROJECT_ROOT:-}" ] || return 1
+  t3 thread list --project "$PROJECT_ROOT" --json >"$dir/out" 2>/dev/null || return 1
+  if grep -Eq '"status":"(${BUSY_STATUSES.join("|")})"' "$dir/out"; then echo busy; else echo idle; fi
+}
+tick() {
+  [ -s "$dir/boat-auth" ] && [ -s "$dir/config" ] || return 1
+  . "$dir/config"
+  state="$(mcp_state || cli_state || echo unknown)"
+  rm -f "$dir/out" "$dir/head"
+  if [ "$state" != busy ]; then
+    note "$state"
+    return 0
+  fi
+  code="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X "$EXTEND_METHOD" -H @"$dir/boat-auth" \\
+    -H 'content-type: application/json' -d "{\\"ttlSeconds\\":$TTL_SECONDS}" "$EXTEND_URL" 2>/dev/null)"
+  note "busy extend $code"
+}
+case "\${1:-}" in
+start)
+  [ -n "$(loop_pid)" ] && exit 0
+  # A transient user unit outlives the command that starts it where systemd runs T3 itself.
+  if command -v systemd-run >/dev/null 2>&1; then
+    [ -n "\${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    systemctl --user reset-failed t3-sandbox-keepalive.service >/dev/null 2>&1 || true
+    if systemd-run --user --quiet --collect --unit=t3-sandbox-keepalive sh "$dir/loop.sh" run >/dev/null 2>&1; then
+      exit 0
+    fi
+  fi
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid sh "$dir/loop.sh" run >/dev/null 2>&1 &
+  else
+    nohup sh "$dir/loop.sh" run >/dev/null 2>&1 &
+  fi
+  ;;
+stop)
+  pid="$(loop_pid)"
+  systemctl --user stop t3-sandbox-keepalive.service >/dev/null 2>&1 || true
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  ;;
+once) tick ;;
+run)
+  other="$(loop_pid)"
+  [ -n "$other" ] && [ "$other" != "$$" ] && exit 0
+  echo "$$" >"$dir/pid"
+  while tick; do sleep "\${INTERVAL_SECONDS:-${KEEP_ALIVE_INTERVAL_SECONDS}}"; done
+  ;;
+*) exit 64 ;;
+esac
+`;
+
+/**
+ * Writes the keep-alive's key, settings, and loop under T3's userdata, then starts the loop. The
+ * key arrives in `secrets` and lands only in a header file; `startScript` starts the loop again
+ * on every resume, and starting it twice is a no-op.
+ */
+export const sandboxKeepAliveScript = (input: {
+  readonly key: string;
+  readonly extend: { readonly method: string; readonly url: string };
+  readonly ttlSeconds: number;
+  readonly port: number;
+  readonly projectRoot?: string | undefined;
+}): SandboxScript => ({
+  secrets: { T3_KEEPALIVE_KEY: input.key },
+  command: `set -eu
+umask 077
+dir="${KEEP_ALIVE_DIR}"
+mkdir -p "$dir"
+printf 'Authorization: Bearer %s\\n' "$T3_KEEPALIVE_KEY" >"$dir/boat-auth.tmp"
+unset T3_KEEPALIVE_KEY
+mv "$dir/boat-auth.tmp" "$dir/boat-auth"
+cat >"$dir/config.tmp" <<'T3_KEEPALIVE_CONFIG'
+EXTEND_METHOD=${shellQuote(input.extend.method)}
+EXTEND_URL=${shellQuote(input.extend.url)}
+TTL_SECONDS=${Math.max(60, Math.round(input.ttlSeconds))}
+PROJECT_ROOT=${shellQuote(input.projectRoot ?? "")}
+T3_KEEPALIVE_CONFIG
+mv "$dir/config.tmp" "$dir/config"
+cat >"$dir/loop.sh.tmp" <<'T3_KEEPALIVE_LOOP'
+${keepAliveLoop(input.port)}T3_KEEPALIVE_LOOP
+chmod 700 "$dir/loop.sh.tmp"
+mv "$dir/loop.sh.tmp" "$dir/loop.sh"
+sh "$dir/loop.sh" start`,
+});
+
+/** Starts the keep-alive loop when it is installed; part of every start of T3 on the sandbox. */
+export const KEEP_ALIVE_START = `if [ -f "${KEEP_ALIVE_DIR}/loop.sh" ]; then
+  sh "${KEEP_ALIVE_DIR}/loop.sh" start >/dev/null 2>&1 || true
+fi`;
+
+// Run before a template save, before T3's userdata (and the key in it) is removed.
+export const KEEP_ALIVE_SCRUB = `if [ -f "${KEEP_ALIVE_DIR}/loop.sh" ]; then
+  sh "${KEEP_ALIVE_DIR}/loop.sh" stop >/dev/null 2>&1 || true
+fi
+rm -rf "${KEEP_ALIVE_DIR}"`;
