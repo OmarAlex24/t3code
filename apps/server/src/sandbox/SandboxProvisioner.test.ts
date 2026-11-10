@@ -696,6 +696,75 @@ describe("boatDriver", () => {
       expect(requests[1]).toEqual({ ...requests[0], key: "attempt-1" });
     });
   });
+
+  it.effect(
+    "keeps a sandbox up with a key scoped to it alone, revoking one Boat makes wider",
+    () => {
+      const config = { apiKey: "boat_test", settings: {} };
+      const requests: Array<{ method: string; url: string; body: unknown }> = [];
+      let scope: unknown = [boatSandboxId];
+      const client = recording(requests, (request) =>
+        request.url.endsWith("/api-keys/scoped")
+          ? Response.json(
+              {
+                ok: true,
+                secret: "boat_keepalive_SECRET",
+                apiKey: { id: "apk_keep", scope: { sandboxes: scope, environments: [] } },
+              },
+              { status: 201 },
+            )
+          : Response.json({ ok: true }),
+      );
+      const keepAlive = boatDriver.keepAlive!;
+      return Effect.gen(function* () {
+        const minted = yield* keepAlive.mintKey({
+          config,
+          sandboxId: boatSandboxId,
+          name: "t3-keepalive-hello-1a2b3c4d",
+          ttlMinutes: 43200,
+        });
+        expect(minted.id).toBe("apk_keep");
+        // Reading and moving its own auto-stop is all the sandbox's key may do, and only there.
+        expect(requests[0]).toMatchObject({
+          method: "POST",
+          url: "https://boat.dev/api/v1/api-keys/scoped",
+        });
+        expect(requests[0]?.body).toEqual({
+          name: "t3-keepalive-hello-1a2b3c4d",
+          ttl: "43200m",
+          actions: ["sandbox.read", "sandbox.update"],
+          sandboxIds: [boatSandboxId],
+        });
+
+        yield* keepAlive.extend({ config, sandboxId: boatSandboxId, ttlMinutes: 35 });
+        expect(requests[1]).toMatchObject({
+          method: "PATCH",
+          url: `https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        });
+        expect(requests[1]?.body).toEqual({ ttlSeconds: 2100 });
+        // The sandbox sends the same request itself, with the same body.
+        expect(keepAlive.extendRequest(boatSandboxId)).toEqual({
+          method: "PATCH",
+          url: `https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        });
+
+        for (const wider of ["*", [boatSandboxId, "bx_other"]]) {
+          requests.length = 0;
+          scope = wider;
+          const refused = yield* keepAlive
+            .mintKey({ config, sandboxId: boatSandboxId, name: "t3-keepalive-x", ttlMinutes: 60 })
+            .pipe(Effect.flip);
+          expect(refused.detail).toBe(
+            "Boat made the keep-alive key wider than this sandbox, so T3 Code revoked it.",
+          );
+          expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+            "POST https://boat.dev/api/v1/api-keys/scoped",
+            "DELETE https://boat.dev/api/v1/api-keys/apk_keep",
+          ]);
+        }
+      }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+    },
+  );
 });
 
 describe("celestoDriver", () => {
@@ -3019,7 +3088,28 @@ describe("SandboxProvisioner lifecycle", () => {
       sandboxId: "bx_fresh",
       runningSince: "1969-12-31T16:01:00.000Z",
     };
-    const repository = memoryRepository([expired, errored, fresh]);
+    // Keeps itself up while it works, so only Boat's idle deadline stops it, however long it runs.
+    const keptUp: SandboxRecord = {
+      ...expired,
+      instanceId: "kept",
+      environmentId: EnvironmentId.make("44444444-4444-4444-8444-444444444444"),
+      sandboxId: "bx_kept",
+      idleMinutes: 30,
+      keepAliveKey: {
+        name: "t3-keepalive-kept",
+        id: "apk_kept",
+        expiresAt: "1970-01-31T00:00:00.000Z",
+      },
+    };
+    // Unless the config sets a hard limit, which it has run past.
+    const capped: SandboxRecord = {
+      ...keptUp,
+      instanceId: "capped",
+      environmentId: EnvironmentId.make("55555555-5555-4555-8555-555555555555"),
+      sandboxId: "bx_capped",
+      runningCapMinutes: 60,
+    };
+    const repository = memoryRepository([expired, errored, fresh, keptUp, capped]);
     const requests: Array<string> = [];
     return Effect.gen(function* () {
       yield* SandboxProvisioner.SandboxProvisioner.pipe(
@@ -3040,7 +3130,13 @@ describe("SandboxProvisioner lifecycle", () => {
       });
       expect(repository.records.get("errored")?.state).toBe("stopped");
       expect(repository.records.get("fresh")?.state).toBe("running");
-      expect(requests.filter((request) => request.endsWith("/stop"))).toHaveLength(2);
+      expect(repository.records.get("kept")?.state).toBe("running");
+      expect(repository.records.get("capped")?.state).toBe("stopped");
+      expect(requests.filter((request) => request.endsWith("/stop"))).toEqual([
+        `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/stop`,
+        `POST https://boat.dev/api/v1/sandboxes/${boatSandboxId}/stop`,
+        "POST https://boat.dev/api/v1/sandboxes/bx_capped/stop",
+      ]);
       // One provider call per record per sweep: the limit stop replaces the status check.
       expect(requests).not.toContain(`GET https://boat.dev/api/v1/sandboxes/${boatSandboxId}`);
     });
@@ -5403,6 +5499,41 @@ describe("SandboxProvisioner per-thread launches", () => {
       });
       expect(fake.commands.some((command) => command.includes("API_TOKEN"))).toBe(false);
       expect(deletes(fake)).toEqual([]);
+
+      // The sandbox keeps itself up with a key scoped to it, which reaches it only in a files
+      // body; T3 keeps its id to revoke it, never the key.
+      expect(repository.records.get(instanceId)).toMatchObject({
+        idleMinutes: 30,
+        keepAliveKey: {
+          name: expect.stringMatching(/^t3-keepalive-hello-on-boat-small-[0-9a-f]{8}$/u),
+          id: "apk_keepalive1",
+          expiresAt: "1970-01-31T00:00:00.000Z",
+        },
+      });
+      expect(JSON.stringify(repository.records.get(instanceId))).not.toContain(keepAliveKeySecret);
+      expect(fake.commands.some((command) => command.includes(keepAliveKeySecret))).toBe(false);
+      expect(
+        fake.bodies.some(
+          (entry) =>
+            entry.url.endsWith("/files") &&
+            JSON.stringify(entry.body).includes(`T3_KEEPALIVE_KEY='${keepAliveKeySecret}1'`),
+        ),
+      ).toBe(true);
+      // Setup runs under the running limit; once handed off, the sandbox stops 30 minutes (plus
+      // one check) after its threads go idle, and its own checks move that while they work.
+      expect(created).toMatchObject({ ttlSeconds: 480 * 60 });
+      const autoStops = fake.requests.filter(
+        (request) => request === `PATCH https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+      );
+      expect(autoStops).toHaveLength(1);
+      expect(
+        fake.bodies.findLast(
+          (entry) => entry.url === `https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        )?.body,
+      ).toEqual({ ttlSeconds: 35 * 60 });
+      expect(fake.commands.find((command) => command.includes("T3_KEEPALIVE_LOOP"))).toContain(
+        `EXTEND_URL='\\''https://boat.dev/api/v1/sandboxes/${boatSandboxId}'\\''`,
+      );
     }).pipe(
       Effect.provide(
         provisionerLayer({}, repository.layer, {
@@ -5413,6 +5544,122 @@ describe("SandboxProvisioner per-thread launches", () => {
       Effect.provideService(HttpClient.HttpClient, fake.client),
     );
   });
+
+  it.effect(
+    "leaves a sandbox on its running limit when Boat scopes its keep-alive key wider",
+    () => {
+      const fake = boatFake({ keepAliveKeys: "wide" });
+      const repository = memoryRepository();
+      return Effect.gen(function* () {
+        const { provisioner, instanceId } = yield* launchedThread;
+        const snapshot = yield* provisioner.subscribeLaunch({ threadId }).pipe(Stream.runHead);
+        expect(Option.getOrThrow(snapshot)?.warnings).toContain(
+          "This sandbox could not be set up to stay on while its agents work, so it stops 8 h after it starts.",
+        );
+        expect(fake.requests).toContain("DELETE https://boat.dev/api/v1/api-keys/apk_keepalive1");
+        expect(fake.keys.size).toBe(0);
+        expect(repository.records.get(instanceId)?.keepAliveKey).toBeUndefined();
+        expect(fake.commands.some((command) => command.includes("T3_KEEPALIVE_LOOP"))).toBe(false);
+        // Boat's auto-stop stays at the running limit, which the sweep enforces as before.
+        expect(fake.requests.some((request) => request.startsWith("PATCH"))).toBe(false);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, repository.layer, { configs: memoryConfigs().layer })),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
+
+  it.effect(
+    "gives a sandbox made before keep-alive a key on resume and renews it near expiry",
+    () => {
+      const fake = boatFake();
+      const config: SandboxEnvironmentConfig = {
+        ...configInput,
+        id: "config-older",
+        idleMinutes: 45,
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+      };
+      // What a thread's sandbox looked like before keep-alive: no idle window, no key.
+      const older: SandboxRecord = {
+        instanceId: "older",
+        environmentId: testEnvironmentId,
+        configId: config.id,
+        threadId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "hello on Boat small",
+        size: "small",
+        state: "stopped",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        runningSince: null,
+        maxRunningMinutes: 480,
+        repoDir: "/home/boat/work/hello",
+      };
+      const repository = memoryRepository([older]);
+      const resumeBodies = () =>
+        fake.bodies.filter((entry) => entry.url.endsWith("/resume")).map((entry) => entry.body);
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        yield* provisioner.resume({ instanceId: "older" });
+        // It resumes under its running limit, gets its key and loop before T3 (and so the loop)
+        // starts, and only then moves to its config's idle window.
+        expect(resumeBodies()).toEqual([{ ttlSeconds: 480 * 60 }]);
+        const installed = fake.commands.findIndex((command) =>
+          command.includes("T3_KEEPALIVE_LOOP"),
+        );
+        const started = fake.commands.findIndex((command) => command.includes("t3 serve"));
+        expect(installed).toBeGreaterThanOrEqual(0);
+        expect(installed).toBeLessThan(started);
+        expect(fake.commands[installed]).toContain("PROJECT_ROOT='\\''/home/boat/work/hello'\\''");
+        expect(fake.commands[started]).toContain("sandbox-keepalive/loop.sh");
+        expect(fake.bodies.at(-1)).toEqual({
+          url: `https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+          body: { ttlSeconds: 50 * 60 },
+        });
+        expect(repository.records.get("older")).toMatchObject({
+          state: "running",
+          idleMinutes: 45,
+          keepAliveKey: { id: "apk_keepalive1", expiresAt: "1970-01-31T00:00:00.000Z" },
+        });
+
+        // Next time it already keeps itself up: the idle window from the start, no new key.
+        yield* provisioner.stop({ instanceId: "older" });
+        yield* provisioner.resume({ instanceId: "older" });
+        expect(resumeBodies().at(-1)).toEqual({ ttlSeconds: 50 * 60 });
+        expect([...fake.keys]).toEqual(["apk_keepalive1"]);
+
+        // With under a week left, a resume swaps in a fresh key and revokes the old one.
+        yield* provisioner.stop({ instanceId: "older" });
+        yield* TestClock.adjust("24 days");
+        yield* provisioner.resume({ instanceId: "older" });
+        expect([...fake.keys]).toEqual(["apk_keepalive2"]);
+        expect(fake.requests).toContain("DELETE https://boat.dev/api/v1/api-keys/apk_keepalive1");
+        expect(repository.records.get("older")?.keepAliveKey).toMatchObject({
+          id: "apk_keepalive2",
+          expiresAt: "1970-02-24T00:00:00.000Z",
+        });
+
+        yield* provisioner.delete({
+          provider: "boat",
+          instanceId: "older",
+          sandboxId: boatSandboxId,
+        });
+        expect(fake.keys.size).toBe(0);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+            { configs: memoryConfigs([config]).layer },
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
 
   const bridgeIssues = (fake: BoatFake) =>
     fake.commands.filter((command) => command.includes("--label t3-sandbox-bridge"));

@@ -13,6 +13,7 @@ import {
   ENSURE_TOOLS_SCRIPT,
   githubAppLoginScript,
   githubLoginScript,
+  KEEP_ALIVE_SCRUB,
   MCP_SERVERS_SCRUB,
   mcpServersScript,
   parseEndpointReach,
@@ -23,6 +24,7 @@ import {
   parseTailscaleReport,
   RAILWAY_LOGIN_SCRUB,
   railwayLoginScript,
+  sandboxKeepAliveScript,
   type SandboxScript,
   tailscaleScript,
   tailscaleScrub,
@@ -493,5 +495,190 @@ describe("railwayLoginScript", () => {
         expect(parseRailwayCli("T3_RAILWAY_CLI:railway\n")).toBeNull();
       }),
     ),
+  );
+});
+
+describe("sandboxKeepAliveScript", () => {
+  const key = "boat_keepalive_KEY'$(touch pwned)";
+  const mcpToken = "t3_mcp_TOKEN";
+  const extendUrl = "https://boat.dev/api/v1/sandboxes/bx_abcdefgh";
+
+  // Stand-ins for what the official T3 Code, curl and systemd do on a sandbox. curl logs each
+  // call with the headers it read from files; the MCP server answers with the statuses in
+  // `threads`, or not at all when `down` exists.
+  const stubs = (home: string) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const bin = `${home}/.local/bin`;
+      yield* fs.makeDirectory(bin, { recursive: true });
+      const write = (name: string, text: string) =>
+        fs
+          .writeFileString(`${bin}/${name}`, text)
+          .pipe(Effect.andThen(fs.chmod(`${bin}/${name}`, 0o755)));
+      yield* write("systemd-run", `#!/bin/sh\necho "$*" >"$HOME/systemd-run.argv"\n`);
+      yield* write("systemctl", "#!/bin/sh\nexit 0\n");
+      yield* write(
+        "t3",
+        `#!/bin/sh
+case "$*" in
+  "auth session issue"*) echo "$*" >>"$HOME/issued.argv"; printf '{\\n  "sessionId": "mcp-session-1",\\n  "token": "${mcpToken}",\\n  "method": "bearer-access-token"\\n}\\n' ;;
+  "auth session revoke"*) ;;
+  "thread list"*) cat "$HOME/cli-threads" ;;
+  *) exit 64 ;;
+esac
+`,
+      );
+      yield* write(
+        "curl",
+        `#!${process.execPath}
+const fs = require("node:fs");
+const home = process.env.HOME;
+const args = process.argv.slice(2);
+const call = { argv: args, headers: [], method: "POST" };
+let out, head, format;
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === "-o") out = args[++i];
+  else if (arg === "-D") head = args[++i];
+  else if (arg === "-w") format = args[++i];
+  else if (arg === "-X") call.method = args[++i];
+  else if (arg === "-d") call.data = args[++i];
+  else if (arg === "-m") i++;
+  else if (arg === "-H") {
+    const value = args[++i];
+    call.headers.push(...(value.startsWith("@") ? fs.readFileSync(value.slice(1), "utf8").split("\\n").filter(Boolean) : [value]));
+  } else if (!arg.startsWith("-")) call.url = arg;
+}
+fs.appendFileSync(home + "/curl.log", JSON.stringify(call) + "\\n");
+let status = 200, body = "{}";
+if (call.url.endsWith("/mcp")) {
+  if (fs.existsSync(home + "/down")) process.exit(7);
+  const data = call.data ?? "";
+  if (data.includes('"initialize"')) {
+    body = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18" } });
+    if (head) fs.writeFileSync(head, "HTTP/1.1 200 OK\\r\\nMcp-Session-Id: sid-1\\r\\n\\r\\n");
+  } else if (data.includes("tools/call")) {
+    const statuses = JSON.parse(fs.readFileSync(home + "/threads", "utf8"));
+    const threads = statuses.map((status, index) => ({ threadId: "thread-" + index, status }));
+    body = JSON.stringify({ jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: JSON.stringify({ threads }) }], structuredContent: { threads, total: threads.length }, isError: false } });
+  } else if (data.includes("notifications/initialized")) status = 202;
+}
+if (out) fs.writeFileSync(out, body);
+if (format) process.stdout.write(String(status));
+`,
+      );
+    });
+
+  const once = (home: string) =>
+    runIn(home, `sh "$HOME/.t3/userdata/sandbox-keepalive/loop.sh" once`).pipe(Effect.ignore);
+
+  const curlCalls = (home: string) =>
+    FileSystem.FileSystem.pipe(
+      Effect.flatMap((fs) => fs.readFileString(`${home}/curl.log`)),
+      Effect.orElseSucceed(() => ""),
+      Effect.map((text) =>
+        text
+          .split("\n")
+          .filter(Boolean)
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                argv: Array<string>;
+                headers: Array<string>;
+                method: string;
+                url: string;
+                data?: string;
+              },
+          ),
+      ),
+    );
+
+  const extends_ = (home: string) =>
+    curlCalls(home).pipe(Effect.map((calls) => calls.filter((call) => call.url === extendUrl)));
+
+  it.live(
+    "installs privately under systemd and moves the auto-stop only while a thread works",
+    () =>
+      withHome((home) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const dir = `${home}/.t3/userdata/sandbox-keepalive`;
+          yield* stubs(home);
+          const script = sandboxKeepAliveScript({
+            key,
+            extend: { method: "PATCH", url: extendUrl },
+            ttlSeconds: 2100,
+            port: 3773,
+            projectRoot: "/home/boat/work/hello",
+          });
+          expect(revealsSecret(script.command, key)).toBe(false);
+          yield* runIn(home, script);
+          expect(yield* fs.exists(`${home}/pwned`)).toBe(false);
+          expect(yield* fs.readFileString(`${dir}/boat-auth`)).toBe(
+            `Authorization: Bearer ${key}\n`,
+          );
+          const mode = (path: string) =>
+            fs.stat(path).pipe(Effect.map((stat) => (stat.mode & 0o777).toString(8)));
+          expect(yield* mode(`${dir}/boat-auth`)).toBe("600");
+          expect(yield* mode(`${dir}/config`)).toBe("600");
+          expect(yield* mode(`${dir}/loop.sh`)).toBe("700");
+          // A transient user unit outlives the provider's command, where systemd runs T3 itself.
+          expect(yield* fs.readFileString(`${home}/systemd-run.argv`)).toBe(
+            `--user --quiet --collect --unit=t3-sandbox-keepalive sh ${dir}/loop.sh run\n`,
+          );
+
+          // A subagent counts: the server is asked for every busy thread, subagents included.
+          yield* fs.writeFileString(`${home}/threads`, JSON.stringify(["running"]));
+          yield* once(home);
+          const calls = yield* curlCalls(home);
+          const listed = calls.find((call) => call.data?.includes("tools/call"));
+          expect(JSON.parse(listed!.data!).params.arguments).toEqual({
+            allProjects: true,
+            includeSubagents: true,
+            statuses: ["queued", "preparing", "starting", "running"],
+            limit: 1,
+          });
+          expect(listed!.headers).toContain(`Authorization: Bearer ${mcpToken}`);
+          expect(listed!.headers).toContain("mcp-session-id: sid-1");
+          expect(yield* fs.readFileString(`${home}/issued.argv`)).toBe(
+            "auth session issue --subject mcp-client --scope orchestration:read --ttl 30d --label t3-sandbox-keepalive --json\n",
+          );
+          expect(yield* extends_(home)).toEqual([
+            expect.objectContaining({
+              method: "PATCH",
+              data: '{"ttlSeconds":2100}',
+              headers: expect.arrayContaining([`Authorization: Bearer ${key}`]),
+            }),
+          ]);
+          expect(yield* mode(`${dir}/mcp-auth`)).toBe("600");
+          // Neither key ever shows up in a process's arguments.
+          for (const call of yield* curlCalls(home)) {
+            expect(call.argv.join(" ")).not.toContain("boat_keepalive_KEY");
+            expect(call.argv.join(" ")).not.toContain(mcpToken);
+          }
+
+          // Idle, or waiting on the user (which the server filters out): Boat's deadline stands.
+          yield* fs.writeFileString(`${home}/threads`, JSON.stringify([]));
+          yield* once(home);
+          expect(yield* extends_(home)).toHaveLength(1);
+
+          // A server that ignores the filter answers with any thread; only a busy one counts, and
+          // the CLI's own list decides.
+          yield* fs.writeFileString(`${home}/threads`, JSON.stringify(["completed"]));
+          yield* fs.writeFileString(`${home}/cli-threads`, '[{"status":"waiting"}]');
+          yield* once(home);
+          expect(yield* extends_(home)).toHaveLength(1);
+
+          // Without the MCP endpoint, the CLI's list of top-level threads is the fallback.
+          yield* fs.writeFileString(`${home}/down`, "");
+          yield* fs.writeFileString(`${home}/cli-threads`, '[{"status":"queued"}]');
+          yield* once(home);
+          expect(yield* extends_(home)).toHaveLength(2);
+
+          // A template keeps neither the loop nor the key.
+          yield* runIn(home, KEEP_ALIVE_SCRUB);
+          expect(yield* fs.exists(dir)).toBe(false);
+        }),
+      ),
   );
 });
