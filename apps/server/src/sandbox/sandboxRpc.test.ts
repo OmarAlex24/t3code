@@ -12,6 +12,7 @@ it("lets read-only clients see sandbox limits but keeps starting machines behind
     WS_METHODS.sandboxesList,
     WS_METHODS.sandboxesConfigs,
     WS_METHODS.sandboxesSubscribeLaunch,
+    WS_METHODS.sandboxesSubscribeListChanges,
   ]) {
     expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
   }
