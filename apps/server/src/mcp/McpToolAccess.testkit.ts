@@ -91,6 +91,7 @@ export const idleThreadProjection = (
     runtimeRequests: [],
     messages: [],
     plans: [],
+    milestones: [],
     turnItems: [],
     checkpointScopes: [],
     checkpoints: [],
