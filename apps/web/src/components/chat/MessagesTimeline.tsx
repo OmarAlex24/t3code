@@ -90,6 +90,7 @@ import {
 } from "./MessagesTimeline.logic";
 import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
+import { type TimelineEntryReveal, useTimelineEntryReveal } from "./useTimelineEntryReveal";
 import { TooltipScrollDismissArea } from "../ui/tooltip";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
@@ -311,6 +312,8 @@ interface MessagesTimelineProps {
   emptyPlaceholderInset: number;
   topFadeEnabled?: boolean;
   historyControls?: MessagesTimelineHistoryControls | undefined;
+  entryReveal?: TimelineEntryReveal | null;
+  onEntryRevealSettled?: (requestId: number) => void;
   findExpanded?: boolean;
   findQuery?: string;
   activeFindMatch?: ThreadFindMatch | null;
@@ -405,6 +408,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   emptyPlaceholderInset,
   topFadeEnabled = false,
   historyControls,
+  entryReveal = null,
+  onEntryRevealSettled,
 }: MessagesTimelineProps) {
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
   // Snapshot restore positions on identity changes; ongoing scroll writes must not move them.
@@ -1175,6 +1180,18 @@ const ConversationTimeline = memo(function ConversationTimeline({
     rowIndex: activeFindMatch ? rows.findIndex((row) => row.id === activeFindMatch.entryId) : -1,
     listRef,
     contentInsetEndAdjustment,
+  });
+  useTimelineEntryReveal({
+    reveal: entryReveal,
+    entries: timelineEntries,
+    rows,
+    listRef,
+    listReady: findListReady && !restoringThreadPosition,
+    container: timelineViewportElement,
+    historyControls,
+    reducedMotion: prefersReducedMotion,
+    onManualNavigation: navigateTimeline,
+    onSettled: onEntryRevealSettled,
   });
 
   // LegendList moves rows one commit late; per-row providers prevent thread context leaks.
