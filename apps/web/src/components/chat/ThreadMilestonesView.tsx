@@ -12,6 +12,7 @@ import {
   parseMilestoneComment,
 } from "@t3tools/client-runtime/state/thread-milestone-board";
 import {
+  deriveCoordinatorActivity,
   deriveThreadMilestoneGraph,
   type MilestoneCoordinator,
   type MilestoneGraphTurn,
@@ -30,6 +31,7 @@ import {
   CornerDownLeftIcon,
   MessageSquareIcon,
   StickyNoteIcon,
+  UserRoundIcon,
   XIcon,
 } from "lucide-react";
 import * as DateTime from "effect/DateTime";
@@ -148,11 +150,17 @@ function MilestoneNode(props: {
 /** A user message on the spine. */
 function YouNode() {
   return (
-    <span className="grid size-5.5 place-items-center rounded-full bg-foreground text-2xs leading-none font-semibold tracking-tight text-background">
-      You
+    <span
+      aria-label="You"
+      className="grid size-4.5 place-items-center rounded-full border border-muted-foreground/45 bg-background text-muted-foreground"
+    >
+      <UserRoundIcon className="size-2.75" strokeWidth={2.25} />
     </span>
   );
 }
+
+const scrollBehavior = (): ScrollBehavior =>
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
 
 function JumpHint() {
   return (
@@ -226,7 +234,7 @@ function AgentLane(props: {
         />
         <ul className="ml-3.75 grid gap-0.5">
           {props.agents.map((agent) => (
-            <li key={agent.id} className="min-w-0">
+            <li key={agent.id} data-milestone-agent={agent.id} className="min-w-0 scroll-mt-12">
               <SubagentTimelineLink
                 parentRef={props.threadRef}
                 subagentId={agent.id}
@@ -279,6 +287,7 @@ function coordinatorPhrase(coordinator: MilestoneCoordinator, awaitingUser: bool
 
 function CoordinatorRow(props: {
   readonly coordinator: MilestoneCoordinator;
+  readonly activity: string | null;
   readonly awaitingUser: boolean;
   /** Absent when the question already shows on a milestone's board. */
   readonly onAnswer?: (() => void) | undefined;
@@ -315,6 +324,11 @@ function CoordinatorRow(props: {
           <span className="font-medium text-foreground/85">Coordinator</span>{" "}
           {coordinatorPhrase(props.coordinator, props.awaitingUser)}
         </span>
+        {live && !props.awaitingUser && props.activity !== null ? (
+          <span className="min-w-0 max-w-full truncate text-muted-foreground/80">
+            {props.activity}
+          </span>
+        ) : null}
         {props.awaitingUser && props.onAnswer !== undefined ? (
           <Button size="xs" variant="outline" onClick={props.onAnswer}>
             Answer in chat
@@ -402,6 +416,8 @@ export function ThreadMilestonesView(props: {
 }) {
   const { threadRef, projection } = props;
   const graph = deriveThreadMilestoneGraph(projection);
+  const activity = deriveCoordinatorActivity(props.turnItems);
+  const failedAgents = projection.subagents.filter(({ status }) => status === "failed");
   const awaitingUser = props.coordinatorAsk !== null;
   const boards = deriveMilestoneBoards(props.turnItems, (item) =>
     item.textOmitted
@@ -471,6 +487,7 @@ export function ThreadMilestonesView(props: {
         ))}
         <CoordinatorRow
           coordinator={graph.coordinator}
+          activity={activity}
           awaitingUser={awaitingUser}
           onAnswer={answer}
           lineAbove="solid"
@@ -514,6 +531,7 @@ export function ThreadMilestonesView(props: {
       <CoordinatorRow
         key="coordinator"
         coordinator={graph.coordinator}
+        activity={activity}
         awaitingUser={awaitingUser}
         lineAbove={lineAbove}
         line="dashed"
@@ -533,12 +551,7 @@ export function ThreadMilestonesView(props: {
                 onClick={() =>
                   document
                     .querySelector(`[data-milestone-node="${CSS.escape(milestone.id)}"]`)
-                    ?.scrollIntoView({
-                      block: "center",
-                      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-                        ? "auto"
-                        : "smooth",
-                    })
+                    ?.scrollIntoView({ block: "center", behavior: scrollBehavior() })
                 }
               >
                 <span
@@ -582,6 +595,20 @@ export function ThreadMilestonesView(props: {
           )}
           {graph.summary.changes > 0 ? (
             <span>Plan changed {timesWord(graph.summary.changes)}</span>
+          ) : null}
+          {failedAgents.length > 0 ? (
+            <button
+              type="button"
+              className="inline-flex items-center gap-1.5 rounded-md bg-destructive/10 px-1.5 py-px font-medium text-destructive hover:bg-destructive/16 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none"
+              onClick={() =>
+                document
+                  .querySelector(`[data-milestone-agent="${CSS.escape(failedAgents[0]!.id)}"]`)
+                  ?.scrollIntoView({ block: "center", behavior: scrollBehavior() })
+              }
+            >
+              <span className="size-1.5 rounded-full bg-destructive" />
+              {failedAgents.length} {failedAgents.length === 1 ? "agent" : "agents"} failed
+            </button>
           ) : null}
           {awaitingUser || projection.subagents.some(({ status }) => status === "waiting") ? (
             <span className="inline-flex items-center gap-1.5 rounded-md bg-warning/12 px-1.5 py-px font-medium text-warning">
@@ -826,10 +853,10 @@ export function ThreadMilestonesView(props: {
   return (
     <div
       data-thread-milestones-view
-      className="scrollbar-gutter-both h-full min-h-0 overflow-y-auto overscroll-y-contain"
+      className="scrollbar-gutter-both h-full min-h-0 overflow-y-auto overscroll-y-contain ps-(--chat-lane-inset-start) pe-(--chat-lane-inset-end)"
     >
       <div
-        className="mx-auto w-full max-w-(--chat-content-max-width) px-4 pt-4 sm:px-6"
+        className="mx-auto w-full max-w-(--chat-content-max-width) px-3 pt-4 sm:px-12"
         style={{ paddingBottom: props.bottomInset + 24 }}
       >
         {body}

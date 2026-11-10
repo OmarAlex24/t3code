@@ -6,6 +6,8 @@ import type {
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
 
+import { commandDisplayText } from "../work-log/commandLabel.ts";
+import type { ThreadStructureTurnItem } from "./models.ts";
 import { isActiveSubagentStatus } from "./subagentRuntime.ts";
 import { resolveActiveThreadRun } from "./threadWorkflows.ts";
 
@@ -191,4 +193,40 @@ export function deriveThreadMilestoneGraph(projection: Projection): ThreadMilest
       startedAt: current[0]?.startedAt ?? rootRun?.startedAt ?? null,
     },
   };
+}
+
+const shortenPaths = (text: string) =>
+  text.replace(/(?:~|\.{0,2})?(?:\/[^\s/]+)+\/([^\s/]+)/gu, "$1");
+const firstLine = (text: string) => text.trim().split("\n")[0]?.trim() ?? "";
+
+/**
+ * What the coordinator is doing right now, from its latest running item: a short phrase for the
+ * spine, or null when nothing of its own is running. Nested items belong to a subagent.
+ */
+export function deriveCoordinatorActivity(
+  items: ReadonlyArray<ThreadStructureTurnItem>,
+): string | null {
+  const item = items.findLast(
+    (candidate) => candidate.status === "running" && candidate.parentItemId === null,
+  );
+  switch (item?.type) {
+    case "reasoning":
+      return "Thinking";
+    case "command_execution": {
+      const command = firstLine(commandDisplayText(item.input));
+      return command ? `Running ${command}` : "Running a command";
+    }
+    case "file_change":
+      return `Editing ${shortenPaths(item.fileName)}`;
+    case "file_search":
+      return item.pattern ? `Searching for ${item.pattern}` : "Searching files";
+    case "web_search":
+      return "Searching the web";
+    case "dynamic_tool": {
+      const label = firstLine(item.title ?? item.toolName ?? "");
+      return label ? shortenPaths(label) : null;
+    }
+    default:
+      return null;
+  }
 }
