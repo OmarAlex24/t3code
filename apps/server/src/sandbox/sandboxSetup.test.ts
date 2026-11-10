@@ -609,6 +609,7 @@ if (format) process.stdout.write(String(status));
             key,
             extend: { method: "PATCH", url: extendUrl },
             ttlSeconds: 2100,
+            maxRunningMinutes: 480,
             port: 3773,
             projectRoot: "/home/boat/work/hello",
           });
@@ -681,5 +682,80 @@ if (format) process.stdout.write(String(status));
           expect(yield* fs.exists(dir)).toBe(false);
         }),
       ),
+  );
+
+  it.live("keeps a sandbox up to its running limit while nothing says whether it works", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = `${home}/.t3/userdata/sandbox-keepalive`;
+        yield* stubs(home);
+        yield* runIn(
+          home,
+          sandboxKeepAliveScript({
+            key,
+            extend: { method: "PATCH", url: extendUrl },
+            ttlSeconds: 2100,
+            maxRunningMinutes: 60,
+            port: 3773,
+            projectRoot: "/home/boat/work/hello",
+          }),
+        );
+        expect(yield* fs.readFileString(`${dir}/config`)).toContain("MAX_RUNNING_MINUTES=60\n");
+        // Neither the MCP endpoint nor the CLI's list answers, as with a changed official CLI.
+        yield* fs.writeFileString(`${home}/down`, "");
+        const log = fs.readFileString(`${dir}/log`).pipe(Effect.orElseSucceed(() => ""));
+        // The sandbox's clock, which is the one the loop reads.
+        const startedAgo = (seconds: number) =>
+          runIn(home, `echo $(( $(date +%s) - ${seconds} )) >"${dir}/started"`);
+
+        // A loop with no start time on record cannot say how long it has run, so it waits.
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(0);
+        expect(yield* log).toMatch(/ unknown\n$/);
+
+        // Under the limit since the loop started with T3, the sandbox stays up.
+        yield* startedAgo(59 * 60);
+        yield* once(home);
+        expect(yield* extends_(home)).toEqual([
+          expect.objectContaining({ method: "PATCH", data: '{"ttlSeconds":2100}' }),
+        ]);
+        expect(yield* log).toMatch(/ unknown extend 200\n$/);
+
+        // Past it, the idle deadline stands and Boat stops it.
+        yield* startedAgo(60 * 60);
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(1);
+        expect(yield* log).toMatch(/ unknown\n$/);
+      }),
+    ),
+  );
+
+  it.live("records when the loop starts, for the running limit", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = `${home}/.t3/userdata/sandbox-keepalive`;
+        yield* stubs(home);
+        yield* runIn(
+          home,
+          sandboxKeepAliveScript({
+            key,
+            extend: { method: "PATCH", url: extendUrl },
+            ttlSeconds: 2100,
+            maxRunningMinutes: 60,
+            port: 3773,
+          }),
+        );
+        // The loop exits after its first tick when its key is gone, having recorded its start.
+        yield* fs.remove(`${dir}/boat-auth`);
+        const clock = runIn(home, "date +%s").pipe(Effect.map((out) => Number(out.trim())));
+        const before = yield* clock;
+        yield* runIn(home, `sh "$HOME/.t3/userdata/sandbox-keepalive/loop.sh" run`);
+        const started = Number((yield* fs.readFileString(`${dir}/started`)).trim());
+        expect(started).toBeGreaterThanOrEqual(before);
+        expect(started).toBeLessThanOrEqual(yield* clock);
+      }),
+    ),
   );
 });
