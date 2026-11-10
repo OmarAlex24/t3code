@@ -68,6 +68,11 @@ export const SandboxProviderInfo = Schema.Struct({
     templates: Schema.Boolean,
     /** The provider can give one sandbox's agent a key scoped to that sandbox and its forks. */
     agentProviderAccess: Schema.Boolean,
+    /**
+     * A sandbox keeps itself running while its threads work and the provider stops it after
+     * `idleMinutes` without work. Absent from older servers.
+     */
+    keepAlive: Schema.optionalKey(Schema.Boolean),
   }),
 });
 export type SandboxProviderInfo = typeof SandboxProviderInfo.Type;
@@ -245,6 +250,7 @@ export const DEFAULT_SANDBOX_IDLE_MINUTES = 30;
 export const SandboxMaxRunningMinutes = Schema.Int.check(
   Schema.isBetween({ minimum: 10, maximum: 43200 }),
 );
+const SandboxIdleMinutes = Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 }));
 
 export const SandboxCreateInput = Schema.Struct({
   provider: SandboxProviderKind,
@@ -262,6 +268,10 @@ export const SandboxCreateInput = Schema.Struct({
   allowCredentials: Schema.optional(Schema.Boolean),
   /** Stop the machine after it has run this many minutes. Defaults to eight hours. */
   maxRunningMinutes: Schema.optional(SandboxMaxRunningMinutes),
+  /** Where the provider keeps a sandbox up while it works: stop it after this long without work. */
+  idleMinutes: Schema.optional(SandboxIdleMinutes),
+  /** Where the provider keeps a sandbox up while it works: stop it after this long even then. */
+  runningCapMinutes: Schema.optional(SandboxMaxRunningMinutes),
   /** A saved template to start from. The template decides the machine size. */
   template: Schema.optional(TrimmedString),
   /** Sets up agents in the sandbox from this server's own setup. Omit for none. */
@@ -363,8 +373,26 @@ export const SandboxRecord = Schema.Struct({
   access: Schema.optionalKey(SandboxAccess),
   /** Start of the current running stretch; null while stopped. */
   runningSince: Schema.NullOr(TrimmedString),
-  /** The sweep stops a sandbox that has run this long since its last start. */
+  /**
+   * The sweep stops a sandbox that has run this long since its last start, unless it keeps itself
+   * running (`keepAliveKey`); then only `runningCapMinutes` limits it.
+   */
   maxRunningMinutes: Schema.Int,
+  /** With keep-alive, the provider stops the sandbox this long after its threads stop working. */
+  idleMinutes: Schema.optionalKey(Schema.Int),
+  /** With keep-alive, the sweep still stops the sandbox after running this long. Absent: no cap. */
+  runningCapMinutes: Schema.optionalKey(Schema.Int),
+  /**
+   * The provider key the sandbox moves its own auto-stop with while its threads work, scoped to
+   * this sandbox and revoked when it is deleted. Named before it is minted; `id` is set once it is.
+   */
+  keepAliveKey: Schema.optionalKey(
+    Schema.Struct({
+      name: TrimmedString,
+      id: Schema.optionalKey(TrimmedString),
+      expiresAt: Schema.optionalKey(TrimmedString),
+    }),
+  ),
   /** When the sandbox last stopped, so the list can say how old its kept disk is. */
   stoppedAt: Schema.optionalKey(TrimmedString),
   credentialEnvironment: Schema.optionalKey(TrimmedString),
@@ -829,9 +857,15 @@ export const SandboxEnvironmentConfig = Schema.Struct({
    * entry gets its env files (`.env*`, `.envrc`, `.dev.vars`).
    */
   envFiles: Schema.Record(Schema.String, Schema.Array(TrimmedNonEmptyString)),
-  /** Minutes without activity before the sandbox stops. */
-  idleMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 })),
+  /**
+   * Minutes without work before the sandbox stops, on providers that keep a sandbox running
+   * while its threads work (`capabilities.keepAlive`).
+   */
+  idleMinutes: SandboxIdleMinutes,
+  /** The running limit on providers without keep-alive, and the fallback when it cannot be set up. */
   maxRunningMinutes: SandboxMaxRunningMinutes,
+  /** With keep-alive, stop a sandbox after running this long even while it works. Absent: no cap. */
+  runningCapMinutes: Schema.optionalKey(SandboxMaxRunningMinutes),
   createdAt: TrimmedString,
   updatedAt: TrimmedString,
 });

@@ -19,6 +19,7 @@ import {
   mayHaveCreated,
   requestJson,
   type SandboxAgentAccess,
+  type SandboxKeepAlive,
   type SandboxProviderDriver,
   type SandboxProviderStatus,
   type SandboxUsage,
@@ -314,8 +315,12 @@ const BoatScopedKey = Schema.Struct({
   secret: Schema.String,
   apiKey: Schema.Struct({
     id: Schema.String,
-    // `"*"` when a key reaches every sandbox, which a sandbox's own key must never do.
-    scope: Schema.Struct({ sandboxes: Schema.Unknown, environments: Schema.Unknown }),
+    // `"*"` when a key reaches every sandbox, which a sandbox's own key must never do. A key
+    // scoped to sandboxes alone may come back without `environments`.
+    scope: Schema.Struct({
+      sandboxes: Schema.Unknown,
+      environments: Schema.optionalKey(Schema.Unknown),
+    }),
   }),
 });
 
@@ -668,6 +673,70 @@ boat info self --json >/dev/null`,
   }),
 };
 
+// What the sandbox's own keep-alive key may do: read itself and move its auto-stop, nothing else.
+const KEEP_ALIVE_KEY_ACTIONS = ["sandbox.read", "sandbox.update"] as const;
+
+const sandboxPath = (sandboxId: string) =>
+  `${BOAT_API_BASE}/sandboxes/${encodeURIComponent(sandboxId)}`;
+
+const keepAlive: SandboxKeepAlive = {
+  mintKey: Effect.fn("Boat.mintKeepAliveKey")(function* (input) {
+    const { apiKey } = input.config;
+    // An empty list would scope the key to every sandbox on the account.
+    if (input.sandboxId.trim() === "") {
+      return yield* new SandboxProviderError({
+        provider: "boat",
+        stage: "install",
+        detail: "T3 Code has no sandbox to scope the keep-alive key to.",
+      });
+    }
+    const minted = yield* requestJson({
+      provider: "boat",
+      stage: "install",
+      schema: BoatScopedKey,
+      request: jsonBody(
+        authorize(HttpClientRequest.post(`${BOAT_API_BASE}/api-keys/scoped`), apiKey),
+        {
+          name: input.name,
+          ttl: `${input.ttlMinutes}m`,
+          actions: KEEP_ALIVE_KEY_ACTIONS,
+          sandboxIds: [input.sandboxId],
+        },
+      ),
+    });
+    const { sandboxes, environments } = minted.apiKey.scope;
+    const scoped =
+      Array.isArray(sandboxes) &&
+      sandboxes.length === 1 &&
+      sandboxes[0] === input.sandboxId &&
+      (environments === null ||
+        environments === undefined ||
+        (Array.isArray(environments) && environments.length === 0));
+    if (!scoped) {
+      yield* revokeScopedKey(apiKey, minted.apiKey.id).pipe(Effect.ignore);
+      return yield* new SandboxProviderError({
+        provider: "boat",
+        stage: "install",
+        detail: "Boat made the keep-alive key wider than this sandbox, so T3 Code revoked it.",
+      });
+    }
+    return { id: minted.apiKey.id, secret: Redacted.make(minted.secret) };
+  }),
+  revokeKey: (input) => revokeScopedKey(input.config.apiKey, input.keyId),
+  // https://docs.boat.dev/api/v1.md: `ttlSeconds` sets the auto-stop to that long from now.
+  extend: (input) =>
+    requestJson({
+      provider: "boat",
+      stage: "start",
+      schema: Schema.Unknown,
+      request: jsonBody(
+        authorize(HttpClientRequest.patch(sandboxPath(input.sandboxId)), input.config.apiKey),
+        { ttlSeconds: input.ttlMinutes * 60 },
+      ),
+    }).pipe(Effect.asVoid),
+  extendRequest: (sandboxId) => ({ method: "PATCH", url: sandboxPath(sandboxId) }),
+};
+
 export const boatDriver: SandboxProviderDriver = {
   info,
   defaultSize: "default",
@@ -691,8 +760,8 @@ export const boatDriver: SandboxProviderDriver = {
           ...(input.environment === undefined
             ? { noEnv: true }
             : { environment: input.environment }),
-          // A paired environment is meant to outlive the setup session, so the provider's auto-stop
-          // must never fire before T3's own lifetime limit (eight hours by default).
+          // The provisioner picks the auto-stop: T3's running limit, which setup and a sandbox
+          // without keep-alive need, or the idle window once the sandbox keeps itself up.
           ttlSeconds: (input.ttlMinutes ?? 480) * 60,
           labels: {
             [ROLE_LABEL.key]: ROLE_LABEL.value,
@@ -723,6 +792,7 @@ export const boatDriver: SandboxProviderDriver = {
     } satisfies CreatedSandbox;
   }),
   agentAccess,
+  keepAlive,
   limits: (input) =>
     requestJson({
       provider: "boat",

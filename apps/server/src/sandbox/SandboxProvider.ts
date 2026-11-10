@@ -122,6 +122,41 @@ export interface SandboxAgentAccess {
   readonly loginScript: (secret: string) => SandboxScript;
 }
 
+/**
+ * Lets a sandbox keep itself running while its threads work: a script on the sandbox moves the
+ * provider's auto-stop out with a key scoped to that sandbox alone, so it works while this server
+ * sleeps. Idle, nothing moves it, and the provider stops the machine when the deadline passes.
+ */
+export interface SandboxKeepAlive {
+  /** Fails, after revoking it, when the provider scopes the key wider than this one sandbox. */
+  readonly mintKey: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly sandboxId: string;
+    readonly name: string;
+    readonly ttlMinutes: number;
+  }) => Effect.Effect<
+    { readonly id: string; readonly secret: Redacted.Redacted<string> },
+    SandboxProviderError,
+    HttpClient.HttpClient
+  >;
+  /** A key the provider no longer has is revoked already. */
+  readonly revokeKey: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly keyId: string;
+  }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
+  /** Moves a running sandbox's auto-stop to `ttlMinutes` from now. */
+  readonly extend: (input: {
+    readonly config: SandboxProviderConfig;
+    readonly sandboxId: string;
+    readonly ttlMinutes: number;
+  }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
+  /** The request the sandbox sends to do what `extend` does; its body is `{"ttlSeconds":N}`. */
+  readonly extendRequest: (sandboxId: string) => {
+    readonly method: "PATCH";
+    readonly url: string;
+  };
+}
+
 export interface SandboxProviderDriver {
   readonly info: Omit<
     SandboxProviderInfo,
@@ -226,8 +261,9 @@ export interface SandboxProviderDriver {
     readonly config: SandboxProviderConfig;
     readonly name: string;
   }) => Effect.Effect<void, SandboxProviderError, HttpClient.HttpClient>;
-  /** Every sandbox this server tagged at create, so the sweep can flag ones no record tracks. */
   readonly agentAccess?: SandboxAgentAccess;
+  readonly keepAlive?: SandboxKeepAlive;
+  /** Every sandbox this server tagged at create, so the sweep can flag ones no record tracks. */
   readonly listSandboxes?: (input: {
     readonly config: SandboxProviderConfig;
     readonly host: string;
