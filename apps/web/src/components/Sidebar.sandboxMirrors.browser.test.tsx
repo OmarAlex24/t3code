@@ -17,7 +17,7 @@ import { dismissContextMenu } from "../contextMenuFallback";
 import { registerSandboxThreadHandlers } from "../state/sandboxThreads";
 import { __setClientSettingsForTests, getClientSettings } from "../hooks/useSettings";
 import { useProjects, useQuietThreadShells } from "../state/entities";
-import { usePrimaryEnvironmentId } from "../state/environments";
+import { useConnectedEnvironmentIds, usePrimaryEnvironmentId } from "../state/environments";
 import type { Project } from "../types";
 import Sidebar from "./Sidebar";
 import { SidebarProvider } from "./ui/sidebar";
@@ -178,6 +178,8 @@ describe("sandbox chats in the sidebar", () => {
       shell(SANDBOX, bridgedThreadId, "project-sandbox", "say high from boat.dev:)"),
       shell(LEGACY_SANDBOX, legacyThreadId, "project-legacy", "An older sandbox chat"),
     ]);
+    vi.mocked(useConnectedEnvironmentIds).mockReturnValue([HOST, SANDBOX, LEGACY_SANDBOX]);
+    stack.defer(() => vi.mocked(useConnectedEnvironmentIds).mockRestore());
 
     await using _screen = await render(
       <SidebarProvider>
@@ -190,6 +192,48 @@ describe("sandbox chats in the sidebar", () => {
     // The host's mirror is for the phone, and its project holds nothing else.
     await expect.element(page.getByText("Greeting from boat.dev")).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["stopped", { state: "stopped" as const, runningSince: null }, [HOST, SANDBOX]],
+    // Its server may answer before the resume is done; the mirror holds on until it is.
+    ["resuming", { resumingSince: "2026-11-10T00:00:00.000Z" }, [HOST, SANDBOX]],
+    ["running but not connected", {}, [HOST]],
+  ])(
+    "lists a sandbox chat once, as the host's mirror, while its sandbox is %s",
+    async (_case, fields, connected) => {
+      using stack = new DisposableStack();
+      const previousSettings = getClientSettings();
+      stack.defer(() => __setClientSettingsForTests(previousSettings));
+      __setClientSettingsForTests({
+        ...DEFAULT_CLIENT_SETTINGS,
+        onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+      });
+      mocks.sandboxes = [sandbox({ hostProjectId: ProjectId.make("project-host"), ...fields })];
+      vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
+      vi.mocked(useProjects).mockReturnValue([
+        placeholder,
+        project(SANDBOX, "project-sandbox", "OmarAlex24/horizon-stack"),
+      ]);
+      // The sandbox's own thread is still listed from the cache.
+      vi.mocked(useQuietThreadShells).mockReturnValue([
+        shell(HOST, bridgedThreadId, "project-host", "Greeting from boat.dev"),
+        shell(SANDBOX, bridgedThreadId, "project-sandbox", "say high from boat.dev:)"),
+      ]);
+      vi.mocked(useConnectedEnvironmentIds).mockReturnValue(connected);
+      stack.defer(() => vi.mocked(useConnectedEnvironmentIds).mockRestore());
+
+      await using _screen = await render(
+        <SidebarProvider>
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </SidebarProvider>,
+      );
+
+      // The mirror holds the conversation and takes what is sent while the sandbox is away.
+      await expect.element(page.getByText("Greeting from boat.dev").first()).toBeVisible();
+      await expect.element(page.getByText("say high from boat.dev:)")).not.toBeInTheDocument();
+      expect(document.querySelectorAll("li[data-thread-item]")).toHaveLength(1);
+    },
+  );
 
   it("keeps a host copy listed while its sandbox's own thread isn't", async () => {
     using stack = new DisposableStack();

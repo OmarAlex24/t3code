@@ -273,12 +273,12 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
-import { useSandboxHostMirrors, useSandboxRowStates } from "../state/sandboxes";
+import { useSandboxChatAliases, useSandboxRowStates } from "../state/sandboxes";
 import {
   deleteSandboxThread,
   deleteThreadSandbox,
   isSandboxThread,
-  sandboxMirrorTarget,
+  sandboxChatAliasTarget,
   sandboxRowPhase,
   threadSandboxUnavailableReason,
   withSandboxHostMirrors,
@@ -930,12 +930,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  // Host mirrors of sandbox threads list nowhere, like delegated tasks: the sandbox's own row
-  // stands for them.
-  const sandboxHostMirrors = useSandboxHostMirrors();
+  // A sandbox chat's other thread lists nowhere, like delegated tasks: one row stands for both.
+  const sandboxChatAliases = useSandboxChatAliases();
   const delegatedUnderParent = withSandboxHostMirrors(
     useDelegatedUnderParent(),
-    sandboxHostMirrors,
+    sandboxChatAliases,
   );
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -1133,11 +1132,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           ),
         );
   const threads = useQuietThreadShells();
-  // A host mirror has no row; its sandbox thread's row stands for it.
+  // A sandbox chat's other thread has no row; the one that stands for it is selected.
   const routeRowThreadRef =
     routeThreadRef === null
       ? null
-      : (sandboxMirrorTarget(sandboxHostMirrors, routeThreadRef) ?? routeThreadRef);
+      : (sandboxChatAliasTarget(sandboxChatAliases, routeThreadRef) ?? routeThreadRef);
   const routeRowThreadKey =
     routeRowThreadRef === null
       ? null

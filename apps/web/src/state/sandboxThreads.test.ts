@@ -19,9 +19,10 @@ import {
   findThreadSandbox,
   isSandboxlessBridgeThread,
   sandboxBridgeReady,
+  sandboxChatAliases,
+  sandboxChatAliasTarget,
   sandboxHostMirrors,
   sandboxMirrorOf,
-  sandboxMirrorTarget,
   sandboxMirrorTitleUpdates,
   sandboxRowPhase,
   sandboxRowStates,
@@ -126,7 +127,7 @@ describe("sandboxHostMirrors", () => {
   const sandboxThread = { environmentId: SANDBOX, id: threadId };
   const mirrorKey = threadKey({ environmentId: HOST, threadId });
 
-  it("hides the host's mirror behind the sandbox's own thread", () => {
+  it("pairs the host's mirror with the sandbox's own thread", () => {
     expect([...sandboxHostMirrors([linked()], [hostThread, sandboxThread], HOST)]).toEqual([
       [mirrorKey, { environmentId: SANDBOX, threadId }],
     ]);
@@ -146,20 +147,78 @@ describe("sandboxHostMirrors", () => {
   });
 });
 
-describe("withSandboxHostMirrors and sandboxMirrorTarget", () => {
-  const sandboxRef = { environmentId: SANDBOX, threadId };
+describe("sandboxChatAliases", () => {
+  const linked = (fields: Partial<SandboxRecord> = {}) =>
+    record({ hostProjectId: ProjectId.make("project-host"), ...fields });
+  const hostThread = { environmentId: HOST, id: threadId };
+  const sandboxThread = { environmentId: SANDBOX, id: threadId };
   const hostRef = { environmentId: HOST, threadId };
-  const mirrors = new Map([[threadKey(hostRef), sandboxRef]]);
+  const sandboxRef = { environmentId: SANDBOX, threadId };
+  const both = [hostThread, sandboxThread];
+  const connected = () => true;
+  const aliases = (
+    sandbox: SandboxRecord,
+    threads: ReadonlyArray<typeof hostThread> = both,
+    isConnected: (environmentId: EnvironmentId) => boolean = connected,
+  ) => [...sandboxChatAliases([sandbox], threads, HOST, isConnected)];
+  const showsSandbox = [[threadKey(hostRef), sandboxRef]];
+  const showsMirror = [[threadKey(sandboxRef), hostRef]];
 
-  it("leaves mirrors out of lists as delegated tasks are, keeping the set when there are none", () => {
-    const delegated = new Set(["task"]);
-    expect(withSandboxHostMirrors(delegated, new Map())).toBe(delegated);
-    expect([...withSandboxHostMirrors(delegated, mirrors)]).toEqual(["task", threadKey(hostRef)]);
+  it("shows the sandbox's own thread while it runs and its server is connected", () => {
+    expect(aliases(linked())).toEqual(showsSandbox);
+    // A launch's thread opens on the sandbox as soon as it answers.
+    expect(aliases(linked({ state: "provisioning" }))).toEqual(showsSandbox);
   });
 
-  it("finds the sandbox thread of a mirror only", () => {
-    expect(sandboxMirrorTarget(mirrors, hostRef)).toEqual(sandboxRef);
-    expect(sandboxMirrorTarget(mirrors, sandboxRef)).toBeUndefined();
+  it("shows the host's mirror while the sandbox is stopped, resuming or not connected", () => {
+    expect(aliases(linked({ state: "stopped" }))).toEqual(showsMirror);
+    expect(
+      aliases(linked({ state: "stopped", resumingSince: "2026-11-10T00:00:00.000Z" })),
+    ).toEqual(showsMirror);
+    // Up again but still answering its first request: the mirror holds on until it connects.
+    expect(aliases(linked({ resumingSince: "2026-11-10T00:00:00.000Z" }))).toEqual(showsMirror);
+    expect(aliases(linked(), both, (environmentId) => environmentId !== SANDBOX)).toEqual(
+      showsMirror,
+    );
+    expect(aliases(linked({ state: "error" }))).toEqual(showsMirror);
+  });
+
+  it("sends a route on the stopped sandbox's thread to the mirror even before that thread lists", () => {
+    expect(aliases(linked({ state: "stopped" }), [hostThread])).toEqual(showsMirror);
+  });
+
+  it("goes back to the sandbox's thread once it connects again", () => {
+    let up = false;
+    const isConnected = (environmentId: EnvironmentId) => environmentId !== SANDBOX || up;
+    expect(aliases(linked(), both, isConnected)).toEqual(showsMirror);
+    up = true;
+    expect(aliases(linked(), both, isConnected)).toEqual(showsSandbox);
+  });
+
+  it("keeps the thread a chat has when the host has no mirror of it, or its own has not loaded", () => {
+    // A launch that could not link sends on its sandbox alone; its resume stays in this client.
+    expect(aliases(linked({ state: "stopped" }), [sandboxThread])).toEqual([]);
+    expect(aliases(record({ state: "stopped" }))).toEqual([]);
+    expect(aliases(linked(), [hostThread])).toEqual([]);
+    expect(aliases(linked({ state: "deleted" }))).toEqual([]);
+    expect([...sandboxChatAliases([linked()], both, null, connected)]).toEqual([]);
+  });
+});
+
+describe("withSandboxHostMirrors and sandboxChatAliasTarget", () => {
+  const sandboxRef = { environmentId: SANDBOX, threadId };
+  const hostRef = { environmentId: HOST, threadId };
+  const aliases = new Map([[threadKey(hostRef), sandboxRef]]);
+
+  it("leaves the hidden thread out of lists as delegated tasks are, keeping the set when none is", () => {
+    const delegated = new Set(["task"]);
+    expect(withSandboxHostMirrors(delegated, new Map())).toBe(delegated);
+    expect([...withSandboxHostMirrors(delegated, aliases)]).toEqual(["task", threadKey(hostRef)]);
+  });
+
+  it("finds the thread standing for a hidden one only", () => {
+    expect(sandboxChatAliasTarget(aliases, hostRef)).toEqual(sandboxRef);
+    expect(sandboxChatAliasTarget(aliases, sandboxRef)).toBeUndefined();
   });
 });
 

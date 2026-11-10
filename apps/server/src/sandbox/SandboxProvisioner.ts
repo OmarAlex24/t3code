@@ -63,6 +63,7 @@ import {
   type SandboxProviderKind,
   type SandboxProvidersResult,
   githubRepositoryOf,
+  SANDBOX_RESUME_STEP_SECONDS,
   type WorktreeSetupStageStatus,
 } from "@t3tools/contracts";
 import { COPYABLE_FILE_MAX_BYTES, isDefaultCopiedFile } from "@t3tools/shared/copiedFiles";
@@ -1007,7 +1008,7 @@ const make = Effect.gen(function* () {
           port: input.driver.serverPort,
           projectRoot: input.projectRoot,
         }),
-        60,
+        SANDBOX_RESUME_STEP_SECONDS.keepAlive,
       )
       .pipe(Effect.exit);
     if (Exit.isFailure(written)) {
@@ -1297,7 +1298,7 @@ const make = Effect.gen(function* () {
     if (current === undefined) return { tailscale: undefined, warning: null };
     const status = yield* run(
       tailscaleScript({ hostname: tailnetHostname(record.label) }),
-      420,
+      SANDBOX_RESUME_STEP_SECONDS.tailnetRejoin,
     ).pipe(
       Effect.map((result) => parseTailscaleReport(result.stdout)),
       Effect.orElseSucceed(() => null),
@@ -3901,7 +3902,8 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         config,
         sandboxId: record.sandboxId,
         command: startScript(driver.serveEnvironment),
-        timeoutSeconds: 180,
+        // The bridge waits out every step's limit for a turn on this sandbox's host thread.
+        timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.t3Start,
       }),
     ).pipe(
       Effect.catch((cause) =>

@@ -562,6 +562,18 @@ describe("SandboxThreadCoordinator", () => {
       expect(mocks.renameThread).toHaveBeenCalledOnce();
     });
 
+    it("keeps naming the mirror after the sandbox's thread while it stands in for a stopped one", async () => {
+      // The chat lists as the mirror now, and the phone still sees the sandbox thread's title.
+      setup("ask", undefined, { bridged: true, hostTitle: "New thread", state: "stopped" });
+      await using _screen = await render(<SandboxThreadCoordinator />);
+
+      await expect.poll(() => mocks.renameThread.mock.calls.length).toBe(1);
+      expect(mocks.renameThread).toHaveBeenCalledWith({
+        environmentId: HOST_ENV,
+        input: { threadId: "thread-1", title: "Fix the login bug" },
+      });
+    });
+
     it("leaves a mirror alone when its title already matches", async () => {
       setup("ask", undefined, { bridged: true });
       await using _screen = await render(<SandboxThreadCoordinator />);

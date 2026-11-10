@@ -191,14 +191,14 @@ import { isModelPickerOpen } from "../modelPickerVisibility";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import {
-  useSandboxHostMirrors,
+  useSandboxChatAliases,
   useSandboxlessBridgeThread,
   useThreadSandbox,
 } from "../state/sandboxes";
 import {
   ensureSandboxThreadRunning,
   isHostThreadRef,
-  sandboxMirrorTarget,
+  sandboxChatAliasTarget,
   shortSandboxId,
 } from "../state/sandboxThreads";
 import { CloudOffIcon } from "lucide-react";
@@ -1004,22 +1004,13 @@ export default function ChatView(props: ChatViewProps) {
     activeSandbox !== undefined &&
     activeThreadRef !== null &&
     isHostThreadRef(activeSandbox, activeThreadRef);
-  // The host's mirror of a sandbox thread is for the phone; here the sandbox's own thread opens.
-  const sandboxHostMirrors = useSandboxHostMirrors();
-  const activeMirrorTarget =
-    activeThreadRef === null ? undefined : sandboxMirrorTarget(sandboxHostMirrors, activeThreadRef);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the route off the host's mirror, which this app never shows, to the sandbox thread
-  useEffect(() => {
-    if (activeMirrorTarget === undefined) return;
-    void navigate({
-      to: "/$environmentId/$threadId",
-      params: {
-        environmentId: activeMirrorTarget.environmentId,
-        threadId: activeMirrorTarget.threadId,
-      },
-      replace: true,
-    });
-  }, [activeMirrorTarget, navigate]);
+  // A sandbox chat opens on the sandbox's own thread while it is up and connected, and on the
+  // host's mirror otherwise, where a message waits on the host for the sandbox to resume.
+  const sandboxChatAliases = useSandboxChatAliases();
+  const activeAliasTarget =
+    activeThreadRef === null
+      ? undefined
+      : sandboxChatAliasTarget(sandboxChatAliases, activeThreadRef);
   const activeSandboxStopped = activeSandbox?.state === "stopped";
   // A chat whose sandbox was deleted keeps its conversation here, but has nowhere to send.
   const sandboxDeleted = useSandboxlessBridgeThread(
@@ -1027,8 +1018,10 @@ export default function ChatView(props: ChatViewProps) {
     serverThread?.modelSelection.instanceId,
   );
   // A legacy sandbox thread's server is off on purpose, so the session cannot be read and the
-  // connection never comes up until a send or un-settle resumes it from this client.
-  const legacySandboxStopped = activeSandboxStopped && !activeSandboxOnHost;
+  // connection never comes up until a send or un-settle resumes it from this client. A chat the
+  // host mirrors sends on the mirror instead, which the route moves to.
+  const legacySandboxStopped =
+    activeSandboxStopped && !activeSandboxOnHost && activeAliasTarget === undefined;
   // A run the sandbox was in when it stopped ended with its machine, though the thread's last
   // known state still reads as running: until a resume brings the real state back, nothing
   // works there, so it shows no live run and nothing to interrupt.
@@ -2222,6 +2215,35 @@ export default function ChatView(props: ChatViewProps) {
     timelineAnchorMessageId,
     setTimelineAnchor,
   });
+  const activeComposerHasContent = useComposerDraftStore((store) =>
+    activeAliasTarget === undefined || activeThreadRef === null
+      ? false
+      : composerDraftHasUserContent(store.getComposerDraft(activeThreadRef)),
+  );
+  // Reading back through the chat is left alone until the end or the composer is reached again:
+  // the other thread opens at its own end.
+  const holdAliasSwitch = showScrollToBottom && !activeComposerHasContent;
+  const activeAliasTargetKey =
+    activeAliasTarget === undefined ? null : scopedThreadKey(activeAliasTarget);
+  const switchToAliasTarget = useStableCallback(() => {
+    if (activeAliasTarget === undefined || activeThreadRef === null) return;
+    useComposerDraftStore
+      .getState()
+      .moveComposerPromptAndImages(activeThreadRef, activeAliasTarget);
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: {
+        environmentId: activeAliasTarget.environmentId,
+        threadId: activeAliasTarget.threadId,
+      },
+      replace: true,
+    });
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the route to the thread that stands for this sandbox chat, taking the unsent draft along
+  useEffect(() => {
+    if (activeAliasTargetKey === null || holdAliasSwitch) return;
+    switchToAliasTarget();
+  }, [activeAliasTargetKey, holdAliasSwitch, switchToAliasTarget]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- schedules a frame to focus the composer DOM element when a thread opens with the terminal closed
   useEffect(() => {
