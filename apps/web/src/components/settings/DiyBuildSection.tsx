@@ -378,7 +378,6 @@ export function DiyResolverPicker({
         modelOptions:
           levels && selection.effort ? [{ id: levels.id, value: selection.effort }] : [],
         allowPromptInjectedEffort: false,
-        planModeEnabled: false,
         onModelOptionsChange: (options) => {
           const effort = options?.find((option) => option.id === levels?.id)?.value;
           if (typeof effort === "string" && effort !== selection.effort) {
