@@ -101,3 +101,20 @@ export const SANDBOX_HOST_ONLY_SERVER_SETTING_KEYS = [
   // Delete-after-settle checks only the clone for unpushed work, never a worktree.
   "defaultThreadEnvMode",
 ] as const satisfies ReadonlyArray<keyof ServerSettings>;
+
+export type SandboxFollowedServerSettingKey = (typeof SANDBOX_FOLLOWED_SERVER_SETTING_KEYS)[number];
+
+const FOLLOWED: ReadonlySet<string> = new Set(SANDBOX_FOLLOWED_SERVER_SETTING_KEYS);
+
+export function isSandboxFollowedServerSettingKey(
+  key: string,
+): key is SandboxFollowedServerSettingKey {
+  return FOLLOWED.has(key);
+}
+
+/** The part of a settings object or patch a sandbox follows. */
+export function pickSandboxFollowedSettings<T extends object>(settings: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(settings).filter(([key]) => FOLLOWED.has(key)),
+  ) as Partial<T>;
+}

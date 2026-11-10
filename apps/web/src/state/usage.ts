@@ -16,6 +16,7 @@ import { useState } from "react";
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentPresentations } from "./presentation";
+import { useSandboxFollowers } from "./sandboxes";
 import { serverEnvironment } from "./server";
 import { environmentSession, readEnvironmentScope } from "./session";
 
@@ -79,8 +80,11 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
 
 export interface UsageView {
   readonly merged: MergedUsage;
+  /** Every environment but sandboxes, whose usage counts under their host. */
   readonly environments: readonly EnvironmentUsageStatus[];
   readonly selectedEnvironments: readonly EnvironmentUsageStatus[];
+  /** The selection plus the selected host's sandboxes, under the host's name. */
+  readonly countedEnvironments: readonly EnvironmentUsageStatus[];
   readonly isPending: boolean;
   readonly shown: { readonly window: UsageSummaryInput; readonly merged: MergedUsage } | null;
   readonly isPartial: boolean;
@@ -133,21 +137,55 @@ function withoutProviders(
   );
 }
 
-function deriveSelection(
-  environments: readonly EnvironmentUsageStatus[],
+interface UsageSandboxes {
+  readonly hostEnvironmentId: EnvironmentId | null;
+  readonly environmentIds: ReadonlySet<EnvironmentId>;
+  /** Stable across renders while the set is, so the derivation below is kept. */
+  readonly key: string;
+}
+
+const NO_USAGE_SANDBOXES: UsageSandboxes = {
+  hostEnvironmentId: null,
+  environmentIds: new Set(),
+  key: "",
+};
+
+export function deriveSelection(
+  source: readonly EnvironmentUsageStatus[],
   selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null,
   hiddenProviders: ReadonlySet<UsageProviderKind>,
+  sandboxes: UsageSandboxes = NO_USAGE_SANDBOXES,
 ) {
+  const environments = source.filter(
+    (environment) => !sandboxes.environmentIds.has(environment.environmentId),
+  );
   const selectedEnvironments =
     selectedEnvironmentIds === null
       ? environments
       : environments.filter((environment) => selectedEnvironmentIds.has(environment.environmentId));
+  const host = selectedEnvironments.find(
+    (environment) => environment.environmentId === sandboxes.hostEnvironmentId,
+  );
+  const countedEnvironments =
+    host === undefined
+      ? selectedEnvironments
+      : [
+          ...selectedEnvironments,
+          ...source.flatMap((environment) =>
+            sandboxes.environmentIds.has(environment.environmentId)
+              ? [{ ...environment, label: host.label }]
+              : [],
+          ),
+        ];
   return {
+    source,
+    sandboxesKey: sandboxes.key,
     environments,
     selectedEnvironmentIds,
     hiddenProviders,
     selectedEnvironments,
-    merged: mergeAnsweredUsage(withoutProviders(selectedEnvironments, hiddenProviders)),
+    countedEnvironments,
+    merged: mergeAnsweredUsage(withoutProviders(countedEnvironments, hiddenProviders)),
   };
 }
 
@@ -165,28 +203,35 @@ export function useUsage(
     untilTime: input.untilTime,
   });
   const atom = usageByWindowAtom(windowKey);
-  const environments = useAtomValue(atom);
+  const source = useAtomValue(atom);
+  const followers = useSandboxFollowers();
+  const sandboxes: UsageSandboxes = {
+    hostEnvironmentId: followers.hostEnvironmentId,
+    environmentIds: followers.environmentIds,
+    key: `${followers.hostEnvironmentId}:${[...followers.environmentIds].toSorted().join(",")}`,
+  };
   // Identity-based render sync needs a derivation retained by inputs across renders.
   const [derived, setDerived] = useState(() =>
-    deriveSelection(environments, selectedEnvironmentIds, hiddenProviders),
+    deriveSelection(source, selectedEnvironmentIds, hiddenProviders, sandboxes),
   );
   let current = derived;
   if (
-    derived.environments !== environments ||
+    derived.source !== source ||
+    derived.sandboxesKey !== sandboxes.key ||
     derived.selectedEnvironmentIds !== selectedEnvironmentIds ||
     derived.hiddenProviders !== hiddenProviders
   ) {
-    current = deriveSelection(environments, selectedEnvironmentIds, hiddenProviders);
+    current = deriveSelection(source, selectedEnvironmentIds, hiddenProviders, sandboxes);
     setDerived(current);
   }
-  const { selectedEnvironments, merged } = current;
+  const { environments, selectedEnvironments, countedEnvironments, merged } = current;
 
   const refresh = (nextInput?: UsageSummaryInput) =>
     refreshUsage({
       registry: appAtomRegistry,
       server: serverEnvironment,
       presentations: environmentPresentations,
-      environmentIds: selectedEnvironments
+      environmentIds: countedEnvironments
         .filter(
           (environment) =>
             environment.canReadDiagnostics &&
@@ -238,6 +283,7 @@ export function useUsage(
     merged,
     environments,
     selectedEnvironments,
+    countedEnvironments,
     isPending,
     shown,
     isPartial: answeredCount > 0 && stillReporting > 0,
