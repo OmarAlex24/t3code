@@ -395,6 +395,8 @@ export const SandboxRecord = Schema.Struct({
   ),
   /** When the sandbox last stopped, so the list can say how old its kept disk is. */
   stoppedAt: Schema.optionalKey(TrimmedString),
+  /** Set while a resume runs, from when it began, so clients can say the sandbox is starting. */
+  resumingSince: Schema.optionalKey(TrimmedString),
   credentialEnvironment: Schema.optionalKey(TrimmedString),
   /** The template the sandbox started from, for display. */
   template: Schema.optionalKey(TrimmedString),

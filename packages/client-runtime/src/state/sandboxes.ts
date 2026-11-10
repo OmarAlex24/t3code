@@ -77,13 +77,24 @@ export function createSandboxEnvironmentAtoms<R, E>(
       Atom.withLabel(`environment-data:sandboxes:list-revision:${environmentId}`),
     ),
   );
+  // Records the server changes on its own (a resume the bridge starts, a stop the sweep sees).
+  const sandboxesListChanges = createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+    label: "environment-data:sandboxes:list-changes",
+    tag: WS_METHODS.sandboxesSubscribeListChanges,
+  });
+  const sandboxesListTriggerAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => [
+      get(sandboxesListRevisionAtom(environmentId)),
+      get(sandboxesListChanges({ environmentId, input: {} })),
+    ]).pipe(Atom.withLabel(`environment-data:sandboxes:list-trigger:${environmentId}`)),
+  );
   const sandboxesList = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:sandboxes:list",
     tag: WS_METHODS.sandboxesList,
     idleTtlMs: 0,
-    // The server's once-a-minute sweep changes records with no client action.
+    // Backs up the pushed changes, which a dropped connection can miss.
     refreshIntervalMs: 60_000,
-    refreshTrigger: ({ environmentId }) => sandboxesListRevisionAtom(environmentId),
+    refreshTrigger: ({ environmentId }) => sandboxesListTriggerAtom(environmentId),
   });
 
   return {

@@ -2,6 +2,7 @@ import * as Rpc from "effect/rpc/Rpc";
 import * as Schema from "effect/Schema";
 
 import { AuthSettingsWriteScope, EnvironmentAuthorizationError } from "./auth.ts";
+import { NonNegativeInt } from "./baseSchemas.ts";
 import {
   SandboxCheckWorkResult,
   SandboxConfigsResult,
@@ -49,6 +50,7 @@ export const SANDBOX_WS_METHODS = {
   sandboxesCreate: "sandboxes.create",
   sandboxesDelete: "sandboxes.delete",
   sandboxesList: "sandboxes.list",
+  sandboxesSubscribeListChanges: "sandboxes.subscribeListChanges",
   sandboxesStop: "sandboxes.stop",
   sandboxesResume: "sandboxes.resume",
   sandboxesCheckWork: "sandboxes.checkWork",
@@ -169,6 +171,17 @@ const WsSandboxesLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesLaunch, {
   error: SandboxFailure,
 });
 
+/** A revision that moves when a record changes with no client action, such as a resume. */
+const WsSandboxesSubscribeListChangesRpc = Rpc.make(
+  SANDBOX_WS_METHODS.sandboxesSubscribeListChanges,
+  {
+    payload: Schema.Struct({}),
+    success: NonNegativeInt,
+    error: EnvironmentAuthorizationError,
+    stream: true,
+  },
+);
+
 const WsSandboxesSubscribeLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesSubscribeLaunch, {
   payload: SandboxLaunchThreadInput,
   success: SandboxLaunchStreamEvent,
@@ -246,6 +259,7 @@ export const SandboxRpcs = [
   WsSandboxesDeleteConfigRpc,
   WsSandboxesLaunchRpc,
   WsSandboxesSubscribeLaunchRpc,
+  WsSandboxesSubscribeListChangesRpc,
   WsSandboxesCancelLaunchRpc,
   WsSandboxesRetryLaunchRpc,
   WsSandboxesPairLaunchRpc,
