@@ -2873,6 +2873,11 @@ export default function ChatView(props: ChatViewProps) {
   const timelineEntryReveal =
     chatReveal !== null && chatReveal.threadKey === activeThreadKey ? chatReveal : null;
   const milestonesShortcutLabel = shortcutLabelForCommand(keybindings, "milestones.toggle");
+  const openSubagentStable = useStableCallback((childThreadId: ThreadId) => {
+    if (activeThreadRef !== null) {
+      useRightPanelStore.getState().openSubagent(activeThreadRef, childThreadId);
+    }
+  });
   const openThreadFindStable = useStableCallback((threadRef: ScopedThreadRef) => {
     if (threadFindEnabled && scopedThreadKey(threadRef) === activeThreadKey) {
       openThreadFind(activeThreadKey);
@@ -3627,7 +3632,7 @@ export default function ChatView(props: ChatViewProps) {
                       activeThreadShell?.hasPendingUserInput === true
                     }
                     bottomInset={composerReservedHeight}
-                    onOpenThread={onOpenRelatedThreadStable}
+                    onOpenThread={openSubagentStable}
                   />
                 ) : (
                   <ThreadTimeline
