@@ -20,7 +20,10 @@ import {
   type HandoffTimelineRun,
   resolveModelSwitchChange,
 } from "@t3tools/client-runtime/handoff";
-import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import {
+  formatSubagentDisplayTitle,
+  plainSubagentDetail,
+} from "@t3tools/client-runtime/state/subagent-display";
 import {
   ProviderDriverKind,
   type ModelSelection,
@@ -195,13 +198,14 @@ const SETTLED_SUBAGENT_STATUSES = new Set<OrchestrationV2TurnItem["status"]>([
 
 const GENERIC_CHILD_END = /^Child task ended with status\b/i;
 
-function plainDetail(text: string): string {
-  return text
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/`/g, "")
-    .replace(/^[ \t]*[-*][ \t]+/gm, "")
-    .replace(/\s+/g, " ")
-    .trim();
+/** The one line a subagent row shows: its progress while it runs, its result once it settles. */
+export function subagentDetailLine(
+  status: OrchestrationV2TurnItem["status"],
+  result: string | undefined,
+  progress: string | undefined,
+): string | null {
+  const raw = SETTLED_SUBAGENT_STATUSES.has(status) ? result || progress : progress || result;
+  return raw && !GENERIC_CHILD_END.test(raw) ? plainSubagentDetail(raw) || null : null;
 }
 
 function isoOrNull(value: DateTime.Utc | null | undefined): string | null {
@@ -394,7 +398,7 @@ export function SubagentNotificationLink(props: {
   );
 }
 
-export function SubagentTimelineLink(props: {
+type SubagentLinkProps = {
   readonly parentRef: ScopedThreadRef;
   readonly subagentId: NodeId;
   readonly providerInstanceId: ProviderInstanceId;
@@ -410,12 +414,13 @@ export function SubagentTimelineLink(props: {
   /** The thread in a linked environment that runs this task, when it runs there. */
   readonly remote?: OrchestrationV2RemoteTaskChild | undefined;
   readonly onOpenThread: (threadId: ThreadId) => void;
-  readonly event?: {
-    readonly status: OrchestrationV2TurnItem["status"] | null;
-    readonly label: string;
-    readonly timestamp: string;
-  };
-}) {
+};
+
+/**
+ * A subagent's live record from its parent thread, falling back to the props, and how to open
+ * it: its own chat, or the linked environment that runs it when this client is connected there.
+ */
+export function useSubagentLink(props: SubagentLinkProps) {
   const agent = useAtomValue(
     environmentThreadDetails.threadAtom(props.parentRef),
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
@@ -424,7 +429,6 @@ export function SubagentTimelineLink(props: {
   const remoteEnvironment = useEnvironment(remote?.environmentId ?? null);
   const navigate = useNavigate();
   const threadId = props.threadId;
-  // A task in a linked environment opens there, if this client is connected to it.
   const open =
     threadId !== null
       ? () => props.onOpenThread(threadId)
@@ -436,20 +440,58 @@ export function SubagentTimelineLink(props: {
             })
         : null;
   const liveStatus = agent?.status ?? props.status;
+  return {
+    agent,
+    remote,
+    open,
+    liveStatus,
+    result: (agent?.result ?? props.result)?.trim(),
+    progress: (agent?.progress ?? props.progress)?.trim(),
+    timing: {
+      status: liveStatus,
+      startedAt: isoOrNull(agent?.startedAt ?? props.startedAt),
+      completedAt: isoOrNull(agent?.completedAt ?? props.completedAt),
+    },
+  };
+}
+
+/** The hover card for a subagent row or card. */
+export function SubagentHoverCard(
+  props: SubagentLinkProps & { readonly link: ReturnType<typeof useSubagentLink> },
+) {
+  const { link } = props;
+  return (
+    <ThreadHoverCardPopup>
+      <SubagentTimelineTooltip
+        {...props}
+        elapsed={
+          link.agent ? <AgentElapsed agent={projectedSubagentsToRuntime([link.agent])[0]!} /> : null
+        }
+        model={link.agent?.model ?? null}
+        modelSelection={link.agent?.modelSelection}
+        status={link.liveStatus}
+        result={link.agent?.result ?? props.result}
+        progress={link.agent?.progress ?? props.progress}
+      />
+    </ThreadHoverCardPopup>
+  );
+}
+
+export function SubagentTimelineLink(
+  props: SubagentLinkProps & {
+    readonly event?: {
+      readonly status: OrchestrationV2TurnItem["status"] | null;
+      readonly label: string;
+      readonly timestamp: string;
+    };
+  },
+) {
+  const link = useSubagentLink(props);
+  const { remote, open, liveStatus, timing } = link;
   const status = props.event ? props.event.status : liveStatus;
   const statusLabel = props.event?.label ?? subagentStatusVisual(liveStatus).label;
-  const result = (agent?.result ?? props.result)?.trim();
-  const progress = (agent?.progress ?? props.progress)?.trim();
-  const settled = SETTLED_SUBAGENT_STATUSES.has(status ?? liveStatus);
-  const rawDetail = settled ? result || progress : progress || result;
-  const detail =
-    rawDetail && !GENERIC_CHILD_END.test(rawDetail) ? plainDetail(rawDetail) || null : null;
+  const detail = subagentDetailLine(status ?? liveStatus, link.result, link.progress);
   const failed = status === "failed";
-  const timing = {
-    status: liveStatus,
-    startedAt: isoOrNull(agent?.startedAt ?? props.startedAt),
-    completedAt: isoOrNull(agent?.completedAt ?? props.completedAt),
-  };
   const content = (
     <>
       <EnvironmentSubagentAvatar
@@ -529,23 +571,13 @@ export function SubagentTimelineLink(props: {
           )
         }
       />
-      <ThreadHoverCardPopup>
-        <SubagentTimelineTooltip
-          {...props}
-          elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
-          model={agent?.model ?? null}
-          modelSelection={agent?.modelSelection}
-          status={liveStatus}
-          result={agent?.result ?? props.result}
-          progress={agent?.progress ?? props.progress}
-        />
-      </ThreadHoverCardPopup>
+      <SubagentHoverCard {...props} link={link} />
     </Tooltip>
   );
 }
 
 function SubagentTimelineTooltip(
-  props: Parameters<typeof SubagentTimelineLink>[0] & {
+  props: SubagentLinkProps & {
     model: string | null;
     modelSelection: OrchestrationV2Subagent["modelSelection"];
     elapsed: ReactNode;
