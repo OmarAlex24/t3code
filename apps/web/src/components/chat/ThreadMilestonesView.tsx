@@ -4,6 +4,13 @@ import {
   projectedSubagentsToRuntime,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import type { ThreadStructureTurnItem } from "@t3tools/client-runtime/state/models";
+import {
+  deriveMilestoneBoards,
+  MILESTONE_BOARD_ROOT,
+  type MilestoneBoardItem,
+  parseMilestoneComment,
+} from "@t3tools/client-runtime/state/thread-milestone-board";
 import {
   deriveThreadMilestoneGraph,
   type MilestoneCoordinator,
@@ -16,7 +23,15 @@ import type {
   ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
-import { CheckIcon, ChevronRightIcon, CornerDownLeftIcon, XIcon } from "lucide-react";
+import {
+  AppWindowIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  CornerDownLeftIcon,
+  MessageSquareIcon,
+  StickyNoteIcon,
+  XIcon,
+} from "lucide-react";
 import * as DateTime from "effect/DateTime";
 import { type ReactNode, useState } from "react";
 
@@ -25,6 +40,7 @@ import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { AgentElapsed } from "./AgentElapsed";
+import { type CoordinatorAsk, MilestoneBoard } from "./MilestoneBoard";
 import { SubagentTimelineLink } from "./V2LifecycleRow";
 
 type Projection = Pick<
@@ -264,7 +280,8 @@ function coordinatorPhrase(coordinator: MilestoneCoordinator, awaitingUser: bool
 function CoordinatorRow(props: {
   readonly coordinator: MilestoneCoordinator;
   readonly awaitingUser: boolean;
-  readonly onAnswer: () => void;
+  /** Absent when the question already shows on a milestone's board. */
+  readonly onAnswer?: (() => void) | undefined;
   readonly lineAbove: Line;
   readonly line: Line;
   readonly last: boolean;
@@ -298,13 +315,49 @@ function CoordinatorRow(props: {
           <span className="font-medium text-foreground/85">Coordinator</span>{" "}
           {coordinatorPhrase(props.coordinator, props.awaitingUser)}
         </span>
-        {props.awaitingUser ? (
+        {props.awaitingUser && props.onAnswer !== undefined ? (
           <Button size="xs" variant="outline" onClick={props.onAnswer}>
             Answer in chat
           </Button>
         ) : null}
       </div>
     </SpineItem>
+  );
+}
+
+/** A finished milestone keeps its board folded behind what it holds. */
+function BoardSummary(props: {
+  readonly items: ReadonlyArray<MilestoneBoardItem>;
+  readonly open: boolean;
+  readonly onToggle: () => void;
+}) {
+  const count = (kind: MilestoneBoardItem["kind"]) =>
+    props.items.filter((item) => item.kind === kind).length;
+  const parts = [
+    { kind: "post", icon: StickyNoteIcon, label: "post" },
+    { kind: "visual", icon: AppWindowIcon, label: "visual" },
+    { kind: "comment", icon: MessageSquareIcon, label: "comment" },
+  ] as const;
+  return (
+    <button
+      type="button"
+      aria-expanded={props.open}
+      onClick={props.onToggle}
+      className="mt-1 -ml-1.5 inline-flex items-center gap-2.5 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none"
+    >
+      <ChevronRightIcon
+        className={cn("size-3.5 transition-transform", props.open && "rotate-90")}
+      />
+      {parts.map(({ kind, icon: Icon, label }) => {
+        const n = count(kind);
+        return n === 0 ? null : (
+          <span key={kind} className="inline-flex items-center gap-1">
+            <Icon className="size-3.5" />
+            {n} {n === 1 ? label : `${label}s`}
+          </span>
+        );
+      })}
+    </button>
   );
 }
 
@@ -340,12 +393,22 @@ function turnLabel(turn: MilestoneGraphTurn): string {
 export function ThreadMilestonesView(props: {
   readonly threadRef: ScopedThreadRef;
   readonly projection: Projection;
-  readonly awaitingUser: boolean;
+  readonly turnItems: ReadonlyArray<ThreadStructureTurnItem>;
+  readonly coordinatorAsk: CoordinatorAsk | null;
   readonly bottomInset: number;
   readonly onOpenThread: (threadId: ThreadId) => void;
+  /** Starts a comment on `milestone` in the composer; null when this client cannot send. */
+  readonly onComment: ((milestone: OrchestrationV2Milestone) => void) | null;
 }) {
   const { threadRef, projection } = props;
   const graph = deriveThreadMilestoneGraph(projection);
+  const awaitingUser = props.coordinatorAsk !== null;
+  const boards = deriveMilestoneBoards(props.turnItems, (item) =>
+    item.textOmitted
+      ? (projection.messages.find(({ id }) => id === item.messageId)?.text ?? "")
+      : item.text,
+  );
+  const [openBoards, setOpenBoards] = useState<ReadonlySet<string>>(() => new Set());
   const revealInChat = useThreadViewModeStore((state) => state.revealInChat);
   const setMode = useThreadViewModeStore((state) => state.setMode);
   // Milestones already present when the view opened appear at once; only new ones cascade in.
@@ -408,7 +471,7 @@ export function ThreadMilestonesView(props: {
         ))}
         <CoordinatorRow
           coordinator={graph.coordinator}
-          awaitingUser={props.awaitingUser}
+          awaitingUser={awaitingUser}
           onAnswer={answer}
           lineAbove="solid"
           line="none"
@@ -425,13 +488,33 @@ export function ThreadMilestonesView(props: {
         ? activeIndex
         : nodes.findLastIndex(({ milestone }) => milestone.status !== "planned");
     const firstMilestone = nodes[0]?.milestone;
+    const remaining = nodes.filter(({ milestone }) => milestone.status === "planned").length;
+    const board = (
+      key: string,
+      agents: ReadonlyArray<OrchestrationV2Subagent>,
+      options: { readonly here: boolean; readonly milestone?: OrchestrationV2Milestone },
+    ) => (
+      <MilestoneBoard
+        threadRef={threadRef}
+        items={boards.get(key) ?? []}
+        agents={agents}
+        coordinatorAsk={options.here ? props.coordinatorAsk : null}
+        onAnswerInChat={answer}
+        onOpenThread={props.onOpenThread}
+        onJump={(entryId) => jump(entryId)}
+        onComment={
+          options.here && options.milestone !== undefined && props.onComment !== null
+            ? () => props.onComment!(options.milestone!)
+            : null
+        }
+      />
+    );
     const newIds = nodes.map(({ milestone }) => milestone.id).filter((id) => !seenAtMount.has(id));
     const coordinatorRow = (lineAbove: Line, last: boolean) => (
       <CoordinatorRow
         key="coordinator"
         coordinator={graph.coordinator}
-        awaitingUser={props.awaitingUser}
-        onAnswer={answer}
+        awaitingUser={awaitingUser}
         lineAbove={lineAbove}
         line="dashed"
         last={last}
@@ -476,6 +559,7 @@ export function ThreadMilestonesView(props: {
           <span className="font-medium text-foreground/85">
             Milestone {graph.summary.position} of {graph.summary.total}
           </span>
+          {remaining > 0 ? <span>{remaining} left</span> : null}
           {graph.coordinator.liveAgents > 0 ? (
             <span className="inline-flex items-center gap-1.5">
               <span className="size-1.5 rounded-full bg-info motion-safe:animate-status-pulse" />
@@ -499,6 +583,12 @@ export function ThreadMilestonesView(props: {
           {graph.summary.changes > 0 ? (
             <span>Plan changed {timesWord(graph.summary.changes)}</span>
           ) : null}
+          {awaitingUser || projection.subagents.some(({ status }) => status === "waiting") ? (
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-warning/12 px-1.5 py-px font-medium text-warning">
+              <span className="size-1.5 rounded-full bg-warning" />
+              Waiting on you
+            </span>
+          ) : null}
         </div>
         <ol>
           {graph.root === null ? null : (
@@ -518,6 +608,7 @@ export function ThreadMilestonesView(props: {
                 agents={graph.root.agents}
                 onOpenThread={props.onOpenThread}
               />
+              {board(MILESTONE_BOARD_ROOT, graph.root.agents, { here: coordinatorAfter === -1 })}
             </SpineItem>
           )}
           {graph.earlierSets.map((set) => {
@@ -683,19 +774,44 @@ export function ThreadMilestonesView(props: {
                 ) : milestone.status === "dropped" && milestone.note !== undefined ? (
                   <p className="mt-1 max-w-152 text-xs text-muted-foreground">{milestone.note}</p>
                 ) : null}
-                {node.turns.map((turn) => (
-                  <TurnCard
-                    key={turn.run.id}
-                    text={turnText(projection, turn)}
-                    label={turnLabel(turn)}
-                    onJump={() => jump(turn.run.userMessageId)}
-                  />
-                ))}
+                {node.turns
+                  .filter((turn) => {
+                    const text = turnText(projection, turn);
+                    // A comment shows on the board of the milestone it is about.
+                    return text === null || parseMilestoneComment(text) === null;
+                  })
+                  .map((turn) => (
+                    <TurnCard
+                      key={turn.run.id}
+                      text={turnText(projection, turn)}
+                      label={turnLabel(turn)}
+                      onJump={() => jump(turn.run.userMessageId)}
+                    />
+                  ))}
                 <AgentLane
                   threadRef={threadRef}
                   agents={node.agents}
                   onOpenThread={props.onOpenThread}
                 />
+                {milestone.status === "done" && (boards.get(milestone.id)?.length ?? 0) > 0 ? (
+                  <BoardSummary
+                    items={boards.get(milestone.id)!}
+                    open={openBoards.has(milestone.id)}
+                    onToggle={() =>
+                      setOpenBoards((current) => {
+                        const next = new Set(current);
+                        if (!next.delete(milestone.id)) next.add(milestone.id);
+                        return next;
+                      })
+                    }
+                  />
+                ) : null}
+                {milestone.status !== "done" || openBoards.has(milestone.id)
+                  ? board(milestone.id, node.agents, {
+                      here: index === coordinatorAfter,
+                      milestone,
+                    })
+                  : null}
               </SpineItem>
             );
             return index === coordinatorAfter
