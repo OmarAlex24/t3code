@@ -5306,8 +5306,12 @@ describe("SandboxProvisioner per-thread launches", () => {
     options: {
       /** Commands containing this text fail with exit code 1, the given number of times. */
       readonly failing?: { readonly text: string; times: number };
-      /** Commands containing this text wait on the deferred before answering. */
-      readonly holding?: { readonly text: string; readonly until: Deferred.Deferred<void> };
+      /** Commands containing this text wait on `until` before answering, after `reached`. */
+      readonly holding?: {
+        readonly text: string;
+        readonly until: Deferred.Deferred<void>;
+        readonly reached?: Deferred.Deferred<void>;
+      };
       readonly listed?: BoatFake["listed"];
       /** What the sandbox gets back from Claude's endpoint; `000` means it never connected. */
       readonly endpointStatus?: string;
@@ -5464,7 +5468,10 @@ describe("SandboxProvisioner per-thread launches", () => {
           return respond(request, { exitCode: 0, stdout, stderr: "" });
         });
         return options.holding !== undefined && command.includes(options.holding.text)
-          ? Deferred.await(options.holding.until).pipe(Effect.andThen(answer))
+          ? (options.holding.reached === undefined
+              ? Effect.void
+              : Deferred.succeed(options.holding.reached, undefined)
+            ).pipe(Effect.andThen(Deferred.await(options.holding.until)), Effect.andThen(answer))
           : answer;
       }
       if (
@@ -5807,6 +5814,60 @@ describe("SandboxProvisioner per-thread launches", () => {
         Effect.provideService(HttpClient.HttpClient, fake.client),
       );
     },
+  );
+
+  it.effect("names a resumed sandbox's first key before it mints it, as a launch does", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const reached = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "T3_KEEPALIVE_LOOP", until, reached } });
+      const older: SandboxRecord = {
+        instanceId: "older",
+        environmentId: testEnvironmentId,
+        threadId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "hello on Boat small",
+        size: "small",
+        state: "stopped",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        runningSince: null,
+        maxRunningMinutes: 480,
+      };
+      const repository = memoryRepository([older]);
+      yield* Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const resuming = yield* provisioner.resume({ instanceId: "older" }).pipe(Effect.forkChild);
+        yield* Deferred.await(reached);
+        // Minted, not yet on the sandbox: the record already names it.
+        expect([...fake.keys]).toEqual(["apk_keepalive1"]);
+        const named = repository.records.get("older")?.keepAliveKey;
+        expect(named?.name).toMatch(/^t3-keepalive-hello-on-boat-small-[0-9a-f]{8}$/u);
+        expect(named?.id).toBeUndefined();
+
+        // The server dies here; the delete that follows says which key to revoke by hand.
+        yield* Fiber.interrupt(resuming);
+        expect(repository.records.get("older")?.keepAliveKey).toEqual(named);
+        const deleted = yield* provisioner.delete({
+          provider: "boat",
+          instanceId: "older",
+          sandboxId: boatSandboxId,
+        });
+        expect(deleted.warnings).toEqual([
+          expect.stringContaining(`Revoke the key named ${named?.name} in Boat.`),
+        ]);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
   );
 
   const bridgeIssues = (fake: BoatFake) =>
