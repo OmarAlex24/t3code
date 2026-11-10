@@ -8,9 +8,11 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import { render } from "../../test/render";
+import { dismissContextMenu } from "../contextMenuFallback";
+import { registerSandboxThreadHandlers } from "../state/sandboxThreads";
 import { __setClientSettingsForTests, getClientSettings } from "../hooks/useSettings";
 import { useProjects, useQuietThreadShells } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
@@ -255,5 +257,67 @@ describe("sandbox chats in the sidebar", () => {
     const remoteRow = await rowOf("Runs on a paired Mac");
     expect(remoteRow.querySelector("svg.lucide-server")).not.toBeNull();
     expect(remoteRow.querySelector(vercelMark)).toBeNull();
+  });
+
+  it("offers deleting a sandbox deleted outside T3 Code from its thread's menu, and says why the rest is off", async () => {
+    using stack = new DisposableStack();
+    const previousSettings = getClientSettings();
+    stack.defer(() => __setClientSettingsForTests(previousSettings));
+    stack.defer(() => dismissContextMenu(false));
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+    });
+    mocks.sandboxes = [
+      sandbox({ environmentId: LEGACY_SANDBOX, threadId: legacyThreadId, state: "deleted" }),
+    ];
+    // The coordinator's own tests cover its dialog; here it only answers for this thread.
+    const deleteSandbox = vi.fn(async () => {});
+    stack.defer(
+      registerSandboxThreadHandlers({
+        isSandboxThread: (ref) => ref.environmentId === LEGACY_SANDBOX,
+        sandboxState: (ref) => (ref.environmentId === LEGACY_SANDBOX ? "deleted" : undefined),
+        onSettled: () => false,
+        ensureRunning: async () => true,
+        deleteThreadAndSandbox: async () => {},
+        deleteSandbox,
+      }),
+    );
+    vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
+    vi.mocked(useProjects).mockReturnValue([
+      project(LEGACY_SANDBOX, "project-legacy", "OmarAlex24/kontext"),
+    ]);
+    // The sandbox's server is gone, so this client holds no session that can change its threads.
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      shell(LEGACY_SANDBOX, legacyThreadId, "project-legacy", "que modelo eres"),
+    ]);
+
+    await using _screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+
+    const title = page.getByText("que modelo eres").first();
+    await expect.element(title).toBeVisible();
+    title
+      .element()
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    const reason = page.getByRole("menuitem", { name: "The sandbox no longer exists" });
+    await expect.element(reason).toBeVisible();
+    await expect.element(reason).toBeDisabled();
+    await expect.element(page.getByRole("menuitem", { name: "Rename thread" })).toBeDisabled();
+    await expect
+      .element(page.getByRole("menuitem", { name: "Delete", exact: true }))
+      .toBeDisabled();
+    const deleteItem = page.getByRole("menuitem", { name: "Delete sandbox…" });
+    await expect.element(deleteItem).toBeEnabled();
+    await userEvent.click(deleteItem);
+    await vi.waitFor(() =>
+      expect(deleteSandbox).toHaveBeenCalledExactlyOnceWith({
+        environmentId: LEGACY_SANDBOX,
+        threadId: legacyThreadId,
+      }),
+    );
   });
 });
