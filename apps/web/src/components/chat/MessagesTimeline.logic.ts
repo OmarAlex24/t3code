@@ -832,7 +832,9 @@ function deriveSupersededAttemptFolds(
       retainedAttemptIds.has(entry.attempt.id) ||
       unfoldedRunIds.has(entry.attempt.runId) ||
       (entry.kind === "message" && entry.message.role === "user") ||
-      (entry.kind === "event" && entry.projectedItem.item.type === "handoff") ||
+      (entry.kind === "event" &&
+        (entry.projectedItem.item.type === "handoff" ||
+          entry.projectedItem.item.type === "milestone")) ||
       entry.kind === "html-render" ||
       entry.kind === "mcp-app" ||
       entry.kind === "sent-message" ||
