@@ -103,7 +103,7 @@ export function ReopenClosedViewShortcut() {
         ownerExists: readThreadShell(ref) !== null || drafts.getDraftThreadByRef(ref) !== null,
         sideChatExists:
           entry.kind !== "panel-tab" ||
-          (entry.surface.kind !== "side-chat" && entry.surface.kind !== "subagent") ||
+          entry.surface.kind !== "side-chat" ||
           readThreadShell(scopeThreadRef(ref.environmentId, entry.surface.threadId)) !== null,
         shellLive:
           appAtomRegistry.get(environmentShell.stateValueAtom(ref.environmentId)).status === "live",
