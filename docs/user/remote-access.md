@@ -51,7 +51,9 @@ this server, keep working and switch to repositories the next time you save them
 **Advanced**:
 
 - **Running limit** (8 hours by default) stops a sandbox that has run that long since its last
-  start. Its disk stays, so **Resume** brings it back with the thread's files.
+  start. Its disk stays, so **Resume** brings it back with the thread's files. Boat sandboxes show
+  **Stop when idle** and an optional **Hard limit** instead (see
+  [Boat sandboxes stay on while they work](#boat-sandboxes-stay-on-while-they-work)).
 - **Files copied from this machine** chooses, per repository, which git-ignored files go into the
   clone. They come from the repository's copy on the server that keeps the configs, so a project
   open only on another machine gets none. By default each sandbox gets that copy's env files
@@ -174,7 +176,9 @@ example after a crash. They may still bill; delete the ones you do not need. Onl
 these. Forks an agent made of its sandbox show under that sandbox instead (see
 [Let the agent use Boat](#let-the-agent-use-boat)).
 
-Each provider also stops sandboxes on its own, as a backstop for the running limit:
+Each provider also stops sandboxes on its own, as a backstop for the running limit. Boat is the
+exception: its own auto-stop is what stops a thread's sandbox once its work ends, as the next
+section explains.
 
 For Vercel, create an access token at vercel.com/account/settings/tokens; T3 Code uses your only
 team and a `t3-sandboxes` project unless you fill in **Team** or **Project** (a change applies to
@@ -200,6 +204,28 @@ and show no cost.
 Daytona deletes a sandbox, files included, a day after its running limit, so copy out anything you
 need before then.
 
+### Boat sandboxes stay on while they work
+
+A thread's Boat sandbox has no running limit while its agents work. It stops on its own once they
+have been idle for the config's **Stop when idle** time (30 minutes by default).
+
+- Every 5 minutes the sandbox checks whether any thread on it, subagents included, is queued,
+  starting or running. If one is, it moves Boat's auto-stop to the idle time plus 5 minutes from
+  now. A thread waiting on you, for an approval or an answer, counts as idle.
+- The sandbox does this itself, so it keeps working while this machine sleeps or the app is
+  closed. With no work, nothing moves the auto-stop, and Boat stops the sandbox when it passes.
+  Its disk stays, and sending a message resumes it.
+- **Hard limit** (off by default) still stops a sandbox that has run that long since its last start,
+  even mid-work.
+- For this, T3 Code mints a Boat key named `t3-keepalive-<name>-<random>`, scoped to that one
+  sandbox with only `sandbox.read` and `sandbox.update`. It travels in a private file, never in a
+  command, and only the sandbox keeps it, under `~/.t3/userdata/sandbox-keepalive/`. It lasts 30
+  days, is replaced on a resume once it has less than a week left, and is revoked when you delete
+  the sandbox.
+- A Boat sandbox made before this gets its key the next time it resumes. If the key cannot be set
+  up, the setup card or the resume says so, and that sandbox stops at its running limit as before.
+- On a Boat trial the idle time is capped at two hours, Boat's longest trial auto-stop.
+
 ### Let the agent use Boat
 
 Off by default, and offered only for Boat. With it on, the agent in each sandbox can run `boat`
@@ -216,8 +242,8 @@ like new sandboxes, and they count against Boat's start limits.
   `sandbox.create` (forking makes a sandbox), `sandbox.read`, `sandbox.stop`, `sandbox.fork`,
   `sandbox.delete-own`, `exec`, `file.read`, `file.write` and `host`. It cannot read or delete any
   other sandbox on your account, or the sandbox it runs on.
-- The key expires after the config's running limit, counted from launch, even if the sandbox was
-  stopped in between. After that `boat` on that sandbox stops working; start a new thread for a new
+- The key expires after the config's running limit (8 hours by default), counted from launch, even
+  if the sandbox was stopped in between or kept itself running past it. After that `boat` on that sandbox stops working; start a new thread for a new
   key.
 - Before anything bills, T3 Code checks that your Boat key can mint scoped keys. A key that cannot
   stops the launch with "Your Boat key can't create scoped keys; use an admin key or turn off Let
