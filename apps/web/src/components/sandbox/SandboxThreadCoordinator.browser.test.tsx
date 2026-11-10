@@ -486,6 +486,9 @@ describe("SandboxThreadCoordinator", () => {
       const toast = vi.spyOn(toastManager, "add");
       await using _screen = await render(<SandboxThreadCoordinator />);
 
+      // A host thread's menu never blames the sandbox: its own server takes its changes.
+      await vi.waitFor(() => expect(threadSandboxUnavailableReason(threadRef)).not.toBeNull());
+      expect(threadSandboxUnavailableReason(hostRef)).toBeNull();
       const done = deleteThreadSandbox(threadRef);
       await expect.element(page.getByText("Delete sandbox bx_46wr?")).toBeVisible();
       await expect
