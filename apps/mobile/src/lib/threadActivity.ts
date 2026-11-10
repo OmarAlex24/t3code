@@ -570,6 +570,8 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "fork":
     case "thread_created":
       return "zap";
+    case "milestone":
+      return "check";
     case "secret_request":
       return "lock";
     case "link_request":
@@ -631,6 +633,8 @@ function itemSummary(
       return "Thread forked";
     case "thread_created":
       return "Thread created";
+    case "milestone":
+      return "Milestone";
     case "secret_request":
       return item.label;
     case "link_request":
@@ -695,6 +699,8 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "secret_request":
     case "link_request":
       return item.reason || null;
+    case "milestone":
+      return item.note ?? item.reason ?? null;
     case "subagent":
       return item.result ?? item.progress ?? item.prompt;
     case "dynamic_tool":

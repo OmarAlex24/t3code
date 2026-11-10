@@ -1,9 +1,12 @@
 import { applyThreadPullRequestLinkUpdate } from "../threadPullRequests.ts";
-import type {
-  OrchestrationV2DomainEvent,
-  OrchestrationV2Run,
-  OrchestrationV2ThreadProjection,
-  OrchestrationV2TurnItem,
+import {
+  activeMilestoneId,
+  applyMilestonesUpdate,
+  stampSubagentMilestone,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import {
   restoreSubagentBodies,
@@ -322,17 +325,20 @@ export function applyOrchestrationV2ProjectionEvent(
     }
     case "node.updated":
       return { ...base, nodes: upsertEntity(base.nodes, event.payload) };
-    case "subagent.updated":
+    case "subagent.updated": {
+      const previous = base.subagents.find((subagent) => subagent.id === event.payload.id);
       return {
         ...base,
         subagents: upsertEntity(
           base.subagents,
-          restoreSubagentBodies(
-            event.payload,
-            base.subagents.find((subagent) => subagent.id === event.payload.id),
+          stampSubagentMilestone(
+            previous,
+            restoreSubagentBodies(event.payload, previous),
+            activeMilestoneId(base.milestones),
           ),
         ),
       };
+    }
     case "provider-session.attached":
     case "provider-session.updated":
       return {
@@ -370,6 +376,8 @@ export function applyOrchestrationV2ProjectionEvent(
       return { ...base, messages: upsertEntity(base.messages, event.payload) };
     case "plan.updated":
       return { ...base, plans: upsertEntity(base.plans, event.payload) };
+    case "thread.milestones-updated":
+      return { ...base, milestones: applyMilestonesUpdate(base.milestones, event.payload) };
     case "turn-item.updated": {
       let payload = restoreTurnItemBodies(event.payload, latestBodies(projection));
       // Streamed updates land on the newest items, so search from the end.

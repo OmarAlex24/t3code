@@ -34,6 +34,7 @@ import {
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as EventSink from "./EventSink.ts";
+import { milestonesAfterRollback } from "./MilestoneDecider.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -452,6 +453,25 @@ export const layer: Layer.Layer<
             payload: { ...rootNode, status: "rolled_back", completedAt: now },
           });
         }
+      }
+      const milestoneRecords = yield* projections.getThreadRecords(rewind.threadId, ["turnItems"], {
+        turnItemTypes: ["milestone"],
+        messageRoles: [],
+      });
+      const milestones = milestonesAfterRollback({
+        items: milestoneRecords.turnItems,
+        runs: projection.runs,
+        rollingBack: runs.map((run) => run.id),
+      });
+      if (milestones !== undefined) {
+        events.push({
+          id: yield* eventId(),
+          type: "thread.milestones-updated",
+          threadId: rewind.threadId,
+          providerInstanceId: input.providerInstanceId,
+          occurredAt: now,
+          payload: { milestones, replace: true },
+        });
       }
       return events;
     });

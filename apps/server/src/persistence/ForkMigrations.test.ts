@@ -11,6 +11,7 @@ import SandboxPerThread from "./ForkMigrations/002_SandboxPerThread.ts";
 const forkHistory: Array<readonly [number, string]> = [
   [1, "SandboxRecords"],
   [2, "SandboxPerThread"],
+  [3, "ProjectionMilestones"],
 ];
 
 const history = (table: string) =>
@@ -83,7 +84,7 @@ describe("runAllMigrations", () => {
         SELECT created_at FROM ${sql(FORK_MIGRATIONS_TABLE)} ORDER BY migration_id
       `;
         assert.deepStrictEqual(
-          forkCreatedAt.map((row) => row.created_at),
+          forkCreatedAt.slice(0, 2).map((row) => row.created_at),
           ["2026-11-04 18:46:23", "2026-11-05 00:15:09"],
         );
         assert.deepStrictEqual(yield* sql`SELECT task_id, thread_mode FROM scheduled_tasks`, [
