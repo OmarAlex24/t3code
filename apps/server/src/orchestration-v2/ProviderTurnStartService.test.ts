@@ -668,6 +668,7 @@ function makeLocalCommandHarness(input: {
     runtimeRequests: [],
     subagents: [],
     plans: [],
+    milestones: [],
     checkpoints: [],
     updatedAt: now,
   };

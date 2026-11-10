@@ -92,6 +92,7 @@ export const v2Projection: OrchestrationV2ThreadProjection = {
   runtimeRequests: [],
   messages: [],
   plans: [],
+  milestones: [],
   turnItems: [],
   checkpointScopes: [],
   checkpoints: [],
