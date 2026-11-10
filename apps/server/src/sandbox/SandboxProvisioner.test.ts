@@ -4124,6 +4124,14 @@ describe("sandbox agent access", () => {
       expect(commands.findIndex((command) => command.includes("T3_PI_PROVIDER"))).toBeLessThan(
         commands.findIndex((command) => command.includes("nohup")),
       );
+      // The host's followed settings go first, without its secrets or its own paths, so Pi's
+      // instance and default model are what the sandbox keeps.
+      const [seed] = secretsOf("T3_SETTINGS_SEED");
+      expect(JSON.parse(seed!.T3_SETTINGS_SEED!)).toEqual({ branchNamePrefix: "ada" });
+      expect(revealsSecret(commands, "mgmt-secret")).toBe(false);
+      expect(commands.findIndex((command) => command.includes("T3_SETTINGS_SEED"))).toBeLessThan(
+        commands.findIndex((command) => command.includes("T3_PI_PROVIDER")),
+      );
 
       // A hub that lists nothing else leaves the sandbox working, with Claude, and says why.
       options.hubModels = ["claude-opus-5-5"];
@@ -4139,7 +4147,13 @@ describe("sandbox agent access", () => {
       ]);
       expect(commands.some((command) => command.includes("T3_PI_PROVIDER"))).toBe(false);
     }).pipe(
-      Effect.provide(provisionerLayer(hubSettings, undefined, { host })),
+      Effect.provide(
+        provisionerLayer(
+          { ...hubSettings, branchNamePrefix: "ada", worktreesDirectory: "/Users/ada/trees" },
+          undefined,
+          { host },
+        ),
+      ),
       Effect.provideService(HttpClient.HttpClient, client),
     );
   });

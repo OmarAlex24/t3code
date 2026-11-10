@@ -93,6 +93,40 @@ unset T3_GITHUB_TOKEN
 gh auth setup-git --hostname github.com`,
 });
 
+/**
+ * Merges the host's followed settings (`sandboxSettingsSeed`) into T3's own settings.json before
+ * `t3 serve`, keeping what setup wrote there, such as Pi's provider instance.
+ */
+export const t3SettingsSeedScript = (seed: Readonly<Record<string, unknown>>): SandboxScript => ({
+  secrets: { T3_SETTINGS_SEED: JSON.stringify(seed) },
+  command: `set -eu
+umask 077
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v node >/dev/null 2>&1; then
+  unset T3_SETTINGS_SEED
+  echo "Node is not installed." >&2
+  exit 3
+fi
+mkdir -p "$HOME/.t3/userdata"
+node -e '
+const fs = require("node:fs");
+const file = process.argv[1];
+const seed = JSON.parse(process.env.T3_SETTINGS_SEED);
+let settings = {};
+try {
+  settings = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch (error) {
+  if (error.code !== "ENOENT") throw new Error("settings.json is not valid JSON");
+}
+if (settings === null || typeof settings !== "object" || Array.isArray(settings)) {
+  throw new Error("settings.json is not an object");
+}
+fs.writeFileSync(file + ".t3-tmp", JSON.stringify({ ...settings, ...seed }, null, 2) + "\\n", { mode: 0o600 });
+fs.renameSync(file + ".t3-tmp", file);
+' "$HOME/.t3/userdata/settings.json"
+unset T3_SETTINGS_SEED`,
+});
+
 // Run before a template save, with the Claude scrub: a copy must not inherit the GitHub login.
 export const GITHUB_LOGIN_SCRUB = `rm -f "\${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml"`;
 
