@@ -650,9 +650,11 @@ export function SandboxThreadCoordinator() {
     (threadRef: ScopedThreadRef) => findSandbox(threadRef) !== undefined,
   );
 
-  const sandboxState = useStableCallback(
-    (threadRef: ScopedThreadRef) => findSandbox(threadRef)?.state,
-  );
+  // Only the sandbox's own thread: the host thread the bridge drives is on the host's server.
+  const sandboxState = useStableCallback((threadRef: ScopedThreadRef) => {
+    const sandbox = findSandbox(threadRef);
+    return sandbox === undefined || isHostThreadRef(sandbox, threadRef) ? undefined : sandbox.state;
+  });
 
   const deleteOnly = useStableCallback((threadRef: ScopedThreadRef) => {
     const sandbox = findSandbox(threadRef);
