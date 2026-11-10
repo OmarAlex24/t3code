@@ -28,6 +28,8 @@ import {
   type SidebarProjectSnapshot,
 } from "../../sidebarProjectGrouping";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
+import { useSandboxEnvironmentIds } from "../../state/sandboxes";
+import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { useThreadShells, waitForProjectRemoval } from "../../state/entities";
 import { refreshProjectFaviconUrl } from "../../state/assets";
 import { projectEnvironment } from "../../state/projects";
@@ -58,7 +60,6 @@ import {
   SCRATCH_PROJECT_TITLE,
   scopeProjectSettingsGroup,
 } from "./ProjectSettingsPanel.logic";
-import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { readUnloadedThreadCount } from "../../state/olderSettledShelf";
 import { settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
 
@@ -171,7 +172,7 @@ export function ProjectSettingsPanel({
   checkoutKey?: string | null;
   unavailable?: ReactNode;
 }) {
-  const groups = useSettingsProjectGroups();
+  const { groups } = useSettingsProjectGroups(useSandboxEnvironmentIds());
   const pathname = useLocation({ select: (location) => location.pathname });
 
   const selected = groups.find((group) => group.projectKey === projectKey) ?? null;
@@ -260,7 +261,10 @@ function ProjectDetail({
 }) {
   const navigate = useNavigate({ from: "/settings" });
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const { environments } = useEnvironments();
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
+  const environments = useEnvironments().environments.filter(
+    (environment) => !sandboxEnvironmentIds.has(environment.environmentId),
+  );
   const environmentById = new Map(
     environments.map((environment) => [environment.environmentId, environment]),
   );
