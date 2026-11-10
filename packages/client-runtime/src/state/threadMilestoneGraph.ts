@@ -195,6 +195,31 @@ export function deriveThreadMilestoneGraph(projection: Projection): ThreadMilest
   };
 }
 
+/**
+ * Relative widths for the plan strip: the time each milestone took, the active one's time so far,
+ * and the average for those not started. A floor keeps an instant milestone visible and clickable.
+ */
+export function milestoneStripWeights(
+  milestones: ReadonlyArray<Pick<OrchestrationV2Milestone, "startedAt" | "completedAt">>,
+  nowMs: number,
+): ReadonlyArray<number> {
+  const spans = milestones.map(({ startedAt, completedAt }) =>
+    startedAt === null
+      ? null
+      : Math.max(
+          0,
+          (completedAt === null ? nowMs : DateTime.toEpochMillis(completedAt)) -
+            DateTime.toEpochMillis(startedAt),
+        ),
+  );
+  const known = spans.filter((span) => span !== null);
+  const typical =
+    known.length === 0 ? 1 : known.reduce((sum, span) => sum + span, 0) / known.length || 1;
+  const raw = spans.map((span) => span ?? typical);
+  const floor = raw.reduce((sum, span) => sum + span, 0) * 0.1;
+  return raw.map((span) => Math.max(span, floor));
+}
+
 const shortenPaths = (text: string) =>
   text.replace(/(?:~|\.{0,2})?(?:\/[^\s/]+)+\/([^\s/]+)/gu, "$1");
 const firstLine = (text: string) => text.trim().split("\n")[0]?.trim() ?? "";

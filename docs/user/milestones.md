@@ -5,6 +5,7 @@ On long, multi-phase work, an agent plans its phases as milestones and marks eac
 Switch a thread between **Chat** and **Milestones** with the toggle in its header, the command palette, or `mod+alt+m`. Each thread remembers its view, and a new thread opens in the view you used last. The composer stays at the bottom in both. Milestones is available on web and desktop.
 
 - Select a milestone, or one of your messages, to jump to that point in Chat.
+- Finished milestones fold into a summary of their agents and posts; select it to unfold one. When an agent fails, **N agents failed** at the top takes you to it.
 - Select a subagent to open its chat beside the view. Closing that tab doesn't delete the subagent.
 - When the agent or a subagent is waiting on you, the milestone it is working on says so. Answer the agent in the composer; **Answer** opens a subagent's chat.
 - Select **Comment on this milestone** to start a message that names it. The agent receives it like any other message, and the comment stays on that milestone.

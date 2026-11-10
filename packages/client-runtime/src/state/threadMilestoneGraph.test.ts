@@ -11,7 +11,11 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { deriveCoordinatorActivity, deriveThreadMilestoneGraph } from "./threadMilestoneGraph.ts";
+import {
+  deriveCoordinatorActivity,
+  deriveThreadMilestoneGraph,
+  milestoneStripWeights,
+} from "./threadMilestoneGraph.ts";
 
 const at = (minute: number) =>
   DateTime.makeUnsafe(`2026-11-10T10:${String(minute).padStart(2, "0")}:00.000Z`);
@@ -178,5 +182,33 @@ describe("deriveCoordinatorActivity", () => {
     ["a subagent's nested item", [item({ type: "reasoning", parentItemId: "agent-1" })], null],
   ])("labels %s", (_case, items, expected) => {
     expect(deriveCoordinatorActivity(items)).toBe(expected);
+  });
+});
+
+describe("milestoneStripWeights", () => {
+  it("sizes milestones by time spent, the active one by time so far, and the rest by the average", () => {
+    const now = DateTime.toEpochMillis(at(20));
+    const weights = milestoneStripWeights(
+      [
+        milestone("m1", "s1", "done", 0, { completedAt: at(4) }),
+        milestone("m2", "s1", "done", 4, { completedAt: at(12) }),
+        milestone("m3", "s1", "active", 12),
+        milestone("m4", "s1", "planned", null),
+      ],
+      now,
+    ).map((weight) => weight / 60_000);
+    expect(weights).toEqual([4, 8, 8, 20 / 3]);
+  });
+
+  it("keeps a sliver for a milestone that took no time", () => {
+    const weights = milestoneStripWeights(
+      [
+        milestone("m1", "s1", "done", 0, { completedAt: at(0) }),
+        milestone("m2", "s1", "done", 0, { completedAt: at(30) }),
+      ],
+      0,
+    );
+    expect(weights[0]).toBeGreaterThan(0);
+    expect(weights[0]! / weights[1]!).toBeGreaterThan(0.09);
   });
 });
