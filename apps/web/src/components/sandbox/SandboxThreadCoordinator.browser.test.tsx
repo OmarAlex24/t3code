@@ -33,6 +33,8 @@ const mocks = vi.hoisted(() => ({
   hostThread: false,
   hostTitle: "Fix the login bug",
   settled: true,
+  // A sandbox deleted outside T3 Code leaves its server unreachable.
+  sandboxConnected: true,
 }));
 
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
@@ -43,7 +45,9 @@ vi.mock(import("~/state/environments"), async (original) => ({
   ...(await original()),
   useEnvironments: (() => ({
     environments: [
-      { environmentId: SANDBOX_ENV, connection: { phase: "connected" }, serverConfig: {} },
+      ...(mocks.sandboxConnected
+        ? [{ environmentId: SANDBOX_ENV, connection: { phase: "connected" }, serverConfig: {} }]
+        : []),
       { environmentId: HOST_ENV, connection: { phase: "connected" }, serverConfig: {} },
     ],
   })) as never,
@@ -137,6 +141,7 @@ import {
   deleteThreadSandbox,
   ensureSandboxThreadRunning,
   notifySandboxThreadSettled,
+  threadSandboxUnavailableReason,
 } from "~/state/sandboxThreads";
 import { toastManager } from "../ui/toast";
 import { SETTLE_DELETE_DELAY_MS, SandboxThreadCoordinator } from "./SandboxThreadCoordinator";
@@ -203,6 +208,7 @@ function setup(
   mocks.hostThread = options.bridged === true;
   mocks.hostTitle = options.hostTitle ?? "Fix the login bug";
   mocks.settled = true;
+  mocks.sandboxConnected = true;
   mocks.sandboxes = [
     {
       ...sandbox,
@@ -434,6 +440,26 @@ describe("SandboxThreadCoordinator", () => {
     await done;
     expect(deleteThread).toHaveBeenCalledOnce();
     expect(mocks.deleteSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("deletes a sandbox deleted outside T3 Code from its thread's menu, through the same confirmation", async () => {
+    setup(undefined, undefined, { state: "deleted" });
+    mocks.sandboxConnected = false;
+    await using _screen = await render(<SandboxThreadCoordinator />);
+
+    await vi.waitFor(() =>
+      expect(threadSandboxUnavailableReason(threadRef)).toBe("The sandbox no longer exists"),
+    );
+    const done = deleteThreadSandbox(threadRef);
+    await expect.element(page.getByText("Delete sandbox bx_46wr?")).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Delete sandbox", exact: true }));
+    await done;
+    expect(mocks.deleteSandbox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: { provider: "boat", sandboxId: "bx_46wrabcd", instanceId: "instance-1" },
+      }),
+    );
+    expect(threadSandboxUnavailableReason(hostRef)).toBeNull();
   });
 
   describe("a thread the sandbox bridge drives from the host", () => {

@@ -283,6 +283,8 @@ export interface SandboxSettleUndo {
  */
 export interface SandboxThreadHandlers {
   readonly isSandboxThread: (threadRef: ScopedThreadRef) => boolean;
+  /** The state of the thread's sandbox; undefined for a thread with no sandbox. */
+  readonly sandboxState: (threadRef: ScopedThreadRef) => SandboxRecord["state"] | undefined;
   /**
    * After a settle: stops, deletes, or asks, as the thread's config says. True when it shows the
    * settle's Undo itself, as a delayed delete does.
@@ -327,3 +329,19 @@ export const deleteSandboxThread = (
 
 export const deleteThreadSandbox = (threadRef: ScopedThreadRef) =>
   handlers?.deleteSandbox(threadRef) ?? Promise.resolve();
+
+const UNAVAILABLE_REASON: Partial<Record<SandboxRecord["state"], string>> = {
+  deleted: "The sandbox no longer exists",
+  expired: "The sandbox's disk expired",
+  stopped: "The sandbox is stopped",
+  provisioning: "The sandbox is still starting",
+};
+
+/**
+ * What a thread's menu says when its server cannot take its changes, because its sandbox is gone,
+ * stopped or not connected. Null for a thread with no sandbox.
+ */
+export const threadSandboxUnavailableReason = (threadRef: ScopedThreadRef): string | null => {
+  const state = handlers?.sandboxState(threadRef);
+  return state === undefined ? null : (UNAVAILABLE_REASON[state] ?? "The sandbox is not connected");
+};
