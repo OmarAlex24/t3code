@@ -425,7 +425,7 @@ export function ThreadMilestonesView(props: {
         ? activeIndex
         : nodes.findLastIndex(({ milestone }) => milestone.status !== "planned");
     const firstMilestone = nodes[0]?.milestone;
-    let cascade = 0;
+    const newIds = nodes.map(({ milestone }) => milestone.id).filter((id) => !seenAtMount.has(id));
     const coordinatorRow = (lineAbove: Line, last: boolean) => (
       <CoordinatorRow
         key="coordinator"
@@ -611,8 +611,8 @@ export function ThreadMilestonesView(props: {
           {coordinatorAfter === -1 ? coordinatorRow("solid", nodes.length === 0) : null}
           {nodes.flatMap((node, index) => {
             const { milestone } = node;
-            const isNew = !seenAtMount.has(milestone.id);
-            const enterDelay = isNew ? cascade++ * 40 : null;
+            const newIndex = newIds.indexOf(milestone.id);
+            const enterDelay = newIndex === -1 ? null : newIndex * 40;
             const reached = milestone.status === "done" || milestone.status === "active";
             const anchor = reached
               ? (milestone.anchors.started ?? milestone.anchors.done)
