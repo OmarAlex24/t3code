@@ -98,6 +98,29 @@ export const sandboxRowStates = (
     null;
 };
 
+/**
+ * Linked sandboxes this app is not paired with yet. The host's launch ends with its own bridge, so
+ * each app pairs on its own afterwards, whether or not the chat is open; meanwhile the host thread
+ * is the chat. A stopped sandbox waits until it runs again.
+ */
+export const sandboxesToPair = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  provisionerEnvironmentId: EnvironmentId | null,
+  pairedEnvironmentIds: ReadonlySet<EnvironmentId>,
+): ReadonlyArray<SandboxRecord> =>
+  provisionerEnvironmentId === null
+    ? []
+    : sandboxes.filter(
+        (sandbox) =>
+          sandbox.state === "running" &&
+          sandbox.threadId !== undefined &&
+          sandbox.hostProjectId !== undefined &&
+          sandbox.bridge !== undefined &&
+          sandbox.environmentId !== null &&
+          sandbox.environmentId !== provisionerEnvironmentId &&
+          !pairedEnvironmentIds.has(sandbox.environmentId),
+      );
+
 /** Whether the ref is the host thread the bridge drives rather than the sandbox's own thread. */
 export const isHostThreadRef = (sandbox: SandboxRecord, threadRef: ScopedThreadRef) =>
   sandbox.environmentId !== threadRef.environmentId;
