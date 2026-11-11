@@ -69,6 +69,7 @@ import * as PeerLinks from "./PeerLinks.ts";
 import { descriptorOf, layerLinkingEnvironment, linkTo, servePeer } from "./PeerLinks.testkit.ts";
 import * as RemoteDelegation from "./RemoteDelegation.ts";
 import * as PeerLinkRequests from "./PeerLinkRequests.ts";
+import * as SubSandboxes from "../sandbox/SubSandboxes.ts";
 
 // The laptop's agent delegates a task to the box through a link. The box is
 // its real /mcp behind real OAuth, with one thread the test finishes; the
@@ -647,6 +648,8 @@ const makeLaptop = (
   kept?: Context.Context<Layer.Success<ReturnType<typeof layerLinkingEnvironment>>>,
   /** Runs as each follow attempt here starts, on its follower's fiber. */
   beforeFollow: Effect.Effect<void, Orchestrator.OrchestratorV2Error> = Effect.void,
+  /** Sandboxes the laptop made for subagents, as a server with sandbox providers has. */
+  subSandboxes?: SubSandboxes.SubSandboxes["Service"],
 ) =>
   Effect.gen(function* () {
     const linking = kept ?? (yield* layerLinkingEnvironment(laptop).pipe(Layer.build));
@@ -692,6 +695,11 @@ const makeLaptop = (
                 };
               }),
             ),
+          ),
+          Layer.provide(
+            subSandboxes === undefined
+              ? Layer.empty
+              : Layer.succeed(SubSandboxes.SubSandboxes, subSandboxes),
           ),
           Layer.provideMerge(PeerForwarding.layer),
           Layer.provide(
@@ -1395,6 +1403,61 @@ it.effect("fails the task when the box revokes the link, and cancel interrupts i
       expect(failed?.result).toBe(
         "The linked environment no longer accepts this link. It may have been revoked there; link it again.",
       );
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a task on a subagent's sandbox ends that sandbox and says where its work went", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const settled: Array<string> = [];
+      const a = yield* makeLaptop(database, offers, undefined, undefined, {
+        start: () => Effect.die("unused"),
+        discard: () => Effect.void,
+        settle: (environmentId) =>
+          Effect.sync(() => {
+            settled.push(environmentId);
+            return "[Sub-sandbox] Its work is kept on the stopped sandbox Box.";
+          }),
+      });
+      yield* linkTo(a.links, b, "full-access");
+      yield* seedParent(a);
+
+      const delegated = yield* delegateToBox(a);
+      expect(settled).toEqual([]);
+      yield* Ref.set(thread.reply, "Built on the box.");
+      yield* Ref.set(thread.status, "completed");
+      yield* Deferred.succeed(thread.finished, undefined);
+      const task = yield* taskResult(a, delegated.taskId);
+      expect(task?.result).toBe(
+        "Built on the box.\n\n[Sub-sandbox] Its work is kept on the stopped sandbox Box.",
+      );
+      expect(settled).toEqual([box.environmentId]);
+
+      // A cancelled one ends its sandbox too, once, and keeps its result after that.
+      const cancelled = yield* a
+        .call("delegate_task", {
+          task: "Another one.",
+          target: {
+            environmentId: box.environmentId,
+            providerInstanceId: instanceId,
+            model: "gpt-5.4",
+          },
+          clientRequestId: "cancelled-on-sub-sandbox",
+        })
+        .pipe(Effect.map((result) => result.structuredContent as { taskId: NodeId }));
+      yield* a.call("task_cancel", { taskId: cancelled.taskId, reason: "Not needed" });
+      const ended = yield* taskResult(a, cancelled.taskId);
+      expect(ended?.status).toBe("cancelled");
+      expect(ended?.result).toContain("[Sub-sandbox]");
+      yield* a.call("task_cancel", { taskId: cancelled.taskId, clientRequestId: "again" });
+      expect(settled).toEqual([box.environmentId, box.environmentId]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
