@@ -396,6 +396,7 @@ import {
 import { useDraftHeroLayoutTransition } from "./chat/useDraftHeroLayoutTransition";
 import { useLocalDispatchState } from "./chat/useLocalDispatchState";
 import { ThreadMilestonesView } from "./chat/ThreadMilestonesView";
+import type { CoordinatorAsk } from "./chat/MilestoneBoard";
 import {
   formatMilestoneCommentPrefix,
   pendingAskCard,
@@ -2937,11 +2938,20 @@ export default function ChatView(props: ChatViewProps) {
     chatReveal !== null && chatReveal.threadKey === activeThreadKey ? chatReveal : null;
   const milestonesShortcutLabel = shortcutLabelForCommand(keybindings, "milestones.toggle");
   const milestoneTurnItems = serverVisibleTurnItems.map(({ item }) => item);
-  // A secret or link card waits on you in the timeline; Milestones shows the same card.
+  // A secret or link card waits on you in the timeline; Milestones and the plan show it too.
   const milestoneAskCard =
-    showMilestones && activeThreadShell?.hasPendingUserInput === true
-      ? pendingAskCard(serverVisibleTurnItems)
-      : null;
+    activeThreadShell?.hasPendingUserInput === true ? pendingAskCard(serverVisibleTurnItems) : null;
+  const coordinatorAsk: CoordinatorAsk | null =
+    activePendingApproval !== null
+      ? { kind: "approval" }
+      : milestoneAskCard !== null
+        ? { kind: "card", item: milestoneAskCard }
+        : activePendingUserInput !== null || activeThreadShell?.hasPendingUserInput === true
+          ? {
+              kind: "input",
+              question: activePendingUserInput?.questions[0]?.question ?? null,
+            }
+          : null;
   // A comment goes through the composer, so it queues or steers like any message you send.
   const commentOnMilestoneStable = useStableCallback((milestone: OrchestrationV2Milestone) => {
     const composer = composerRef.current;
@@ -3738,19 +3748,7 @@ export default function ChatView(props: ChatViewProps) {
                     threadRef={activeThreadRef}
                     projection={serverProjection}
                     turnItems={milestoneTurnItems}
-                    coordinatorAsk={
-                      activePendingApproval !== null
-                        ? { kind: "approval" }
-                        : milestoneAskCard !== null
-                          ? { kind: "card", item: milestoneAskCard }
-                          : activePendingUserInput !== null ||
-                              activeThreadShell?.hasPendingUserInput === true
-                            ? {
-                                kind: "input",
-                                question: activePendingUserInput?.questions[0]?.question ?? null,
-                              }
-                            : null
-                    }
+                    coordinatorAsk={coordinatorAsk}
                     bottomInset={composerReservedHeight}
                     onOpenThread={openSubagentStable}
                     onComment={canOperateThread ? commentOnMilestoneStable : null}
@@ -4224,6 +4222,13 @@ export default function ChatView(props: ChatViewProps) {
                 />
 
                 <ThreadDetailsPanel
+                  plan={
+                    isServerThread &&
+                    serverProjection !== null &&
+                    serverProjection.milestones.length > 0
+                      ? { projection: serverProjection, coordinatorAsk }
+                      : null
+                  }
                   anchor={threadPanelPopoverAnchorRef}
                   handle={threadPanelPopoverHandle}
                   forceNewWorktree={multipleModelSelections !== null}

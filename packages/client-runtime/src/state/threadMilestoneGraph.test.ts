@@ -11,11 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import {
-  deriveCoordinatorActivity,
-  deriveThreadMilestoneGraph,
-  milestoneStripWeights,
-} from "./threadMilestoneGraph.ts";
+import { deriveCoordinatorActivity, deriveThreadMilestoneGraph } from "./threadMilestoneGraph.ts";
 
 const at = (minute: number) =>
   DateTime.makeUnsafe(`2026-11-10T10:${String(minute).padStart(2, "0")}:00.000Z`);
@@ -104,16 +100,17 @@ describe("deriveThreadMilestoneGraph", () => {
     expect(graph.mode).toBe("milestones");
     if (graph.mode !== "milestones") return;
     expect(ids(graph.root!.agents)).toEqual(["scout"]);
-    expect(graph.milestones.map((node) => ids(node.agents))).toEqual([["mapper"], ["builder"], []]);
-    // The user's second turn landed while m2 was active.
-    expect(graph.milestones[1]!.turns.map((turn) => [turn.run.id, ids(turn.agents)])).toEqual([
-      ["run-2", ["orphan"]],
+    // The user's second turn landed while m2 was active, so its unstamped agent joins m2.
+    expect(graph.milestones.map((node) => ids(node.agents))).toEqual([
+      ["mapper"],
+      ["builder", "orphan"],
+      [],
     ]);
     expect(graph.coordinator).toEqual({ status: "waiting", liveAgents: 1 });
-    expect(graph.summary).toMatchObject({ position: 2, total: 3, changes: 1 });
+    expect(graph.summary).toEqual({ position: 2, total: 3 });
   });
 
-  it("collapses earlier sets and counts only the current one", () => {
+  it("keeps earlier sets in order with their agents, and counts only the current one", () => {
     const graph = deriveThreadMilestoneGraph({
       runs: [run(1, "completed", 0)],
       milestones: [
@@ -127,10 +124,16 @@ describe("deriveThreadMilestoneGraph", () => {
     });
 
     if (graph.mode !== "milestones") throw new Error(graph.mode);
-    expect(graph.earlierSets).toEqual([expect.objectContaining({ setId: "s1", agentCount: 1 })]);
-    expect(graph.earlierSets[0]!.milestones.map(({ id }) => id)).toEqual(["m1", "m2"]);
-    expect(graph.milestones.map(({ milestone }) => milestone.id)).toEqual(["m3", "m4", "m5"]);
-    expect(graph.summary).toMatchObject({ position: 2, total: 2 });
+    expect(
+      graph.milestones.map((node) => [node.milestone.id, node.current, ids(node.agents)]),
+    ).toEqual([
+      ["m1", false, ["early"]],
+      ["m2", false, []],
+      ["m3", true, []],
+      ["m4", true, []],
+      ["m5", true, []],
+    ]);
+    expect(graph.summary).toEqual({ position: 2, total: 2 });
     expect(graph.coordinator.status).toBe("idle");
   });
 
@@ -182,33 +185,5 @@ describe("deriveCoordinatorActivity", () => {
     ["a subagent's nested item", [item({ type: "reasoning", parentItemId: "agent-1" })], null],
   ])("labels %s", (_case, items, expected) => {
     expect(deriveCoordinatorActivity(items)).toBe(expected);
-  });
-});
-
-describe("milestoneStripWeights", () => {
-  it("sizes milestones by time spent, the active one by time so far, and the rest by the average", () => {
-    const now = DateTime.toEpochMillis(at(20));
-    const weights = milestoneStripWeights(
-      [
-        milestone("m1", "s1", "done", 0, { completedAt: at(4) }),
-        milestone("m2", "s1", "done", 4, { completedAt: at(12) }),
-        milestone("m3", "s1", "active", 12),
-        milestone("m4", "s1", "planned", null),
-      ],
-      now,
-    ).map((weight) => weight / 60_000);
-    expect(weights).toEqual([4, 8, 8, 20 / 3]);
-  });
-
-  it("keeps a sliver for a milestone that took no time", () => {
-    const weights = milestoneStripWeights(
-      [
-        milestone("m1", "s1", "done", 0, { completedAt: at(0) }),
-        milestone("m2", "s1", "done", 0, { completedAt: at(30) }),
-      ],
-      0,
-    );
-    expect(weights[0]).toBeGreaterThan(0);
-    expect(weights[0]! / weights[1]!).toBeGreaterThan(0.09);
   });
 });
