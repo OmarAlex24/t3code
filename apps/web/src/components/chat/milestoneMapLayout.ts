@@ -18,8 +18,11 @@ const RAIL_X = 18;
 const COL_GAP = 44;
 const INDENT = 32;
 const R = 8;
-/** Below this canvas width a milestone's agents nest under it instead of fanning out right. */
-export const WIDE_MIN_WIDTH = 690;
+const WIDE_MIN_WIDTH = 690;
+
+/** Whether a milestone's agents fan out to its right in `width`, or nest under it. */
+export const fitsWide = (width: number, map: MilestoneMap) =>
+  width >= WIDE_MIN_WIDTH + map.maxCol * LANE_W;
 
 export interface NodeBox {
   readonly x: number;

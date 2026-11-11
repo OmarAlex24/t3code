@@ -156,6 +156,7 @@ export function ChatCanvas({
     detailsCardTopInset: model.detailsCardTopInset,
     preferredDetailsCard: model.preferredDetailsCard,
     detailsCardPlacement: model.detailsCardPlacement,
+    detailsCardInsetEnd: model.detailsCardInsetEnd,
   };
   const { layout } = context;
   return (
