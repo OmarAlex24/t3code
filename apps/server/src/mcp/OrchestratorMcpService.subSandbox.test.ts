@@ -13,7 +13,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -113,7 +112,7 @@ const layerFor = (calls: Calls, options: { readonly delegateFails?: boolean } = 
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getThreadRecords: (_threadId, fields) =>
             Effect.succeed(
-              (fields.includes("subagents")
+              ((fields as ReadonlyArray<string>).includes("subagents")
                 ? { thread: parentProjection.thread, subagents: [remoteTask] }
                 : parentProjection) as never,
             ),
@@ -125,7 +124,7 @@ const layerFor = (calls: Calls, options: { readonly delegateFails?: boolean } = 
         }),
         Layer.mock(ProjectService.ProjectService)({
           getById: () =>
-            Effect.succeed(Option.some({ id: projectId, workspaceRoot: "/home/me/app" } as never)),
+            Effect.succeedSome({ id: projectId, workspaceRoot: "/home/me/app" } as never),
         }),
         Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(RemoteDelegation.RemoteDelegation)({
