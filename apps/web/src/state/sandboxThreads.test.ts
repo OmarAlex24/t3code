@@ -25,6 +25,7 @@ import {
   sandboxMirrorTitleUpdates,
   sandboxRowPhase,
   sandboxRowStates,
+  sandboxesToPair,
   withSandboxHostMirrors,
 } from "./sandboxThreads";
 
@@ -325,5 +326,33 @@ describe("the sandbox bridge as an internal provider instance", () => {
     expect(
       resolveProjectDefaultProviderModelSelection(providers, settings as never, projectId),
     ).toEqual({ instanceId: "claudeAgent", model: "opus" });
+  });
+});
+
+describe("sandboxesToPair", () => {
+  const linked = (fields: Partial<SandboxRecord> = {}) =>
+    record({
+      hostProjectId: ProjectId.make("project-host"),
+      bridge: {
+        sessionId: "bridge-session-1",
+        secret: "sandbox-bridge-1",
+        expiresAt: "2027-01-01T00:00:00.000Z",
+      },
+      ...fields,
+    });
+
+  it("pairs with a linked, running sandbox this app has not paired with", () => {
+    const sandbox = linked();
+    expect(sandboxesToPair([sandbox], HOST, new Set())).toEqual([sandbox]);
+    expect(sandboxesToPair([sandbox], HOST, new Set([SANDBOX]))).toEqual([]);
+  });
+
+  it("waits for a launch to finish, a stopped sandbox to run, and a link to exist", () => {
+    expect(sandboxesToPair([linked({ state: "provisioning" })], HOST, new Set())).toEqual([]);
+    expect(sandboxesToPair([linked({ state: "stopped" })], HOST, new Set())).toEqual([]);
+    expect(sandboxesToPair([record()], HOST, new Set())).toEqual([]);
+    // One that answers as the host, or with no host to pair through.
+    expect(sandboxesToPair([linked({ environmentId: HOST })], HOST, new Set())).toEqual([]);
+    expect(sandboxesToPair([linked()], null, new Set())).toEqual([]);
   });
 });
