@@ -278,6 +278,7 @@ import {
   deleteThreadSandbox,
   isSandboxThread,
   sandboxMirrorTarget,
+  sandboxRowPhase,
   threadSandboxUnavailableReason,
   withSandboxHostMirrors,
 } from "../state/sandboxThreads";
@@ -362,6 +363,11 @@ interface SidebarThreadPartitionInput {
   readonly connectedEnvironmentIds: readonly EnvironmentId[];
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly workingShelfEnabled: boolean;
+  /**
+   * Whether the thread's sandbox is stopped. Its last run may still read as running (the machine
+   * went down mid-run), but nothing works there until a message resumes it.
+   */
+  readonly sandboxStopped: (thread: EnvironmentThreadShell) => boolean;
   /** Boring mode: folders list active threads by the user's latest message. */
   readonly sortActiveBySend: boolean;
   // Snooze wakes, the queued-turn grace and the Working shelf's exit grace depend
@@ -428,6 +434,7 @@ function useSidebarThreads(input: {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly sandboxStopped: (thread: EnvironmentThreadShell) => boolean;
   readonly routeRowThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
@@ -442,6 +449,7 @@ function useSidebarThreads(input: {
     optimisticDrop,
     threads,
     delegatedUnderParent,
+    sandboxStopped,
     routeRowThreadKey,
     folderGroups,
     keepEmptyFolders: keepEmpty,
@@ -492,6 +500,7 @@ function useSidebarThreads(input: {
     connectedEnvironmentIds,
     optimisticDrop,
     workingShelfEnabled,
+    sandboxStopped,
     sortActiveBySend: folderGroups !== null,
     clockKey: `${nowMinute}:${snoozeWakeClock}:${inboxReturnsVersion}`,
   });
@@ -627,6 +636,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     serverConfigs,
     optimisticDrop,
     workingShelfEnabled,
+    sandboxStopped,
     sortActiveBySend,
   } = input;
   const preciseNow = new Date().toISOString();
@@ -635,8 +645,10 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
   const working: EnvironmentThreadShell[] = [];
+  // A stopped sandbox's chat waits on the user, so it sits with the active threads, not Working.
   const inbox = (thread: EnvironmentThreadShell, manuallyMoved = false) =>
     workingShelfEnabled &&
+    !sandboxStopped(thread) &&
     (manuallyMoved ? isThreadWorking(thread) : inboxObservation.isWorking(thread))
       ? working
       : active;
@@ -1365,6 +1377,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     optimisticDrop,
     threads: listedThreads,
     delegatedUnderParent,
+    sandboxStopped: (thread) =>
+      sandboxRowPhase(sandboxRowState(scopeThreadRef(thread.environmentId, thread.id))) ===
+      "stopped",
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
       ? scopedProjectGroups.length === 0

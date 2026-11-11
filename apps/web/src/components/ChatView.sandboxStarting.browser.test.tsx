@@ -1,6 +1,6 @@
 import { secondTick } from "@t3tools/client-runtime/clock";
 import { createMemoryHistory } from "@tanstack/react-router";
-import { EnvironmentId, type SandboxRecord } from "@t3tools/contracts";
+import { EnvironmentId, RunId, type SandboxRecord } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import type * as Context from "effect/Context";
 import { expect, it, vi } from "vite-plus/test";
@@ -15,7 +15,9 @@ import { getRouter } from "~/router";
 import {
   ENVIRONMENT_ID,
   installFakeEnvironment,
+  runningRun,
   threadWithHistory,
+  userItem,
   type FakeDriver,
 } from "../../test/fakeEnvironment";
 import { render } from "../../test/render";
@@ -84,4 +86,56 @@ it("the composer says a sandbox is starting, and for how long, while its resume 
     /^Starting sandbox bx_46wr(Starting sandbox bx_46wr)?·4\ds$/,
   );
   await page.screenshot({ path: "__screenshots__/sandbox-state-banner.png" });
+});
+
+it("a stopped sandbox's chat shows the run its machine stopped in as stopped, not working", async () => {
+  // The sandbox stopped at its running limit mid-turn: the thread's last known run still runs.
+  const base = threadWithHistory("thread-halted", 1);
+  const halted = {
+    ...base,
+    runs: [...base.runs, runningRun(base.id, "thread-halted-run-1", 2, "thread-halted-user-1")],
+    items: [
+      ...base.items,
+      userItem(base.id, RunId.make("thread-halted-run-1"), "thread-halted-user-1", 2, "Keep going"),
+    ],
+  };
+  const sandboxes = [
+    {
+      instanceId: "instance-1",
+      environmentId: EnvironmentId.make(ENVIRONMENT_ID),
+      configId: "config-1",
+      threadId: halted.id,
+      provider: "boat",
+      sandboxId: "bx_46wrabcd",
+      label: "render on Boat small",
+      size: "small",
+      state: "stopped",
+      createdAt: "2026-11-01T10:00:00.000Z",
+      updatedAt: "2026-11-10T11:00:00.000Z",
+      httpBaseUrl: "https://bx.example.test",
+      runningSince: null,
+      stoppedAt: "2026-11-10T11:00:00.000Z",
+      maxRunningMinutes: 480,
+    },
+  ] satisfies ReadonlyArray<SandboxRecord>;
+  using _environment = installFakeEnvironment([halted], { sandboxes });
+  __setClientSettingsForTests({
+    ...DEFAULT_CLIENT_SETTINGS,
+    onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+  });
+  await page.viewport(1100, 700);
+
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${halted.id}`] }),
+  );
+  await router.load();
+  await using _app = await render(<AppRoot router={router} />, { router: false });
+  await expect.element(page.getByText("Keep going").first()).toBeVisible();
+  await expect.element(page.getByText("Sandbox bx_46wr is stopped")).toBeVisible();
+  // Nothing runs on a stopped machine, so there is no live timer and nothing to stop.
+  await expect.element(page.getByText(/^Working for/)).not.toBeInTheDocument();
+  await expect
+    .element(page.getByRole("button", { name: "Stop generation" }))
+    .not.toBeInTheDocument();
+  await page.screenshot({ path: "__screenshots__/sandbox-stopped-halted-run.png" });
 });
