@@ -127,6 +127,17 @@ export const OrchestratorMcpTarget = Schema.Struct({
 });
 export type OrchestratorMcpTarget = typeof OrchestratorMcpTarget.Type;
 
+export const OrchestratorMcpDelegateTaskTarget = Schema.Struct({
+  ...OrchestratorMcpTarget.fields,
+  sandbox: Schema.optional(
+    Schema.Struct({ size: Schema.optional(TrimmedNonEmptyString) }).annotate({
+      description:
+        "Own sandbox for a child that needs more CPU, RAM or disk, or runs heavy builds in parallel. Not with `environmentId`.",
+    }),
+  ),
+});
+export type OrchestratorMcpDelegateTaskTarget = typeof OrchestratorMcpDelegateTaskTarget.Type;
+
 export const OrchestratorMcpRuntimeMode = Schema.Union([Schema.Literal("inherit"), RuntimeMode]);
 export type OrchestratorMcpRuntimeMode = typeof OrchestratorMcpRuntimeMode.Type;
 
@@ -168,7 +179,7 @@ export type OrchestratorMcpTerminalDelegatedTaskStatus =
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt,
-  target: Schema.optional(OrchestratorMcpTarget),
+  target: Schema.optional(OrchestratorMcpDelegateTaskTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(
@@ -915,6 +926,8 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "orchestration_error",
       "thread_credential_required",
       "target_required",
+      /** A limit on how many of something may run at once is reached, such as subagent sandboxes. */
+      "concurrency_full",
     ]),
     message: Schema.String,
   },
