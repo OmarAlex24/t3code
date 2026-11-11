@@ -17,6 +17,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
+  DEFAULT_SANDBOX_IDLE_MINUTES,
   type EnvironmentId,
   type SandboxEnvironmentConfig,
   type SandboxOrphan,
@@ -261,7 +262,15 @@ export function SandboxManagementSection() {
                   providerOf(config.provider)?.sizes.find((size) => size.id === config.size)
                     ?.label ?? config.size,
                   ...(config.template === undefined ? [] : [`from ${config.template}`]),
-                  `stops after ${formatDuration(config.maxRunningMinutes)} running`,
+                  // A provider that keeps a sandbox up while it works stops it on idle instead.
+                  ...(providerOf(config.provider)?.capabilities.keepAlive === true
+                    ? [
+                        `stops after ${formatDuration(config.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES)} without work`,
+                        ...(config.runningCapMinutes === undefined
+                          ? []
+                          : [`at most ${formatDuration(config.runningCapMinutes)} running`]),
+                      ]
+                    : [`stops after ${formatDuration(config.maxRunningMinutes)} running`]),
                 ].join(" · ")}
               </span>
             </div>
@@ -638,7 +647,19 @@ function SandboxRow({
       ? [dot.meta + (stoppedMinutes === null ? "" : ` ${formatDuration(stoppedMinutes)}`)]
       : [
           `up ${formatDuration(runningMinutes)}`,
-          `stops in ${formatDuration(Math.max(0, sandbox.maxRunningMinutes - runningMinutes))}`,
+          // With a keep-alive key it runs while its threads work, up to an optional hard limit.
+          ...(sandbox.keepAliveKey === undefined
+            ? [
+                `stops in ${formatDuration(Math.max(0, sandbox.maxRunningMinutes - runningMinutes))}`,
+              ]
+            : [
+                `stops after ${formatDuration(sandbox.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES)} without work`,
+                ...(sandbox.runningCapMinutes === undefined
+                  ? []
+                  : [
+                      `at most ${formatDuration(Math.max(0, sandbox.runningCapMinutes - runningMinutes))} more`,
+                    ]),
+              ]),
         ]),
     ...(sandbox.costDollars === undefined ? [] : [formatCost(sandbox.costDollars)]),
   ];
