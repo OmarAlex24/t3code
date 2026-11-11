@@ -372,6 +372,107 @@ describe("sandbox chats in the sidebar", () => {
     await page.screenshot({ path: "__screenshots__/sandbox-state-stopped-hover.png" });
   });
 
+  it("lists a stopped sandbox's chat that was mid-run with the active threads, not in Working", async () => {
+    using stack = new DisposableStack();
+    const previousSettings = getClientSettings();
+    stack.defer(() => __setClientSettingsForTests(previousSettings));
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+      sidebarWorkingShelfEnabled: true,
+    });
+    const STARTING = EnvironmentId.make("sandbox-starting");
+    const startingThreadId = ThreadId.make("thread-starting");
+    mocks.sandboxes = [
+      // Stopped at its running limit while a turn ran: its own thread still reads as running.
+      sandbox({
+        hostProjectId: ProjectId.make("project-host"),
+        state: "stopped",
+        runningSince: null,
+        stoppedAt: "2026-11-10T11:00:00.000Z",
+      }),
+      // The same, seen through the host's mirror, since its own thread is not listed.
+      sandbox({
+        instanceId: "instance-2",
+        environmentId: LEGACY_SANDBOX,
+        threadId: legacyThreadId,
+        sandboxId: "bx_9kq2wxyz",
+        hostProjectId: ProjectId.make("project-host"),
+        state: "stopped",
+        runningSince: null,
+      }),
+      // One already coming back keeps its place in Working.
+      sandbox({
+        instanceId: "instance-3",
+        environmentId: STARTING,
+        threadId: startingThreadId,
+        sandboxId: "bx_7tq9mnop",
+        state: "stopped",
+        runningSince: null,
+        resumingSince: "2026-11-10T11:00:00.000Z",
+      }),
+    ];
+    vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
+    vi.mocked(useProjects).mockReturnValue([
+      placeholder,
+      project(SANDBOX, "project-sandbox", "OmarAlex24/horizon-stack"),
+      project(STARTING, "project-starting", "OmarAlex24/starting-stack"),
+      project(REMOTE, "project-remote", "OmarAlex24/remote-stack"),
+    ]);
+    await page.viewport(1100, 640);
+    const running = (thread: EnvironmentThreadShell): EnvironmentThreadShell => ({
+      ...thread,
+      runtime: {
+        status: "running",
+        activeRunId: null,
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        providerName: "Claude",
+        lastError: null,
+        updatedAt: "2026-11-10T10:59:00.000Z",
+      },
+    });
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      running(shell(SANDBOX, bridgedThreadId, "project-sandbox", "Refactor the billing worker")),
+      running(shell(HOST, legacyThreadId, "project-host", "Add retries to the importer")),
+      running(shell(STARTING, startingThreadId, "project-starting", "Port the search index")),
+      running(shell(REMOTE, remoteThreadId, "project-remote", "Runs on a paired Mac")),
+    ]);
+
+    await using _screen = await render(
+      <SidebarProvider>
+        <div className="flex h-[600px] w-80 flex-col bg-sidebar text-sidebar-foreground">
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </div>
+      </SidebarProvider>,
+    );
+
+    const header = page.getByTestId("sidebar-working-header");
+    await expect.element(header).toBeVisible();
+    // Only the work that really runs: the paired Mac's and the sandbox coming back.
+    await expect.poll(() => header.element().textContent?.replace(/\D/g, "")).toBe("2");
+    const above = (title: string) => {
+      const row = page.getByText(title).first().element().closest("li[data-thread-item]")!;
+      return Boolean(
+        row.compareDocumentPosition(header.element()) & Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    };
+    for (const title of ["Refactor the billing worker", "Add retries to the importer"]) {
+      await expect.element(page.getByText(title).first()).toBeVisible();
+      expect(above(title), title).toBe(true);
+    }
+    for (const title of ["Refactor the billing worker", "Add retries to the importer"]) {
+      const row = page.getByText(title).first().element().closest("li[data-thread-item]")!;
+      expect(row.textContent).toContain("Stopped");
+    }
+    await page.screenshot({ path: "__screenshots__/sandbox-stopped-active.png" });
+
+    await userEvent.click(page.getByTestId("sidebar-working-shelf-toggle"));
+    for (const title of ["Port the search index", "Runs on a paired Mac"]) {
+      await expect.element(page.getByText(title).first()).toBeVisible();
+      expect(above(title), title).toBe(false);
+    }
+  });
+
   it("offers deleting a sandbox deleted outside T3 Code from its thread's menu, and says why the rest is off", async () => {
     using stack = new DisposableStack();
     const previousSettings = getClientSettings();

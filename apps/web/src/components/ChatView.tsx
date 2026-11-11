@@ -1079,6 +1079,11 @@ export default function ChatView(props: ChatViewProps) {
   // A legacy sandbox thread's server is off on purpose, so the session cannot be read and the
   // connection never comes up until a send or un-settle resumes it from this client.
   const legacySandboxStopped = activeSandboxStopped && !activeSandboxOnHost;
+  // A run the sandbox was in when it stopped ended with its machine, though the thread's last
+  // known state still reads as running: until a resume brings the real state back, nothing
+  // works there, so it shows no live run and nothing to interrupt.
+  const sandboxRunHalted =
+    activeSandboxStopped && !activeSandboxOnHost && (activeSandbox?.resumingSince ?? null) === null;
   const [sandboxResendPending, setSandboxResendPending] = useState(false);
   const activeEnvironmentServerBrowser = useEnvironmentSupportsServerBrowser(
     activeThreadRef?.environmentId ?? null,
@@ -1469,7 +1474,7 @@ export default function ChatView(props: ChatViewProps) {
     canOperateThread &&
     conversationProviderStatus !== null &&
     conversationProviderStatus.supportsConversationRollback !== false;
-  const phase = derivePhase(activeRuntime);
+  const phase = sandboxRunHalted ? "disconnected" : derivePhase(activeRuntime);
   const serverThreadId = serverThread?.id;
   const serverThreadEnvironmentId = serverThread?.environmentId;
   const setThreadError = makeThreadErrorSetter({
@@ -1600,7 +1605,7 @@ export default function ChatView(props: ChatViewProps) {
     phase,
     isSendBusy,
     isCompacting,
-    runlessWorkStartedAt,
+    runlessWorkStartedAt: sandboxRunHalted ? null : runlessWorkStartedAt,
   });
   const activeContextWindow = deriveLatestContextWindowSnapshot(
     serverVisibleTurnItems ?? [],
@@ -1964,7 +1969,9 @@ export default function ChatView(props: ChatViewProps) {
   const { focusComposer: focusComposerStable, scheduleComposerFocus: scheduleComposerFocusStable } =
     useComposerFocus(composerRef);
   const canInterruptRunningThread =
-    canOperateThread && deriveCanInterruptRunningThread(activeThread !== undefined, activeRuntime);
+    canOperateThread &&
+    !sandboxRunHalted &&
+    deriveCanInterruptRunningThread(activeThread !== undefined, activeRuntime);
   const onInterrupt = async () => {
     if (
       !activeThread ||
