@@ -10340,6 +10340,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         detail: decision.message,
       });
     }
+    if (decision._tag === "unchanged") return;
     const now = yield* DateTime.now;
     const turnItem = milestoneTurnItem({
       base: {
