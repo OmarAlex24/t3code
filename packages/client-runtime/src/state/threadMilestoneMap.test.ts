@@ -527,19 +527,46 @@ describe("deriveMilestoneMap", () => {
 describe("agentLine", () => {
   const done = { status: "completed", result: "## Fase 1\n- `ok`", progress: "Reading" } as const;
   const running = { ...done, status: "running" } as const;
+  const root = "/Users/me/worktrees/t3code/feat-x";
   it.each([
-    [{ kind: "approval", command: "pnpm db:reset" }, null, done, "Wants to run pnpm db:reset"],
+    [
+      { kind: "approval", command: "pnpm db:reset" },
+      null,
+      done,
+      null,
+      "Wants to run pnpm db:reset",
+    ],
     [
       { kind: "secret", label: "GITHUB_CLIENT_SECRET" },
       { summary: "Ran tests" },
       done,
+      null,
       "Asks you for GITHUB_CLIENT_SECRET",
     ],
-    [null, { summary: "Read", detail: "src/auth/session.ts" }, done, "Read · src/auth/session.ts"],
-    [null, null, done, "Fase 1 ok"],
-    [null, null, running, "Reading"],
-    [null, null, { status: "completed", result: null }, null],
-  ] as const)("%o with %o and %o reads %s", (ask, action, agent, expected) => {
-    expect(agentLine(ask, action, agent)).toBe(expected);
-  });
+    [
+      null,
+      { summary: "Read", detail: "src/auth/session.ts" },
+      done,
+      root,
+      "Read · src/auth/session.ts",
+    ],
+    [null, { summary: `Read ${root}/src/a.ts` }, done, root, "Read feat-x/src/a.ts"],
+    [
+      null,
+      { summary: "Ran", detail: `vp test run ${root}/a.ts --root=${root}/apps "${root}/b c.ts"` },
+      done,
+      `${root}/`,
+      'Ran · vp test run feat-x/a.ts --root=feat-x/apps "feat-x/b c.ts"',
+    ],
+    [null, { summary: `Read ${root}-two/a.ts` }, done, root, `Read ${root}-two/a.ts`],
+    [null, { summary: `Read ${root}/a.ts` }, done, null, `Read ${root}/a.ts`],
+    [null, null, done, root, "Fase 1 ok"],
+    [null, null, running, null, "Reading"],
+    [null, null, { status: "completed", result: null }, null, null],
+  ] as const)(
+    "%o with %o and %o under %s reads %s",
+    (ask, action, agent, workspaceRoot, expected) => {
+      expect(agentLine(ask, action, agent, workspaceRoot)).toBe(expected);
+    },
+  );
 });

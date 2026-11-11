@@ -9,6 +9,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
+import { fileBasename } from "@t3tools/shared/path";
 
 import { scopedThreadKey, scopeThreadRef } from "../environment/scoped.ts";
 
@@ -348,6 +349,7 @@ export function agentLine(
   ask: AgentAsk | null,
   latestAction: Pick<OrchestrationV2LatestActionSummary, "summary" | "detail"> | null | undefined,
   agent: Pick<Subagent, "status" | "result" | "progress">,
+  workspaceRoot?: string | null,
 ): string | null {
   if (ask !== null) {
     switch (ask.kind) {
@@ -362,7 +364,7 @@ export function agentLine(
   const plain = (text: string | null | undefined) =>
     text == null ? null : plainSubagentDetail(text);
   return (
-    actionLine(latestAction) ??
+    actionLine(latestAction, workspaceRoot) ??
     subagentDetailPreview({
       status: agent.status,
       result: plain(agent.result),
@@ -371,11 +373,16 @@ export function agentLine(
   );
 }
 
+/** A thread's latest step, with paths under its workspace shown as `<workspace>/<relative>`. */
 export function actionLine(
   action: Pick<OrchestrationV2LatestActionSummary, "summary" | "detail"> | null | undefined,
+  workspaceRoot?: string | null,
 ): string | null {
   if (action == null) return null;
-  return action.detail === undefined ? action.summary : `${action.summary} · ${action.detail}`;
+  const line =
+    action.detail === undefined ? action.summary : `${action.summary} · ${action.detail}`;
+  const root = workspaceRoot?.replace(/[/\\]+$/, "");
+  return root ? line.replaceAll(`${root}/`, `${fileBasename(root)}/`) : line;
 }
 
 function agentStatus(agent: Subagent, ask: AgentAsk | null): MapStatus {
