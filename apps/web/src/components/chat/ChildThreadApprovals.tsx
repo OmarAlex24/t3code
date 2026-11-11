@@ -8,9 +8,14 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useState } from "react";
 import { useEnvironmentScope } from "../../state/session";
-import { childThreadApprovalsAtom, threadEnvironment } from "../../state/threads";
+import {
+  childThreadApprovalsAtom,
+  childThreadSecretRequestsAtom,
+  threadEnvironment,
+} from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
+import { SecretRequestCard } from "./SecretRequestCard";
 
 function ChildApproval({ entry }: { entry: ChildThreadApproval }) {
   const canRespond = useEnvironmentScope(entry.thread.environmentId, AuthOrchestrationOperateScope);
@@ -77,9 +82,18 @@ function ChildApproval({ entry }: { entry: ChildThreadApproval }) {
 
 export function ChildThreadApprovals({ threadRef }: { threadRef: ScopedThreadRef | null }) {
   const approvals = useAtomValue(childThreadApprovalsAtom(threadRef));
-  if (approvals.length === 0) return null;
+  const secrets = useAtomValue(childThreadSecretRequestsAtom(threadRef));
+  if (approvals.length === 0 && secrets.length === 0) return null;
   return (
     <div className="mb-2 flex max-h-80 flex-col gap-2 overflow-auto">
+      {secrets.map((entry) => (
+        <SecretRequestCard
+          key={JSON.stringify([entry.thread.environmentId, entry.item.id])}
+          environmentId={entry.thread.environmentId}
+          item={entry.item}
+          visibility="local"
+        />
+      ))}
       {approvals.map((entry) => (
         <ChildApproval
           key={JSON.stringify([

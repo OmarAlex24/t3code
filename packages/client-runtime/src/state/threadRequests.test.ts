@@ -20,6 +20,7 @@ import { v2Now, v2Projection, v2ThreadShell } from "./orchestrationV2TestFixture
 import {
   createQuestionHistoryProjector,
   createChildThreadApprovalsAtom,
+  createChildThreadSecretRequestsAtom,
   type PendingThreadRequests,
   derivePendingThreadRequests,
   declinePendingApprovals,
@@ -639,6 +640,56 @@ it("loads only child approvals and retains their destination across environments
   );
   expect(registry.get(approvalsAtom(parent))).toEqual([]);
   expect(readDetails).not.toHaveBeenCalled();
+
+  // The same children now wait on a secret: only their waiting cards reach the parent.
+  const card = (id: string, secretStatus: "pending" | "saved") => ({
+    position: 0,
+    visibility: "local" as const,
+    sourceThreadId: childId,
+    sourceItemId: TurnItemId.make(id),
+    item: {
+      id: TurnItemId.make(id),
+      threadId: childId,
+      runId: null,
+      nodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: secretStatus === "pending" ? ("waiting" as const) : ("completed" as const),
+      title: "GITHUB_CLIENT_SECRET",
+      startedAt: v2Now,
+      completedAt: null,
+      updatedAt: v2Now,
+      type: "secret_request" as const,
+      label: "GITHUB_CLIENT_SECRET",
+      reason: "To test the real OAuth flow",
+      secretStatus,
+    },
+  });
+  const items = Atom.family((key: string) =>
+    Atom.make<OrchestrationV2ThreadProjection["visibleTurnItems"]>(
+      key.startsWith(local) ? [card("saved", "saved"), card("asking", "pending")] : [],
+    ),
+  );
+  const readItems = vi.fn((ref: ScopedThreadRef) => items(threadKey(ref)));
+  const secretsAtom = createChildThreadSecretRequestsAtom({
+    childThreadInputsAtom: () => children,
+    visibleTurnItemsAtom: readItems,
+  });
+  const unmountSecrets = registry.mount(secretsAtom(parent));
+  expect(
+    registry.get(secretsAtom(parent)).map((entry) => [entry.thread.environmentId, entry.item.id]),
+  ).toEqual([[local, "asking"]]);
+  readItems.mockClear();
+  registry.set(
+    children,
+    registry.get(children).map((child) => ({ ...child, hasPendingUserInput: false })),
+  );
+  expect(registry.get(secretsAtom(parent))).toEqual([]);
+  expect(readItems).not.toHaveBeenCalled();
+  unmountSecrets();
   unmount();
   registry.dispose();
 });
