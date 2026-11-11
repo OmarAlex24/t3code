@@ -22,6 +22,7 @@ import {
   checkSubSandboxCapacity,
   resolveSubSandboxConfig,
   resolveSubSandboxSize,
+  type SubSandboxCaller,
 } from "./subSandboxPolicy.ts";
 
 /** A subagent's sandbox, linked here and ready for its task. */
@@ -47,6 +48,19 @@ export class SubSandboxes extends Context.Service<
       /** The parent's checkout, whose repository and pushed branch the sandbox clones. */
       readonly cwd: string;
       readonly size: string | undefined;
+      /**
+       * For a parent that works on a sandbox of its own, whose clone is there and not at `cwd`:
+       * the repository and pushed branch that clone tracks. `cwd` is then only the host
+       * project's folder, read for env files when it is a real checkout of the repository.
+       */
+      readonly repository?: {
+        readonly remoteUrl: string;
+        readonly canonicalKey: string;
+        readonly baseRef: string | undefined;
+        readonly hostCheckout: boolean;
+      };
+      /** Who asked, for the words of a refusal. `delegate_task` when absent. */
+      readonly caller?: SubSandboxCaller;
     }) => Effect.Effect<StartedSubSandbox, OrchestratorMcpFailure>;
     /** Deletes a sandbox whose task never started. */
     readonly discard: (instanceId: string) => Effect.Effect<void>;
@@ -61,8 +75,10 @@ export class SubSandboxes extends Context.Service<
 const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
   new OrchestratorMcpFailure({ code, message });
 
-const LINKED_ENVIRONMENTS_NEEDED =
-  "A subagent's sandbox runs its task as a linked environment, and Linked environments is off on this machine. Ask the user to turn it on in Settings → Labs, then try again, or run the task without target.sandbox.";
+const linkedEnvironmentsNeeded = (caller: SubSandboxCaller) =>
+  caller === "delegate_task"
+    ? "A subagent's sandbox runs its task as a linked environment, and Linked environments is off on this machine. Ask the user to turn it on in Settings → Labs, then try again, or run the task without target.sandbox."
+    : "A sub-sandbox runs its task as a linked environment of the user's computer, and Linked environments is off there. Ask the user to turn it on in T3 Code's Settings → Labs on their computer, then try again, or run the task here, on this sandbox.";
 
 /** The branch name a remote-tracking ref such as `origin/feature/x` points at. */
 const branchOfUpstream = (upstreamRef: string | null) => {
@@ -142,10 +158,32 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  /** The repository and pushed branch of the parent's checkout on this machine. */
+  const checkoutSource = Effect.fn("SubSandboxes.checkoutSource")(function* (cwd: string) {
+    const identity = yield* repositoryIdentities.resolve(cwd);
+    const remoteUrl = identity?.locator.remoteUrl;
+    if (remoteUrl === undefined) {
+      return yield* failure(
+        "invalid_request",
+        "This thread's checkout has no git remote, so a sandbox has nothing to clone.",
+      );
+    }
+    // The sandbox clones from GitHub, so it gets the parent's branch only once that is pushed.
+    const status = yield* git.statusDetailsLocal(cwd).pipe(Effect.orElseSucceed(() => null));
+    return {
+      remoteUrl,
+      repositoryKey: identity?.canonicalKey.toLowerCase() ?? null,
+      baseRef:
+        status !== null && status.hasUpstream ? branchOfUpstream(status.upstreamRef) : undefined,
+      hostCheckout: true,
+    };
+  });
+
   const start: SubSandboxes["Service"]["start"] = Effect.fn("SubSandboxes.start")(
     function* (input) {
+      const caller = input.caller ?? "delegate_task";
       if (!(yield* peerLinks.enabled)) {
-        return yield* failure("invalid_request", LINKED_ENVIRONMENTS_NEEDED);
+        return yield* failure("invalid_request", linkedEnvironmentsNeeded(caller));
       }
       const project = yield* projects.getById(input.projectId).pipe(
         Effect.map(Option.getOrUndefined),
@@ -154,20 +192,15 @@ const make = Effect.gen(function* () {
       if (project === undefined) {
         return yield* failure("invalid_request", `Project ${input.projectId} was not found.`);
       }
-      const identity = yield* repositoryIdentities.resolve(input.cwd);
-      const remoteUrl = identity?.locator.remoteUrl;
-      if (remoteUrl === undefined) {
-        return yield* failure(
-          "invalid_request",
-          "This thread's checkout has no git remote, so a sandbox has nothing to clone.",
-        );
-      }
-      // The sandbox clones from GitHub, so it gets the parent's branch only once that is pushed.
-      const status = yield* git
-        .statusDetailsLocal(input.cwd)
-        .pipe(Effect.orElseSucceed(() => null));
-      const baseRef =
-        status !== null && status.hasUpstream ? branchOfUpstream(status.upstreamRef) : undefined;
+      const source = yield* input.repository === undefined
+        ? checkoutSource(input.cwd)
+        : Effect.succeed({
+            remoteUrl: input.repository.remoteUrl,
+            repositoryKey: input.repository.canonicalKey.toLowerCase(),
+            baseRef: input.repository.baseRef,
+            hostCheckout: input.repository.hostCheckout,
+          });
+      const { remoteUrl, baseRef } = source;
       const providers = yield* provisioner.providers;
       const instanceId = yield* random.uuidV4();
 
@@ -183,7 +216,7 @@ const make = Effect.gen(function* () {
           const resolved = resolveSubSandboxConfig({
             parentThreadId: input.parentThreadId,
             projectId: input.projectId,
-            repositoryKey: identity?.canonicalKey.toLowerCase() ?? null,
+            repositoryKey: source.repositoryKey,
             records: listed,
             configs,
           });
@@ -195,6 +228,7 @@ const make = Effect.gen(function* () {
             parentThreadId: input.parentThreadId,
             records: listed,
             starting,
+            caller,
           });
           if (full !== null) return yield* failure(full.code, full.message);
           const sized = resolveSubSandboxSize({
@@ -203,6 +237,7 @@ const make = Effect.gen(function* () {
               providers.providers.find((provider) => provider.kind === resolved.config.provider)
                 ?.sizes ?? [],
             requested: input.size,
+            caller,
           });
           if (sized._tag === "refused") {
             return yield* failure(sized.refusal.code, sized.refusal.message);
@@ -224,7 +259,9 @@ const make = Effect.gen(function* () {
               title: project.title,
               remoteUrl,
               ...(baseRef === undefined ? {} : { baseRef }),
-              hostCopy: { projectId: project.id, workspaceRoot: project.workspaceRoot },
+              ...(source.hostCheckout
+                ? { hostCopy: { projectId: project.id, workspaceRoot: project.workspaceRoot } }
+                : {}),
             },
           })
           .pipe(
