@@ -212,13 +212,16 @@ function currentMilestoneSetId(
 
 export type MilestoneDecision =
   | { readonly _tag: "accepted"; readonly detail: MilestoneItemDetail }
-  | { readonly _tag: "rejected"; readonly message: string };
+  | { readonly _tag: "rejected"; readonly message: string }
+  | { readonly _tag: "unchanged" };
 
 const rejected = (message: string): MilestoneDecision => ({ _tag: "rejected", message });
 const accepted = (detail: Omit<MilestoneItemDetail, "type">): MilestoneDecision => ({
   _tag: "accepted",
   detail: { type: "milestone", ...detail },
 });
+
+const titleKey = (title: string) => title.trim().toLowerCase();
 
 /** Validates one action against the current state. Pure: the caller builds and applies the item. */
 export function decideMilestoneAction(
@@ -251,6 +254,22 @@ export function decideMilestoneAction(
         ...(action.note === undefined ? {} : { note: action.note }),
       };
       if (action.title !== undefined) {
+        const key = titleKey(action.title);
+        const current = milestones.filter(
+          (milestone) =>
+            milestone.setId === setId && isOpen(milestone) && titleKey(milestone.title) === key,
+        );
+        const planned = current.find((milestone) => milestone.status === "planned");
+        if (planned !== undefined) {
+          return accepted({
+            event: "started",
+            milestoneId: planned.id,
+            setId: planned.setId,
+            title: planned.title,
+            ...closing,
+          });
+        }
+        if (current.length > 0) return { _tag: "unchanged" };
         return accepted({
           event: "started",
           milestoneId: nextId(),

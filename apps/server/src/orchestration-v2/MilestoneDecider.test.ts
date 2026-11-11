@@ -34,6 +34,7 @@ function record(
       rejections.push(decision.message);
       continue;
     }
+    if (decision._tag !== "accepted") continue;
     log.push(
       milestoneTurnItem({
         base: {
@@ -100,6 +101,54 @@ describe("decideMilestoneAction", () => {
   it("starts an unplanned milestone in a new set when nothing exists yet", () => {
     const { state } = record([[RUN_1, { action: "start", title: "Explore" }]]);
     expect(statuses(state)).toEqual(["m1:s1:active"]);
+  });
+
+  it("keeps the active milestone when started again by its own title", () => {
+    const { state, items, rejections } = record([
+      [RUN_1, { action: "plan", titles: ["Preparar", "Verificar"] }],
+      [RUN_1, { action: "start", title: "Preparar" }],
+    ]);
+    expect(rejections).toEqual([]);
+    expect(items).toHaveLength(1);
+    expect(statuses(state)).toEqual(["m1:s1:active", "m2:s1:planned"]);
+    expect(decideMilestoneAction(state, { action: "start", title: "  preparar " })).toMatchObject({
+      _tag: "unchanged",
+    });
+  });
+
+  it.each([
+    ["the same title", "Verificar"],
+    ["a title differing in case and whitespace", "  vERIFICAR  "],
+  ])("starts the planned milestone with %s", (_name, title) => {
+    const { state, items } = record([
+      [RUN_1, { action: "plan", titles: ["Preparar", "Verificar", "Verificar"] }],
+      [RUN_1, { action: "start", title }],
+    ]);
+    expect(items.at(-1)).toMatchObject({
+      event: "started",
+      milestoneId: "m2",
+      setId: "s1",
+      title: "Verificar",
+      closedMilestoneId: "m1",
+    });
+    expect(statuses(state)).toEqual(["m1:s1:done", "m2:s1:active", "m3:s1:planned"]);
+  });
+
+  it("starts a new milestone when the title matches only a closed one", () => {
+    const { state } = record([
+      [RUN_1, { action: "plan", titles: ["Preparar", "Verificar"] }],
+      [RUN_1, { action: "start" }],
+      [RUN_1, { action: "drop", id: "m2", reason: "skipped" }],
+      [RUN_1, { action: "start", title: "Preparar" }],
+      [RUN_1, { action: "start", title: "verificar" }],
+    ]);
+    expect(statuses(state)).toEqual(["m1:s1:done", "m2:s1:dropped", "m3:s1:done", "m4:s1:active"]);
+    expect(state.milestones.map(({ title }) => title)).toEqual([
+      "Preparar",
+      "Verificar",
+      "Preparar",
+      "verificar",
+    ]);
   });
 
   it.each<[string, ReadonlyArray<OrchestrationV2MilestoneAction>, string]>([
