@@ -54,7 +54,12 @@ describe("GitHub App manifest page", () => {
       name: "T3 Code sandboxes",
       public: false,
       redirect_url: SANDBOX_GITHUB_APP_PASTE_REDIRECT_URL,
-      default_permissions: { contents: "write", pull_requests: "write", metadata: "read" },
+      default_permissions: {
+        contents: "write",
+        pull_requests: "write",
+        metadata: "read",
+        workflows: "write",
+      },
     });
     expect(body).toContain('<button type="submit">Continue to GitHub</button>');
   });

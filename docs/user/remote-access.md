@@ -37,7 +37,8 @@ With a hub, **Pi** also installs the [Pi agent](./providers-pi.md)
 in each sandbox with the hub's non-Claude models, on that same key, and **Start new chats on** can
 make new chats on the config start on Pi with one of them instead of Claude.
 **GitHub** lets `gh` and `git` in each sandbox clone private repositories and push, with a
-token from the GitHub App or this machine's own. Without it a sandbox can clone public repositories only.
+token from the [GitHub App](#github-in-a-sandbox) or this machine's own. Without it a sandbox can
+clone public repositories only.
 [**Let the agent use Boat**](#let-the-agent-use-boat) signs the `boat` CLI in on each Boat sandbox
 with a key scoped to it. T3 Code also
 installs git, the GitHub CLI, and Claude Code when the provider's image lacks them; sign Codex in
@@ -229,6 +230,30 @@ have been idle for the config's **Stop when idle** time (30 minutes by default).
 - A Boat sandbox made before this gets its key the next time it resumes. If the key cannot be set
   up, the setup card or the resume says so, and that sandbox stops at its running limit as before.
 - On a Boat trial the idle time is capped at two hours, Boat's longest trial auto-stop.
+
+### GitHub in a sandbox
+
+With **Sign in with → GitHub App (recommended)**, each sandbox gets an hour-long token from the
+app, which T3 Code renews while the sandbox runs and revokes when you delete it.
+
+- The token covers **every repository the app is installed on**, not just the sandbox's own, so an
+  agent can clone, push, and open pull requests on another of your repositories in the same
+  thread. It is the app's installation that decides this, so the app must still be installed on the
+  sandbox's own repository, or the launch warns with a link to install it.
+- Choose those repositories on GitHub: **Settings → Applications → Installed GitHub Apps →
+  Configure** next to the app (for an organization, the organization's **Settings → GitHub
+  Apps**), under **Repository access**. **Install on repositories** in the app's menu under
+  **Settings → Connections → Sandboxes** opens the same page. A running sandbox picks up a
+  change with its next token, at most about 40 minutes later; a resumed sandbox gets a new token
+  as it starts. Because every sandbox reaches every repository on that list, keep it to the
+  repositories you want agents to push to.
+- The app asks to write contents, pull requests and workflows, and to read checks, statuses and
+  actions. Without Workflows, GitHub refuses a push that changes `.github/workflows/`. An app
+  created before T3 Code asked for it lacks it: open the app's settings on GitHub
+  (**Settings → Developer settings → GitHub Apps → Edit**), set **Permissions → Repository
+  permissions → Workflows** to **Read and write**, and save. GitHub then asks each installation to
+  approve the change; until you accept it under **Installed GitHub Apps → Configure**, tokens keep
+  the old permissions.
 
 ### Let the agent use Boat
 
