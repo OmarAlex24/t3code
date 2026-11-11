@@ -1255,6 +1255,8 @@ const SANDBOX_GITHUB_APP_PERMISSIONS = {
   checks: "read",
   statuses: "read",
   actions: "read",
+  // A push that changes `.github/workflows/` needs it, or GitHub refuses the push.
+  workflows: "write",
 } as const;
 
 /** The sandboxes' GitHub App's homepage on github.com. */
@@ -1280,7 +1282,8 @@ export const sandboxGithubAppManifest = (input: {
   name: "T3 Code sandboxes",
   url: input.homepageUrl,
   redirect_url: input.redirectUrl,
-  description: "Gives each T3 Code sandbox an hour-long token for one repository.",
+  description:
+    "Gives each T3 Code sandbox an hour-long token for every repository this app is installed on.",
   public: false,
   default_permissions: SANDBOX_GITHUB_APP_PERMISSIONS,
 });

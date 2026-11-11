@@ -143,21 +143,21 @@ export const makeGithubAppApi = Effect.gen(function* () {
     );
   });
 
-  /** An hour-long token for one repository of the installation, with the app's permissions. */
+  /**
+   * An hour-long token with the app's permissions on every repository the installation covers. The
+   * user picks those repositories in the installation's settings on GitHub, so an agent can work on
+   * more than the sandbox's own repository.
+   */
   const createInstallationToken = Effect.fn("GithubAppApi.createInstallationToken")(function* (
     app: GithubAppCredentials,
     installationId: number,
-    repositoryName: string,
   ) {
     const jwt = yield* appJwt(app);
     const body = yield* send(
       "making a token for the sandbox",
       HttpClientRequest.post(
         `${GITHUB_API}/app/installations/${installationId}/access_tokens`,
-      ).pipe(
-        HttpClientRequest.bearerToken(Redacted.value(jwt)),
-        HttpClientRequest.bodyJsonUnsafe({ repositories: [repositoryName] }),
-      ),
+      ).pipe(HttpClientRequest.bearerToken(Redacted.value(jwt))),
       HttpClientResponse.schemaBodyJson(InstallationToken),
     );
     return { token: Redacted.make(body.token), expiresAt: body.expires_at };

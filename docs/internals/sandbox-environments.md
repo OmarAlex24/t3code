@@ -240,6 +240,17 @@ server except into the sandbox.
   the machine, and the environment only when nothing is left in it, since it is the only way to
   find a fork again. The sweep's abandoned-launch delete never touches forks. The driver hides
   `t3-sandbox-*` environments from `listEnvironments`, so they never show as credential choices.
+- **A GitHub App token covers the whole installation.** `mintGithubToken` finds the installation
+  through the sandbox's repository (`GET /repos/{owner}/{repo}/installation`; a 404 is "not
+  installed", a launch warning with the install link), then mints with no `repositories` in the
+  body, so the token reaches every repository the user installed the app on and an agent can push
+  to a second repository from one sandbox. The record keeps `{ installationId, repository, secret,
+  expiresAt }`; the sweep renews a running sandbox's token 20 minutes before it expires (and a
+  resume renews it at once) with the known installation id, writes it with the login script, then
+  revokes the old one. The manifest
+  asks for `workflows: "write"` because GitHub refuses a push that touches `.github/workflows/`
+  without it; an app made from an older manifest needs it added on GitHub and approved by each
+  installation.
 - **A Railway token belongs to one sandbox.** The saved workspace token mints
   `t3-sandbox-<sandboxId>` in its workspace ([`railwayApi.ts`](../../apps/server/src/sandbox/railwayApi.ts)).
   Railway returns only the token's value, so every revoke lists the workspace's tokens and deletes

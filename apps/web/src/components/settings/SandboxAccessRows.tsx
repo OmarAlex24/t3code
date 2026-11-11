@@ -198,7 +198,7 @@ const INTEGRATIONS: Record<
     anchor: "sandbox-github-app",
     name: "GitHub App",
     about:
-      "Gives each sandbox an hour-long token for its own repository, revoked when it's deleted. Create the app once, then install it on the repositories sandboxes may use.",
+      "Gives each sandbox an hour-long token for every repository the app is installed on, revoked when it's deleted. Create the app once, then install it on the repositories sandboxes may use.",
     docs: { href: GITHUB_APP_DOCS, label: "How it works" },
   },
   northflank: {

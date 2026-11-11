@@ -199,7 +199,7 @@ export function SandboxAgentToolingFields({
     draft.githubMode === "app"
       ? host?.githubApp === undefined
         ? "The GitHub App isn't connected on this machine"
-        : `A token for its repository only, as ${host.githubApp.slug}`
+        : `A token for the repositories ${host.githubApp.slug} is installed on`
       : draft.githubMode === "legacy"
         ? host?.github === true
           ? "This machine's token, not revoked on delete"
