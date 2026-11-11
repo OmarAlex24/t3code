@@ -309,7 +309,29 @@ environments** has to be on under **Settings → Labs**; the agent says so when 
   unpushed commits. A clean one is deleted. One with work, or one it could not check, is stopped
   and kept, and the task's result says which sandbox and folder hold the work.
 - In the Sandboxes list they sit under the thread that delegated their tasks.
-- An agent running on a sandbox cannot start one yet: the sandbox runs the official T3 Code.
+
+Agents on a sandbox can ask too. The sandbox runs the official T3 Code, whose `delegate_task` has no
+`target.sandbox`, so T3 Code installs a small helper there that gives Claude two tools:
+`sandbox_delegate` asks for a sandbox and `sandbox_task_status` reports on it. The request goes to
+this machine, which starts the sandbox the same way: from the same config, within the same limits
+and sizes, and ended the same way when the task is done. The task shows under the sandbox's chat
+on this machine.
+
+- **This machine must be awake** and running T3 Code, since it holds the configs and provider
+  keys. It checks each running sandbox for requests every 15 seconds while that sandbox's chat
+  works, and every minute otherwise. When nothing picks a request up within about 45 seconds, the
+  helper withdraws it and tells the agent to do the work on its own sandbox.
+- The request is recorded on the chat's running turn on this machine, so it works when the
+  conversation goes through T3 Code here or on your phone. Each request has an id, and asking
+  again with the same id never starts a second sandbox. A result is passed back to the agent when
+  it asks for the status, and a result that arrives after its turn has ended starts a new turn,
+  as a subagent's result does here.
+- Refusals reach the agent with the reason: a limit reached (`concurrency_full`), **Linked
+  environments** off, no config to start from, or a size too large. A config whose limits are 0
+  still gets the helper, and every request from it is refused with that reason.
+- Sandboxes get the helper when they start, and older sandboxes get it when they resume. A
+  subagent's own sandbox does not get it. The helper is for Claude; other agents on a sandbox do
+  not see it. Saving a template removes it, with any pending requests.
 
 ### Templates
 
