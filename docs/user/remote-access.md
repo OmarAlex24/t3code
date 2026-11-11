@@ -257,6 +257,28 @@ like new sandboxes, and they count against Boat's start limits.
   deletes a fork on its own: a launch cut short by a restart loses its key and machine, but any
   fork stays, with its environment, for you to delete in Boat.
 
+### Sandboxes for subagents
+
+An agent on this machine can give a subagent its own sandbox when the task needs more CPU, RAM or
+disk than its machine has, or runs heavy builds in parallel: `delegate_task` with
+`target.sandbox`. The child then runs there as a task in a linked environment, so **Linked
+environments** has to be on under **Settings → Labs**; the agent says so when it is off.
+
+- The sandbox comes from the parent thread's own sandbox config when the parent is a sandbox chat.
+  Otherwise it comes from the config this project's sandbox chats last used, or the only config
+  there is. It clones the project at the parent's branch once that branch is pushed (the default
+  branch otherwise), with the same env files, tools and keep-alive as a thread's sandbox.
+- `target.sandbox.size` can be the config's size or one size larger. A config that starts from a
+  template keeps the template's size.
+- Each config limits how many run at once: **Subagent sandboxes per thread** (2 by default) and
+  **in total** across every thread (4 by default), under **Machine**. Sandboxes still starting
+  count. 0 turns them off. Past a limit the agent gets a `concurrency_full` error.
+- When the task ends or is cancelled, T3 Code checks the sandbox for uncommitted files and
+  unpushed commits. A clean one is deleted. One with work, or one it could not check, is stopped
+  and kept, and the task's result says which sandbox and folder hold the work.
+- In the Sandboxes list they sit under the thread that delegated their tasks.
+- An agent running on a sandbox cannot start one yet: the sandbox runs the official T3 Code.
+
 ### Templates
 
 A template starts each sandbox with your tools and dependencies already installed. Save one from a
