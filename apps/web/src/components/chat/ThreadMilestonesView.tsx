@@ -1,9 +1,5 @@
-import {
-  deriveWorkflowGroups,
-  isActiveSubagentStatus,
-  projectedSubagentsToRuntime,
-} from "@t3tools/client-runtime/state/subagentRuntime";
-import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import { secondTick } from "@t3tools/client-runtime/clock";
+import { isActiveSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { ThreadStructureTurnItem } from "@t3tools/client-runtime/state/models";
 import {
   deriveMilestoneBoards,
@@ -12,42 +8,56 @@ import {
   parseMilestoneComment,
 } from "@t3tools/client-runtime/state/thread-milestone-board";
 import {
+  deriveCoordinatorActivity,
   deriveThreadMilestoneGraph,
   type MilestoneCoordinator,
+  type MilestoneGraphNode,
   type MilestoneGraphTurn,
+  milestoneStripWeights,
 } from "@t3tools/client-runtime/state/thread-milestone-graph";
+import { resolveActiveThreadRun } from "@t3tools/client-runtime/state/thread-workflows";
 import type {
+  EnvironmentId,
   OrchestrationV2Milestone,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadProjection,
   ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
+import { formatModelSlugName } from "@t3tools/shared/model";
 import {
-  AppWindowIcon,
   CheckIcon,
   ChevronRightIcon,
   CornerDownLeftIcon,
-  MessageSquareIcon,
-  StickyNoteIcon,
+  UserRoundIcon,
   XIcon,
 } from "lucide-react";
 import * as DateTime from "effect/DateTime";
 import { type ReactNode, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { useThreadViewModeStore } from "../../threadViewModeStore";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { AgentElapsed } from "./AgentElapsed";
-import { type CoordinatorAsk, MilestoneBoard } from "./MilestoneBoard";
-import { SubagentTimelineLink } from "./V2LifecycleRow";
+import { AgentStack, AgentTray, agentTraySummary } from "./MilestoneAgents";
+import {
+  boardCounts,
+  CommentButton,
+  type CoordinatorAsk,
+  CoordinatorAskCard,
+  MilestoneBoard,
+} from "./MilestoneBoard";
+import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 
 type Projection = Pick<
   OrchestrationV2ThreadProjection,
   "runs" | "subagents" | "milestones" | "messages"
 >;
+type Run = Projection["runs"][number];
 type Line = "solid" | "dashed" | "none";
+type Tone = "info" | "success" | "error" | "warning" | "outline";
 
 const iso = (value: DateTime.Utc | null) => (value === null ? null : DateTime.formatIso(value));
 
@@ -62,8 +72,25 @@ function turnText(projection: Projection, turn: MilestoneGraphTurn): string | nu
   return line ? line : null;
 }
 
+function turnLabel(turn: MilestoneGraphTurn): string {
+  const at = DateTime.toDate(turn.run.requestedAt).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `Turn ${turn.run.ordinal} · ${at}`;
+}
+
 const lineClass = (line: Line) =>
   line === "solid" ? "w-px bg-muted-foreground/35" : "border-l border-dashed";
+
+const focusRing =
+  "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none";
+
+const scrollBehavior = (): ScrollBehavior =>
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+
+const scrollToSelector = (selector: string) =>
+  document.querySelector(selector)?.scrollIntoView({ block: "center", behavior: scrollBehavior() });
 
 /**
  * One stop on the spine: a node in the left gutter, the line arriving at it (`lineAbove`) and the
@@ -148,8 +175,11 @@ function MilestoneNode(props: {
 /** A user message on the spine. */
 function YouNode() {
   return (
-    <span className="grid size-5.5 place-items-center rounded-full bg-foreground text-2xs leading-none font-semibold tracking-tight text-background">
-      You
+    <span
+      aria-label="You"
+      className="grid size-4.5 place-items-center rounded-full border border-muted-foreground/45 bg-background text-muted-foreground"
+    >
+      <UserRoundIcon className="size-2.75" strokeWidth={2.25} />
     </span>
   );
 }
@@ -163,105 +193,126 @@ function JumpHint() {
   );
 }
 
-const headClass =
-  "group/jump -ml-2.5 flex min-h-9 w-full min-w-0 items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none";
+const headClass = cn(
+  "group/jump -ml-2.5 flex min-h-8 w-full min-w-0 items-center gap-2.5 rounded-lg px-2.5 py-1 text-left hover:bg-accent",
+  focusRing,
+);
 
-function WorkflowPhases(props: { readonly agent: OrchestrationV2Subagent }) {
-  const group = deriveWorkflowGroups(projectedSubagentsToRuntime([props.agent]))[0];
-  if (group === undefined || group.phases.length === 0) return null;
+/** Your message as it reads in Chat; selecting it opens Chat there. */
+function YouMessage(props: { readonly text: string; readonly onJump: () => void }) {
   return (
-    <ol className="mb-1 ml-12 grid gap-0.5 text-xs text-muted-foreground">
-      {group.phases.map((phase) => (
-        <li key={phase.index} className="flex min-w-0 items-center gap-2">
-          <span
-            aria-hidden
-            className={cn(
-              "size-1.5 shrink-0 rounded-full",
-              phase.state === "done"
-                ? "bg-success"
-                : phase.state === "running"
-                  ? "bg-info motion-safe:animate-status-pulse"
-                  : "border border-muted-foreground/60",
-            )}
-          />
-          <span className="min-w-0 truncate">{phase.title}</span>
-          {phase.members.length > 0 ? (
-            <span className="shrink-0 tabular-nums">
-              {phase.settledCount}/{phase.members.length}
-            </span>
-          ) : null}
-        </li>
-      ))}
-    </ol>
+    <button
+      type="button"
+      onClick={props.onJump}
+      className={cn(
+        "group/jump flex w-fit max-w-full min-w-0 rounded-2xl bg-message px-3 py-2 text-left text-sm text-message-foreground hover:bg-accent",
+        focusRing,
+      )}
+    >
+      <span className="line-clamp-3 min-w-0">{props.text}</span>
+    </button>
   );
 }
 
-/** Delegated work forks off the spine and, once every agent settles, merges back. */
-function AgentLane(props: {
-  readonly threadRef: ScopedThreadRef;
-  readonly agents: ReadonlyArray<OrchestrationV2Subagent>;
-  readonly onOpenThread: (threadId: ThreadId) => void;
+function Elapsed(props: {
+  readonly running: boolean;
+  readonly startedAt: DateTime.Utc | null;
+  readonly completedAt: DateTime.Utc | null;
 }) {
-  if (props.agents.length === 0) return null;
-  const open = props.agents.some((agent) => isActiveSubagentStatus(agent.status));
-  const curve = open ? "stroke-info/55" : "stroke-muted-foreground/35";
   return (
-    <div className="relative -ml-8.5 py-4.5">
-      <svg
-        aria-hidden
-        viewBox="0 0 24 18"
-        className="absolute top-0 left-2.75 h-4.5 w-6 overflow-visible"
-      >
-        <path d="M0 0 C0 10, 24 8, 24 18" fill="none" strokeWidth={1.5} className={curve} />
-      </svg>
-      <div className="relative">
-        <span
-          aria-hidden
-          className={cn(
-            "absolute -top-px -bottom-px left-8.75 w-px -translate-x-1/2",
-            open
-              ? "bg-linear-to-b from-info/55 via-info/55 to-transparent"
-              : "bg-muted-foreground/35",
-          )}
-        />
-        <ul className="ml-3.75 grid gap-0.5">
-          {props.agents.map((agent) => (
-            <li key={agent.id} className="min-w-0">
-              <SubagentTimelineLink
-                parentRef={props.threadRef}
-                subagentId={agent.id}
-                providerInstanceId={agent.providerInstanceId}
-                origin={agent.origin}
-                status={agent.status}
-                driver={agent.driver}
-                title={formatSubagentDisplayTitle(agent.title ?? "Subagent")}
-                result={agent.result}
-                progress={agent.progress}
-                startedAt={agent.startedAt}
-                completedAt={agent.completedAt}
-                threadId={agent.childThreadId}
-                remote={agent.remoteChild}
-                onOpenThread={props.onOpenThread}
-              />
-              {agent.workflow === undefined ? null : <WorkflowPhases agent={agent} />}
-            </li>
-          ))}
-        </ul>
+    <span className="shrink-0 text-xs text-muted-foreground">
+      <AgentElapsed
+        agent={{
+          status: props.running ? "running" : "completed",
+          startedAt: iso(props.startedAt),
+          completedAt: iso(props.completedAt),
+        }}
+      />
+    </span>
+  );
+}
+
+function SectionHead(props: { readonly title: string; readonly detail: string }) {
+  return (
+    <div className="mb-1.5 flex items-baseline gap-2 text-xs text-muted-foreground">
+      <span className="font-semibold text-foreground">{props.title}</span>
+      <span className="min-w-0 truncate">{props.detail}</span>
+    </div>
+  );
+}
+
+/**
+ * The plan as one strip, each milestone sized by the time it took. The active segment grows on
+ * the shared second tick through the DOM, so the view doesn't re-render every second.
+ */
+function PlanStrip(props: {
+  readonly milestones: ReadonlyArray<OrchestrationV2Milestone>;
+  readonly ticking: boolean;
+  readonly onSelect: (milestone: OrchestrationV2Milestone) => void;
+}) {
+  const { milestones, ticking } = props;
+  const labelled = milestones.length <= 5;
+  const current =
+    milestones.find(({ status }) => status === "active") ??
+    milestones.findLast(({ status }) => status === "done");
+  const sizeSegments = (node: HTMLDivElement | null) => {
+    if (!node) return;
+    const write = () => {
+      for (const [index, weight] of milestoneStripWeights(milestones, Date.now()).entries()) {
+        const segment = node.children[index];
+        if (segment instanceof HTMLElement) segment.style.flexGrow = String(weight);
+      }
+    };
+    write();
+    return ticking ? secondTick.subscribe(write) : undefined;
+  };
+  return (
+    <div className="mt-3">
+      <div ref={sizeSegments} className="flex gap-1">
+        {milestones.map((milestone) => (
+          <button
+            key={milestone.id}
+            type="button"
+            aria-label={`Go to ${milestone.title}`}
+            onClick={() => props.onSelect(milestone)}
+            className={cn(
+              "group/segment flex min-w-3 grow basis-0 flex-col gap-1.5 rounded-sm text-left",
+              focusRing,
+            )}
+          >
+            <span
+              className={cn(
+                "block h-1.5 w-full rounded-full transition-opacity group-hover/segment:opacity-70",
+                milestone.status === "done"
+                  ? "bg-success/55"
+                  : milestone.status === "active"
+                    ? "bg-info"
+                    : "border border-dashed border-muted-foreground/45",
+              )}
+            />
+            {labelled ? (
+              <span
+                className={cn(
+                  "w-full truncate text-xs",
+                  milestone.id === current?.id
+                    ? "font-medium text-foreground"
+                    : "text-muted-foreground",
+                )}
+              >
+                {milestone.title}
+              </span>
+            ) : null}
+          </button>
+        ))}
       </div>
-      {open ? null : (
-        <svg
-          aria-hidden
-          viewBox="0 0 24 18"
-          className="absolute bottom-0 left-2.75 h-4.5 w-6 overflow-visible"
-        >
-          <path d="M24 0 C24 10, 0 8, 0 18" fill="none" strokeWidth={1.5} className={curve} />
-        </svg>
+      {labelled || current === undefined ? null : (
+        <p className="mt-1.5 truncate text-xs font-medium text-foreground">{current.title}</p>
       )}
     </div>
   );
 }
 
-function coordinatorPhrase(coordinator: MilestoneCoordinator, awaitingUser: boolean): ReactNode {
+function coordinatorPhrase(coordinator: MilestoneCoordinator, awaitingUser: boolean): string {
   if (awaitingUser) return "is waiting for you";
   switch (coordinator.status) {
     case "waiting":
@@ -277,17 +328,24 @@ function coordinatorPhrase(coordinator: MilestoneCoordinator, awaitingUser: bool
   }
 }
 
-function CoordinatorRow(props: {
+/** The coordinator's own stop: what it is doing now and for how long. */
+function CoordinatorCard(props: {
+  readonly environmentId: EnvironmentId;
   readonly coordinator: MilestoneCoordinator;
+  readonly run: Run | null;
+  readonly activity: string | null;
   readonly awaitingUser: boolean;
-  /** Absent when the question already shows on a milestone's board. */
+  /** Absent when the question already shows on a milestone. */
   readonly onAnswer?: (() => void) | undefined;
+  /** A secret or link card to answer here, when no milestone holds it. */
+  readonly askCard?: ReactNode;
   readonly lineAbove: Line;
   readonly line: Line;
   readonly last: boolean;
 }) {
   const { status } = props.coordinator;
   const live = status === "working" || status === "waiting";
+  const model = props.run ? formatModelSlugName(props.run.modelSelection.model) : null;
   return (
     <SpineItem
       line={props.line}
@@ -310,85 +368,136 @@ function CoordinatorRow(props: {
         />
       }
     >
-      <div className="flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <span>
-          <span className="font-medium text-foreground/85">Coordinator</span>{" "}
-          {coordinatorPhrase(props.coordinator, props.awaitingUser)}
-        </span>
+      <div className="flex min-w-0 items-center gap-2.5 rounded-xl border bg-card px-2.5 py-2 shadow-xs/5">
+        {props.run === null ? null : (
+          <EnvironmentSubagentAvatar
+            environmentId={props.environmentId}
+            providerInstanceId={props.run.providerInstanceId}
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs text-muted-foreground">
+            <span className="text-sm font-medium text-foreground">Coordinator</span>{" "}
+            {model ? `${model} · ` : ""}
+            {coordinatorPhrase(props.coordinator, props.awaitingUser)}
+          </div>
+          {live && !props.awaitingUser && props.activity !== null ? (
+            <div className="truncate font-mono text-xs text-foreground/80">{props.activity}</div>
+          ) : null}
+        </div>
         {props.awaitingUser && props.onAnswer !== undefined ? (
           <Button size="xs" variant="outline" onClick={props.onAnswer}>
             Answer in chat
           </Button>
+        ) : live && props.run?.startedAt ? (
+          <Badge variant="info">
+            <AgentElapsed
+              agent={{ status: "running", startedAt: iso(props.run.startedAt), completedAt: null }}
+            />
+          </Badge>
         ) : null}
       </div>
+      {props.askCard ? <div className="mt-2">{props.askCard}</div> : null}
     </SpineItem>
   );
 }
 
-/** A finished milestone keeps its board folded behind what it holds. */
-function BoardSummary(props: {
+function focusBadge(status: OrchestrationV2Milestone["status"]): {
+  readonly label: string;
+  readonly tone: Tone;
+} {
+  switch (status) {
+    case "active":
+      return { label: "In progress", tone: "info" };
+    case "done":
+      return { label: "Done", tone: "success" };
+    case "dropped":
+      return { label: "Dropped", tone: "outline" };
+    case "planned":
+      return { label: "Planned", tone: "outline" };
+  }
+}
+
+function Revision(props: { readonly milestone: OrchestrationV2Milestone }) {
+  const { milestone } = props;
+  if (milestone.revision !== undefined) {
+    return (
+      <p className="mt-1.5 max-w-152 border-l-2 border-warning/45 pl-2.5 text-xs text-muted-foreground">
+        <s className="text-muted-foreground/70">{milestone.revision.previousTitle}</s>
+        <br />
+        {milestone.revision.reason}
+      </p>
+    );
+  }
+  return milestone.note === undefined ? null : (
+    <p className="max-w-152 text-xs text-muted-foreground">{milestone.note}</p>
+  );
+}
+
+/** What a folded milestone holds, as chips; selecting them unfolds it. */
+function FoldedSummary(props: {
+  readonly threadRef: ScopedThreadRef;
+  readonly agents: ReadonlyArray<OrchestrationV2Subagent>;
   readonly items: ReadonlyArray<MilestoneBoardItem>;
   readonly open: boolean;
   readonly onToggle: () => void;
 }) {
-  const count = (kind: MilestoneBoardItem["kind"]) =>
-    props.items.filter((item) => item.kind === kind).length;
-  const parts = [
-    { kind: "post", icon: StickyNoteIcon, label: "post" },
-    { kind: "visual", icon: AppWindowIcon, label: "visual" },
-    { kind: "comment", icon: MessageSquareIcon, label: "comment" },
-  ] as const;
+  const failed = props.agents.filter(({ status }) => status === "failed").length;
+  const chip =
+    "inline-flex h-7 items-center gap-1.5 rounded-lg border bg-card px-2 text-xs text-foreground/80 group-hover/fold:border-foreground/20";
   return (
     <button
       type="button"
       aria-expanded={props.open}
       onClick={props.onToggle}
-      className="mt-1 -ml-1.5 inline-flex items-center gap-2.5 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none"
+      className={cn("group/fold mt-1.5 flex flex-wrap items-center gap-1.5 rounded-lg", focusRing)}
     >
-      <ChevronRightIcon
-        className={cn("size-3.5 transition-transform", props.open && "rotate-90")}
-      />
-      {parts.map(({ kind, icon: Icon, label }) => {
-        const n = count(kind);
-        return n === 0 ? null : (
-          <span key={kind} className="inline-flex items-center gap-1">
-            <Icon className="size-3.5" />
-            {n} {n === 1 ? label : `${label}s`}
-          </span>
-        );
-      })}
+      {props.agents.length === 0 ? null : (
+        <span className={cn(chip, "ps-1")}>
+          <AgentStack threadRef={props.threadRef} agents={props.agents} />
+          {props.agents.length} {props.agents.length === 1 ? "agent" : "agents"}
+          {failed > 0 ? <span className="text-destructive">· {failed} failed</span> : null}
+        </span>
+      )}
+      {boardCounts(props.items).map(({ kind, icon: Icon, text }) => (
+        <span key={kind} className={chip}>
+          <Icon className="size-3.5 text-muted-foreground" />
+          {text}
+        </span>
+      ))}
+      <span className={cn(chip, "text-muted-foreground")}>
+        <ChevronRightIcon
+          className={cn("size-3.5 transition-transform", props.open && "rotate-90")}
+        />
+        {props.open ? "Hide" : "Show"}
+      </span>
     </button>
   );
 }
 
-function TurnCard(props: {
-  readonly text: string | null;
-  readonly label: string;
-  readonly onJump: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={props.onJump}
-      className="group/jump mt-2 flex w-fit max-w-full min-w-0 flex-col rounded-xl border bg-card px-3 py-2 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none"
-    >
-      <span className="text-2xs text-muted-foreground">You</span>
-      <span className="line-clamp-3 text-sm text-foreground">{props.text ?? props.label}</span>
-    </button>
-  );
-}
-
-function turnLabel(turn: MilestoneGraphTurn): string {
-  const at = DateTime.toDate(turn.run.requestedAt).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  return `Turn ${turn.run.ordinal} · ${at}`;
+function overallBadge(
+  coordinator: MilestoneCoordinator,
+  awaitingUser: boolean,
+  allDone: boolean,
+): { readonly label: string; readonly tone: Tone } {
+  if (awaitingUser) return { label: "Needs you", tone: "warning" };
+  switch (coordinator.status) {
+    case "working":
+    case "waiting":
+      return { label: "Working", tone: "info" };
+    case "failed":
+      return { label: "Failed", tone: "error" };
+    case "interrupted":
+      return { label: "Stopped", tone: "warning" };
+    case "idle":
+      return allDone ? { label: "Done", tone: "success" } : { label: "Idle", tone: "outline" };
+  }
 }
 
 /**
- * The coordinator's progress as a spine of milestones with their agents, the user's turns where
- * they landed, and where the coordinator is now. Clicking a node opens Chat at that point.
+ * The coordinator's progress: an overview of the plan, then a spine where finished milestones
+ * fold, the current one carries its agents and board, and the coordinator says what it is doing.
+ * Selecting a title or one of your messages opens Chat at that point.
  */
 export function ThreadMilestonesView(props: {
   readonly threadRef: ScopedThreadRef;
@@ -401,14 +510,26 @@ export function ThreadMilestonesView(props: {
   readonly onComment: ((milestone: OrchestrationV2Milestone) => void) | null;
 }) {
   const { threadRef, projection } = props;
+  const environmentId = threadRef.environmentId;
   const graph = deriveThreadMilestoneGraph(projection);
+  const activity = deriveCoordinatorActivity(props.turnItems);
   const awaitingUser = props.coordinatorAsk !== null;
+  const run =
+    resolveActiveThreadRun(projection) ??
+    projection.runs.reduce<Run | null>(
+      (latest, candidate) =>
+        candidate.status !== "rolled_back" &&
+        (latest === null || candidate.ordinal > latest.ordinal)
+          ? candidate
+          : latest,
+      null,
+    );
   const boards = deriveMilestoneBoards(props.turnItems, (item) =>
     item.textOmitted
       ? (projection.messages.find(({ id }) => id === item.messageId)?.text ?? "")
       : item.text,
   );
-  const [openBoards, setOpenBoards] = useState<ReadonlySet<string>>(() => new Set());
+  const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(() => new Set());
   const revealInChat = useThreadViewModeStore((state) => state.revealInChat);
   const setMode = useThreadViewModeStore((state) => state.setMode);
   // Milestones already present when the view opened appear at once; only new ones cascade in.
@@ -418,6 +539,30 @@ export function ThreadMilestonesView(props: {
     if (entryId !== undefined) revealInChat(threadRef, entryId);
   };
   const answer = () => setMode(threadRef, "chat");
+  const toggleFold = (id: string) =>
+    setUnfolded((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const trayLayout = (agents: ReadonlyArray<OrchestrationV2Subagent>) =>
+    agents.some(({ status }) => isActiveSubagentStatus(status)) ? "cards" : "rows";
+  const coordinatorCard = (
+    options: Pick<
+      Parameters<typeof CoordinatorCard>[0],
+      "lineAbove" | "line" | "last" | "onAnswer" | "askCard"
+    >,
+  ) => (
+    <CoordinatorCard
+      key="coordinator"
+      environmentId={environmentId}
+      coordinator={graph.mode === "empty" ? { status: "idle", liveAgents: 0 } : graph.coordinator}
+      run={run}
+      activity={activity}
+      awaitingUser={awaitingUser}
+      {...options}
+    />
+  );
 
   let body: ReactNode;
   if (graph.mode === "empty") {
@@ -452,31 +597,36 @@ export function ThreadMilestonesView(props: {
               )
             }
           >
-            <button
-              type="button"
-              className={headClass}
-              onClick={() => jump(turn.run.userMessageId)}
-            >
-              <span className="min-w-0 flex-1 truncate text-sm text-foreground">
-                {turnText(projection, turn) ?? turnLabel(turn)}
-              </span>
-              <JumpHint />
-            </button>
-            <AgentLane
-              threadRef={threadRef}
-              agents={turn.agents}
-              onOpenThread={props.onOpenThread}
+            <YouMessage
+              text={turnText(projection, turn) ?? turnLabel(turn)}
+              onJump={() => jump(turn.run.userMessageId)}
             />
+            {turn.agents.length === 0 ? null : (
+              <div className="mt-2">
+                <AgentTray
+                  threadRef={threadRef}
+                  agents={turn.agents}
+                  layout={trayLayout(turn.agents)}
+                  onOpenThread={props.onOpenThread}
+                />
+              </div>
+            )}
           </SpineItem>
         ))}
-        <CoordinatorRow
-          coordinator={graph.coordinator}
-          awaitingUser={awaitingUser}
-          onAnswer={answer}
-          lineAbove="solid"
-          line="none"
-          last
-        />
+        {props.coordinatorAsk?.kind === "card"
+          ? coordinatorCard({
+              lineAbove: "solid",
+              line: "none",
+              last: true,
+              askCard: (
+                <CoordinatorAskCard
+                  environmentId={environmentId}
+                  ask={props.coordinatorAsk}
+                  onAnswerInChat={answer}
+                />
+              ),
+            })
+          : coordinatorCard({ lineAbove: "solid", line: "none", last: true, onAnswer: answer })}
       </ol>
     );
   } else {
@@ -488,127 +638,292 @@ export function ThreadMilestonesView(props: {
         ? activeIndex
         : nodes.findLastIndex(({ milestone }) => milestone.status !== "planned");
     const firstMilestone = nodes[0]?.milestone;
-    const remaining = nodes.filter(({ milestone }) => milestone.status === "planned").length;
-    const board = (
-      key: string,
-      agents: ReadonlyArray<OrchestrationV2Subagent>,
-      options: { readonly here: boolean; readonly milestone?: OrchestrationV2Milestone },
-    ) => (
-      <MilestoneBoard
-        threadRef={threadRef}
-        items={boards.get(key) ?? []}
-        agents={agents}
-        coordinatorAsk={options.here ? props.coordinatorAsk : null}
-        onAnswerInChat={answer}
-        onOpenThread={props.onOpenThread}
-        onJump={(entryId) => jump(entryId)}
-        onComment={
-          options.here && options.milestone !== undefined && props.onComment !== null
-            ? () => props.onComment!(options.milestone!)
-            : null
-        }
-      />
+    const counted = nodes
+      .map(({ milestone }) => milestone)
+      .filter(({ status }) => status !== "dropped");
+    const overall = overallBadge(
+      graph.coordinator,
+      awaitingUser,
+      counted.length > 0 && counted.every(({ status }) => status === "done"),
     );
+    const failedAgents = [
+      ...(graph.root?.agents ?? []),
+      ...nodes.flatMap(({ agents }) => agents),
+    ].filter(({ status }) => status === "failed");
+    const isOpen = (index: number) =>
+      index === coordinatorAfter || unfolded.has(nodes[index]!.milestone.id);
+    const revealAgent = (agent: OrchestrationV2Subagent) => {
+      const owner = nodes.findIndex(({ agents }) => agents.some(({ id }) => id === agent.id));
+      if (owner !== -1 && !isOpen(owner)) {
+        flushSync(() => toggleFold(nodes[owner]!.milestone.id));
+      }
+      scrollToSelector(`[data-milestone-agent="${CSS.escape(agent.id)}"]`);
+    };
     const newIds = nodes.map(({ milestone }) => milestone.id).filter((id) => !seenAtMount.has(id));
-    const coordinatorRow = (lineAbove: Line, last: boolean) => (
-      <CoordinatorRow
-        key="coordinator"
-        coordinator={graph.coordinator}
-        awaitingUser={awaitingUser}
-        lineAbove={lineAbove}
-        line="dashed"
-        last={last}
-      />
-    );
-    body = (
-      <>
-        <div className="sticky top-0 z-10 -mx-1 mb-3 flex gap-1 bg-background px-1 py-2">
-          {nodes.map(({ milestone }) =>
-            milestone.status === "dropped" ? null : (
-              <button
-                key={milestone.id}
-                type="button"
-                aria-label={`Go to ${milestone.title}`}
-                className="group/segment h-3 flex-1 py-1"
-                onClick={() =>
-                  document
-                    .querySelector(`[data-milestone-node="${CSS.escape(milestone.id)}"]`)
-                    ?.scrollIntoView({
-                      block: "center",
-                      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-                        ? "auto"
-                        : "smooth",
-                    })
-                }
-              >
-                <span
-                  className={cn(
-                    "block h-1 rounded-full transition-colors group-hover/segment:bg-foreground/60",
-                    milestone.status === "done"
-                      ? "bg-success/70"
-                      : milestone.status === "active"
-                        ? "bg-info"
-                        : "bg-border",
-                  )}
-                />
-              </button>
-            ),
+    const rootItems = boards.get(MILESTONE_BOARD_ROOT) ?? [];
+    const rootText = graph.root === null ? null : turnText(projection, graph.root);
+    const userTurns = (node: MilestoneGraphNode) =>
+      node.turns
+        .filter((turn) => {
+          const text = turnText(projection, turn);
+          // A comment shows on the board of the milestone it is about.
+          return text === null || parseMilestoneComment(text) === null;
+        })
+        .map((turn) => (
+          <YouMessage
+            key={turn.run.id}
+            text={turnText(projection, turn) ?? turnLabel(turn)}
+            onJump={() => jump(turn.run.userMessageId)}
+          />
+        ));
+    const anchorOf = (milestone: OrchestrationV2Milestone) =>
+      milestone.status === "done" || milestone.status === "active"
+        ? (milestone.anchors.started ?? milestone.anchors.done)
+        : (milestone.anchors.dropped ?? milestone.anchors.changed ?? milestone.anchors.planned);
+
+    const focusCard = (node: MilestoneGraphNode) => {
+      const { milestone, agents } = node;
+      const items = boards.get(milestone.id) ?? [];
+      const badge = focusBadge(milestone.status);
+      return (
+        <article
+          className={cn(
+            "min-w-0 rounded-2xl border bg-card shadow-xs/5",
+            milestone.status === "active" && "border-info/30",
           )}
-        </div>
-        <div className="mb-5 flex flex-wrap items-center gap-x-3.5 gap-y-1 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground/85">
-            Milestone {graph.summary.position} of {graph.summary.total}
-          </span>
-          {remaining > 0 ? <span>{remaining} left</span> : null}
-          {graph.coordinator.liveAgents > 0 ? (
-            <span className="inline-flex items-center gap-1.5">
-              <span className="size-1.5 rounded-full bg-info motion-safe:animate-status-pulse" />
-              {graph.coordinator.liveAgents}{" "}
-              {graph.coordinator.liveAgents === 1 ? "agent" : "agents"} running
-            </span>
-          ) : null}
-          {graph.summary.startedAt === null ? null : (
-            <AgentElapsed
-              compact
-              agent={{
-                status: live ? "running" : "completed",
-                startedAt: iso(graph.summary.startedAt),
-                completedAt: iso(
-                  nodes.findLast(({ milestone }) => milestone.completedAt !== null)?.milestone
-                    .completedAt ?? null,
-                ),
-              }}
-            />
-          )}
-          {graph.summary.changes > 0 ? (
-            <span>Plan changed {timesWord(graph.summary.changes)}</span>
-          ) : null}
-          {awaitingUser || projection.subagents.some(({ status }) => status === "waiting") ? (
-            <span className="inline-flex items-center gap-1.5 rounded-md bg-warning/12 px-1.5 py-px font-medium text-warning">
-              <span className="size-1.5 rounded-full bg-warning" />
-              Waiting on you
-            </span>
-          ) : null}
-        </div>
-        <ol>
-          {graph.root === null ? null : (
-            <SpineItem first line="solid" node={<YouNode />}>
+        >
+          <div className="px-3.5 pt-2.5">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Badge variant={badge.tone}>
+                <span aria-hidden className="size-1.5 rounded-full bg-current" />
+                {badge.label}
+              </Badge>
               <button
                 type="button"
-                className={headClass}
-                onClick={() => jump(graph.root!.run.userMessageId)}
+                onClick={() => jump(anchorOf(milestone)?.itemId)}
+                className={cn(
+                  "group/jump flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left hover:bg-accent",
+                  focusRing,
+                )}
               >
-                <span className="line-clamp-2 min-w-0 flex-1 text-sm text-foreground">
-                  {turnText(projection, graph.root) ?? turnLabel(graph.root)}
+                <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                  {milestone.title}
                 </span>
                 <JumpHint />
               </button>
-              <AgentLane
+              {milestone.revision !== undefined ? (
+                <Badge variant="warning" size="sm">
+                  Changed
+                </Badge>
+              ) : null}
+              <Elapsed
+                running={milestone.status === "active" && live}
+                startedAt={milestone.startedAt}
+                completedAt={milestone.completedAt}
+              />
+            </div>
+            <Revision milestone={milestone} />
+          </div>
+          <div className="grid gap-3 px-3.5 pt-3 pb-3.5">
+            {userTurns(node)}
+            {props.coordinatorAsk === null ? null : (
+              <CoordinatorAskCard
+                environmentId={environmentId}
+                ask={props.coordinatorAsk}
+                onAnswerInChat={answer}
+              />
+            )}
+            {agents.length === 0 ? null : (
+              <section>
+                <SectionHead title="Agents" detail={agentTraySummary(agents)} />
+                <AgentTray
+                  threadRef={threadRef}
+                  agents={agents}
+                  layout="cards"
+                  onOpenThread={props.onOpenThread}
+                />
+              </section>
+            )}
+            {items.length === 0 ? null : (
+              <section>
+                <SectionHead
+                  title="Board"
+                  detail={boardCounts(items)
+                    .map(({ text }) => text)
+                    .join(" · ")}
+                />
+                <MilestoneBoard environmentId={environmentId} items={items} onJump={jump} />
+              </section>
+            )}
+            {props.onComment === null ? null : (
+              <CommentButton onComment={() => props.onComment!(milestone)} />
+            )}
+          </div>
+        </article>
+      );
+    };
+
+    const settledStop = (node: MilestoneGraphNode, index: number) => {
+      const { milestone, agents } = node;
+      const items = boards.get(milestone.id) ?? [];
+      const reached = milestone.status === "done";
+      const open = isOpen(index);
+      const foldable = reached && (agents.length > 0 || items.length > 0 || node.turns.length > 0);
+      const turns = userTurns(node);
+      return (
+        <>
+          <button
+            type="button"
+            className={headClass}
+            onClick={() => jump(anchorOf(milestone)?.itemId)}
+          >
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-sm",
+                reached
+                  ? "font-medium text-foreground"
+                  : milestone.status === "dropped"
+                    ? "text-muted-foreground line-through"
+                    : "text-foreground/85",
+              )}
+            >
+              {milestone.title}
+            </span>
+            <JumpHint />
+            {milestone.revision !== undefined ? (
+              <Badge variant="warning" size="sm">
+                Changed
+              </Badge>
+            ) : null}
+            {milestone.status === "dropped" ? (
+              <Badge variant="outline" size="sm">
+                Dropped
+              </Badge>
+            ) : null}
+            {reached ? (
+              <Elapsed
+                running={false}
+                startedAt={milestone.startedAt}
+                completedAt={milestone.completedAt}
+              />
+            ) : null}
+          </button>
+          <Revision milestone={milestone} />
+          {foldable ? (
+            <FoldedSummary
+              threadRef={threadRef}
+              agents={agents}
+              items={items}
+              open={open}
+              onToggle={() => toggleFold(milestone.id)}
+            />
+          ) : null}
+          {(!foldable || open) && (turns.length > 0 || agents.length > 0 || items.length > 0) ? (
+            <div className="mt-2 grid gap-2">
+              {turns}
+              <AgentTray
                 threadRef={threadRef}
-                agents={graph.root.agents}
+                agents={agents}
+                layout={trayLayout(agents)}
                 onOpenThread={props.onOpenThread}
               />
-              {board(MILESTONE_BOARD_ROOT, graph.root.agents, { here: coordinatorAfter === -1 })}
+              <MilestoneBoard environmentId={environmentId} items={items} onJump={jump} />
+            </div>
+          ) : null}
+        </>
+      );
+    };
+
+    body = (
+      <>
+        <section
+          aria-label="Plan"
+          className="mb-5 rounded-2xl border bg-card px-4 py-3 shadow-xs/5"
+        >
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <h2 className="truncate text-sm font-semibold text-foreground">
+                {rootText ?? "Plan"}
+              </h2>
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground/85">
+                  Milestone {graph.summary.position} of {graph.summary.total}
+                </span>
+                {graph.coordinator.liveAgents > 0 ? (
+                  <span>
+                    {graph.coordinator.liveAgents}{" "}
+                    {graph.coordinator.liveAgents === 1 ? "agent" : "agents"} running
+                  </span>
+                ) : null}
+                {failedAgents.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => revealAgent(failedAgents[0]!)}
+                    className={cn(
+                      "rounded-sm font-medium text-destructive hover:underline",
+                      focusRing,
+                    )}
+                  >
+                    {failedAgents.length} {failedAgents.length === 1 ? "agent" : "agents"} failed
+                  </button>
+                ) : null}
+                {graph.summary.startedAt === null ? null : (
+                  <AgentElapsed
+                    agent={{
+                      status: live ? "running" : "completed",
+                      startedAt: iso(graph.summary.startedAt),
+                      completedAt: iso(
+                        nodes.findLast(({ milestone }) => milestone.completedAt !== null)?.milestone
+                          .completedAt ?? null,
+                      ),
+                    }}
+                  />
+                )}
+                {graph.summary.changes > 0 ? (
+                  <span>Plan changed {timesWord(graph.summary.changes)}</span>
+                ) : null}
+              </div>
+            </div>
+            <Badge variant={overall.tone}>
+              <span aria-hidden className="size-1.5 rounded-full bg-current" />
+              {overall.label}
+            </Badge>
+          </div>
+          <PlanStrip
+            milestones={counted}
+            ticking={live && activeIndex !== -1}
+            onSelect={(milestone) =>
+              scrollToSelector(`[data-milestone-node="${CSS.escape(milestone.id)}"]`)
+            }
+          />
+        </section>
+        <ol>
+          {graph.root === null ? null : (
+            <SpineItem first line="solid" node={<YouNode />}>
+              <YouMessage
+                text={rootText ?? turnLabel(graph.root)}
+                onJump={() => jump(graph.root!.run.userMessageId)}
+              />
+              {graph.root.agents.length === 0 &&
+              rootItems.length === 0 &&
+              (coordinatorAfter !== -1 || props.coordinatorAsk === null) ? null : (
+                <div className="mt-2 grid gap-2">
+                  {coordinatorAfter === -1 && props.coordinatorAsk !== null ? (
+                    <CoordinatorAskCard
+                      environmentId={environmentId}
+                      ask={props.coordinatorAsk}
+                      onAnswerInChat={answer}
+                    />
+                  ) : null}
+                  <AgentTray
+                    threadRef={threadRef}
+                    agents={graph.root.agents}
+                    layout={trayLayout(graph.root.agents)}
+                    onOpenThread={props.onOpenThread}
+                  />
+                  <MilestoneBoard environmentId={environmentId} items={rootItems} onJump={jump} />
+                </div>
+              )}
             </SpineItem>
           )}
           {graph.earlierSets.map((set) => {
@@ -623,7 +938,7 @@ export function ThreadMilestonesView(props: {
                 <button
                   type="button"
                   aria-expanded={open}
-                  className={cn(headClass, "min-h-8 text-xs text-muted-foreground")}
+                  className={cn(headClass, "text-xs text-muted-foreground")}
                   onClick={() =>
                     setOpenEarlierSets((current) => {
                       const next = new Set(current);
@@ -688,7 +1003,7 @@ export function ThreadMilestonesView(props: {
           >
             <button
               type="button"
-              className={cn(headClass, "min-h-8 text-xs text-muted-foreground")}
+              className={cn(headClass, "text-xs text-muted-foreground")}
               onClick={() => jump(firstMilestone?.anchors.planned?.itemId)}
             >
               <span className="min-w-0 flex-1 truncate">
@@ -699,17 +1014,13 @@ export function ThreadMilestonesView(props: {
               <JumpHint />
             </button>
           </SpineItem>
-          {coordinatorAfter === -1 ? coordinatorRow("solid", nodes.length === 0) : null}
+          {coordinatorAfter === -1
+            ? coordinatorCard({ lineAbove: "solid", line: "dashed", last: nodes.length === 0 })
+            : null}
           {nodes.flatMap((node, index) => {
             const { milestone } = node;
             const newIndex = newIds.indexOf(milestone.id);
-            const enterDelay = newIndex === -1 ? null : newIndex * 40;
             const reached = milestone.status === "done" || milestone.status === "active";
-            const anchor = reached
-              ? (milestone.anchors.started ?? milestone.anchors.done)
-              : (milestone.anchors.dropped ??
-                milestone.anchors.changed ??
-                milestone.anchors.planned);
             const item = (
               <SpineItem
                 key={milestone.id}
@@ -717,7 +1028,7 @@ export function ThreadMilestonesView(props: {
                 line={reached ? "solid" : "dashed"}
                 lineAbove={index <= coordinatorAfter ? "solid" : "dashed"}
                 last={index === nodes.length - 1 && index !== coordinatorAfter}
-                enterDelay={enterDelay}
+                enterDelay={newIndex === -1 ? null : newIndex * 40}
                 node={
                   <MilestoneNode
                     status={milestone.status}
@@ -725,97 +1036,18 @@ export function ThreadMilestonesView(props: {
                   />
                 }
               >
-                <button type="button" className={headClass} onClick={() => jump(anchor?.itemId)}>
-                  <span
-                    className={cn(
-                      "min-w-0 flex-1 truncate text-sm",
-                      reached
-                        ? "font-semibold text-foreground"
-                        : milestone.status === "dropped"
-                          ? "text-muted-foreground line-through"
-                          : "text-foreground/85",
-                    )}
-                  >
-                    {milestone.title}
-                  </span>
-                  <JumpHint />
-                  {milestone.revision !== undefined ? (
-                    <Badge variant="warning" size="sm">
-                      Changed
-                    </Badge>
-                  ) : null}
-                  {milestone.status === "dropped" ? (
-                    <Badge variant="outline" size="sm">
-                      Dropped
-                    </Badge>
-                  ) : null}
-                  {reached ? (
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      <AgentElapsed
-                        compact
-                        agent={{
-                          status: milestone.status === "active" && live ? "running" : "completed",
-                          startedAt: iso(milestone.startedAt),
-                          completedAt: iso(milestone.completedAt),
-                        }}
-                      />
-                    </span>
-                  ) : null}
-                </button>
-                {milestone.note !== undefined && milestone.status !== "dropped" ? (
-                  <p className="max-w-152 text-xs text-muted-foreground">{milestone.note}</p>
-                ) : null}
-                {milestone.revision !== undefined ? (
-                  <p className="mt-1.5 max-w-152 border-l-2 border-warning/45 pl-2.5 text-xs text-muted-foreground">
-                    <s className="text-muted-foreground/70">{milestone.revision.previousTitle}</s>
-                    <br />
-                    {milestone.revision.reason}
-                  </p>
-                ) : milestone.status === "dropped" && milestone.note !== undefined ? (
-                  <p className="mt-1 max-w-152 text-xs text-muted-foreground">{milestone.note}</p>
-                ) : null}
-                {node.turns
-                  .filter((turn) => {
-                    const text = turnText(projection, turn);
-                    // A comment shows on the board of the milestone it is about.
-                    return text === null || parseMilestoneComment(text) === null;
-                  })
-                  .map((turn) => (
-                    <TurnCard
-                      key={turn.run.id}
-                      text={turnText(projection, turn)}
-                      label={turnLabel(turn)}
-                      onJump={() => jump(turn.run.userMessageId)}
-                    />
-                  ))}
-                <AgentLane
-                  threadRef={threadRef}
-                  agents={node.agents}
-                  onOpenThread={props.onOpenThread}
-                />
-                {milestone.status === "done" && (boards.get(milestone.id)?.length ?? 0) > 0 ? (
-                  <BoardSummary
-                    items={boards.get(milestone.id)!}
-                    open={openBoards.has(milestone.id)}
-                    onToggle={() =>
-                      setOpenBoards((current) => {
-                        const next = new Set(current);
-                        if (!next.delete(milestone.id)) next.add(milestone.id);
-                        return next;
-                      })
-                    }
-                  />
-                ) : null}
-                {milestone.status !== "done" || openBoards.has(milestone.id)
-                  ? board(milestone.id, node.agents, {
-                      here: index === coordinatorAfter,
-                      milestone,
-                    })
-                  : null}
+                {index === coordinatorAfter ? focusCard(node) : settledStop(node, index)}
               </SpineItem>
             );
             return index === coordinatorAfter
-              ? [item, coordinatorRow("solid", index === nodes.length - 1)]
+              ? [
+                  item,
+                  coordinatorCard({
+                    lineAbove: "solid",
+                    line: "dashed",
+                    last: index === nodes.length - 1,
+                  }),
+                ]
               : [item];
           })}
         </ol>
@@ -826,10 +1058,10 @@ export function ThreadMilestonesView(props: {
   return (
     <div
       data-thread-milestones-view
-      className="scrollbar-gutter-both h-full min-h-0 overflow-y-auto overscroll-y-contain"
+      className="scrollbar-gutter-both h-full min-h-0 overflow-y-auto overscroll-y-contain ps-(--chat-lane-inset-start) pe-(--chat-lane-inset-end)"
     >
       <div
-        className="mx-auto w-full max-w-(--chat-content-max-width) px-4 pt-4 sm:px-6"
+        className="mx-auto w-full max-w-(--chat-content-max-width) px-3 pt-4 sm:px-12"
         style={{ paddingBottom: props.bottomInset + 24 }}
       >
         {body}

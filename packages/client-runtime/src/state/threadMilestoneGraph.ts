@@ -6,6 +6,8 @@ import type {
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
 
+import { commandDisplayText } from "../work-log/commandLabel.ts";
+import type { ThreadStructureTurnItem } from "./models.ts";
 import { isActiveSubagentStatus } from "./subagentRuntime.ts";
 import { resolveActiveThreadRun } from "./threadWorkflows.ts";
 
@@ -191,4 +193,65 @@ export function deriveThreadMilestoneGraph(projection: Projection): ThreadMilest
       startedAt: current[0]?.startedAt ?? rootRun?.startedAt ?? null,
     },
   };
+}
+
+/**
+ * Relative widths for the plan strip: the time each milestone took, the active one's time so far,
+ * and the average for those not started. A floor keeps an instant milestone visible and clickable.
+ */
+export function milestoneStripWeights(
+  milestones: ReadonlyArray<Pick<OrchestrationV2Milestone, "startedAt" | "completedAt">>,
+  nowMs: number,
+): ReadonlyArray<number> {
+  const spans = milestones.map(({ startedAt, completedAt }) =>
+    startedAt === null
+      ? null
+      : Math.max(
+          0,
+          (completedAt === null ? nowMs : DateTime.toEpochMillis(completedAt)) -
+            DateTime.toEpochMillis(startedAt),
+        ),
+  );
+  const known = spans.filter((span) => span !== null);
+  const typical =
+    known.length === 0 ? 1 : known.reduce((sum, span) => sum + span, 0) / known.length || 1;
+  const raw = spans.map((span) => span ?? typical);
+  const floor = raw.reduce((sum, span) => sum + span, 0) * 0.1;
+  return raw.map((span) => Math.max(span, floor));
+}
+
+const shortenPaths = (text: string) =>
+  text.replace(/(?:~|\.{0,2})?(?:\/[^\s/]+)+\/([^\s/]+)/gu, "$1");
+const firstLine = (text: string) => text.trim().split("\n")[0]?.trim() ?? "";
+
+/**
+ * What the coordinator is doing right now, from its latest running item: a short phrase for the
+ * spine, or null when nothing of its own is running. Nested items belong to a subagent.
+ */
+export function deriveCoordinatorActivity(
+  items: ReadonlyArray<ThreadStructureTurnItem>,
+): string | null {
+  const item = items.findLast(
+    (candidate) => candidate.status === "running" && candidate.parentItemId === null,
+  );
+  switch (item?.type) {
+    case "reasoning":
+      return "Thinking";
+    case "command_execution": {
+      const command = firstLine(commandDisplayText(item.input));
+      return command ? `Running ${command}` : "Running a command";
+    }
+    case "file_change":
+      return `Editing ${shortenPaths(item.fileName)}`;
+    case "file_search":
+      return item.pattern ? `Searching for ${item.pattern}` : "Searching files";
+    case "web_search":
+      return "Searching the web";
+    case "dynamic_tool": {
+      const label = firstLine(item.title ?? item.toolName ?? "");
+      return label ? shortenPaths(label) : null;
+    }
+    default:
+      return null;
+  }
 }
