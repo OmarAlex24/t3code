@@ -40,6 +40,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import { forkParked } from "../serverActivation.ts";
+import * as SubSandboxes from "../sandbox/SubSandboxes.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 
@@ -124,6 +125,8 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const random = yield* SecureRandom.SecureRandom;
+  // Only servers that make sandboxes have it; a task on a subagent's sandbox ends it there.
+  const subSandboxes = yield* Effect.serviceOption(SubSandboxes.SubSandboxes);
   const hereId = yield* ServerEnvironment.ServerEnvironment.pipe(
     Effect.flatMap((environment) => environment.getEnvironmentId),
   );
@@ -373,6 +376,18 @@ const make = Effect.gen(function* () {
     stoppedThere: "ran-out" | "stopped" | undefined,
     stopCount?: number,
   ) {
+    // The first result a task gets ends its subagent sandbox, if it ran on one, and says where
+    // that sandbox's work went. Its thread there has ended or been stopped by now.
+    let text = result;
+    if (Option.isSome(subSandboxes)) {
+      const { task } = yield* readTask(parentThreadId, taskId).pipe(
+        Effect.orElseSucceed(() => ({ task: undefined })),
+      );
+      if (task?.result === null && task.remoteChild !== undefined) {
+        const note = yield* subSandboxes.value.settle(task.remoteChild.environmentId);
+        if (note !== undefined) text = `${result}\n\n${note}`;
+      }
+    }
     const attempt = yield* random.uuidV4();
     yield* threads
       .dispatch({
@@ -381,7 +396,7 @@ const make = Effect.gen(function* () {
         parentThreadId,
         taskId,
         status,
-        result,
+        result: text,
         ...(stoppedThere === undefined ? {} : { stoppedThere }),
         ...(stopCount === undefined ? {} : { stopCount }),
       })
