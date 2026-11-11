@@ -5,6 +5,7 @@ import {
   AuthSettingsWriteScope,
   DEFAULT_SANDBOX_IDLE_MINUTES,
   DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
+  DEFAULT_SANDBOX_SUB_SANDBOX_LIMITS,
   type EnvironmentId,
   type SandboxCredentialEnvironment,
   type SandboxEnvironmentConfig,
@@ -127,6 +128,8 @@ function MinutesField({
   label,
   hint,
   unit = "minutes",
+  inputLabel = `${label} in minutes`,
+  step = 5,
   value,
   min,
   max,
@@ -136,6 +139,9 @@ function MinutesField({
   label: string;
   hint: string;
   unit?: string;
+  /** What the input is called to assistive tech; minutes unless the field counts something else. */
+  inputLabel?: string;
+  step?: number;
   value: number;
   min: number;
   max: number;
@@ -150,7 +156,7 @@ function MinutesField({
           value={value}
           min={min}
           max={max}
-          step={5}
+          step={step}
           size="sm"
           className="w-32"
           disabled={disabled}
@@ -160,7 +166,7 @@ function MinutesField({
         >
           <NumberFieldGroup>
             <NumberFieldDecrement aria-label={`Decrease ${label.toLowerCase()}`} />
-            <NumberFieldInput aria-label={`${label} in minutes`} />
+            <NumberFieldInput aria-label={inputLabel} />
             <NumberFieldIncrement aria-label={`Increase ${label.toLowerCase()}`} />
           </NumberFieldGroup>
         </NumberField>
@@ -266,6 +272,10 @@ export function SandboxEnvironmentFields({
   // Null is no hard limit: a sandbox that keeps itself up runs as long as its threads work.
   const [runningCapMinutes, setRunningCapMinutes] = useState<number | null>(
     config?.runningCapMinutes ?? null,
+  );
+  // Sandboxes agents may start for their subagents, at once.
+  const [subSandboxes, setSubSandboxes] = useState(
+    config?.subSandboxes ?? DEFAULT_SANDBOX_SUB_SANDBOX_LIMITS,
   );
   // Offered only to a config that already has it, so it can be turned off.
   const offersTailnetOnly = config?.access === "tailnet";
@@ -448,6 +458,10 @@ export function SandboxEnvironmentFields({
           idleMinutes,
           maxRunningMinutes,
           ...(keepsItselfUp && runningCapMinutes !== null ? { runningCapMinutes } : {}),
+          ...(subSandboxes.perThread === DEFAULT_SANDBOX_SUB_SANDBOX_LIMITS.perThread &&
+          subSandboxes.total === DEFAULT_SANDBOX_SUB_SANDBOX_LIMITS.total
+            ? {}
+            : { subSandboxes }),
         },
         ...(apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
         ...(settingsFields.length === 0
@@ -766,6 +780,34 @@ export function SandboxEnvironmentFields({
                   )}
                 </div>
               ) : null}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <MinutesField
+                  label="Subagent sandboxes per thread"
+                  hint="An agent can give a subagent that needs more CPU, RAM or disk a sandbox of its own, up to one size larger. 0 turns this off."
+                  unit="at once"
+                  inputLabel="Subagent sandboxes per thread"
+                  step={1}
+                  value={subSandboxes.perThread}
+                  min={0}
+                  max={20}
+                  disabled={isSaving}
+                  onChange={(perThread) =>
+                    setSubSandboxes((current) => ({ ...current, perThread }))
+                  }
+                />
+                <MinutesField
+                  label="Subagent sandboxes in total"
+                  hint="Across every thread on this machine. Each one is deleted when its task ends, or stopped and kept when it holds unpushed work."
+                  unit="at once"
+                  inputLabel="Subagent sandboxes in total"
+                  step={1}
+                  value={subSandboxes.total}
+                  min={0}
+                  max={20}
+                  disabled={isSaving}
+                  onChange={(total) => setSubSandboxes((current) => ({ ...current, total }))}
+                />
+              </div>
               {tailscaleReady ? (
                 <div className="space-y-2">
                   {autoJoinsTailnet ? (
