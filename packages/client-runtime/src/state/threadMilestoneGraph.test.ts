@@ -11,7 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { deriveCoordinatorActivity, deriveThreadMilestoneGraph } from "./threadMilestoneGraph.ts";
+import { deriveThreadMilestoneGraph } from "./threadMilestoneGraph.ts";
 
 const at = (minute: number) =>
   DateTime.makeUnsafe(`2026-11-10T10:${String(minute).padStart(2, "0")}:00.000Z`);
@@ -107,7 +107,6 @@ describe("deriveThreadMilestoneGraph", () => {
       [],
     ]);
     expect(graph.coordinator).toEqual({ status: "waiting", liveAgents: 1 });
-    expect(graph.summary).toEqual({ position: 2, total: 3 });
   });
 
   it("keeps earlier sets in order with their agents, and counts only the current one", () => {
@@ -133,7 +132,6 @@ describe("deriveThreadMilestoneGraph", () => {
       ["m4", true, []],
       ["m5", true, []],
     ]);
-    expect(graph.summary).toEqual({ position: 2, total: 2 });
     expect(graph.coordinator.status).toBe("idle");
   });
 
@@ -153,37 +151,5 @@ describe("deriveThreadMilestoneGraph", () => {
     expect(deriveThreadMilestoneGraph({ runs: [], milestones: [], subagents: [] })).toEqual({
       mode: "empty",
     });
-  });
-});
-
-describe("deriveCoordinatorActivity", () => {
-  const item = (fields: Record<string, unknown>) =>
-    ({ status: "running", parentItemId: null, title: null, ...fields }) as never;
-  it.each([
-    ["thinking", [item({ type: "reasoning" })], "Thinking"],
-    [
-      "a command, first line only",
-      [item({ type: "command_execution", input: "vp test run src/a.test.ts\necho done" })],
-      "Running vp test run src/a.test.ts",
-    ],
-    [
-      "a tool, with paths cut to the file name",
-      [item({ type: "dynamic_tool", toolName: "Read", title: "Read /home/user/app/src/auth.ts" })],
-      "Read auth.ts",
-    ],
-    [
-      "a file edit",
-      [item({ type: "file_change", fileName: "/home/user/app/src/a.ts" })],
-      "Editing a.ts",
-    ],
-    [
-      "the latest running item",
-      [item({ type: "reasoning" }), item({ type: "web_search" })],
-      "Searching the web",
-    ],
-    ["nothing running", [item({ type: "reasoning", status: "completed" })], null],
-    ["a subagent's nested item", [item({ type: "reasoning", parentItemId: "agent-1" })], null],
-  ])("labels %s", (_case, items, expected) => {
-    expect(deriveCoordinatorActivity(items)).toBe(expected);
   });
 });

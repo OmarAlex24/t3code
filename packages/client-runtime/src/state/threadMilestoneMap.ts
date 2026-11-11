@@ -5,8 +5,12 @@ import type {
   OrchestrationV2Subagent,
   OrchestrationV2ThreadProjection,
   ProviderDriverKind,
+  EnvironmentId,
+  ScopedThreadRef,
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
+
+import { scopedThreadKey, scopeThreadRef } from "../environment/scoped.ts";
 
 import type { ThreadStructureTurnItem } from "./models.ts";
 import { isActiveSubagentStatus } from "./subagentRuntime.ts";
@@ -267,8 +271,6 @@ export interface MapMilestone {
   readonly milestone: OrchestrationV2Milestone | null;
   readonly title: string;
   readonly subtitle: string;
-  /** Why it changed, for a milestone the coordinator rewrote. */
-  readonly subtitleHint: string | null;
   readonly status: MapStatus;
   readonly started: boolean;
   /** Why it was dropped. */
@@ -327,11 +329,14 @@ export const flattenAgents = (agents: ReadonlyArray<MapAgent>): ReadonlyArray<Ma
   agents.flatMap((agent) => [agent, ...flattenAgents(agent.children)]);
 
 /** Where an agent's own thread lives: here, or in the linked environment it was delegated to. */
-function agentThreadKey(agent: Subagent, environmentId: string): string | null {
+export function agentThreadRef(
+  agent: Subagent,
+  environmentId: EnvironmentId,
+): ScopedThreadRef | null {
   if (agent.remoteChild !== undefined) {
-    return `${agent.remoteChild.environmentId}:${agent.remoteChild.threadId}`;
+    return scopeThreadRef(agent.remoteChild.environmentId, agent.remoteChild.threadId);
   }
-  return agent.childThreadId === null ? null : `${environmentId}:${agent.childThreadId}`;
+  return agent.childThreadId === null ? null : scopeThreadRef(environmentId, agent.childThreadId);
 }
 
 /** An agent's one line: its ask while it needs you, else what it did last, else nothing. */
@@ -352,7 +357,7 @@ export function agentLine(
   return actionLine(latestAction);
 }
 
-function actionLine(
+export function actionLine(
   action: Pick<OrchestrationV2LatestActionSummary, "summary" | "detail"> | null | undefined,
 ): string | null {
   if (action == null) return null;
@@ -398,13 +403,13 @@ function overlaps(agents: ReadonlyArray<MapAgent>): boolean {
 function buildAgents(
   subagents: ReadonlyArray<Subagent>,
   asks: ReadonlyMap<string, AgentAsk>,
-  environmentId: string,
+  environmentId: EnvironmentId,
 ): ReadonlyArray<MapAgent> {
   const ids = new Set(subagents.map(({ id }) => id));
   const failed: Array<{ key: string; endMs: number }> = [];
   const build = (agent: Subagent): MapAgent => {
-    const key = agentThreadKey(agent, environmentId);
-    const ask = key === null ? null : (asks.get(key) ?? null);
+    const ref = agentThreadRef(agent, environmentId);
+    const ask = ref === null ? null : (asks.get(scopedThreadKey(ref)) ?? null);
     const status = agentStatus(agent, ask);
     const startMs = msOrNull(agent.startedAt);
     const live = status === "running" || status === "needs-you";
@@ -511,10 +516,10 @@ const lastReply = (projection: Projection, run: Run): string | null => {
 /**
  * The thread as a graph of milestones in the order work started, each with its agents grouped as
  * the coordinator grouped them; one row per turn on a thread that never planned. `asks` holds what
- * each agent's thread (by `agentThreadKey`) waits on you for.
+ * each agent's thread (by the `scopedThreadKey` of `agentThreadRef`) waits on you for.
  */
 export function deriveMilestoneMap(input: {
-  readonly environmentId: string;
+  readonly environmentId: EnvironmentId;
   readonly projection: Projection;
   readonly turnItems: ReadonlyArray<ThreadStructureTurnItem>;
   readonly asks: ReadonlyMap<string, AgentAsk>;
@@ -537,7 +542,6 @@ export function deriveMilestoneMap(input: {
     readonly milestone: OrchestrationV2Milestone | null;
     readonly title: string;
     readonly subtitle: string;
-    readonly subtitleHint?: string | null;
     readonly state: "done" | "active" | "planned" | "dropped";
     readonly why?: string | null;
     readonly revision?: MapMilestone["revision"];
@@ -564,7 +568,6 @@ export function deriveMilestoneMap(input: {
       milestone: fields.milestone,
       title: fields.title,
       subtitle: fields.subtitle,
-      subtitleHint: fields.subtitleHint ?? null,
       status,
       started: fields.startMs !== null,
       why: fields.why ?? null,
@@ -746,7 +749,6 @@ export function deriveMilestoneMap(input: {
           milestone,
           title: milestone.title,
           subtitle: subtitleOf(milestone, revision),
-          subtitleHint: revision?.reason ?? null,
           state,
           why: isDropped
             ? milestone.status === "dropped"
