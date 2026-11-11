@@ -225,9 +225,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
      compositor updates discrete frames instead of every vsync. */
   --animate-status-pulse: status-pulse 2s infinite;
   --animate-status-ping: status-ping 2s infinite;
-  /* Runs once as Milestones zooms into a milestone or back out to the whole thread. */
-  --animate-trace-zoom-in: trace-zoom-in 180ms ease-out;
-  --animate-trace-zoom-out: trace-zoom-out 180ms ease-out;
+  /* Runs once as a zoomed milestone's agents and posts fan out on the Milestones map. */
+  --animate-map-enter: map-enter 220ms ease both;
   /* Stash pulses hold a highlight for 1.2s; the row then eases back over 200ms, the count snaps.
      The row alternates two identical keyframes so each stash restarts it without a remount. */
   --animate-stash-pulse-row: stash-pulse-row 1400ms;
@@ -347,16 +346,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
       opacity: 1;
     }
   }
-  @keyframes trace-zoom-in {
+  @keyframes map-enter {
     from {
       opacity: 0;
-      scale: 0.975;
-    }
-  }
-  @keyframes trace-zoom-out {
-    from {
-      opacity: 0;
-      scale: 1.02;
+      translate: -6px 0;
     }
   }
   @keyframes status-ping {

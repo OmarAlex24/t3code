@@ -199,7 +199,7 @@ const SETTLED_SUBAGENT_STATUSES = new Set<OrchestrationV2TurnItem["status"]>([
 const GENERIC_CHILD_END = /^Child task ended with status\b/i;
 
 /** The one line a subagent row shows: its progress while it runs, its result once it settles. */
-export function subagentDetailLine(
+function subagentDetailLine(
   status: OrchestrationV2TurnItem["status"],
   result: string | undefined,
   progress: string | undefined,
@@ -456,7 +456,7 @@ export function useSubagentLink(props: SubagentLinkProps) {
 }
 
 /** The hover card for a subagent row or card. */
-export function SubagentHoverCard(
+function SubagentHoverCard(
   props: SubagentLinkProps & { readonly link: ReturnType<typeof useSubagentLink> },
 ) {
   const { link } = props;
