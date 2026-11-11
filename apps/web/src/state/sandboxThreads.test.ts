@@ -53,11 +53,17 @@ describe("findThreadSandbox", () => {
     expect(findThreadSandbox([linked], { environmentId: HOST, threadId }, HOST)).toBe(linked);
   });
 
-  it("ignores the host's thread id when the sandbox was never linked or is still starting", () => {
+  it("ignores the host's thread id for a running sandbox its launch never linked", () => {
     const ref = { environmentId: HOST, threadId };
     expect(findThreadSandbox([record()], ref, HOST)).toBeUndefined();
-    const starting = record({ hostProjectId: ProjectId.make("p"), state: "provisioning" });
-    expect(findThreadSandbox([starting], ref, HOST)).toBeUndefined();
+    expect(findThreadSandbox([record({ state: "deleted" })], ref, HOST)).toBeUndefined();
+  });
+
+  it("matches the host thread while its sandbox launches, since the launch made that thread", () => {
+    const ref = { environmentId: HOST, threadId };
+    // The launch links the host project only at its end; the thread exists from the send.
+    const starting = record({ state: "provisioning" });
+    expect(findThreadSandbox([starting], ref, HOST)).toBe(starting);
   });
 
   it("never matches a thread on a third environment", () => {
@@ -91,7 +97,10 @@ describe("sandboxRowStates", () => {
   it("leaves other threads, deleted sandboxes and unlinked host threads alone", () => {
     expect(sandboxRowStates([linked({ state: "deleted" })], HOST)(sandboxRef)).toBeNull();
     expect(sandboxRowStates([record({ provider: "boat" })], HOST)(hostRef)).toBeNull();
-    expect(sandboxRowStates([linked({ state: "provisioning" })], HOST)(hostRef)).toBeNull();
+    // A launch's host thread shows its sandbox's provider from the send on.
+    expect(
+      sandboxRowStates([record({ provider: "boat", state: "provisioning" })], HOST)(hostRef),
+    ).toEqual({ provider: "boat", state: "provisioning", resumingSince: null });
     const other = { environmentId: EnvironmentId.make("other"), threadId };
     expect(sandboxRowStates([linked()], HOST)(other)).toBeNull();
     // A record that answers as the host must not claim the host's own threads.
@@ -168,6 +177,14 @@ describe("sandboxChatAliases", () => {
     expect(aliases(linked())).toEqual(showsSandbox);
     // A launch's thread opens on the sandbox as soon as it answers.
     expect(aliases(linked({ state: "provisioning" }))).toEqual(showsSandbox);
+  });
+
+  it("keeps a launch's host thread as the chat until the sandbox's own thread lists", () => {
+    // The launch links the host project at its end, so a starting sandbox moves nothing.
+    expect(aliases(record({ state: "provisioning" }))).toEqual([]);
+    // Linked and connected, but the bridge has not made the sandbox's thread yet.
+    expect(aliases(linked(), [hostThread])).toEqual([]);
+    expect(aliases(linked())).toEqual(showsSandbox);
   });
 
   it("shows the host's mirror while the sandbox is stopped, resuming or not connected", () => {
