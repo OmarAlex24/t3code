@@ -100,6 +100,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
+import { LATEST_ACTION_ITEM_TYPES, latestActionFromTurnItem } from "./latestAction.ts";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import { readableSearchText } from "./messageSearchIndex.ts";
 import {
@@ -1072,6 +1073,7 @@ type ShellThreadRow = {
   readonly blocking_failure_payload_json: string | null;
   readonly pending_request_payload_json: string | null;
   readonly pending_secret_request_payload_json: string | null;
+  readonly latest_tool_payload_json: string | null;
   readonly pending_link_request_payload_json: string | null;
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
@@ -1574,6 +1576,27 @@ const linkCardStillAsks = (
   latestUserAuthoredMessageAt === null ||
   !DateTime.isGreaterThan(latestUserAuthoredMessageAt, item.startedAt ?? item.updatedAt);
 
+function latestToolItem(
+  projection: OrchestrationV2ThreadProjection,
+): OrchestrationV2TurnItem | null {
+  const rolledBack = new Set(
+    projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
+  );
+  const types: ReadonlyArray<string> = LATEST_ACTION_ITEM_TYPES;
+  let latest: OrchestrationV2TurnItem | null = null;
+  for (const item of projection.turnItems) {
+    if (!types.includes(item.type) || (item.runId !== null && rolledBack.has(item.runId))) continue;
+    if (
+      latest === null ||
+      item.ordinal > latest.ordinal ||
+      (item.ordinal === latest.ordinal && item.id > latest.id)
+    ) {
+      latest = item;
+    }
+  }
+  return latest;
+}
+
 export function threadShellFromProjection(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadShell {
@@ -1709,6 +1732,7 @@ export function threadShellFromProjection(
     // Thread detail owns message bodies. Keeping them out of shell rows makes
     // initial hydration and streaming updates independent of transcript size.
     latestVisibleMessage: null,
+    latestAction: latestActionFromTurnItem(latestToolItem(projection)),
     latestUserMessageAt: latestUserMessage?.updatedAt ?? null,
     latestUserAuthoredMessageAt,
     hasActionableProposedPlan: projection.plans.some(
@@ -1846,6 +1870,7 @@ type ShellThreadState = {
   readonly pendingBackgroundTasks: OrchestrationV2ThreadShell["pendingBackgroundTasks"];
   readonly providerInstanceHistory: OrchestrationV2ThreadShell["providerInstanceHistory"];
   readonly goal: OrchestrationV2ThreadShell["goal"];
+  readonly latestAction: OrchestrationV2ThreadShell["latestAction"];
   readonly itemCount: number;
   readonly runlessItemCount: number;
   readonly updatedAt: OrchestrationV2ThreadProjection["updatedAt"];
@@ -2004,6 +2029,7 @@ function shellFromState(input: {
     pendingRuntimeRequest: input.state.pendingRuntimeRequest,
     pendingGuestMessageCount: pendingGuestMessageCount(input.state.thread.guestShare),
     latestVisibleMessage: null,
+    latestAction: input.state.latestAction,
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
     hasActionableProposedPlan: input.state.hasActionableProposedPlan,
@@ -6666,6 +6692,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS pending_link_request_payload_json,
               (
+                -- Tool output and diffs can be megabytes; the label needs none of them.
+                SELECT json_remove(tool.payload_json,
+                  '$.output', '$.diffStr', '$.oldStr', '$.newStr', '$.changes', '$.results')
+                FROM orchestration_v2_projection_turn_items tool
+                  INDEXED BY orchestration_v2_projection_turn_items_latest_tool_idx
+                LEFT JOIN orchestration_v2_projection_runs tool_run ON tool_run.run_id = tool.run_id
+                WHERE tool.thread_id = t.thread_id
+                  AND tool.type IN ('command_execution', 'file_change', 'file_search', 'web_search', 'dynamic_tool')
+                  AND (tool.run_id IS NULL OR tool_run.status <> 'rolled_back')
+                ORDER BY tool.ordinal DESC, tool.turn_item_id DESC
+                LIMIT 1
+              ) AS latest_tool_payload_json,
+              (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = t.thread_id
@@ -7187,6 +7226,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             pendingRuntimeRequest = waitingCard;
           }
         }
+        const latestToolItem =
+          row.latest_tool_payload_json === null
+            ? null
+            : yield* decodeTurnItemPayload(row.latest_tool_payload_json).pipe(
+                Effect.orElseSucceed(() => null),
+              );
         let terminalFailureItem =
           row.terminal_failure_payload_json === null
             ? null
@@ -7301,6 +7346,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             providerThreadsByThreadId.get(thread.id) ?? [],
             thread.activeProviderThreadId,
           ),
+          latestAction: latestActionFromTurnItem(latestToolItem),
           itemCount: shellItemCountsByThreadId.get(thread.id)?.itemCount ?? 0,
           runlessItemCount: shellItemCountsByThreadId.get(thread.id)?.runlessItemCount ?? 0,
           updatedAt: thread.updatedAt,
