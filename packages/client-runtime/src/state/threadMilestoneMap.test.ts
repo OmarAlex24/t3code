@@ -517,7 +517,7 @@ describe("deriveMilestoneMap", () => {
           : [],
       ),
     ).toEqual([
-      ["run-1", 0, "go", "Turn 1", "Ran the showcase. Details.", "done"],
+      ["run-1", 0, "go", "Turn 1", "Ran the showcase.", "done"],
       ["run-2", 0, "again", "Turn 2", null, "done"],
     ]);
     expect(edges(map)).toEqual([["run-1", "run-2", "live"]]);
