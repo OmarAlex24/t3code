@@ -563,9 +563,14 @@ export function shouldPublishShellApplicationEvent(
 
 const LATEST_ACTION_TYPES: ReadonlySet<string> = new Set(LATEST_ACTION_ITEM_TYPES);
 
-/** A finished tool moves the child's latest action; streaming tool output does not. */
+/**
+ * A secret or link card is the child's only record of waiting on you, so its parent must hear it.
+ * A finished tool moves the child's latest action; streaming tool output does not.
+ */
 const changesChildShell = (item: { readonly type: string; readonly status: string }) =>
-  LATEST_ACTION_TYPES.has(item.type) && item.status !== "running" && item.status !== "pending";
+  item.type === "secret_request" ||
+  item.type === "link_request" ||
+  (LATEST_ACTION_TYPES.has(item.type) && item.status !== "running" && item.status !== "pending");
 
 /** Shell updates refetch an aggregate; drop transcript bodies before retaining an event. */
 export function toShellApplicationEvent(stored: ApplicationStoredEvent): ShellApplicationEvent {
