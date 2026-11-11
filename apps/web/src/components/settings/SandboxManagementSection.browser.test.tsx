@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   sandboxes: [] as Array<unknown>,
   orphans: [] as Array<unknown>,
   configs: [] as Array<unknown>,
+  providers: undefined as Array<unknown> | undefined,
   deleteSandbox: vi.fn(async () => AsyncResult.success({ warnings: [] })),
   stopSandbox: vi.fn(async () => AsyncResult.success(undefined)),
   navigate: vi.fn(),
@@ -77,7 +78,7 @@ vi.mock(import("~/state/query"), async (original) => ({
         : atom === "configs"
           ? { configs: mocks.configs }
           : atom === "providers"
-            ? { providers: [boatInfo], host: { github: false } }
+            ? { providers: mocks.providers ?? [boatInfo], host: { github: false } }
             : null,
     isPending: false,
     error: null,
@@ -183,6 +184,45 @@ describe("SandboxManagementSection", () => {
     await userEvent.hover(page.getByText("bx_46wr", { exact: true }));
     await expect.element(page.getByText("bx_46wrgghp", { exact: true })).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Running" })).toBeVisible();
+  });
+
+  it("says a sandbox that keeps itself up stops on idle, not at its running limit", async () => {
+    setup("running", {
+      configId: "config-1",
+      threadId: ThreadId.make("thread-1"),
+      projectId: ProjectId.make("project-1"),
+      projectTitle: "hello",
+      sandboxId: "bx_46wrgghp",
+      size: "small",
+      idleMinutes: 30,
+      keepAliveKey: { name: "t3-keepalive-hello-abc" },
+    });
+    mocks.configs = [
+      {
+        id: "config-1",
+        label: "Boat small",
+        provider: "boat",
+        size: "small",
+        passGithubToken: false,
+        joinTailnet: false,
+        access: "public",
+        envFiles: {},
+        idleMinutes: 30,
+        maxRunningMinutes: 480,
+        createdAt: "2026-11-01T09:00:00.000Z",
+        updatedAt: "2026-11-01T09:00:00.000Z",
+      },
+    ];
+    mocks.providers = [
+      { ...boatInfo, capabilities: { ...boatInfo.capabilities, keepAlive: true } },
+    ];
+    await using _screen = await render(<SandboxManagementSection />);
+
+    await expect.element(page.getByText("Small · stops after 30 min without work")).toBeVisible();
+    await expect
+      .element(page.getByText("hello · bx_46wr · up 2 h · stops after 30 min without work"))
+      .toBeVisible();
+    mocks.providers = [boatInfo];
   });
 
   it("recommends deleting a stopped disk close to the provider's retention", async () => {
