@@ -13,7 +13,6 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -61,6 +60,12 @@ const subRecord = (overrides: Partial<SandboxRecord> = {}): SandboxRecord => ({
   sandboxProjectId,
   ...overrides,
 });
+
+/** A sandbox chat's own sandbox, which no subagent asked for. */
+const chatRecord = (overrides: Partial<SandboxRecord>): SandboxRecord => {
+  const { parentThreadId: _parent, ...record } = subRecord(overrides);
+  return record;
+};
 
 interface Fakes {
   records: Array<SandboxRecord>;
@@ -169,9 +174,11 @@ const layerFor = (fakes: Fakes) =>
         }),
         Layer.mock(ProjectService.ProjectService)({
           getById: () =>
-            Effect.succeed(
-              Option.some({ id: projectId, title: "app", workspaceRoot: "/home/me/app" } as never),
-            ),
+            Effect.succeedSome({
+              id: projectId,
+              title: "app",
+              workspaceRoot: "/home/me/app",
+            } as never),
         }),
         Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
           resolve: () =>
@@ -303,9 +310,8 @@ describe("SubSandboxes", () => {
     const fakes = makeFakes({
       records: [
         subRecord(),
-        subRecord({
+        chatRecord({
           instanceId: "chat",
-          parentThreadId: undefined,
           environmentId: EnvironmentId.make("environment:chat"),
           threadId: parentThreadId,
         }),
