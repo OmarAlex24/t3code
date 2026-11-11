@@ -73,6 +73,20 @@ describe("subagent shell events", () => {
     expect([tool("running"), tool("completed"), tool("failed")]).toEqual([false, true, true]);
   });
 
+  it("publishes a subagent's secret or link card so its parent hears it waits on you", () => {
+    const subagents = new Set(["child"]);
+    const card = (type: string, status: string) =>
+      shouldPublishShellApplicationEvent(
+        stored("child", "turn-item.updated", { type, status }),
+        subagents,
+      );
+    expect([
+      card("secret_request", "waiting"),
+      card("secret_request", "completed"),
+      card("link_request", "waiting"),
+    ]).toEqual([true, true, true]);
+  });
+
   it("tracks subagents created after the subscription starts", () => {
     const subagents = new Set<string>();
     const created = {
