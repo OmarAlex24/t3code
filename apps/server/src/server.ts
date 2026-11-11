@@ -85,6 +85,7 @@ import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as SubSandboxes from "./sandbox/SubSandboxes.ts";
+import * as SubSandboxRequests from "./sandbox/SubSandboxRequests.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
@@ -820,10 +821,16 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
+  // Picks up what agents on this machine's sandboxes ask for through the helper installed there.
+  Layer.effectDiscard(
+    SubSandboxRequests.SubSandboxRequests.pipe(Effect.flatMap((requests) => requests.start())),
+  ),
 ).pipe(
   Layer.provide(
     PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
   ),
+  // Sub-sandbox requests from agents on sandboxes, started through the two layers below.
+  Layer.provide(SubSandboxRequests.layer),
   // delegate_task to a linked environment, from /mcp and the follower above.
   Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
   // Sandboxes delegate_task starts for subagents, linked like any environment and ended with
