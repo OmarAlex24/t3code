@@ -41,6 +41,10 @@ export type SandboxBridgeResumeFailure = typeof SandboxBridgeResumeFailure.Type;
 
 export const SandboxBridgeResumeFailureJson = Schema.fromJsonString(SandboxBridgeResumeFailure);
 
+/** The host's record of a thread's sandbox launch, kept until its first message goes out. */
+export const bridgeLaunchSecretName = (threadId: string): string =>
+  `sandbox-bridge-launch-${hex(threadId)}`;
+
 export const bridgeResumeFailureSecretName = (threadId: string): string =>
   `sandbox-bridge-resume-failed-${hex(threadId)}`;
 

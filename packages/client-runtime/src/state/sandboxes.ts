@@ -150,14 +150,6 @@ export function createSandboxEnvironmentAtoms<R, E>(
       label: "environment-data:sandboxes:pair-launch",
       tag: WS_METHODS.sandboxesPairLaunch,
     }),
-    sandboxesCompleteLaunch: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:sandboxes:complete-launch",
-      tag: WS_METHODS.sandboxesCompleteLaunch,
-      onSuccess: ({ environmentId }, registry) =>
-        Effect.sync(() =>
-          registry.update(sandboxesListRevisionAtom(environmentId), (revision) => revision + 1),
-        ),
-    }),
     sandboxesConnectGithubApp: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandboxes:connect-github-app",
       tag: WS_METHODS.sandboxesConnectGithubApp,
