@@ -10,8 +10,10 @@ const state = vi.hoisted(() => ({ respond: vi.fn(), approvalsAtom: null as unkno
 
 vi.mock("../../state/session", () => ({ useEnvironmentScope: () => true }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.respond }));
+vi.mock("./SecretRequestCard", () => ({ SecretRequestCard: () => null }));
 vi.mock("../../state/threads", () => ({
   childThreadApprovalsAtom: () => state.approvalsAtom,
+  childThreadSecretRequestsAtom: () => Atom.make([]),
   threadEnvironment: { respondToApproval: {} },
 }));
 
