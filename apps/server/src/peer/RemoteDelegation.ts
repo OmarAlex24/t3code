@@ -307,6 +307,7 @@ const make = Effect.gen(function* () {
           parentNodeId,
           task,
           ...(input.title === undefined ? {} : { title: input.title }),
+          ...(input.group === undefined ? {} : { group: input.group }),
           // The driver runs there; this side only labels the task with it.
           driver: ProviderDriverKind.make("remote"),
           modelSelection: launched.modelSelection,
