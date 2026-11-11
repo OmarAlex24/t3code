@@ -7,6 +7,7 @@ import {
   dynamicToolTitle,
   type ToolActivityPresentation,
 } from "@t3tools/shared/toolActivity";
+import { resolveT3McpToolDefinition } from "@t3tools/shared/t3McpToolPresentation";
 
 /** Keep in sync with the latest-tool index and the shell row query in ProjectionStore. */
 export const LATEST_ACTION_ITEM_TYPES = [
@@ -23,6 +24,8 @@ const clip = (text: string) =>
   text.length > LATEST_ACTION_TEXT_LIMIT
     ? `${text.slice(0, LATEST_ACTION_TEXT_LIMIT - 1).trimEnd()}…`
     : text;
+
+const withoutMcpPrefix = (name: string) => name.replace(/^mcp__.+?__(?=.)/, "");
 
 function presentation(item: OrchestrationV2TurnItem): ToolActivityPresentation | null {
   switch (item.type) {
@@ -50,13 +53,25 @@ function presentation(item: OrchestrationV2TurnItem): ToolActivityPresentation |
         title: item.title,
         data: { query: item.patterns?.join(", ") },
       });
-    case "dynamic_tool":
+    case "dynamic_tool": {
+      const t3Tool = resolveT3McpToolDefinition(item.toolName, item.input);
+      if (t3Tool !== null) {
+        const [action, , completed, detail] = t3Tool.labels;
+        return {
+          summary:
+            item.status === "failed"
+              ? `Failed to ${action.toLowerCase()} ${detail}`
+              : `${completed} ${detail}`,
+        };
+      }
+      const title = dynamicToolTitle(item.toolName, item.input, item.title) ?? item.title;
       return deriveToolActivityPresentation({
         itemType: "dynamic_tool_call",
-        title: dynamicToolTitle(item.toolName, item.input, item.title) ?? item.title,
+        title: title && withoutMcpPrefix(title),
         data: { toolName: item.toolName ?? undefined, input: item.input },
-        fallbackSummary: item.toolName,
+        fallbackSummary: item.toolName && withoutMcpPrefix(item.toolName),
       });
+    }
     default:
       return null;
   }
