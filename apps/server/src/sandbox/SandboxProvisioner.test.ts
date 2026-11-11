@@ -5776,6 +5776,77 @@ describe("SandboxProvisioner per-thread launches", () => {
     );
   });
 
+  it.effect("starts a subagent's sandbox from a config with the project set up but no chat", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    const parentThreadId = ThreadId.make("thread-parent-of-subagent");
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      const created = yield* provisioner.createSubSandbox({
+        instanceId: "instance-subagent",
+        config,
+        parentThreadId,
+        size: "default",
+        project: { ...project, baseRef: "feature/fast" },
+      });
+      expect(created).toMatchObject({
+        instanceId: "instance-subagent",
+        environmentId: testEnvironmentId,
+        label: "hello subagent on Boat small",
+        pairingCode: pairToken,
+      });
+      // No thread's launch runs for it, and nothing links a chat to it.
+      expect(yield* provisioner.launching(threadId)).toBe(false);
+      const record = repository.records.get("instance-subagent");
+      expect(record).toMatchObject({
+        state: "running",
+        parentThreadId,
+        configId: config.id,
+        projectId,
+        projectTitle: "hello",
+        size: "default",
+        repoDir: "/home/boat/work/hello",
+        sandboxProjectId: "project-remote",
+        // It keeps itself up while its task works, as a thread's sandbox does.
+        idleMinutes: 30,
+        keepAliveKey: { id: "apk_keepalive1" },
+      });
+      expect(record?.threadId).toBeUndefined();
+      expect(record?.bridge).toBeUndefined();
+      // The same clone and env files as a thread's launch, at the parent's pushed branch.
+      const clone = fake.commands.find((command) =>
+        command.includes("https://github.com/octo/hello.git"),
+      );
+      expect(clone).toContain("feature/fast");
+      expect(fake.bodies).toContainEqual({
+        url: `https://boat.dev/api/v1/sandboxes/${boatSandboxId}/files`,
+        body: { path: "/home/boat/work/hello/.env", content: "API_TOKEN=shh" },
+      });
+      // Boat names the machine size `type`.
+      expect(fake.bodies.find((entry) => entry.url.endsWith("/sandboxes"))?.body).toMatchObject({
+        type: "default",
+      });
+      expect(
+        fake.bodies.findLast(
+          (entry) => entry.url === `https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
+        )?.body,
+      ).toEqual({ ttlSeconds: 35 * 60 });
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: configs.layer,
+          workspace: { ".env": "API_TOKEN=shh" },
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
   it.effect(
     "leaves a sandbox on its running limit when Boat scopes its keep-alive key wider",
     () => {
