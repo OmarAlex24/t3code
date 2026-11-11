@@ -274,6 +274,19 @@ export const SandboxMaxRunningMinutes = Schema.Int.check(
 );
 const SandboxIdleMinutes = Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 }));
 
+/** How many sandboxes `delegate_task` may start for subagents when a config sets no limits. */
+export const DEFAULT_SANDBOX_SUB_SANDBOX_LIMITS = { perThread: 2, total: 4 } as const;
+const SandboxSubSandboxCount = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 20 }));
+/**
+ * Sandboxes subagents may get of their own: at most `perThread` at once for one parent thread,
+ * and `total` at once across every parent. 0 turns them off.
+ */
+export const SandboxSubSandboxLimits = Schema.Struct({
+  perThread: SandboxSubSandboxCount,
+  total: SandboxSubSandboxCount,
+});
+export type SandboxSubSandboxLimits = typeof SandboxSubSandboxLimits.Type;
+
 export const SandboxCreateInput = Schema.Struct({
   provider: SandboxProviderKind,
   /** Saved on this server when present; when omitted the saved key is used. */
@@ -381,6 +394,11 @@ export const SandboxRecord = Schema.Struct({
   environmentId: Schema.NullOr(EnvironmentId),
   configId: Schema.optionalKey(TrimmedNonEmptyString),
   threadId: Schema.optionalKey(ThreadId),
+  /**
+   * Set on a sandbox `delegate_task` started for a subagent: the thread on this server that
+   * delegated the task. Such a sandbox has no chat of its own (`threadId` is absent).
+   */
+  parentThreadId: Schema.optionalKey(ThreadId),
   projectId: Schema.optionalKey(ProjectId),
   projectTitle: Schema.optionalKey(TrimmedString),
   provider: SandboxProviderKind,
@@ -890,6 +908,8 @@ export const SandboxEnvironmentConfig = Schema.Struct({
   maxRunningMinutes: SandboxMaxRunningMinutes,
   /** With keep-alive, stop a sandbox after running this long even while it works. Absent: no cap. */
   runningCapMinutes: Schema.optionalKey(SandboxMaxRunningMinutes),
+  /** Sandboxes subagents may start from this config. Absent: `DEFAULT_SANDBOX_SUB_SANDBOX_LIMITS`. */
+  subSandboxes: Schema.optionalKey(SandboxSubSandboxLimits),
   createdAt: TrimmedString,
   updatedAt: TrimmedString,
 });
