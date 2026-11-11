@@ -2873,6 +2873,7 @@ const make = Effect.gen(function* () {
           parentNodeId: parentRun.rootNodeId,
           task: taskPrompt(input),
           ...(input.title === undefined ? {} : { title: input.title }),
+          ...(input.group === undefined ? {} : { group: input.group }),
           modelSelection: target.modelSelection,
           runtimeMode,
           interactionMode,

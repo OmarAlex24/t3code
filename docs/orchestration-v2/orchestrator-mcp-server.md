@@ -242,6 +242,8 @@ import type {
 } from "@t3tools/contracts";
 ```
 
+`group` names the work stream clients group parallel subagents by, such as `"UI"`.
+
 For local delegation, provider, model, runtime mode, and interaction mode inherit
 from the parent when omitted. A driver-only target inherits the parent's provider instance
 when it can run child tasks, and otherwise selects an available instance of

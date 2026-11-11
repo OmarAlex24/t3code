@@ -398,6 +398,7 @@ describe("orchestrator MCP toolkit", () => {
             providerInstanceId: codexInstanceId,
             model: codexModel,
           },
+          group: "Backend",
           mode: "async",
           clientRequestId: "delegate-codex-replay-1",
         });
@@ -510,10 +511,12 @@ describe("orchestrator MCP toolkit", () => {
         expect(followupTasks.every((task) => task.result === null)).toBe(true);
         // Each subagent keeps the milestone that was active when it started.
         const parentNow = yield* orchestrator.getThreadProjection(parentThreadId);
-        expect(
-          parentNow.subagents.find((task) => task.id === delegated.taskId)?.milestoneId,
-        ).toBe("m1");
+        expect(parentNow.subagents.find((task) => task.id === delegated.taskId)).toMatchObject({
+          milestoneId: "m1",
+          group: "Backend",
+        });
         expect(followupTasks.map((task) => task.milestoneId)).toEqual(["m2", "m2"]);
+        expect(followupTasks.map((task) => task.group)).toEqual(["Backend", "Backend"]);
         expect(
           parentNow.turnItems
             .filter((item) => item.type === "milestone")
