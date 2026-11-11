@@ -22,6 +22,7 @@ import {
   WS_METHODS,
   WsRpcGroup,
   type SandboxRecord,
+  type SandboxSetupSnapshot,
   type VcsStatusStreamEvent,
   type ModelSelection,
   type OrchestrationProjectShell,
@@ -226,13 +227,15 @@ export interface FakeThread {
   readonly olderSettled?: true;
   readonly id: ThreadId;
   readonly title: string;
-  /** Defaults to GPT-5.4 on Codex. */
+  /** Defaults to GPT-5.4 on Codex; a sandbox chat uses the sandbox bridge's. */
   readonly modelSelection?: ModelSelection;
   /** The first is the thread's active provider thread. */
   readonly providerThreads?: ReadonlyArray<OrchestrationV2ProviderThread>;
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
   readonly runtimeRequests?: OrchestrationV2ThreadProjection["runtimeRequests"];
+  /** The shell's status, as the sidebar reads it; by default, from whether it has a run. */
+  readonly shellStatus?: OrchestrationV2ThreadShell["status"];
 }
 
 /** A thread of `turns` user prompts, each answered in markdown with a list and inline code. */
@@ -329,7 +332,7 @@ function shellOf(thread: FakeThread): OrchestrationV2ThreadShell {
     latestRunId: latest?.id ?? null,
     activeRunId: null,
     // Idle reads as waiting on the user, which shows a per-second duration in the sidebar.
-    status: latest ? "completed" : "idle",
+    status: thread.shellStatus ?? (latest ? "completed" : "idle"),
     pendingRuntimeRequest: null,
     latestVisibleMessage: null,
     latestUserMessageAt: AT,
@@ -419,6 +422,7 @@ let pendingDispatches: Array<{
 }> = [];
 let pendingAssetUrls: Array<Deferred.Deferred<AssetCreateUrlResult>> = [];
 let sandboxes: ReadonlyArray<SandboxRecord> = [];
+let launches: ReadonlyArray<SandboxSetupSnapshot> = [];
 let scopes: ReadonlyArray<string> = AuthStandardClientScopes;
 let projectWorkspaceRoot = project.workspaceRoot;
 let sequence = 1;
@@ -518,6 +522,9 @@ const handlers: Record<string, (input: never) => unknown> = {
     subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig() }]),
   // The host's Sandboxes list, for threads whose environment is a sandbox.
   "sandboxes.list": () => Effect.succeed({ sandboxes, orphans: [] }),
+  // A sandbox chat's launch, which its host thread shows while the first message waits.
+  "sandboxes.subscribeLaunch": (input: { readonly threadId: ThreadId }) =>
+    subscribe([launches.find((launch) => launch.threadId === input.threadId) ?? null]),
 };
 
 // Unanswered calls stay pending, like a server that has not replied yet.
@@ -595,6 +602,8 @@ export function installFakeEnvironment(
     readonly holdCommand?: (command: OrchestrationV2Command) => boolean;
     readonly providers?: ReadonlyArray<unknown>;
     readonly sandboxes?: ReadonlyArray<SandboxRecord>;
+    /** Sandbox launches the host runs, one per thread. */
+    readonly launches?: ReadonlyArray<SandboxSetupSnapshot>;
     /** What the session grants; a scope left out is one this client cannot read as granted. */
     readonly scopes?: ReadonlyArray<string>;
     /** Where the one project lives, such as a sandbox's placeholder folder. */
@@ -618,6 +627,7 @@ export function installFakeEnvironment(
   ];
   holdCommand = options?.holdCommand ?? (() => false);
   sandboxes = options?.sandboxes ?? [];
+  launches = options?.launches ?? [];
   scopes = options?.scopes ?? AuthStandardClientScopes;
   projectWorkspaceRoot = options?.projectWorkspaceRoot ?? project.workspaceRoot;
   globalThis.fetch = async (input, init) => {
@@ -649,6 +659,7 @@ export function installFakeEnvironment(
       pendingDispatches = [];
       pendingAssetUrls = [];
       sandboxes = [];
+      launches = [];
       scopes = AuthStandardClientScopes;
       projectWorkspaceRoot = project.workspaceRoot;
       bringFakeEnvironmentOnline();

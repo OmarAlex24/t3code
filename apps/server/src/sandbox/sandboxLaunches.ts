@@ -35,6 +35,16 @@ const emptyStage = (id: SandboxSetupStageId): SandboxSetupStage => ({
   detail: null,
 });
 
+/** A launch beginning, including a retry that starts a new sandbox, or ending. */
+export type SandboxLaunchLifecycle =
+  | { readonly _tag: "began"; readonly threadId: ThreadId }
+  | {
+      readonly _tag: "finished";
+      readonly threadId: ThreadId;
+      readonly phase: "done" | "failed" | "cancelled";
+      readonly error: string | null;
+    };
+
 export interface SandboxLaunchTracker {
   readonly begin: (input: {
     readonly threadId: ThreadId;
@@ -63,6 +73,7 @@ export interface SandboxLaunchTracker {
   readonly remove: (threadId: ThreadId) => Effect.Effect<void>;
   readonly get: (threadId: ThreadId) => Effect.Effect<SandboxSetupSnapshot | null>;
   readonly stream: (threadId: ThreadId) => Stream.Stream<SandboxSetupSnapshot | null>;
+  readonly lifecycle: Stream.Stream<SandboxLaunchLifecycle>;
 }
 
 export const makeSandboxLaunchTracker = Effect.gen(function* () {
@@ -71,6 +82,7 @@ export const makeSandboxLaunchTracker = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly snapshot: SandboxSetupSnapshot | null;
   }>();
+  const lifecycleEvents = yield* PubSub.unbounded<SandboxLaunchLifecycle>();
   const retention = new Map<ThreadId, Fiber.Fiber<void>>();
   // Sequences keep rising across launches of one thread, so a subscriber accepts the next one.
   const lastSequence = new Map<ThreadId, number>();
@@ -137,6 +149,7 @@ export const makeSandboxLaunchTracker = Effect.gen(function* () {
       lastSequence.set(input.threadId, snapshot.sequence);
       yield* Ref.update(launches, (current) => new Map(current).set(input.threadId, snapshot));
       yield* publish(input.threadId, snapshot);
+      yield* PubSub.publish(lifecycleEvents, { _tag: "began", threadId: input.threadId });
     },
   );
 
@@ -197,6 +210,12 @@ export const makeSandboxLaunchTracker = Effect.gen(function* () {
             : entry,
         ),
       }));
+      yield* PubSub.publish(lifecycleEvents, {
+        _tag: "finished",
+        threadId,
+        phase,
+        error: options.error ?? null,
+      });
       if (phase === "failed") return;
       yield* clearRetention(threadId);
       const fiber = yield* remove(threadId).pipe(
@@ -234,5 +253,15 @@ export const makeSandboxLaunchTracker = Effect.gen(function* () {
       { bufferSize: 1, strategy: "sliding" },
     );
 
-  return { begin, stage, warn, update, finish, remove, get, stream } satisfies SandboxLaunchTracker;
+  return {
+    begin,
+    stage,
+    warn,
+    update,
+    finish,
+    remove,
+    get,
+    stream,
+    lifecycle: Stream.fromPubSub(lifecycleEvents),
+  } satisfies SandboxLaunchTracker;
 });

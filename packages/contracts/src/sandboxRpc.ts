@@ -65,7 +65,6 @@ export const SANDBOX_WS_METHODS = {
   sandboxesCancelLaunch: "sandboxes.cancelLaunch",
   sandboxesRetryLaunch: "sandboxes.retryLaunch",
   sandboxesPairLaunch: "sandboxes.pairLaunch",
-  sandboxesCompleteLaunch: "sandboxes.completeLaunch",
   sandboxesCheckTailscale: "sandboxes.checkTailscale",
   sandboxesLinkHostThread: "sandboxes.linkHostThread",
   sandboxesConnectGithubApp: "sandboxes.connectGithubApp",
@@ -207,12 +206,6 @@ const WsSandboxesPairLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesPairLaunch
   error: SandboxFailure,
 });
 
-const WsSandboxesCompleteLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCompleteLaunch, {
-  payload: SandboxLaunchThreadInput,
-  success: Schema.Void,
-  error: SandboxFailure,
-});
-
 // The secret only signs in; nothing is saved, so a wrong one changes nothing.
 const WsSandboxesCheckTailscaleRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCheckTailscale, {
   payload: SandboxTailscaleCheckInput,
@@ -263,7 +256,6 @@ export const SandboxRpcs = [
   WsSandboxesCancelLaunchRpc,
   WsSandboxesRetryLaunchRpc,
   WsSandboxesPairLaunchRpc,
-  WsSandboxesCompleteLaunchRpc,
   WsSandboxesCheckTailscaleRpc,
   WsSandboxesLinkHostThreadRpc,
   WsSandboxesConnectGithubAppRpc,
@@ -286,7 +278,6 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesCancelLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesRetryLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesPairLaunch]: AuthSettingsWriteScope,
-  [SANDBOX_WS_METHODS.sandboxesCompleteLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesCheckTailscale]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesLinkHostThread]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesConnectGithubApp]: AuthSettingsWriteScope,

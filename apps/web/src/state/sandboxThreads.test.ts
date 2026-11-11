@@ -18,7 +18,6 @@ import {
 import {
   findThreadSandbox,
   isSandboxlessBridgeThread,
-  sandboxBridgeReady,
   sandboxChatAliases,
   sandboxChatAliasTarget,
   sandboxHostMirrors,
@@ -286,67 +285,6 @@ describe("isSandboxlessBridgeThread", () => {
         provisionerEnvironmentId: HOST,
       }),
     ).toBe(false);
-  });
-});
-
-describe("sandboxBridgeReady", () => {
-  const projectId = ProjectId.make("project-host");
-  const provider = (fields: Partial<ServerProvider> = {}) =>
-    ({
-      instanceId: "sandboxes",
-      driver: "acpRegistry",
-      enabled: true,
-      installed: true,
-      status: "ready",
-      models: [{ slug: "sandbox", name: "Sandbox agent" }],
-      ...fields,
-    }) as unknown as ServerProvider;
-  const settings = (projectEnabled: boolean) =>
-    ({
-      providerInstances: { sandboxes: { driver: "acpRegistry", enabled: false } },
-      projectSettingsOverrides: projectEnabled
-        ? { [projectId]: { providerInstances: { sandboxes: { enabled: true } } } }
-        : {},
-    }) as unknown as ServerSettings;
-  const projects = [{ environmentId: HOST, id: projectId }];
-
-  it("is ready once the instance is probed, the project shows it, and the project is listed", () => {
-    expect(
-      sandboxBridgeReady({
-        providers: [provider()],
-        settings: settings(true),
-        projects,
-        environmentId: HOST,
-        projectId,
-        model: "sandbox",
-      }),
-    ).toBe(true);
-  });
-
-  it("waits for each of them", () => {
-    const base = {
-      providers: [provider()],
-      settings: settings(true),
-      projects,
-      environmentId: HOST,
-      projectId,
-      model: "sandbox",
-    };
-    expect(sandboxBridgeReady({ ...base, providers: [] })).toBe(false);
-    // Before the probe discovers the bridge's model the instance lists a placeholder, which the
-    // composer would send with instead.
-    expect(
-      sandboxBridgeReady({
-        ...base,
-        providers: [provider({ models: [{ slug: "default", name: "Default" }] as never })],
-      }),
-    ).toBe(false);
-    expect(sandboxBridgeReady({ ...base, providers: [provider({ status: "warning" })] })).toBe(
-      false,
-    );
-    expect(sandboxBridgeReady({ ...base, settings: settings(false) })).toBe(false);
-    expect(sandboxBridgeReady({ ...base, settings: null })).toBe(false);
-    expect(sandboxBridgeReady({ ...base, projects: [] })).toBe(false);
   });
 });
 

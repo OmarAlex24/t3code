@@ -8,7 +8,6 @@ describe("slow request tracking", () => {
     for (const method of [
       WS_METHODS.sandboxesResume,
       WS_METHODS.sandboxesCreate,
-      WS_METHODS.sandboxesCompleteLaunch,
       WS_METHODS.sandboxesPairLaunch,
     ]) {
       expect(shouldTrackRpcAck(method)).toBe(false);

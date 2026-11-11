@@ -69,7 +69,6 @@ import {
 import { COPYABLE_FILE_MAX_BYTES, isDefaultCopiedFile } from "@t3tools/shared/copiedFiles";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Context from "effect/Context";
-import * as Deferred from "effect/Deferred";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -155,7 +154,7 @@ import {
   type SandboxBridgeLink,
   SandboxBridgeLinkJson,
 } from "@t3tools/sandbox-bridge/link";
-import { makeSandboxLaunchTracker } from "./sandboxLaunches.ts";
+import { makeSandboxLaunchTracker, type SandboxLaunchLifecycle } from "./sandboxLaunches.ts";
 import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
 import { GithubAppApiError, type GithubAppCredentials, makeGithubAppApi } from "./githubAppApi.ts";
 import { makeMapleApi, mapleApiBaseUrl } from "./mapleApi.ts";
@@ -377,11 +376,11 @@ const encodeBridgeLink = Schema.encodeEffect(SandboxBridgeLinkJson);
 // A bridge credential this close to its expiry is replaced the next time it is linked or resumed.
 const BRIDGE_RENEW_BEFORE_MS = 30 * 24 * 60 * 60 * 1000;
 
-// How long a launch waits on its client, to pair and start the thread or to retry a failed stage,
-// before it gives up and releases the machine. Every pairing or retry starts the wait again.
-const LAUNCH_CLIENT_WAIT = "10 minutes";
-const LAUNCH_CLIENT_TIMEOUT =
-  "Nothing connected to this sandbox for 10 minutes, so T3 Code deleted it. Start a new sandbox to try again.";
+// How long a stage that failed but kept its machine waits for a retry before the launch gives up
+// and releases the machine. Every retry starts the wait again.
+const LAUNCH_RETRY_WAIT = "10 minutes";
+const LAUNCH_RETRY_TIMEOUT =
+  "Nothing retried this sandbox's setup for 10 minutes, so T3 Code deleted it. Start a new sandbox to try again.";
 const LAUNCH_DELETED_OUTSIDE =
   "The sandbox was deleted outside T3 Code before it finished starting. Start a new sandbox to try again.";
 // A record left `provisioning` with no launch to finish it: T3 Code stopped mid-launch.
@@ -615,10 +614,23 @@ export class SandboxProvisioner extends Context.Service<
     readonly deleteConfig: (
       input: SandboxDeleteConfigInput,
     ) => Effect.Effect<void, SandboxProviderError>;
-    /** Starts provisioning a thread's sandbox on this server and returns at once. */
+    /**
+     * Starts provisioning a thread's sandbox on this server and returns at once. With a host
+     * project, the launch ends with the host's bridge linked for that project's thread.
+     */
     readonly launch: (
       input: SandboxLaunchInput,
+      options?: { readonly hostProjectId?: ProjectId },
     ) => Effect.Effect<SandboxLaunchResult, SandboxProviderError>;
+    /** Each launch beginning and ending, for the host thread that waits on it. */
+    readonly launchLifecycle: Stream.Stream<SandboxLaunchLifecycle>;
+    /** Whether a launch for the thread is still working. */
+    readonly launching: (threadId: ThreadId) => Effect.Effect<boolean>;
+    /**
+     * Shows a lost launch as failed, with a new sandbox as the way back: T3 Code stopped while it
+     * ran. Nothing changes when the thread already shows a launch.
+     */
+    readonly markLaunchLost: (input: SandboxLaunchInput) => Effect.Effect<void>;
     readonly subscribeLaunch: (
       input: SandboxLaunchThreadInput,
     ) => Stream.Stream<SandboxSetupSnapshot | null>;
@@ -626,17 +638,17 @@ export class SandboxProvisioner extends Context.Service<
     readonly cancelLaunch: (
       input: SandboxLaunchThreadInput,
     ) => Effect.Effect<SandboxLaunchCancelResult>;
+    /** False when this server holds no launch for the thread, as after a restart. */
     readonly retryLaunch: (
       input: SandboxLaunchThreadInput,
-    ) => Effect.Effect<void, SandboxProviderError>;
-    /** Runs `t3 pair` on the launched sandbox; the code goes only to the caller. */
+    ) => Effect.Effect<boolean, SandboxProviderError>;
+    /**
+     * Runs `t3 pair` on a thread's sandbox once its launch is done, for a client that has not
+     * paired with it yet; the code goes only to the caller.
+     */
     readonly pairLaunch: (
       input: SandboxLaunchThreadInput,
     ) => Effect.Effect<SandboxLaunchPairResult, SandboxProviderError>;
-    /** The client paired and holds the thread's project, so the launch is done. */
-    readonly completeLaunch: (
-      input: SandboxLaunchThreadInput,
-    ) => Effect.Effect<void, SandboxProviderError>;
     /** Signs in with a Tailscale OAuth client and says whether it can do what T3 needs. */
     readonly checkTailscale: (
       input: SandboxTailscaleCheckInput,
@@ -2168,14 +2180,19 @@ const make = Effect.gen(function* () {
     } satisfies Machine;
   });
 
-  const pairMachine = Effect.fn("SandboxProvisioner.pairMachine")(function* (machine: Machine) {
+  const pairMachine = (machine: Machine) => pairWith(machine.run, machine.prepared.input.provider);
+
+  const pairWith = Effect.fn("SandboxProvisioner.pairWith")(function* (
+    run: Machine["run"],
+    provider: SandboxProviderKind,
+  ) {
     const key = yield* makePairingKey;
-    const paired = yield* machine.run(pairScript(key.publicKeyPem), 60);
+    const paired = yield* run(pairScript(key.publicKeyPem), 60);
     const report = readPairReport(paired.stdout, key.privateKey);
     if (report._tag === "token") return report.token;
     const status = report.exitCode === undefined ? "" : ` It exited with ${report.exitCode}.`;
     return yield* new SandboxProviderError({
-      provider: machine.prepared.input.provider,
+      provider,
       stage: "pair",
       detail: `${PAIR_FAILURES[report.reason]}${status}`,
       ...(report.stderr === undefined ? {} : { cause: new Error(report.stderr) }),
@@ -2405,38 +2422,35 @@ const make = Effect.gen(function* () {
     });
   });
 
-  // One thread's launch: its fiber, and the signals the client sends it.
+  // One thread's launch: its fiber, and the retries the user asks of it.
   interface Launch {
     readonly input: SandboxLaunchInput;
     readonly config: SandboxEnvironmentConfig;
     readonly instanceId: string;
+    /** The host project whose thread holds the chat; recorded on the sandbox once it is linked. */
+    readonly hostProjectId: ProjectId | null;
     readonly fiber: Fiber.Fiber<void, SandboxProviderError>;
     /** Retries a stage that failed but kept its machine. */
     readonly retries: Queue.Queue<void>;
-    readonly handoff: Deferred.Deferred<void>;
-    ready: { readonly machine: Machine; readonly projectId: ProjectId } | null;
-    /** Bumped by each pairing or retry, so the client wait starts over. */
+    /** Bumped by each retry, so the wait for the next one starts over. */
     activity: number;
     /** Set when T3 stops the launch for a reason the card shows; a plain cancel leaves it null. */
     stopReason: string | null;
   }
   const launches = new Map<ThreadId, Launch>();
 
-  // Waits on the client, starting over while it pairs or retries; past the wait the launch fails
-  // and releases what it made, so a client that never comes back leaves nothing billing.
-  const awaitClient = Effect.fn("SandboxProvisioner.awaitClient")(function* <A>(
-    launch: Launch,
-    wait: Effect.Effect<A>,
-  ) {
+  // Waits for a retry of a failed stage; past the wait the launch fails and releases what it made,
+  // so a machine nobody comes back to leaves nothing billing.
+  const awaitRetry = Effect.fn("SandboxProvisioner.awaitRetry")(function* (launch: Launch) {
     while (true) {
       const seen = launch.activity;
-      const result = yield* Effect.timeoutOption(wait, LAUNCH_CLIENT_WAIT);
-      if (Option.isSome(result)) return result.value;
+      const result = yield* Effect.timeoutOption(Queue.take(launch.retries), LAUNCH_RETRY_WAIT);
+      if (Option.isSome(result)) return;
       if (launch.activity === seen) {
         return yield* new SandboxProviderError({
           provider: launch.config.provider,
           stage: "pair",
-          detail: LAUNCH_CLIENT_TIMEOUT,
+          detail: LAUNCH_RETRY_TIMEOUT,
         });
       }
     }
@@ -2899,7 +2913,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         error: result.failure.detail,
         recovery: "retry",
       });
-      yield* awaitClient(launch, Queue.take(launch.retries));
+      yield* awaitRetry(launch);
       yield* tracker.update(threadId, { phase: "running", error: null, recovery: null });
     }
   });
@@ -2907,11 +2921,11 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
   const startLaunch = Effect.fn("SandboxProvisioner.startLaunch")(function* (
     input: SandboxLaunchInput,
     config: SandboxEnvironmentConfig,
+    hostProjectId: ProjectId | null,
   ) {
     const threadId = input.threadId;
     const instanceId = yield* secureRandom.uuidV4();
     const retries = yield* Queue.unbounded<void>();
-    const handoff = yield* Deferred.make<void>();
     const reporter: Reporter = {
       stage: (id, status, detail) => tracker.stage(threadId, id, status, detail),
       warn: (warning) => tracker.warn(threadId, warning),
@@ -2971,7 +2985,6 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
 
         yield* reporter.stage("env-files", "running");
         const hostCopy = yield* verifiedHostCopy(input.project);
-        if (hostCopy !== null) yield* machine.save({ hostProjectId: hostCopy.projectId });
         const repositoryKey = repository?.key;
         const copied =
           hostCopy === null
@@ -3017,11 +3030,29 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
 
         const keptAlive = yield* setUpKeepAlive(machine, owned, cloned.directory, reporter.warn);
 
-        // The client pairs through `pairLaunch`, opens the project, and then completes the launch.
-        launch.ready = { machine, projectId: cloned.projectId };
-        yield* reporter.stage("pair", "running", null);
-        yield* tracker.update(threadId, { awaitingHandoff: true });
-        yield* awaitClient(launch, Deferred.await(handoff));
+        // The host thread sends its first message through the bridge, so the launch is done only
+        // once the bridge can reach the sandbox. Clients pair with it on their own afterwards.
+        if (launch.hostProjectId === null) {
+          yield* reporter.stage("pair", "running");
+          yield* ensureBridge(machine.record(), machine.run).pipe(
+            Effect.flatMap((bridge) => machine.save({ bridge })),
+            Effect.andThen(reporter.stage("pair", "done", null)),
+            Effect.catch((error) =>
+              reporter
+                .warn(`Phones cannot drive this thread yet: ${error.detail}`)
+                .pipe(Effect.andThen(reporter.stage("pair", "warning", null))),
+            ),
+          );
+        } else {
+          const bridge = yield* untilRetried(
+            launch,
+            threadId,
+            "pair",
+            ensureBridge(machine.record(), machine.run),
+          );
+          yield* machine.save({ bridge, hostProjectId: launch.hostProjectId });
+          yield* reporter.stage("pair", "done", null);
+        }
         yield* machine.save({ state: "running" });
         // Setup is over, so from here the sandbox stops once its threads have been idle a while.
         if (keptAlive) {
@@ -3032,13 +3063,6 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
             keepAliveTtlMinutes(prepared.idleMinutes, prepared.maxTtlMinutes),
           );
         }
-        // Only the host's bridge (and so the phone) needs this; the client's own pairing is done.
-        yield* ensureBridge(machine.record(), machine.run).pipe(
-          Effect.flatMap((bridge) => machine.save({ bridge })),
-          Effect.catch((error) =>
-            reporter.warn(`Phones cannot drive this thread yet: ${error.detail}`),
-          ),
-        );
         yield* tracker.finish(threadId, "done");
       }).pipe(
         Effect.onExit((exit) =>
@@ -3077,10 +3101,9 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       input,
       config,
       instanceId,
+      hostProjectId,
       fiber,
       retries,
-      handoff,
-      ready: null,
       activity: 0,
       stopReason: null,
     };
@@ -3158,6 +3181,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
   const startOrAttach = Effect.fn("SandboxProvisioner.startOrAttach")(function* (
     input: SandboxLaunchInput,
     config: SandboxEnvironmentConfig,
+    hostProjectId: ProjectId | null,
   ) {
     yield* releaseAbandoned(input.threadId);
     const all = yield* records.list.pipe(Effect.orDie);
@@ -3168,10 +3192,13 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     if (existing !== undefined) {
       return { instanceId: existing.instanceId } satisfies SandboxLaunchResult;
     }
-    return yield* startLaunch(input, config);
+    return yield* startLaunch(input, config, hostProjectId);
   });
 
-  const launch = Effect.fn("SandboxProvisioner.launch")(function* (input: SandboxLaunchInput) {
+  const launch = Effect.fn("SandboxProvisioner.launch")(function* (
+    input: SandboxLaunchInput,
+    options?: { readonly hostProjectId?: ProjectId },
+  ) {
     const current = runningLaunch(input.threadId);
     if (current !== null) {
       // A send while the thread's sandbox starts follows that launch instead of failing; one that
@@ -3196,7 +3223,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         config.provider,
       );
     }
-    return yield* startOrAttach(input, config);
+    return yield* startOrAttach(input, config, options?.hostProjectId ?? null);
   });
 
   const runningLaunch = (threadId: ThreadId) => {
@@ -3211,45 +3238,54 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       detail: "This sandbox is not ready to connect yet.",
     });
 
+  const launching = (threadId: ThreadId) => Effect.sync(() => runningLaunch(threadId) !== null);
+
+  const markLaunchLost = Effect.fn("SandboxProvisioner.markLaunchLost")(function* (
+    input: SandboxLaunchInput,
+  ) {
+    if (runningLaunch(input.threadId) !== null || (yield* tracker.get(input.threadId)) !== null) {
+      return;
+    }
+    const config = yield* configStore.get(input.configId).pipe(Effect.orDie);
+    yield* tracker.begin({
+      threadId: input.threadId,
+      instanceId: yield* secureRandom.uuidV4(),
+      configId: input.configId,
+      label: Option.match(config, { onNone: () => "Sandbox", onSome: (found) => found.label }),
+      provider: Option.match(config, {
+        onNone: (): SandboxProviderKind => "boat",
+        onSome: (found) => found.provider,
+      }),
+    });
+    yield* tracker.finish(input.threadId, "failed", {
+      error: LAUNCH_ABANDONED,
+      recovery: "relaunch",
+    });
+  });
+
   const pairLaunch = Effect.fn("SandboxProvisioner.pairLaunch")(function* (
     input: SandboxLaunchThreadInput,
   ) {
-    const current = runningLaunch(input.threadId);
-    if (current === null || current.ready === null) {
-      return yield* notReady(current?.config.provider ?? "boat");
-    }
-    current.activity += 1;
-    const { machine, projectId } = current.ready;
-    const pairingCode = yield* pairMachine(machine).pipe(
-      Effect.tapError((error) =>
-        tracker.stage(input.threadId, "pair", "failed", null).pipe(
-          Effect.andThen(
-            tracker.update(input.threadId, {
-              phase: "failed",
-              error: error.detail,
-              recovery: "retry",
-            }),
-          ),
-        ),
-      ),
+    const all = yield* records.list.pipe(Effect.orDie);
+    const record = all.find(
+      (candidate) => candidate.threadId === input.threadId && candidate.state !== "deleted",
     );
-    return {
-      environmentId: machine.environmentId,
-      httpBaseUrl: machine.httpBaseUrl,
-      pairingCode,
-      projectId,
-    } satisfies SandboxLaunchPairResult;
-  });
-
-  const completeLaunch = Effect.fn("SandboxProvisioner.completeLaunch")(function* (
-    input: SandboxLaunchThreadInput,
-  ) {
-    const current = runningLaunch(input.threadId);
-    if (current === null || current.ready === null) {
-      return yield* notReady(current?.config.provider ?? "boat");
+    if (
+      record === undefined ||
+      record.state !== "running" ||
+      record.environmentId === null ||
+      record.sandboxProjectId === undefined ||
+      runningLaunch(input.threadId) !== null
+    ) {
+      return yield* notReady(record?.provider ?? "boat");
     }
-    yield* Deferred.succeed(current.handoff, undefined);
-    yield* Fiber.join(current.fiber);
+    const pairingCode = yield* pairWith(runOnRecord(record), record.provider);
+    return {
+      environmentId: record.environmentId,
+      httpBaseUrl: record.httpBaseUrl,
+      pairingCode,
+      projectId: record.sandboxProjectId,
+    } satisfies SandboxLaunchPairResult;
   });
 
   const retryLaunch = Effect.fn("SandboxProvisioner.retryLaunch")(function* (
@@ -3257,7 +3293,8 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
   ) {
     const snapshot = yield* tracker.get(input.threadId);
     const current = launches.get(input.threadId);
-    if (snapshot === null || snapshot.phase !== "failed" || current === undefined) return;
+    if (current === undefined) return false;
+    if (snapshot === null || snapshot.phase !== "failed") return true;
     if (snapshot.recovery === "relaunch" || snapshot.recovery === "set-up-tailscale") {
       // A new sandbox follows the config as saved now, which may have changed since.
       const saved = yield* configStore.get(current.config.id).pipe(Effect.orDie);
@@ -3267,17 +3304,12 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
           current.config.provider,
         );
       }
-      yield* startOrAttach(current.input, saved.value);
-      return;
+      yield* startOrAttach(current.input, saved.value, current.hostProjectId);
+      return true;
     }
     current.activity += 1;
-    // The machine is kept; a failed pairing goes back to waiting for the client to pair again.
-    if (current.ready !== null) {
-      yield* tracker.stage(input.threadId, "pair", "running", null);
-      yield* tracker.update(input.threadId, { phase: "running", error: null, recovery: null });
-      return;
-    }
     yield* Queue.offer(current.retries, undefined);
+    return true;
   });
 
   const cancelLaunch = Effect.fn("SandboxProvisioner.cancelLaunch")(function* (
@@ -4529,7 +4561,9 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     cancelLaunch,
     retryLaunch,
     pairLaunch,
-    completeLaunch,
+    launching,
+    markLaunchLost,
+    launchLifecycle: tracker.lifecycle,
     checkTailscale,
     connectGithubApp,
     connectRailway,
@@ -4591,11 +4625,9 @@ export const rpcHandlers = Effect.gen(function* () {
     [WS_METHODS.sandboxesCancelLaunch]: (input: SandboxLaunchThreadInput) =>
       sandboxes.cancelLaunch(input),
     [WS_METHODS.sandboxesRetryLaunch]: (input: SandboxLaunchThreadInput) =>
-      sandboxes.retryLaunch(input),
+      sandboxes.retryLaunch(input).pipe(Effect.asVoid),
     [WS_METHODS.sandboxesPairLaunch]: (input: SandboxLaunchThreadInput) =>
       sandboxes.pairLaunch(input),
-    [WS_METHODS.sandboxesCompleteLaunch]: (input: SandboxLaunchThreadInput) =>
-      sandboxes.completeLaunch(input),
     [WS_METHODS.sandboxesCheckTailscale]: (input: SandboxTailscaleCheckInput) =>
       sandboxes.checkTailscale(input),
     [WS_METHODS.sandboxesConnectGithubApp]: (input: SandboxConnectGithubAppInput) =>

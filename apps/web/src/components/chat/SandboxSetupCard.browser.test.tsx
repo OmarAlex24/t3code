@@ -40,12 +40,7 @@ describe("SandboxSetupCard", () => {
   it("points to the Tailscale setup when none is saved", async () => {
     const on = handlers();
     await using _screen = await render(
-      <SandboxSetupCard
-        snapshot={refused("set-up-tailscale")}
-        connecting={false}
-        localError={null}
-        {...on}
-      />,
+      <SandboxSetupCard snapshot={refused("set-up-tailscale")} {...on} />,
     );
 
     await expect.element(page.getByText(/Set up Tailscale under Sandboxes/u)).toBeVisible();

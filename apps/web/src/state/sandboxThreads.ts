@@ -10,12 +10,8 @@ import {
   type SandboxProviderKind,
   type SandboxRecord,
   type ScopedThreadRef,
-  type ServerProvider,
-  type ServerSettings,
   type ThreadId,
 } from "@t3tools/contracts";
-
-import { isProviderInstancePickerReady, providerInstanceEntriesFor } from "../providerInstances";
 
 /**
  * The sandbox a thread runs on. The ref is either the sandbox's own thread, or the host thread the
@@ -305,48 +301,6 @@ export const isSandboxlessBridgeThread = (input: {
   !input.sandboxes.some(
     (sandbox) => sandbox.threadId === input.threadRef.threadId && sandbox.state !== "deleted",
   );
-
-interface InstanceReadyInput {
-  readonly providers: ReadonlyArray<ServerProvider>;
-  readonly settings: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides"> | null;
-  readonly projects: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly id: ProjectId;
-  }>;
-  readonly environmentId: EnvironmentId;
-  readonly projectId: ProjectId;
-  readonly model: string;
-}
-
-/**
- * Whether the composer can send on `instanceId` with `model` in this project yet: the project is
- * listed, the instance is on there and probed, and its probe found `model`. Until then the composer
- * would pick another provider, or a placeholder model the instance lists before its probe.
- */
-export const providerInstanceReady = (
-  input: InstanceReadyInput & { readonly instanceId: ProviderInstanceId },
-) => {
-  if (input.settings === null) return false;
-  const listed = input.projects.some(
-    (project) => project.environmentId === input.environmentId && project.id === input.projectId,
-  );
-  const entry = providerInstanceEntriesFor(input.providers, input.settings, input.projectId).find(
-    (candidate) => candidate.instanceId === input.instanceId,
-  );
-  return (
-    listed &&
-    entry !== undefined &&
-    isProviderInstancePickerReady(entry) &&
-    entry.models.some((candidate) => candidate.slug === input.model)
-  );
-};
-
-/**
- * Whether a host thread can send through the bridge in this project yet. Linking turns the
- * provider on for the project and the server probes it after.
- */
-export const sandboxBridgeReady = (input: InstanceReadyInput) =>
-  providerInstanceReady({ ...input, instanceId: bridgeInstanceId });
 
 const DAY_MINUTES = 24 * 60;
 // A stopped disk this close to the provider's limit gets a warning that recommends deleting it.

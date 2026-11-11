@@ -2,35 +2,24 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   type EnvironmentId,
   type ProjectId,
-  ProviderInstanceId,
-  SANDBOX_BRIDGE_INSTANCE_ID,
   type SandboxRecord,
   type ScopedThreadRef,
-  type ServerSettings,
   type ThreadId,
 } from "@t3tools/contracts";
-import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
-import { useProjects, useQuietThreadShells } from "./entities";
-import {
-  useConnectedEnvironmentIds,
-  useEnvironmentProviders,
-  usePrimaryEnvironmentId,
-} from "./environments";
+import { useQuietThreadShells } from "./entities";
+import { useConnectedEnvironmentIds, usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentPresentation } from "./presentation";
 import { useEnvironmentQuery } from "./query";
 import {
   findThreadSandbox,
   isSandboxlessBridgeThread,
-  providerInstanceReady,
   sandboxChatAliases,
   sandboxRowStates,
   type SandboxRowState,
 } from "./sandboxThreads";
 import { serverEnvironment } from "./server";
-
-const NO_SETTINGS = Atom.make<ServerSettings | null>(null);
 
 /**
  * Hosted web has no primary. The catalog keeps save order, so the first enabled saved environment
@@ -223,36 +212,3 @@ export function useSandboxRecords(): ReadonlyArray<SandboxRecord> {
   );
   return list.data?.sandboxes ?? NO_SANDBOXES;
 }
-
-/** Whether a project's composer can send on `instanceId` with `model`; see `providerInstanceReady`. */
-export function useProviderInstanceReady(
-  environmentId: EnvironmentId | null,
-  projectId: ProjectId | null,
-  instanceId: ProviderInstanceId,
-  model: string | null,
-): boolean {
-  const providersByEnvironment = useEnvironmentProviders();
-  const settings = useAtomValue(
-    environmentId === null ? NO_SETTINGS : serverEnvironment.settingsValueAtom(environmentId),
-  );
-  const projects = useProjects();
-  if (environmentId === null || projectId === null || model === null) return false;
-  return providerInstanceReady({
-    providers: providersByEnvironment.get(environmentId) ?? [],
-    settings,
-    projects,
-    environmentId,
-    projectId,
-    instanceId,
-    model,
-  });
-}
-
-const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
-
-/** Whether a host project can send through the sandbox bridge yet. */
-export const useSandboxBridgeReady = (
-  environmentId: EnvironmentId | null,
-  projectId: ProjectId | null,
-  model: string | null,
-): boolean => useProviderInstanceReady(environmentId, projectId, bridgeInstanceId, model);

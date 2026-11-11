@@ -7,11 +7,16 @@ import {
   ProjectId,
   ProviderInstanceId,
   SANDBOX_BRIDGE_INSTANCE_ID,
+  MessageId,
+  type SandboxEnvironmentConfig,
+  type SandboxLaunchInput,
+  type SandboxLaunchMessage,
   SandboxProviderError,
   type SandboxRecord,
   ThreadId,
 } from "@t3tools/contracts";
 import {
+  bridgeLaunchSecretName,
   bridgeResumeFailureSecretName,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
   SandboxBridgeResumeFailureJson,
@@ -25,6 +30,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { describe, expect } from "vite-plus/test";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -35,6 +41,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { WorkspaceRootNotExistsError } from "../workspace/WorkspacePaths.ts";
 import * as SandboxBridge from "./sandboxBridge.ts";
 import * as SandboxProvisioner from "./SandboxProvisioner.ts";
+import type { SandboxLaunchLifecycle } from "./sandboxLaunches.ts";
 
 const threadId = ThreadId.make("thread-on-sandbox");
 const decodeResumeFailure = Schema.decodeEffect(SandboxBridgeResumeFailureJson);
@@ -53,6 +60,68 @@ const record = (overrides: Partial<SandboxRecord> = {}): SandboxRecord =>
     sandboxProjectId: "project-remote",
     ...overrides,
   }) as SandboxRecord;
+
+const boatConfig = {
+  id: "config-1",
+  provider: "boat",
+  label: "Boat small",
+} as SandboxEnvironmentConfig;
+
+const launchMessage = {
+  messageId: MessageId.make("message-1"),
+  text: "Fix the flaky test",
+  attachments: [],
+  title: "Fix the flaky test",
+  modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+} as unknown as SandboxLaunchMessage;
+
+const launchInput: SandboxLaunchInput = {
+  configId: "config-1",
+  threadId,
+  project: {
+    id: ProjectId.make("project-elsewhere"),
+    title: "hello",
+    remoteUrl: "https://github.com/octo/hello.git",
+  },
+  message: launchMessage,
+};
+
+// The orchestrator's part, as far as the bridge reads it back: runs a launch's message makes.
+const applyCommand = (harness: Harness, command: Record<string, unknown>) => {
+  harness.commands.push(command);
+  const run = harness.hostRuns.find((candidate) => candidate.id === command.runId);
+  switch (command.type) {
+    case "thread.create":
+      harness.hostThreadExists = true;
+      return;
+    case "message.dispatch": {
+      const modelSelection = command.modelSelection as HostRun["modelSelection"];
+      harness.hostRuns.push({
+        id: `run-${String(command.messageId)}`,
+        status:
+          (command.dispatchMode as { readonly type: string }).type === "defer_start"
+            ? "preparing"
+            : "starting",
+        userMessageId: String(command.messageId),
+        providerInstanceId: modelSelection?.instanceId ?? SANDBOX_BRIDGE_INSTANCE_ID,
+        ordinal: harness.hostRuns.length + 1,
+        ...(modelSelection === undefined ? {} : { modelSelection }),
+      });
+      return;
+    }
+    case "prepared-run.release":
+      if (run !== undefined) run.status = "starting";
+      return;
+    case "prepared-run.fail":
+      if (run !== undefined) run.status = "failed";
+      return;
+    case "prepared-run.retry":
+      if (run !== undefined) run.status = "preparing";
+      return;
+  }
+};
 
 interface Harness {
   readonly records: Array<SandboxRecord>;
@@ -74,15 +143,37 @@ interface Harness {
     readonly settledAt: string | null;
     readonly runtimeMode?: string;
   };
-  hostRuns: Array<{
-    readonly id: string;
-    readonly status: string;
-    readonly userMessageId?: string;
-  }>;
+  hostRuns: Array<HostRun>;
   /** Set to make the next resumes fail with this reason. */
-  resumeFails?: string;
+  resumeFails?: string | undefined;
   /** The name of every secret the bridge writes, once written. */
   readonly secretWrites: Queue.Queue<string>;
+  /** Secrets the store holds before the bridge starts, as after a restart. */
+  readonly presetSecrets: Map<string, string>;
+  /** Every command the bridge dispatched, whole. */
+  readonly commands: Array<Record<string, unknown>>;
+  /** Whether the host already has the thread. */
+  hostThreadExists: boolean;
+  shells: Array<{ readonly id: ThreadId; readonly mayBeLive: boolean }>;
+  configs: Array<SandboxEnvironmentConfig>;
+  readonly lifecycle: Queue.Queue<SandboxLaunchLifecycle>;
+  readonly launched: Array<{ readonly input: SandboxLaunchInput; readonly hostProjectId?: string }>;
+  readonly launchingThreads: Set<string>;
+  readonly lost: Array<string>;
+  /** Whether the provisioner still holds a launch to retry. */
+  retryFound: boolean;
+  piReady: boolean;
+  /** Each time the bridge asks whether Pi is ready on the sandbox. */
+  readonly piChecks: Queue.Queue<void>;
+}
+
+interface HostRun {
+  readonly id: string;
+  status: string;
+  readonly userMessageId?: string;
+  readonly providerInstanceId?: string;
+  readonly ordinal?: number;
+  readonly modelSelection?: { readonly instanceId: string; readonly model: string };
 }
 
 const makeHarness = Effect.gen(function* () {
@@ -106,6 +197,18 @@ const makeHarness = Effect.gen(function* () {
     hostThread: { instanceId: SANDBOX_BRIDGE_INSTANCE_ID, settledAt: null },
     hostRuns: [],
     secretWrites: yield* Queue.unbounded<string>(),
+    presetSecrets: new Map(),
+    commands: [],
+    hostThreadExists: false,
+    shells: [],
+    configs: [boatConfig],
+    lifecycle: yield* Queue.unbounded<SandboxLaunchLifecycle>(),
+    launched: [],
+    launchingThreads: new Set(),
+    lost: [],
+    retryFound: true,
+    piReady: true,
+    piChecks: yield* Queue.unbounded<void>(),
   };
   const provisionerService: Partial<SandboxProvisioner.SandboxProvisioner["Service"]> = {
     list: Effect.sync(() => ({ sandboxes: harness.records, orphans: [] })),
@@ -125,6 +228,20 @@ const makeHarness = Effect.gen(function* () {
               new SandboxProviderError({ provider: "boat", stage: "start", detail: reason }),
             );
       }).pipe(Effect.tap(() => Queue.offer(harness.resumes, input.instanceId))),
+    configs: Effect.sync(() => ({ configs: harness.configs })),
+    launch: (input, options) =>
+      Effect.sync(() => {
+        harness.launched.push({
+          input,
+          ...(options?.hostProjectId === undefined ? {} : { hostProjectId: options.hostProjectId }),
+        });
+        harness.launchingThreads.add(input.threadId);
+        return { instanceId: "sandbox-1" };
+      }),
+    launching: (onThread) => Effect.sync(() => harness.launchingThreads.has(onThread)),
+    launchLifecycle: Stream.fromQueue(harness.lifecycle),
+    markLaunchLost: (input) => Effect.sync(() => void harness.lost.push(input.threadId)),
+    retryLaunch: () => Effect.sync(() => harness.retryFound),
   };
   const provisioner = Layer.succeed(
     SandboxProvisioner.SandboxProvisioner,
@@ -186,23 +303,32 @@ const makeHarness = Effect.gen(function* () {
         },
         runs: harness.hostRuns,
       })),
+    getThreadShell: () => Effect.sync(() => (harness.hostThreadExists ? { id: threadId } : null)),
+    listActiveShellIndex: () => Effect.sync(() => harness.shells),
     dispatch: (command: {
       readonly type: string;
       readonly threadId: string;
       readonly runId?: string;
     }) =>
-      Queue.offer(
-        harness.dispatched,
-        command.runId === undefined
-          ? { type: command.type, threadId: command.threadId }
-          : { type: command.type, threadId: command.threadId, runId: command.runId },
-      ).pipe(Effect.as({ sequence: 1 })),
+      Effect.sync(() => applyCommand(harness, command)).pipe(
+        Effect.andThen(
+          Queue.offer(
+            harness.dispatched,
+            command.runId === undefined
+              ? { type: command.type, threadId: command.threadId }
+              : { type: command.type, threadId: command.threadId, runId: command.runId },
+          ),
+        ),
+        Effect.as({ sequence: 1 }),
+      ),
   } as unknown as Orchestrator.OrchestratorV2["Service"]);
   const remote = Layer.succeed(SandboxBridge.SandboxThreadRemote, {
     setModes: (threadId, modes) =>
       Queue.offer(harness.modeChanges, { threadId, runtimeMode: modes.runtimeMode }).pipe(
         Effect.asVoid,
       ),
+    providerReady: () =>
+      Queue.offer(harness.piChecks, undefined).pipe(Effect.map(() => harness.piReady)),
   });
   const layer = SandboxBridge.layer.pipe(
     Layer.provideMerge(
@@ -226,6 +352,16 @@ const makeHarness = Effect.gen(function* () {
           const store = yield* ServerSecretStore.make;
           return {
             ...store,
+            get: (name: string) => {
+              const preset = harness.presetSecrets.get(name);
+              return preset === undefined
+                ? store.get(name)
+                : Effect.succeedSome(new TextEncoder().encode(preset));
+            },
+            remove: (name: string) =>
+              Effect.sync(() => harness.presetSecrets.delete(name)).pipe(
+                Effect.andThen(store.remove(name)),
+              ),
             set: (name: string, value: Uint8Array) =>
               store
                 .set(name, value)
@@ -252,15 +388,30 @@ const withHarness = <A, E>(
     | ServerSecretStore.ServerSecretStore
     | Path.Path
   >,
+  /** Runs before the bridge starts, to set up what a restarted host finds. */
+  before?: (harness: Harness) => void,
 ) =>
   Effect.gen(function* () {
     const { harness, layer } = yield* makeHarness;
+    before?.(harness);
     return yield* body(harness).pipe(Effect.provide(layer));
   }).pipe(
     Effect.provideService(HostProcess.ExecutablePath, "/usr/local/bin/node"),
     Effect.provideService(HostProcess.Arguments, ["/usr/local/bin/node", "/srv/t3/bin.mjs"]),
     Effect.provideService(HostProcess.IsExecutable, false),
   );
+
+/** The next dispatch of `type`, skipping the others. */
+const nextDispatch = (harness: Harness, type: string) =>
+  Effect.gen(function* () {
+    while (true) {
+      const command = yield* Queue.take(harness.dispatched);
+      if (command.type === type) return command;
+    }
+  });
+
+const lastCommand = (harness: Harness, type: string) =>
+  harness.commands.findLast((command) => command.type === type);
 
 describe("SandboxBridge", () => {
   it.effect("seeds a hidden Sandboxes instance that runs this server as `sandbox-bridge`", () =>
@@ -551,5 +702,254 @@ describe("SandboxBridge", () => {
           expect(harness.resumed).toEqual(["sandbox-1", "sandbox-1"]);
         }),
       ),
+  );
+  it.effect("starts a sandbox chat as a thread here with its first message waiting", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const bridge = yield* SandboxBridge.SandboxBridge;
+        const config = yield* ServerConfig.ServerConfig;
+        const result = yield* bridge.launch(launchInput);
+
+        // The thread lives in a project here, shown with the Sandboxes provider.
+        const hostProjectId = result.hostThread!.projectId;
+        expect(result).toEqual({
+          instanceId: "sandbox-1",
+          hostThread: { threadId, projectId: hostProjectId },
+        });
+        expect([...harness.projects.keys()]).toEqual([
+          `${config.baseDir}/sandbox-projects/octo/hello`,
+        ]);
+        expect(lastCommand(harness, "thread.create")).toMatchObject({
+          threadId,
+          projectId: hostProjectId,
+          title: "Fix the flaky test",
+          runtimeMode: "full-access",
+          // The picked model goes through the bridge, which carries it to the sandbox.
+          modelSelection: { instanceId: SANDBOX_BRIDGE_INSTANCE_ID, model: "claude-opus-5-5" },
+        });
+        expect(lastCommand(harness, "message.dispatch")).toMatchObject({
+          threadId,
+          messageId: "message-1",
+          text: "Fix the flaky test",
+          dispatchMode: { type: "defer_start" },
+        });
+        // The message waits, `preparing`, while the launch runs and links the bridge.
+        expect(harness.hostRuns).toMatchObject([{ id: "run-message-1", status: "preparing" }]);
+        expect(harness.launched).toEqual([{ input: launchInput, hostProjectId: hostProjectId }]);
+        expect(yield* Queue.take(harness.secretWrites)).toBe(bridgeLaunchSecretName(threadId));
+
+        // A send again (a retried request) makes nothing twice.
+        harness.launchingThreads.add(threadId);
+        yield* bridge.launch(launchInput);
+        expect(harness.commands.filter((command) => command.type === "thread.create")).toHaveLength(
+          1,
+        );
+      }),
+    ),
+  );
+
+  it.effect("sends the waiting message once its launch is done, even with no client", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const bridge = yield* SandboxBridge.SandboxBridge;
+        const secrets = yield* ServerSecretStore.ServerSecretStore;
+        yield* bridge.launch(launchInput);
+        expect(Option.isSome(yield* secrets.get(bridgeLaunchSecretName(threadId)))).toBe(true);
+
+        harness.launchingThreads.delete(threadId);
+        yield* Queue.offer(harness.lifecycle, {
+          _tag: "finished",
+          threadId,
+          phase: "done",
+          error: null,
+        });
+        expect(yield* nextDispatch(harness, "prepared-run.release")).toEqual({
+          type: "prepared-run.release",
+          threadId,
+          runId: "run-message-1",
+        });
+        expect(harness.hostRuns[0]?.status).toBe("starting");
+        // Nothing is left to retry once the message is out.
+        expect(yield* secrets.get(bridgeLaunchSecretName(threadId))).toEqual(Option.none());
+      }),
+    ),
+  );
+
+  it.effect("fails the waiting message with its launch and takes it back on a retry", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const bridge = yield* SandboxBridge.SandboxBridge;
+        yield* bridge.launch(launchInput);
+        yield* Queue.offer(harness.lifecycle, {
+          _tag: "finished",
+          threadId,
+          phase: "failed",
+          error: "Boat refused to create the sandbox.",
+        });
+        yield* nextDispatch(harness, "prepared-run.fail");
+        expect(lastCommand(harness, "prepared-run.fail")).toMatchObject({
+          runId: "run-message-1",
+          failure: {
+            class: "provider_error",
+            message: "The sandbox could not be set up: Boat refused to create the sandbox.",
+            retryable: true,
+          },
+        });
+        expect(harness.hostRuns[0]?.status).toBe("failed");
+
+        // A retry on the card starts the launch again, and the message waits on it again.
+        yield* bridge.retryLaunch({ threadId });
+        yield* Queue.offer(harness.lifecycle, { _tag: "began", threadId });
+        expect(yield* nextDispatch(harness, "prepared-run.retry")).toEqual({
+          type: "prepared-run.retry",
+          threadId,
+          runId: "run-message-1",
+        });
+        expect(harness.hostRuns[0]?.status).toBe("preparing");
+        yield* Queue.offer(harness.lifecycle, {
+          _tag: "finished",
+          threadId,
+          phase: "done",
+          error: null,
+        });
+        yield* nextDispatch(harness, "prepared-run.release");
+        expect(harness.hostRuns[0]?.status).toBe("starting");
+      }),
+    ),
+  );
+
+  it.effect("says a cancelled launch's message was not sent", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const bridge = yield* SandboxBridge.SandboxBridge;
+        yield* bridge.launch(launchInput);
+        yield* Queue.offer(harness.lifecycle, {
+          _tag: "finished",
+          threadId,
+          phase: "cancelled",
+          error: null,
+        });
+        yield* nextDispatch(harness, "prepared-run.fail");
+        expect(lastCommand(harness, "prepared-run.fail")).toMatchObject({
+          failure: { message: SandboxBridge.LAUNCH_CANCELLED_MESSAGE },
+        });
+      }),
+    ),
+  );
+
+  it.effect("starts a new sandbox from what it kept when a retry follows a restart", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const bridge = yield* SandboxBridge.SandboxBridge;
+        const { hostThread } = yield* bridge.launch(launchInput);
+        // The provisioner lost its launch with the restart.
+        harness.retryFound = false;
+        yield* bridge.retryLaunch({ threadId });
+        const { message: _message, ...kept } = launchInput;
+        expect(harness.launched.at(-1)).toEqual({
+          input: kept,
+          hostProjectId: hostThread!.projectId,
+        });
+      }),
+    ),
+  );
+
+  it.effect("after a restart, fails a first message whose launch was lost", () =>
+    withHarness(
+      (harness) =>
+        Effect.gen(function* () {
+          yield* SandboxBridge.SandboxBridge;
+          expect(yield* nextDispatch(harness, "prepared-run.fail")).toEqual({
+            type: "prepared-run.fail",
+            threadId,
+            runId: "run-waiting",
+          });
+          expect(lastCommand(harness, "prepared-run.fail")).toMatchObject({
+            failure: { message: SandboxBridge.LAUNCH_LOST_MESSAGE },
+          });
+          // Its card offers a new sandbox.
+          expect(harness.lost).toEqual([threadId]);
+        }),
+      (harness) => {
+        harness.shells = [{ id: threadId, mayBeLive: true }];
+        harness.hostRuns = [
+          {
+            id: "run-waiting",
+            status: "preparing",
+            providerInstanceId: SANDBOX_BRIDGE_INSTANCE_ID,
+            ordinal: 1,
+            modelSelection: { instanceId: SANDBOX_BRIDGE_INSTANCE_ID, model: "sandbox" },
+          },
+        ];
+        const { message: _message, ...kept } = launchInput;
+        harness.presetSecrets.set(
+          bridgeLaunchSecretName(threadId),
+          JSON.stringify({ input: kept, hostProjectId: "project-host" }),
+        );
+      },
+    ),
+  );
+
+  it.effect("after a restart, sends a first message whose sandbox was already linked", () =>
+    withHarness(
+      (harness) =>
+        Effect.gen(function* () {
+          yield* SandboxBridge.SandboxBridge;
+          expect(yield* nextDispatch(harness, "prepared-run.release")).toEqual({
+            type: "prepared-run.release",
+            threadId,
+            runId: "run-waiting",
+          });
+          expect(harness.lost).toEqual([]);
+        }),
+      (harness) => {
+        harness.shells = [{ id: threadId, mayBeLive: true }];
+        harness.records.push(
+          record({
+            hostProjectId: ProjectId.make("project-host"),
+            bridge: {
+              sessionId: "bridge-session-1",
+              secret: "sandbox-bridge-x",
+              expiresAt: "2027-01-01T00:00:00.000Z",
+            },
+          }),
+        );
+        harness.hostRuns = [
+          {
+            id: "run-waiting",
+            status: "preparing",
+            providerInstanceId: SANDBOX_BRIDGE_INSTANCE_ID,
+            ordinal: 1,
+            modelSelection: { instanceId: SANDBOX_BRIDGE_INSTANCE_ID, model: "sandbox" },
+          },
+        ];
+      },
+    ),
+  );
+
+  it.effect("waits a while for Pi on a config that starts chats there, then sends anyway", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        harness.configs = [{ ...boatConfig, pi: { startModel: "wafer/GLM-5.3" } }];
+        harness.piReady = false;
+        const bridge = yield* SandboxBridge.SandboxBridge;
+        yield* bridge.launch(launchInput);
+        // The first message is for Pi with the config's model, whatever the composer had.
+        expect(lastCommand(harness, "message.dispatch")).toMatchObject({
+          modelSelection: { instanceId: SANDBOX_BRIDGE_INSTANCE_ID, model: "hub/wafer/GLM-5.3" },
+        });
+        yield* Queue.offer(harness.lifecycle, {
+          _tag: "finished",
+          threadId,
+          phase: "done",
+          error: null,
+        });
+        yield* Queue.take(harness.piChecks);
+        yield* TestClock.adjust("30 seconds");
+        expect(lastCommand(harness, "prepared-run.release")).toBeUndefined();
+        yield* TestClock.adjust("31 seconds");
+        yield* nextDispatch(harness, "prepared-run.release");
+      }),
+    ),
   );
 });

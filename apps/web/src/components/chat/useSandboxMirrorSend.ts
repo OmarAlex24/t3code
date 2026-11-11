@@ -1,9 +1,7 @@
-import { threadKey } from "@t3tools/client-runtime/state/entities";
 import {
   type MessageId,
   type ModelSelection,
   type OrchestrationV2RunStatus,
-  type ProjectId,
   type ProviderInteractionMode,
   ProviderInstanceId,
   type RuntimeMode,
@@ -33,12 +31,6 @@ const mirrorModelSelection = (selection: ModelSelection): ModelSelection =>
       } as ModelSelection);
 
 // Links a launch made before the sandbox list caught up, so its first message is mirrored too.
-const pendingLinks = new Map<string, ProjectId>();
-
-/** Remembers a sandbox thread's host project from the launch, before the sandbox list says so. */
-export const rememberSandboxMirror = (threadRef: ScopedThreadRef, hostProjectId: ProjectId) => {
-  pendingLinks.set(threadKey(threadRef), hostProjectId);
-};
 
 export interface SandboxMirrorMessage {
   readonly messageId: MessageId;
@@ -74,15 +66,7 @@ export function useSandboxMirrorSend() {
     // A send on the host's mirror is already the phone's copy, and its run delivers it to the
     // sandbox; copying it again would send it twice.
     if (threadRef.environmentId === provisionerEnvironmentId) return;
-    const pending = pendingLinks.get(threadKey(threadRef));
-    const target =
-      sandboxMirrorOf(sandboxes, threadRef, provisionerEnvironmentId) ??
-      (pending === undefined || provisionerEnvironmentId === null
-        ? null
-        : {
-            mirror: { environmentId: provisionerEnvironmentId, threadId: threadRef.threadId },
-            hostProjectId: pending,
-          });
+    const target = sandboxMirrorOf(sandboxes, threadRef, provisionerEnvironmentId);
     if (target === null) return;
     const { environmentId, threadId } = target.mirror;
     const existing = threads.find(
@@ -135,10 +119,7 @@ export function useSandboxMirrorSend() {
             }),
       },
     });
-    if (result._tag === "Success") {
-      pendingLinks.delete(threadKey(threadRef));
-      return;
-    }
+    if (result._tag === "Success") return;
     toastManager.add(
       stackedThreadToast({
         type: "warning",
