@@ -15,7 +15,7 @@ import { render } from "../../../test/render";
 import { useThreadViewModeStore } from "../../threadViewModeStore";
 
 vi.mock("./AgentAsks", () => ({ useAgentAsks: () => new Map(), focusAgentAsk: () => {} }));
-vi.mock("../../state/entities", () => ({ useThreadShell: () => null }));
+vi.mock("../../state/entities", () => ({ useThreadShell: () => null, useProject: () => null }));
 vi.mock("../../state/server", () => ({
   serverEnvironment: { providersValueAtom: () => Atom.make(null) },
 }));
