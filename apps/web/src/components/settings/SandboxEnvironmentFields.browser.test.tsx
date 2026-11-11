@@ -334,6 +334,42 @@ describe("SandboxEnvironmentFields", () => {
     expect(savedConfig(1)).toMatchObject({ idleMinutes: 60, runningCapMinutes: 240 });
   });
 
+  it("limits the sandboxes subagents may start, keeping the defaults out of the config", async () => {
+    setup({ keepAlive: true });
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    await page.viewport(820, 1200);
+    await using _viewport = {
+      [Symbol.asyncDispose]: () => page.viewport(viewport.width, viewport.height),
+    };
+    await using _screen = await render(
+      <div className="w-[720px] bg-background p-6">{editing(saved())}</div>,
+    );
+
+    await userEvent.click(section("Machine"));
+    const perThread = page.getByRole("textbox", { name: "Subagent sandboxes per thread" });
+    const total = page.getByRole("textbox", { name: "Subagent sandboxes in total" });
+    await expect.element(perThread).toHaveValue("2");
+    await expect.element(total).toHaveValue("4");
+    await expect.element(page.getByText(/Across every thread on this machine/u)).toBeVisible();
+    // The section has finished opening, so the picture shows all of it.
+    await expect
+      .poll(() => {
+        const panel = document.querySelector<HTMLElement>(
+          "[data-slot=collapsible-panel][data-open]",
+        );
+        return panel !== null && panel.scrollHeight <= panel.clientHeight;
+      })
+      .toBe(true);
+    await page.screenshot({ path: "__screenshots__/sub-sandbox/config-limits.png" });
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    expect(savedConfig()).not.toHaveProperty("subSandboxes");
+
+    await userEvent.fill(perThread, "1");
+    await userEvent.fill(total, "3");
+    await userEvent.click(page.getByRole("button", { name: "Save changes" }));
+    expect(savedConfig(1)).toMatchObject({ subSandboxes: { perThread: 1, total: 3 } });
+  });
+
   it("sums up what a saved config's sandboxes get from this machine", async () => {
     setup({ tailscale: true });
     await using _screen = await render(
