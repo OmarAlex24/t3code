@@ -1,4 +1,7 @@
-import { createChildThreadApprovalsAtom } from "@t3tools/client-runtime/state/thread-requests";
+import {
+  createChildThreadApprovalsAtom,
+  createChildThreadSecretRequestsAtom,
+} from "@t3tools/client-runtime/state/thread-requests";
 import { useAtomValue } from "@effect/atom-react";
 import {
   createEnvironmentThreadDetailAtoms,
@@ -67,6 +70,10 @@ export const steadyNavigationThreadShellsAtom = createEnvironmentThreadShellAtom
 export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
   childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
   pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,
+});
+export const childThreadSecretRequestsAtom = createChildThreadSecretRequestsAtom({
+  childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
+  visibleTurnItemsAtom: environmentThreadDetails.visibleTurnItemsAtom,
 });
 
 // Long enough for the opened screen to subscribe; its subscription keeps the thread after this.
