@@ -1,3 +1,5 @@
+import type { LinkRequestItem } from "@t3tools/client-runtime/link-request";
+import type { SecretRequestItem } from "@t3tools/client-runtime/secret-request";
 import type { MilestoneBoardItem } from "@t3tools/client-runtime/state/thread-milestone-board";
 import type { ChatImageAttachment, EnvironmentId } from "@t3tools/contracts";
 import {
@@ -12,11 +14,15 @@ import { useState } from "react";
 
 import { useAssetUrls } from "../../assets/assetUrls";
 import { Button } from "../ui/button";
+import { LinkRequestCard } from "./LinkRequestCard";
+import { SecretRequestCard } from "./SecretRequestCard";
 
 /** What the coordinator is asking you right now, shown on the milestone it is working on. */
 export type CoordinatorAsk =
   | { readonly kind: "input"; readonly question: string | null }
-  | { readonly kind: "approval" };
+  | { readonly kind: "approval" }
+  /** A secret or link card is answered in place, never in the composer. */
+  | { readonly kind: "card"; readonly item: SecretRequestItem | LinkRequestItem };
 
 /** How many board items show before the older ones fold. */
 const BOARD_LIMIT = 4;
@@ -37,17 +43,37 @@ export function boardCounts(items: ReadonlyArray<MilestoneBoardItem>) {
   });
 }
 
+function AskHeading() {
+  return (
+    <div className="flex items-center gap-1.5 text-xs font-medium text-warning">
+      <TriangleAlertIcon className="size-3.5" />
+      Coordinator asks you
+    </div>
+  );
+}
+
 export function CoordinatorAskCard(props: {
+  readonly environmentId: EnvironmentId;
   readonly ask: CoordinatorAsk;
   readonly onAnswerInChat: () => void;
 }) {
+  if (props.ask.kind === "card") {
+    const { item } = props.ask;
+    return (
+      <div className="grid gap-1.5">
+        <AskHeading />
+        {item.type === "secret_request" ? (
+          <SecretRequestCard environmentId={props.environmentId} item={item} visibility="local" />
+        ) : (
+          <LinkRequestCard environmentId={props.environmentId} item={item} visibility="local" />
+        )}
+      </div>
+    );
+  }
   const question = props.ask.kind === "input" ? props.ask.question : null;
   return (
     <div className="rounded-xl border border-warning/40 bg-warning/6 px-3 py-2.5">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-warning">
-        <TriangleAlertIcon className="size-3.5" />
-        Coordinator asks you
-      </div>
+      <AskHeading />
       {question === null ? null : <p className="mt-1 text-sm text-foreground">{question}</p>}
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
         {props.ask.kind === "approval" ? (

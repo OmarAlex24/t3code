@@ -1,7 +1,9 @@
 import type { ChatImageAttachment } from "@t3tools/contracts";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 
-import type { ThreadStructureTurnItem } from "./models.ts";
+import type { LinkRequestItem } from "../linkRequest.ts";
+import type { SecretRequestItem } from "../secretRequest.ts";
+import type { ThreadStructureTurnItem, ThreadStructureVisibleTurnItem } from "./models.ts";
 
 type UserMessageItem = Extract<ThreadStructureTurnItem, { readonly type: "user_message" }>;
 
@@ -76,4 +78,17 @@ export function deriveMilestoneBoards(
     }
   }
   return boards;
+}
+
+/** The latest secret or link card of this thread that still waits on you. */
+export function pendingAskCard(
+  items: ReadonlyArray<ThreadStructureVisibleTurnItem>,
+): SecretRequestItem | LinkRequestItem | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const { item, visibility } = items[index]!;
+    if (visibility !== "local") continue;
+    if (item.type === "secret_request" && item.secretStatus === "pending") return item;
+    if (item.type === "link_request" && item.linkStatus === "pending") return item;
+  }
+  return null;
 }

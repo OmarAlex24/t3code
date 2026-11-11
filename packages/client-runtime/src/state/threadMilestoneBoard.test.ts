@@ -5,6 +5,7 @@ import {
   formatMilestoneCommentPrefix,
   MILESTONE_BOARD_ROOT,
   parseMilestoneComment,
+  pendingAskCard,
 } from "./threadMilestoneBoard.ts";
 
 const milestone = (id: string, event: string, fields: Record<string, unknown> = {}) =>
@@ -61,5 +62,22 @@ describe("deriveMilestoneBoards", () => {
       { kind: "comment", id: "c1", text: "Looks good" },
     ]);
     expect(boards.get("m2")).toEqual([{ kind: "visual", id: "r2", title: "Schema" }]);
+  });
+});
+
+describe("pendingAskCard", () => {
+  const card = (id: string, fields: Record<string, unknown>, visibility = "local") =>
+    ({ visibility, item: { id, ...fields } }) as never;
+  const secret = { type: "secret_request", secretStatus: "pending" };
+  const link = { type: "link_request", linkStatus: "pending" };
+  it.each([
+    ["a pending secret", [card("s1", secret)], "s1"],
+    ["a pending link", [card("l1", link)], "l1"],
+    ["the latest of several", [card("s1", secret), card("l1", link)], "l1"],
+    ["an answered secret", [card("s1", { ...secret, secretStatus: "saved" })], null],
+    ["a card from the parent thread", [card("s1", secret, "inherited")], null],
+    ["no card", [card("m1", { type: "milestone" })], null],
+  ])("%s", (_name, items, expected) => {
+    expect(pendingAskCard(items)?.id ?? null).toBe(expected);
   });
 });
