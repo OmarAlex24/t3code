@@ -250,18 +250,22 @@ export function TraceChart(props: {
         onHorizon();
         return;
       }
-      node.style.setProperty("--trace-now", String(tracePosition(domain, live ? now : nowMs)));
+      const at = tracePosition(domain, live ? now : nowMs);
+      node.style.setProperty("--trace-now", String(at));
+      // The now pill shares the tick row, so tick labels hide while it passes them.
+      if (!live) return;
+      for (const tick of node.querySelectorAll<HTMLElement>("[data-trace-tick]")) {
+        const position = Number(tick.dataset.traceTick);
+        tick.toggleAttribute("data-under-now", position > at - 0.15 && position < at + 0.06);
+      }
     };
     write();
     return live ? secondTick.subscribe(write) : undefined;
   };
   const showNow = live;
   const nowAt = tracePosition(domain, nowMs);
-  // The now pill shares the tick row, and a label at the right edge would be cut off.
-  const ticks = traceTicks(domain).filter(
-    ({ position }) =>
-      position <= 0.93 && (!showNow || position < nowAt - 0.15 || position > nowAt + 0.06),
-  );
+  // A label at the right edge would be cut off.
+  const ticks = traceTicks(domain).filter(({ position }) => position <= 0.93);
   return (
     <div className="@container">
       <div
@@ -287,8 +291,9 @@ export function TraceChart(props: {
             {ticks.map((tick, index) => (
               <div
                 key={tick.position}
+                data-trace-tick={tick.position}
                 className={cn(
-                  "absolute inset-y-0 w-px bg-foreground/7",
+                  "absolute inset-y-0 w-px bg-foreground/7 data-under-now:[&>span]:invisible",
                   index % 2 === 1 && "@max-xl:[&>span]:invisible",
                 )}
                 style={{ left: pct(tick.position) }}
@@ -299,15 +304,22 @@ export function TraceChart(props: {
               </div>
             ))}
             {domain.gaps.map((gap) => {
-              const left = pct(tracePosition(domain, gap.startMs));
+              const at = tracePosition(domain, gap.startMs);
+              const left = pct(at);
               return (
                 <div key={gap.startMs}>
                   <div
                     className="absolute top-[30px] bottom-0 -translate-x-1/2 border-l-2 border-dashed border-foreground/20"
                     style={{ left }}
                   />
+                  {/* Work resuming after a break puts now just right of it, so the label moves left. */}
                   <span
-                    className="absolute top-1.5 -translate-x-1/2 rounded-sm border bg-muted px-1.25 text-3xs leading-3.5 whitespace-nowrap text-muted-foreground"
+                    className={cn(
+                      "absolute top-1.5 rounded-sm border bg-muted px-1.25 text-3xs leading-3.5 whitespace-nowrap text-muted-foreground",
+                      showNow && nowAt - at < 0.1
+                        ? "-translate-x-[calc(100%+3px)]"
+                        : "-translate-x-1/2",
+                    )}
                     style={{ left }}
                   >
                     {formatTraceClock(gap.endMs - gap.startMs)} idle
