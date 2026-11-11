@@ -261,6 +261,7 @@ export const SANDBOX_RESUME_STEP_SECONDS = {
   tailnetRejoin: 420,
   t3Start: 180,
   agentSkill: 30,
+  subSandboxHelper: 30,
 } as const;
 
 /**
