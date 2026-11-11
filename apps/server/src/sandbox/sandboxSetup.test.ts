@@ -24,6 +24,9 @@ import {
   parseTailscaleReport,
   RAILWAY_LOGIN_SCRUB,
   railwayLoginScript,
+  SANDBOX_FILES_SKILL,
+  SANDBOX_FILES_SKILL_NAME,
+  sandboxFilesSkillScript,
   sandboxKeepAliveScript,
   type SandboxScript,
   tailscaleScript,
@@ -354,6 +357,41 @@ describe("setupScriptScript", () => {
           expect(yield* fs.exists(`${home}/.t3/setup-scripts/def456`)).toBe(false);
         }),
       ),
+  );
+});
+
+describe("sandboxFilesSkillScript", () => {
+  it("names the skill so it can't replace one of the user's, and says when to load it", () => {
+    expect(SANDBOX_FILES_SKILL_NAME).toBe("t3-sandbox-files");
+    const frontmatter = /^---\n([\s\S]*?)\n---\n/u.exec(SANDBOX_FILES_SKILL)?.[1] ?? "";
+    expect(frontmatter).toContain("name: t3-sandbox-files\n");
+    const description = /^description: (.*)$/mu.exec(frontmatter)?.[1] ?? "";
+    for (const trigger of ["/tmp", "$TMPDIR", "screenshots", "logs", "worktrees", "drafts"]) {
+      expect(description).toContain(trigger);
+    }
+  });
+
+  it.live("writes the skill into Claude's folder, and on a resume only when it is missing", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const file = `${home}/.claude/skills/t3-sandbox-files/SKILL.md`;
+        yield* runIn(home, sandboxFilesSkillScript("write"));
+        expect(yield* fs.readFileString(file)).toBe(SANDBOX_FILES_SKILL);
+
+        // A copy already there stays as it is on a resume, and goes on a launch.
+        yield* fs.writeFileString(file, "edited");
+        yield* runIn(home, sandboxFilesSkillScript("if-missing"));
+        expect(yield* fs.readFileString(file)).toBe("edited");
+        yield* runIn(home, sandboxFilesSkillScript("write"));
+        expect(yield* fs.readFileString(file)).toBe(SANDBOX_FILES_SKILL);
+
+        yield* fs.remove(`${home}/.claude/skills`, { recursive: true });
+        yield* runIn(home, sandboxFilesSkillScript("if-missing"));
+        expect(yield* fs.readFileString(file)).toBe(SANDBOX_FILES_SKILL);
+        expect(yield* fs.exists(`${file}.t3-tmp`)).toBe(false);
+      }),
+    ),
   );
 });
 

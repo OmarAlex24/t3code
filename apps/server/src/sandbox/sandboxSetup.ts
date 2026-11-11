@@ -894,3 +894,46 @@ export const KEEP_ALIVE_SCRUB = `if [ -f "${KEEP_ALIVE_DIR}/loop.sh" ]; then
   sh "${KEEP_ALIVE_DIR}/loop.sh" stop >/dev/null 2>&1 || true
 fi
 rm -rf "${KEEP_ALIVE_DIR}"`;
+
+/** The skill every sandbox's Claude gets from T3 Code, named so it never replaces one of the user's. */
+export const SANDBOX_FILES_SKILL_NAME = "t3-sandbox-files";
+
+/**
+ * Tells agents on a sandbox to keep what they need later out of `/tmp`, which a stop empties. The
+ * description is what makes Claude load it, so it names every moment an agent reaches for `/tmp`.
+ */
+export const SANDBOX_FILES_SKILL = `---
+name: ${SANDBOX_FILES_SKILL_NAME}
+description: Where to save files on this T3 Code sandbox, whose /tmp is wiped every time the sandbox stops. Use before writing anything that must still exist later (screenshots or images you embed in a reply, logs you will point the user to, downloads, PR or doc drafts, extra git worktrees, build artifacts), and whenever you would reach for /tmp or $TMPDIR.
+---
+
+# Files on a sandbox
+
+This machine is a T3 Code sandbox. It stops on its own: when its agents go idle, at its running limit, or when the user stops it. Resuming it boots the machine again, and the boot empties \`/tmp\`. Everything under \`$HOME\` survives, including the project under \`~/work\`, \`~/.t3\` and \`~/.claude\`.
+
+## Rules
+
+- **Never put anything in \`/tmp\` that someone needs after your current command finishes.** Use a folder under \`$HOME\` instead: an existing work folder the user already uses (such as \`~/work\`), or \`~/scratch/<task>/\`.
+- **Images you show the user:** save screenshots and generated images under \`$HOME\` before embedding them. An image embedded from \`/tmp\` breaks for the user after the next stop.
+- **Extra git worktrees:** create them under \`$HOME\`, for example \`~/scratch/worktrees/<name>\`, not in \`/tmp\`. A worktree in \`/tmp\` leaves stale git metadata behind; \`git worktree prune\` cleans it up.
+- **Logs and long outputs** you will cite later go to a file under \`$HOME\`, for example with \`tee ~/scratch/<task>/run.log\`.
+- **Delegated agents:** when you brief one, tell it the same, and give it the folder to use.
+- **Throwaway files** that nothing reads after the command ends, such as a pipe's temporary file, may stay in \`/tmp\`.
+- **Large downloads and build outputs** under \`~/scratch\` count against the sandbox's disk. Delete them when the task is done.
+`;
+
+/**
+ * Writes the built-in skill into Claude's skills folder: always at launch, so a template's older
+ * copy goes, and on a resume only when it is missing, for sandboxes made before it existed. Exits
+ * nonzero when it cannot write it.
+ */
+export const sandboxFilesSkillScript = (mode: "write" | "if-missing") => `set -eu
+dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/${SANDBOX_FILES_SKILL_NAME}"
+${
+  mode === "if-missing"
+    ? `[ -f "$dir/SKILL.md" ] && exit 0
+`
+    : ""
+}mkdir -p "$dir"
+printf '%s' '${base64(SANDBOX_FILES_SKILL)}' | base64 -d >"$dir/SKILL.md.t3-tmp"
+mv "$dir/SKILL.md.t3-tmp" "$dir/SKILL.md"`;
