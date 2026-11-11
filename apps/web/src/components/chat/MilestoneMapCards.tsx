@@ -1,4 +1,4 @@
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import {
   actionLine,
@@ -25,7 +25,7 @@ import {
 import type { CSSProperties } from "react";
 
 import { cn } from "~/lib/utils";
-import { useThreadShell } from "../../state/entities";
+import { useProject, useThreadShell } from "../../state/entities";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { AgentElapsed } from "./AgentElapsed";
@@ -173,13 +173,23 @@ const ROLLUP_ICON: Record<MapRollupTone, typeof CheckIcon> = {
 const cardClass =
   "absolute flex flex-col justify-between rounded-xl border bg-card shadow-xs/5 transition-[opacity,box-shadow] duration-200 motion-reduce:transition-none";
 
+/** A thread's latest step and the workspace its paths are relative to, as the chat shows them. */
+function useThreadAction(ref: ScopedThreadRef | null) {
+  const shell = useThreadShell(ref);
+  const project = useProject(shell ? scopeProjectRef(shell.environmentId, shell.projectId) : null);
+  return {
+    action: shell?.latestAction,
+    workspaceRoot: shell?.worktreePath ?? project?.workspaceRoot ?? null,
+  };
+}
+
 /** The coordinator's latest step, for the milestone it is working on now. */
 function CoordinatorLine(props: {
   readonly threadRef: ScopedThreadRef;
   readonly fallback: string | null;
 }) {
-  const shell = useThreadShell(props.threadRef);
-  return <>{actionLine(shell?.latestAction) ?? props.fallback ?? ""}</>;
+  const { action, workspaceRoot } = useThreadAction(props.threadRef);
+  return <>{actionLine(action, workspaceRoot) ?? props.fallback ?? ""}</>;
 }
 
 export function MilestoneCard(props: {
@@ -298,8 +308,8 @@ export function MilestoneCard(props: {
 
 function AgentTask(props: { readonly entry: MapAgent; readonly threadRef: ScopedThreadRef }) {
   const ref = agentThreadRef(props.entry.agent, props.threadRef.environmentId);
-  const shell = useThreadShell(ref);
-  const line = agentLine(props.entry.ask, shell?.latestAction, props.entry.agent);
+  const { action, workspaceRoot } = useThreadAction(ref);
+  const line = agentLine(props.entry.ask, action, props.entry.agent, workspaceRoot);
   return <span className="min-w-0 flex-1 truncate">{line}</span>;
 }
 
