@@ -240,6 +240,15 @@ server except into the sandbox.
   the machine, and the environment only when nothing is left in it, since it is the only way to
   find a fork again. The sweep's abandoned-launch delete never touches forks. The driver hides
   `t3-sandbox-*` environments from `listEnvironments`, so they never show as credential choices.
+- **Every sandbox's Claude gets T3 Code's `t3-sandbox-files` skill.** A stop empties `/tmp`, so
+  agents need telling to keep files under `$HOME`. The skill's text lives once, as
+  `SANDBOX_FILES_SKILL` in [`sandboxSetup.ts`](../../apps/server/src/sandbox/sandboxSetup.ts), and
+  `sandboxFilesSkillScript` writes it into `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/t3-sandbox-files/`.
+  The launch's tools step always writes it, after the user's own skills, so a template's older copy
+  goes; it counts in that step only when it fails, so a config that asks for nothing still reads
+  "Nothing to set up". A resume writes it before `t3 serve` only when `SKILL.md` is missing. Either
+  failure is a warning. Nothing writes instructions for Codex on a sandbox, so Codex does not get
+  it.
 - **A GitHub App token covers the whole installation.** `mintGithubToken` finds the installation
   through the sandbox's repository (`GET /repos/{owner}/{repo}/installation`; a 404 is "not
   installed", a launch warning with the install link), then mints with no `repositories` in the
@@ -419,7 +428,7 @@ without pairing with the sandbox.
 - **Placeholder projects.** A project whose root `isSandboxHostProjectRoot` matches gets no git
   status, scripts, open-in, files or terminal in the web app.
 - **Stopped sandbox.** A run starting on a `sandboxes` thread whose sandbox is stopped makes the
-  host resume it. Meanwhile the bridge retries for `SANDBOX_RESUME_WAIT_SECONDS` (15 minutes:
+  host resume it. Meanwhile the bridge retries for `SANDBOX_RESUME_WAIT_SECONDS` (15½ minutes:
   every step of a resume at its limit, `SANDBOX_RESUME_STEP_SECONDS`, plus a minute), showing
   "Starting sandbox bx_…", then says the sandbox is not answering. Messages sent meanwhile queue
   behind that run on the host, so they go out after it whether or not a client stays open.

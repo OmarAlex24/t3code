@@ -44,6 +44,13 @@ with a key scoped to it. T3 Code also
 installs git, the GitHub CLI, and Claude Code when the provider's image lacks them; sign Codex in
 from the sandbox's **Settings → Providers**.
 
+Every sandbox's Claude also gets a skill from T3 Code, `t3-sandbox-files`, whether or not you copy
+any skills of your own. A stop empties the sandbox's `/tmp`, so the skill tells the agent to keep
+screenshots, drafts, logs, downloads and extra git worktrees under its home folder (for example
+`~/scratch/<task>/`) instead. A launch writes it; a resume adds it when it is missing, so sandboxes
+made before it get it too. A sandbox where it could not be written still works and shows a warning.
+Codex agents on a sandbox do not get it.
+
 **Projects** limits which repositories can start a thread on the config. It lists the github.com
 repositories of projects on every connected machine, once each, so a project that lives only on a
 paired machine counts too: the sandbox clones from GitHub, not from that machine. With none picked,

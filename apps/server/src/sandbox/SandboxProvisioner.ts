@@ -125,6 +125,7 @@ import {
   RAILWAY_LOGIN_SCRUB,
   railwayLoginScript,
   parseSetupScriptReport,
+  sandboxFilesSkillScript,
   sandboxKeepAliveScript,
   setupScriptScript,
   TAILSCALE_PROXY_URL,
@@ -489,6 +490,8 @@ const scriptHash = (script: string) => {
 
 // A minted Maple key also expires on its own, in case a revoke never reaches Maple.
 const MAPLE_KEY_SECONDS = 30 * 24 * 60 * 60;
+const SANDBOX_FILES_SKILL_WARNING =
+  "T3 Code's t3-sandbox-files skill could not be added, so agents on this sandbox may keep files in /tmp, which a stop empties.";
 // A sandbox's GitHub token is replaced this long before it expires.
 const GITHUB_TOKEN_REFRESH_MS = 20 * 60 * 1000;
 // A keep-alive key outlives any one running stretch and is replaced on a resume once it is close
@@ -2982,6 +2985,13 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       steps += 1;
       yield* copyClaudeFiles(machine, { claudeMd: config.claudeMd === true, skills }, fail);
     }
+    // T3 Code's own skill goes on every sandbox, after the user's so a template's copy is replaced.
+    // It is not something the config asked for, so only a failure shows in the step.
+    const skillWritten = yield* machine.run(sandboxFilesSkillScript("write"), 30).pipe(Effect.exit);
+    if (Exit.isFailure(skillWritten)) {
+      steps += 1;
+      yield* fail(SANDBOX_FILES_SKILL_WARNING);
+    }
     return { steps, failed };
   });
 
@@ -4033,6 +4043,19 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         };
       };
     }
+    // A sandbox made before T3 Code's agent skill existed gets it before T3 starts, so the first
+    // Claude session after the resume already sees it; one that has it keeps its copy.
+    const skill = yield* onHttp(
+      driver.execute({
+        config,
+        sandboxId: record.sandboxId,
+        command: sandboxFilesSkillScript("if-missing"),
+        timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.agentSkill,
+      }),
+    ).pipe(
+      Effect.as<string | null>(null),
+      Effect.orElseSucceed(() => SANDBOX_FILES_SKILL_WARNING),
+    );
     yield* onHttp(
       driver.execute({
         config,
@@ -4109,9 +4132,13 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
             ),
           );
     if (bridged.record !== updated) yield* records.put(bridged.record).pipe(Effect.orDie);
-    const warnings = [rejoined.warning, kept.warning, github.warning, bridged.warning].filter(
-      (warning): warning is string => warning !== null,
-    );
+    const warnings = [
+      rejoined.warning,
+      kept.warning,
+      skill,
+      github.warning,
+      bridged.warning,
+    ].filter((warning): warning is string => warning !== null);
     return {
       sandbox: bridged.record,
       httpBaseUrl: bridged.record.httpBaseUrl,
