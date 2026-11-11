@@ -5637,45 +5637,36 @@ describe("SandboxProvisioner per-thread launches", () => {
     );
   });
 
-  it.effect("launches a thread's sandbox through every stage and hands it to the client", () => {
+  it.effect("launches a thread's sandbox through every stage and links the host's bridge", () => {
     const fake = boatFake();
     const repository = memoryRepository();
     const configs = memoryConfigs();
+    const hostProjectId = ProjectId.make("project-host-thread");
     return Effect.gen(function* () {
       const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
       const { config } = yield* provisioner.saveConfig({
         config: configInput,
         apiKey: "boat_test",
       });
-      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+      const ended = yield* provisioner.launchLifecycle.pipe(
+        Stream.filter((event) => event._tag === "finished"),
+        Stream.runHead,
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      const { instanceId } = yield* provisioner.launch(
+        { configId: config.id, threadId, project },
+        { hostProjectId },
+      );
+      // No client pairs with a sandbox before its launch is done.
+      expect((yield* provisioner.pairLaunch({ threadId }).pipe(Effect.flip)).detail).toBe(
+        "This sandbox is not ready to connect yet.",
+      );
 
-      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
-      expect(waiting).toMatchObject({ instanceId, configId: config.id, phase: "running" });
-      expect(stageOf(waiting, "repo")).toMatchObject({ status: "done", detail: "~/work/hello" });
-      expect(stageOf(waiting, "env-files")).toMatchObject({ status: "done", detail: "1 file" });
-      expect(stageOf(waiting, "pair")?.status).toBe("running");
-      // The record exists from the moment the machine does, and names its thread.
-      expect(repository.records.get(instanceId)).toMatchObject({
-        state: "provisioning",
-        threadId,
-        projectId,
-        projectTitle: "hello",
-        configId: config.id,
-        label: "hello on Boat small",
-        environmentId: testEnvironmentId,
-        // Where a delete checks for unpushed work.
-        repoDir: "/home/boat/work/hello",
-      });
-
-      const paired = yield* provisioner.pairLaunch({ threadId });
-      expect(paired).toEqual({
-        environmentId: testEnvironmentId,
-        httpBaseUrl: "https://boat.example/t3",
-        pairingCode: pairToken,
-        projectId: "project-remote",
-      });
-      yield* provisioner.completeLaunch({ threadId });
       const done = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+      expect(done).toMatchObject({ instanceId, configId: config.id, awaitingHandoff: false });
+      expect(stageOf(done, "repo")).toMatchObject({ status: "done", detail: "~/work/hello" });
+      expect(stageOf(done, "env-files")).toMatchObject({ status: "done", detail: "1 file" });
       expect(done.stages.map((stage) => stage.status)).toEqual([
         "done",
         "done",
@@ -5686,9 +5677,39 @@ describe("SandboxProvisioner per-thread launches", () => {
         "done",
         // Nothing to set up: the config asks for no tools, MCP servers, or skills.
         "skipped",
+        // The host's bridge reaches the sandbox, so the thread's first message can go out.
         "done",
       ]);
-      expect(repository.records.get(instanceId)?.state).toBe("running");
+      expect(Option.getOrThrow(yield* Fiber.join(ended))).toEqual({
+        _tag: "finished",
+        threadId,
+        phase: "done",
+        error: null,
+      });
+      // The record exists from the moment the machine does, names its thread, and ends linked.
+      expect(repository.records.get(instanceId)).toMatchObject({
+        state: "running",
+        threadId,
+        projectId,
+        projectTitle: "hello",
+        configId: config.id,
+        label: "hello on Boat small",
+        environmentId: testEnvironmentId,
+        hostProjectId,
+        bridge: { sessionId: expect.any(String) },
+        // Where a delete checks for unpushed work.
+        repoDir: "/home/boat/work/hello",
+      });
+      expect(yield* provisioner.launching(threadId)).toBe(false);
+
+      // A client pairs on its own once the launch is done, as many times as it needs.
+      const paired = yield* provisioner.pairLaunch({ threadId });
+      expect(paired).toEqual({
+        environmentId: testEnvironmentId,
+        httpBaseUrl: "https://boat.example/t3",
+        pairingCode: pairToken,
+        projectId: "project-remote",
+      });
 
       // Boat tags the machine with this host and instance, so a sweep can find it again.
       const created = fake.bodies.find((entry) => entry.url.endsWith("/sandboxes"))?.body;
@@ -6035,10 +6056,12 @@ describe("SandboxProvisioner per-thread launches", () => {
   const launchedThread = Effect.gen(function* () {
     const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
     const { config } = yield* provisioner.saveConfig({ config: configInput, apiKey: "boat_test" });
-    const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
-    yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+    const { instanceId } = yield* provisioner.launch(
+      { configId: config.id, threadId, project },
+      { hostProjectId: projectId },
+    );
+    yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
     yield* provisioner.pairLaunch({ threadId });
-    yield* provisioner.completeLaunch({ threadId });
     return { provisioner, instanceId };
   });
 
@@ -6200,7 +6223,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         apiKey: "boat_test",
       });
       yield* provisioner.launch({ configId: config.id, threadId, project });
-      yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
       expect(fake.requests).toContain("POST https://api.tailscale.com/api/v2/tailnet/-/keys");
       expect(fake.commands.some((command) => command.includes("--auth-key="))).toBe(true);
     }).pipe(
@@ -6224,7 +6247,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         apiKey: "boat_test",
       });
       yield* provisioner.launch({ configId: config.id, threadId, project });
-      yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
       expect(fake.requests.some((request) => request.includes("api.tailscale.com"))).toBe(false);
     }).pipe(
       Effect.provide(
@@ -6266,7 +6289,7 @@ describe("SandboxProvisioner per-thread launches", () => {
           config: { ...config, claude: { baseUrl: "https://api.example.test" } },
         });
         yield* provisioner.retryLaunch({ threadId });
-        yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
       }).pipe(
         Effect.provide(
           provisionerLayer({}, discardingRepository, {
@@ -6279,7 +6302,7 @@ describe("SandboxProvisioner per-thread launches", () => {
     },
   );
 
-  it.effect("fails setup instead of handing off when the sandbox cannot reach Claude", () => {
+  it.effect("fails setup instead of finishing when the sandbox cannot reach Claude", () => {
     const fake = boatFake({ endpointStatus: "000" });
     const repository = memoryRepository();
     const configs = memoryConfigs();
@@ -6327,7 +6350,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         apiKey: "boat_test",
       });
       const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
-      yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
 
       // The check, the environment and its lockdown all come before the machine that bills.
       const posts = fake.requests.filter((request) => !request.startsWith("GET"));
@@ -6395,7 +6418,6 @@ describe("SandboxProvisioner per-thread launches", () => {
       expect(picker.environments.map((candidate) => candidate.name)).toEqual(["base"]);
 
       yield* provisioner.pairLaunch({ threadId });
-      yield* provisioner.completeLaunch({ threadId });
       // The agent forked its sandbox; the fork carries no tag, only the environment.
       fake.inEnvironments.push(
         { id: "bx_fork1", name: "hello on Boat small fork", environment: environment!.name },
@@ -6471,7 +6493,10 @@ describe("SandboxProvisioner per-thread launches", () => {
   it.effect(
     "revokes the agent's key and deletes its environment when a launch is cancelled",
     () => {
-      const fake = boatFake();
+      // Held at the launch's last step, linking the host's bridge, where a cancel finds it.
+      const until = Deferred.makeUnsafe<void>();
+      const reached = Deferred.makeUnsafe<void>();
+      const fake = boatFake({ holding: { text: "--label t3-sandbox-bridge", until, reached } });
       const repository = memoryRepository();
       const configs = memoryConfigs();
       return Effect.gen(function* () {
@@ -6480,8 +6505,11 @@ describe("SandboxProvisioner per-thread launches", () => {
           config: agentConfig,
           apiKey: "boat_test",
         });
-        yield* provisioner.launch({ configId: config.id, threadId, project });
-        yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        yield* provisioner.launch(
+          { configId: config.id, threadId, project },
+          { hostProjectId: projectId },
+        );
+        yield* Deferred.await(reached);
         expect(yield* provisioner.cancelLaunch({ threadId })).toEqual({ cancelled: true });
         yield* Effect.yieldNow;
         const released = deletes(fake);
@@ -6511,7 +6539,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         apiKey: "boat_test",
       });
       const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
-      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
       expect(waiting.warnings).toContain(
         "The Boat CLI could not be signed in on the sandbox, so the agent cannot use Boat. T3 Code revoked its key.",
       );
@@ -6539,7 +6567,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         apiKey: "boat_test",
       });
       const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
-      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
       expect(waiting.warnings).toContain(
         "T3 Code could not make a Boat key for the agent, so it cannot use Boat on this sandbox.",
       );
@@ -6692,7 +6720,7 @@ describe("SandboxProvisioner per-thread launches", () => {
 
       // A relaunch is a new machine; this time install works.
       yield* provisioner.retryLaunch({ threadId });
-      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
       expect(waiting.instanceId).not.toBe(failed.instanceId);
       expect(repository.records.size).toBe(1);
     }).pipe(
@@ -6702,7 +6730,7 @@ describe("SandboxProvisioner per-thread launches", () => {
   });
 
   it.effect("keeps the machine when the clone fails, retries it, and cleans up on cancel", () => {
-    const fake = boatFake({ failing: { text: "git clone", times: 1 } });
+    const fake = boatFake({ failing: { text: "git clone", times: 2 } });
     const repository = memoryRepository();
     const configs = memoryConfigs();
     return Effect.gen(function* () {
@@ -6719,21 +6747,24 @@ describe("SandboxProvisioner per-thread launches", () => {
       expect(deletes(fake)).toEqual([]);
 
       yield* provisioner.retryLaunch({ threadId });
-      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
-      expect(waiting.instanceId).toBe(failed.instanceId);
-      expect(stageOf(waiting, "repo")?.status).toBe("done");
+      const again = yield* snapshotWhere(
+        provisioner,
+        (snapshot) => snapshot.phase === "failed" && snapshot.sequence > failed.sequence,
+      );
+      // The retry ran the clone again on the same machine.
+      expect(again.instanceId).toBe(failed.instanceId);
+      expect(stageOf(again, "repo")?.status).toBe("failed");
+      expect(deletes(fake)).toEqual([]);
 
-      // Cancelling at the handoff deletes the machine and its record.
+      // Cancelling while it waits for another retry deletes the machine and its record.
       expect(yield* provisioner.cancelLaunch({ threadId })).toEqual({ cancelled: true });
       const cancelled = yield* snapshotWhere(
         provisioner,
         (snapshot) => snapshot.phase === "cancelled",
       );
-      expect(stageOf(cancelled, "pair")?.status).toBe("skipped");
-      expect(deletes(fake)).toEqual([
-        `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
-        "DELETE https://boat.dev/api/v1/api-keys/apk_keepalive1",
-      ]);
+      expect(stageOf(cancelled, "pair")?.status).toBe("pending");
+      // Nothing past the clone ran, so only the machine was made.
+      expect(deletes(fake)).toEqual([`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`]);
       expect(repository.records.size).toBe(0);
     }).pipe(
       Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
@@ -6809,10 +6840,9 @@ describe("SandboxProvisioner per-thread launches", () => {
         expect(sandboxCreates(fake)).toHaveLength(1);
 
         yield* Deferred.succeed(until, undefined);
-        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
         expect(waiting.instanceId).toBe(instanceId);
         yield* provisioner.pairLaunch({ threadId });
-        yield* provisioner.completeLaunch({ threadId });
         expect(repository.records.get(instanceId)?.state).toBe("running");
         expect(deletes(fake)).toEqual([]);
       }).pipe(
@@ -6873,7 +6903,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         ]);
         delete fake.states[boatSandboxId];
         yield* Deferred.succeed(until, undefined);
-        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
         expect(waiting.instanceId).toBe(fresh.instanceId);
       }).pipe(
         Effect.provide(provisionerLayer({}, repository.layer)),
@@ -6933,7 +6963,7 @@ describe("SandboxProvisioner per-thread launches", () => {
     }),
   );
 
-  it.effect("gives up on a client that never connects and deletes the sandbox", () => {
+  it.effect("finishes a launch without waiting on any client and keeps its sandbox", () => {
     const fake = boatFake();
     const repository = memoryRepository();
     return Effect.gen(function* () {
@@ -6942,29 +6972,50 @@ describe("SandboxProvisioner per-thread launches", () => {
         config: configInput,
         apiKey: "boat_test",
       });
-      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
-      yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
-      yield* TestClock.adjust("9 minutes");
-      // Pairing is the client at work, so the wait starts over.
-      yield* provisioner.pairLaunch({ threadId });
-      yield* TestClock.adjust("9 minutes");
-      expect((yield* snapshotWhere(provisioner, () => true)).phase).toBe("running");
-      expect(deletes(fake)).toEqual([]);
-
-      yield* TestClock.adjust("2 minutes");
-      const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "failed");
-      expect(failed).toMatchObject({ instanceId, recovery: "relaunch" });
-      expect(failed.error).toContain("Nothing connected to this sandbox for 10 minutes");
-      expect(stageOf(failed, "pair")?.status).toBe("failed");
-      expect(deletes(fake)).toEqual([
-        `DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
-        "DELETE https://boat.dev/api/v1/api-keys/apk_keepalive1",
-      ]);
-      expect(repository.records.size).toBe(0);
-      // A late completion finds nothing to finish.
-      expect((yield* provisioner.completeLaunch({ threadId }).pipe(Effect.flip)).detail).toContain(
-        "not ready",
+      const { instanceId } = yield* provisioner.launch(
+        { configId: config.id, threadId, project },
+        { hostProjectId: ProjectId.make("project-host-thread") },
       );
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+      // Nobody pairs: the host thread sends through the bridge, so nothing waits on a client.
+      yield* TestClock.adjust("20 minutes");
+      expect(deletes(fake)).toEqual([]);
+      expect(repository.records.get(instanceId)?.state).toBe("running");
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer)),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("retries linking the host's bridge when the sandbox cannot mint its credential", () => {
+    const fake = boatFake({ failing: { text: "--label t3-sandbox-bridge", times: 1 } });
+    const repository = memoryRepository();
+    const hostProjectId = ProjectId.make("project-host-thread");
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch(
+        { configId: config.id, threadId, project },
+        { hostProjectId },
+      );
+      const failed = yield* snapshotWhere(provisioner, (snapshot) => snapshot.recovery === "retry");
+      expect(failed.phase).toBe("failed");
+      expect(stageOf(failed, "pair")?.status).toBe("failed");
+      // The machine is kept for the retry, and the thread is not linked yet.
+      expect(repository.records.get(instanceId)?.bridge).toBeUndefined();
+      expect(yield* provisioner.launching(threadId)).toBe(true);
+
+      expect(yield* provisioner.retryLaunch({ threadId })).toBe(true);
+      yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+      expect(repository.records.get(instanceId)).toMatchObject({
+        state: "running",
+        hostProjectId,
+        bridge: { sessionId: expect.any(String) },
+      });
+      expect(deletes(fake)).toEqual([]);
     }).pipe(
       Effect.provide(provisionerLayer({}, repository.layer)),
       Effect.provideService(HttpClient.HttpClient, fake.client),
@@ -6987,7 +7038,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         provisioner,
         (snapshot) => snapshot.phase === "failed" && snapshot.recovery === "relaunch",
       );
-      expect(failed.error).toContain("Nothing connected to this sandbox");
+      expect(failed.error).toContain("Nothing retried this sandbox's setup for 10 minutes");
       expect(deletes(fake)).toEqual([`DELETE https://boat.dev/api/v1/sandboxes/${boatSandboxId}`]);
       expect(repository.records.size).toBe(0);
     }).pipe(
@@ -7045,7 +7096,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         const fresh = yield* provisioner.launch({ configId: config.id, threadId, project });
         expect(deletes(fake)).toEqual(["DELETE https://boat.dev/api/v1/sandboxes/bx_alive"]);
         expect(repository.records.has("abandoned")).toBe(false);
-        yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
         expect([...repository.records.keys()]).toEqual([fresh.instanceId]);
       }).pipe(
         Effect.provide(provisionerLayer(boatSettings, repository.layer)),
@@ -7139,7 +7190,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         threadId,
         project: remoteProject,
       });
-      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
       expect(stageOf(waiting, "repo")?.status).toBe("done");
       // Nothing on this machine to copy from, and nothing read from anywhere else.
       expect(stageOf(waiting, "env-files")?.status).toBe("skipped");
@@ -7176,7 +7227,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         threadId,
         project: { ...remoteProject, hostCopy: { projectId, workspaceRoot: "/etc" } },
       });
-      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+      const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
       expect(stageOf(waiting, "env-files")?.status).toBe("skipped");
       expect(fake.commands.some((command) => command.includes("API_TOKEN"))).toBe(false);
     }).pipe(
@@ -7501,7 +7552,10 @@ describe("SandboxProvisioner per-thread launches", () => {
             threadId,
             project,
           });
-          const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+          const waiting = yield* snapshotWhere(
+            provisioner,
+            (snapshot) => snapshot.phase === "done",
+          );
           expect(stageOf(waiting, "credentials")?.status).toBe("done");
           // The stdio server is the only thing that could not go, and the card says why.
           expect(stageOf(waiting, "tools")).toMatchObject({ status: "warning" });
@@ -7579,7 +7633,6 @@ describe("SandboxProvisioner per-thread launches", () => {
           });
 
           yield* provisioner.pairLaunch({ threadId });
-          yield* provisioner.completeLaunch({ threadId });
           services.state.calls.length = 0;
           services.state.railway.length = 0;
           const deleted = yield* provisioner.delete({
@@ -7633,8 +7686,15 @@ describe("SandboxProvisioner per-thread launches", () => {
             config: toolingConfig,
             apiKey: "boat_test",
           });
-          yield* provisioner.launch({ configId: config.id, threadId, project });
-          const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+          // The bridge never links, so the launch waits on its last step for a retry.
+          yield* provisioner.launch(
+            { configId: config.id, threadId, project },
+            { hostProjectId: projectId },
+          );
+          const waiting = yield* snapshotWhere(
+            provisioner,
+            (snapshot) => snapshot.recovery === "retry",
+          );
           expect(waiting.warnings).toContain(
             "Your setup script failed (exit 2). See ~/.t3/setup-script.log on the sandbox.",
           );
@@ -7811,7 +7871,7 @@ describe("SandboxProvisioner per-thread launches", () => {
           apiKey: "boat_test",
         });
         yield* provisioner.launch({ configId: config.id, threadId, project });
-        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.awaitingHandoff);
+        const waiting = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
         expect(stageOf(waiting, "credentials")?.status).toBe("warning");
         expect(launchWarnings(waiting)).toEqual([
           "The GitHub App isn't installed on octo/hello. Install it at https://github.com/apps/t3-sandboxes/installations/new",

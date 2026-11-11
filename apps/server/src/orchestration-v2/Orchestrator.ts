@@ -78,6 +78,7 @@ import {
   TrimmedNonEmptyString,
   managedRuntimeModeCeilingMessage,
   leavesSandboxBridge,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_SWITCH_REFUSAL,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -11861,7 +11862,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     if (
       state === null ||
-      state.run.workspacePreparation === undefined ||
+      // A sandbox chat's first message waits on its sandbox's launch instead of a workspace; the
+      // host retries the launch and then this.
+      (state.run.workspacePreparation === undefined &&
+        state.run.providerInstanceId !== SANDBOX_BRIDGE_INSTANCE_ID) ||
       failureItem === undefined ||
       projection.thread.archivedAt !== null ||
       projection.thread.deletedAt !== null
