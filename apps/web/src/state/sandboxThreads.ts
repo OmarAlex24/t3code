@@ -14,8 +14,18 @@ import {
 } from "@t3tools/contracts";
 
 /**
+ * Whether a sandbox's chat is the provisioning server's thread with its id: once the launch linked
+ * it, and from the start of a launch, which makes that thread and holds its first message there.
+ * A running sandbox the launch never linked keeps its chat on the sandbox.
+ */
+const chatsOnHost = (sandbox: SandboxRecord) =>
+  sandbox.threadId !== undefined &&
+  sandbox.state !== "deleted" &&
+  (sandbox.hostProjectId !== undefined || sandbox.state === "provisioning");
+
+/**
  * The sandbox a thread runs on. The ref is either the sandbox's own thread, or the host thread the
- * sandbox bridge drives: the provisioning server's thread with the same id, once it is linked.
+ * sandbox bridge drives: the provisioning server's thread with the same id (see `chatsOnHost`).
  */
 export const findThreadSandbox = (
   sandboxes: ReadonlyArray<SandboxRecord>,
@@ -27,13 +37,7 @@ export const findThreadSandbox = (
       sandbox.environmentId === threadRef.environmentId && sandbox.threadId === threadRef.threadId,
   ) ??
   (threadRef.environmentId === provisionerEnvironmentId
-    ? sandboxes.find(
-        (sandbox) =>
-          sandbox.threadId === threadRef.threadId &&
-          sandbox.hostProjectId !== undefined &&
-          sandbox.state !== "provisioning" &&
-          sandbox.state !== "deleted",
-      )
+    ? sandboxes.find((sandbox) => sandbox.threadId === threadRef.threadId && chatsOnHost(sandbox))
     : undefined);
 
 /** What a thread row shows of the sandbox it runs on. */
@@ -82,11 +86,7 @@ export const sandboxRowStates = (
     if (sandbox.environmentId !== null && sandbox.environmentId !== provisionerEnvironmentId) {
       byEnvironment.set(sandbox.environmentId, row);
     }
-    if (
-      sandbox.threadId !== undefined &&
-      sandbox.hostProjectId !== undefined &&
-      sandbox.state !== "provisioning"
-    ) {
+    if (sandbox.threadId !== undefined && chatsOnHost(sandbox)) {
       byHostThread.set(sandbox.threadId, row);
     }
   }
