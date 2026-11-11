@@ -52,11 +52,12 @@ import { AgentCard, MilestoneCard, ProviderTile, RailDot } from "./MilestoneMapC
 import {
   CARD_W,
   type DetailPart,
+  fitsWide,
   isMilestoneNode,
   layoutMilestoneMap,
   type MapLayout,
-  WIDE_MIN_WIDTH,
 } from "./milestoneMapLayout";
+import { useChatCanvas } from "./ChatCanvasContext";
 
 type Projection = Pick<
   OrchestrationV2ThreadProjection,
@@ -97,6 +98,8 @@ function MapHeader(props: {
   readonly map: MilestoneMap;
   readonly lead: ReactNode;
   readonly narrow: boolean;
+  /** Keeps the header's right end clear of the inline details card. */
+  readonly insetEnd: number;
   readonly selected: {
     readonly node: MapMilestone;
     readonly index: number;
@@ -107,9 +110,14 @@ function MapHeader(props: {
 }) {
   const { map, selected } = props;
   const turns = map.mode === "turns";
+  const style =
+    props.insetEnd > 0 ? { paddingRight: `calc(${props.insetEnd}px + 0.875rem)` } : undefined;
   if (selected !== null) {
     return (
-      <div className="flex h-13 shrink-0 items-center gap-2.5 border-b bg-background px-3.5">
+      <div
+        style={style}
+        className="flex h-13 shrink-0 items-center gap-2.5 border-b bg-background px-3.5"
+      >
         <Button
           size="icon-xs"
           variant="ghost"
@@ -177,7 +185,10 @@ function MapHeader(props: {
     </span>,
   ];
   return (
-    <div className="flex h-13 shrink-0 items-center gap-2.5 border-b bg-background px-3.5">
+    <div
+      style={style}
+      className="flex h-13 shrink-0 items-center gap-2.5 border-b bg-background px-3.5"
+    >
       <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-semibold">
         {props.lead}
         <span className="min-w-0 truncate">{map.title ?? "Plan"}</span>
@@ -522,12 +533,15 @@ export function ThreadMilestonesView(props: {
   const firstPlace = useRef(true);
   const [scale, setScale] = useState(1);
   const [width, setWidth] = useState(0);
+  // The inline details card floats over the view's right edge, so layout and camera use what's left.
+  const insetEnd = useChatCanvas()?.detailsCardInsetEnd ?? 0;
+  const visibleWidth = Math.max(0, width - insetEnd);
 
   const milestones = map?.nodes.filter(isMilestoneNode) ?? [];
   const index =
     storedZoom === null ? -1 : milestones.findIndex(({ id }) => id === storedZoom.rowId);
   const selected = milestones[index] ?? null;
-  const wide = width >= WIDE_MIN_WIDTH;
+  const wide = map !== null && fitsWide(visibleWidth, map);
   const layout =
     map === null || width === 0
       ? null
@@ -551,12 +565,12 @@ export function ThreadMilestonesView(props: {
     setScale(next.s);
   };
   const insets = () => ({ top: 14, bottom: props.bottomInset + 12, side: 12 });
-  const place = useEffectEvent((animate: boolean, zoomedId: string | null) => {
+  const place = useEffectEvent((animate: boolean, zoomedId: string | null, inset: number) => {
     const canvas = canvasRef.current;
     if (canvas === null || layout === null || map === null || zoomedId !== (selected?.id ?? null))
       return;
     const { top, bottom, side } = insets();
-    const room = canvas.clientWidth - side * 2;
+    const room = canvas.clientWidth - inset - side * 2;
     const s = selected !== null ? 1 : Math.min(1, Math.max(0.86, room / layout.width));
     const x = side + Math.max(0, (room - layout.width * s) / 2);
     let y = top;
@@ -577,12 +591,12 @@ export function ThreadMilestonesView(props: {
   });
   const placed = width > 0;
   const selectedId = selected?.id ?? null;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the camera, which lives on the DOM, to the zoomed milestone or the overview whenever the zoom changes
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the camera, which lives on the DOM, to the zoomed milestone or the overview whenever the zoom or the details card changes
   useLayoutEffect(() => {
     if (!placed) return;
-    place(!firstPlace.current, selectedId);
+    place(!firstPlace.current, selectedId, insetEnd);
     firstPlace.current = false;
-  }, [selectedId, placed]);
+  }, [selectedId, placed, insetEnd]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks the canvas width, which picks between fanning agents out and nesting them
   useEffect(() => {
@@ -598,13 +612,14 @@ export function ThreadMilestonesView(props: {
   };
   const zoomBy = (factor: number) => {
     const canvas = canvasRef.current;
-    if (canvas !== null) zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, factor, true);
+    if (canvas !== null)
+      zoomAt((canvas.clientWidth - insetEnd) / 2, canvas.clientHeight / 2, factor, true);
   };
   const fitAll = () => {
     const canvas = canvasRef.current;
     if (canvas === null || layout === null) return;
     const { top, bottom, side } = insets();
-    const room = canvas.clientWidth - side * 2;
+    const room = canvas.clientWidth - insetEnd - side * 2;
     const s = Math.max(
       MIN_SCALE,
       Math.min(1, room / layout.width, (canvas.clientHeight - top - bottom) / layout.height),
@@ -725,6 +740,7 @@ export function ThreadMilestonesView(props: {
           map={map}
           lead={lead}
           narrow={!wide}
+          insetEnd={insetEnd}
           selected={selected === null ? null : { node: selected, index, count: milestones.length }}
           onZoomOut={() => zoom(null)}
           onStep={step}
