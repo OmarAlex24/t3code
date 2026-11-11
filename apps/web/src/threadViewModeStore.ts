@@ -14,13 +14,9 @@ export interface ThreadChatReveal {
   readonly requestId: number;
 }
 
-/** The milestone (or turn) Milestones is zoomed into, and what it singles out there. */
+/** The milestone (or turn) Milestones is zoomed into. */
 export interface MilestoneZoom {
   readonly rowId: string;
-  readonly highlight:
-    | { readonly kind: "group"; readonly name: string | null }
-    | { readonly kind: "agent"; readonly id: string }
-    | null;
 }
 
 interface ThreadViewModeState {

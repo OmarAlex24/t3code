@@ -6,8 +6,6 @@ import type {
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
 
-import { commandDisplayText } from "../work-log/commandLabel.ts";
-import type { ThreadStructureTurnItem } from "./models.ts";
 import { isActiveSubagentStatus } from "./subagentRuntime.ts";
 import { resolveActiveThreadRun } from "./threadWorkflows.ts";
 
@@ -50,11 +48,6 @@ export type ThreadMilestoneGraph =
       /** Every set's milestones in order: earlier plans first, then the current one. */
       readonly milestones: ReadonlyArray<MilestoneGraphNode>;
       readonly coordinator: MilestoneCoordinator;
-      readonly summary: {
-        /** 1-based position of the active milestone, or how many are done. */
-        readonly position: number;
-        readonly total: number;
-      };
     };
 
 const startKey = (subagent: Subagent) =>
@@ -142,10 +135,6 @@ export function deriveThreadMilestoneGraph(projection: Projection): ThreadMilest
     else push(byMilestone, owner.id, turnOf(run).agents);
   }
 
-  const counted = projection.milestones.filter(
-    (milestone) => milestone.setId === currentSetId && milestone.status !== "dropped",
-  );
-  const activeIndex = counted.findIndex((milestone) => milestone.status === "active");
   return {
     mode: "milestones",
     root: rootRun === undefined ? null : { run: rootRun, agents: rootAgents },
@@ -158,48 +147,5 @@ export function deriveThreadMilestoneGraph(projection: Projection): ThreadMilest
       current: milestone.setId === currentSetId,
     })),
     coordinator,
-    summary: {
-      position:
-        activeIndex === -1
-          ? counted.filter((milestone) => milestone.status === "done").length
-          : activeIndex + 1,
-      total: counted.length,
-    },
   };
-}
-
-const shortenPaths = (text: string) =>
-  text.replace(/(?:~|\.{0,2})?(?:\/[^\s/]+)+\/([^\s/]+)/gu, "$1");
-const firstLine = (text: string) => text.trim().split("\n")[0]?.trim() ?? "";
-
-/**
- * What the coordinator is doing right now, from its latest running item: a short phrase for the
- * spine, or null when nothing of its own is running. Nested items belong to a subagent.
- */
-export function deriveCoordinatorActivity(
-  items: ReadonlyArray<ThreadStructureTurnItem>,
-): string | null {
-  const item = items.findLast(
-    (candidate) => candidate.status === "running" && candidate.parentItemId === null,
-  );
-  switch (item?.type) {
-    case "reasoning":
-      return "Thinking";
-    case "command_execution": {
-      const command = firstLine(commandDisplayText(item.input));
-      return command ? `Running ${command}` : "Running a command";
-    }
-    case "file_change":
-      return `Editing ${shortenPaths(item.fileName)}`;
-    case "file_search":
-      return item.pattern ? `Searching for ${item.pattern}` : "Searching files";
-    case "web_search":
-      return "Searching the web";
-    case "dynamic_tool": {
-      const label = firstLine(item.title ?? item.toolName ?? "");
-      return label ? shortenPaths(label) : null;
-    }
-    default:
-      return null;
-  }
 }

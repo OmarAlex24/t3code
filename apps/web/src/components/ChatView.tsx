@@ -1,4 +1,4 @@
-import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
+import { AgentAsks, type CoordinatorAsk } from "./chat/AgentAsks";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
@@ -79,6 +79,7 @@ import {
   type ScopedThreadRef,
   type ThreadId,
   type OrchestrationV2Milestone,
+  type OrchestrationV2Subagent,
   ProviderInteractionMode,
   resolveIdleCompaction,
   RuntimeMode,
@@ -406,7 +407,6 @@ import {
 import { useDraftHeroLayoutTransition } from "./chat/useDraftHeroLayoutTransition";
 import { useLocalDispatchState } from "./chat/useLocalDispatchState";
 import { ThreadMilestonesView } from "./chat/ThreadMilestonesView";
-import type { CoordinatorAsk } from "./chat/MilestoneBoard";
 import {
   formatMilestoneCommentPrefix,
   pendingAskCard,
@@ -428,6 +428,8 @@ const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_TURN_ITEMS: ThreadStructure["turnItems"] = [];
 const EMPTY_RUNS: ThreadStructure["runs"] = [];
+const EMPTY_SUBAGENTS: ReadonlyArray<OrchestrationV2Subagent> = [];
+const EMPTY_MILESTONES: ReadonlyArray<OrchestrationV2Milestone> = [];
 const EMPTY_AUTO_UPDATE_ENVIRONMENTS: ReadonlyArray<EnvironmentPresentation> = [];
 const EMPTY_COMPOSER_BANNER_ITEMS: ReadonlyArray<ComposerBannerStackItem> = [];
 
@@ -3783,6 +3785,7 @@ export default function ChatView(props: ChatViewProps) {
               <WorkspaceMutationIdContext value={workspaceMutationId}>
                 {showMilestones && activeThreadRef !== null ? (
                   <ThreadMilestonesView
+                    key={activeThreadKey}
                     threadRef={activeThreadRef}
                     projection={serverProjection}
                     turnItems={milestoneTurnItems}
@@ -3955,7 +3958,12 @@ export default function ChatView(props: ChatViewProps) {
                         : undefined
                     }
                   >
-                    <ChildThreadApprovals threadRef={activeThreadRef} />
+                    <AgentAsks
+                      threadRef={activeThreadRef}
+                      subagents={serverProjection?.subagents ?? EMPTY_SUBAGENTS}
+                      milestones={serverProjection?.milestones ?? EMPTY_MILESTONES}
+                      coordinatorCard={showMilestones ? milestoneAskCard : null}
+                    />
                     <div className="relative">
                       <ComposerSurface.Shell contextRow={showComposerContextStrip}>
                         <ComposerSurface.Host

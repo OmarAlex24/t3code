@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   type OrchestrationV2Milestone,
   type OrchestrationV2Subagent,
+  EnvironmentId,
   NodeId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -24,7 +25,7 @@ import {
 
 const BASE_MS = Date.parse("2026-11-10T10:00:00.000Z");
 const sec = (seconds: number) => DateTime.makeUnsafe(BASE_MS + seconds * 1000);
-const ENV = "env-1";
+const ENV = EnvironmentId.make("env-1");
 
 const run = (ordinal: number, status: string, startS: number, endS: number | null = null) =>
   ({
@@ -374,7 +375,7 @@ describe("deriveMilestoneMap", () => {
       ["m9", "planned", "In the new plan", "No agents"],
     ]);
     expect(card(map, "m6").why).toBe("Replaced by the new plan");
-    expect(card(map, "m2").subtitleHint).toBe("Ya existe /api/session.");
+    expect(card(map, "m2").revision?.reason).toBe("Ya existe /api/session.");
 
     const build = card(map, "m3");
     expect(

@@ -1,80 +1,74 @@
+import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import type { ThreadStructureTurnItem } from "@t3tools/client-runtime/state/models";
-import { deriveMilestoneBoards } from "@t3tools/client-runtime/state/thread-milestone-board";
 import {
-  deriveCoordinatorActivity,
-  type MilestoneCoordinator,
-} from "@t3tools/client-runtime/state/thread-milestone-graph";
+  deriveMilestoneBoards,
+  type MilestoneBoardItem,
+} from "@t3tools/client-runtime/state/thread-milestone-board";
 import {
-  deriveThreadTrace,
-  formatTraceDuration,
-  threadTraceDomain,
-  type ThreadTrace,
-  type TraceAgent,
-  type TraceCounts,
-  type TraceDomain,
-  type TraceGroup,
-  type TraceRow,
-  traceRowDomain,
-} from "@t3tools/client-runtime/state/thread-milestone-trace";
+  deriveMilestoneMap,
+  type MapMilestone,
+  type MilestoneMap,
+} from "@t3tools/client-runtime/state/thread-milestone-map";
 import type {
   OrchestrationV2Milestone,
-  OrchestrationV2Subagent,
   OrchestrationV2ThreadProjection,
   ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
-import { formatModelSlugName } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
-import { ArrowLeftIcon, ChevronLeftIcon, ChevronRightIcon, TriangleAlertIcon } from "lucide-react";
-import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "react";
+import {
+  ArrowLeftIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  ImageIcon,
+  MessageSquareIcon,
+  MinusIcon,
+  PlusIcon,
+  ScanIcon,
+} from "lucide-react";
+import {
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
+import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
-import { type MilestoneZoom, useThreadViewModeStore } from "../../threadViewModeStore";
-import { Badge } from "../ui/badge";
+import { serverEnvironment } from "../../state/server";
+import { useThreadViewModeStore } from "../../threadViewModeStore";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
-import { Tooltip, TooltipTrigger } from "../ui/tooltip";
 import { AgentElapsed } from "./AgentElapsed";
+import { type CoordinatorAsk, focusAgentAsk, useAgentAsks } from "./AgentAsks";
+import { AgentCard, MilestoneCard, ProviderTile, RailDot } from "./MilestoneMapCards";
 import {
-  boardCounts,
-  CommentButton,
-  type CoordinatorAsk,
-  CoordinatorAskCard,
-  MilestoneBoard,
-} from "./MilestoneBoard";
-import {
-  afterNowStyle,
-  atNowStyle,
-  atStyle,
-  MilestoneStatusIcon,
-  spanStyle,
-  TraceBar,
-  TraceChart,
-  traceCoverClass,
-  TraceLabel,
-  TraceLegendSwatch,
-  TracePin,
-  TracePlot,
-  traceRowClass,
-  TraceStrand,
-  TraceText,
-  useAgentsWaitingOnYou,
-} from "./MilestoneTrace";
-import {
-  EnvironmentSubagentAvatar,
-  SubagentHoverCard,
-  subagentDetailLine,
-  useSubagentLink,
-} from "./V2LifecycleRow";
+  CARD_W,
+  type DetailPart,
+  isMilestoneNode,
+  layoutMilestoneMap,
+  type MapLayout,
+  WIDE_MIN_WIDTH,
+} from "./milestoneMapLayout";
 
 type Projection = Pick<
   OrchestrationV2ThreadProjection,
   "runs" | "subagents" | "milestones" | "messages"
 >;
-type Tone = "info" | "success" | "error" | "warning" | "outline";
+interface Camera {
+  readonly x: number;
+  readonly y: number;
+  readonly s: number;
+}
 
+const MIN_SCALE = 0.35;
+const MAX_SCALE = 1.6;
+const clampScale = (scale: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
 const iso = (ms: number | null) =>
   ms === null ? null : DateTime.formatIso(DateTime.makeUnsafe(ms));
 const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
@@ -91,356 +85,388 @@ function focusZoomedPanel(node: HTMLDivElement | null) {
   node.focus({ preventScroll: true });
 }
 
-const linkProps = (
-  threadRef: ScopedThreadRef,
-  agent: OrchestrationV2Subagent,
-  onOpenThread: (threadId: ThreadId) => void,
-) => ({
-  parentRef: threadRef,
-  subagentId: agent.id,
-  providerInstanceId: agent.providerInstanceId,
-  origin: agent.origin,
-  status: agent.status,
-  driver: agent.driver,
-  title: formatSubagentDisplayTitle(agent.title ?? "Subagent"),
-  result: agent.result,
-  progress: agent.progress,
-  startedAt: agent.startedAt,
-  completedAt: agent.completedAt,
-  threadId: agent.childThreadId,
-  remote: agent.remoteChild,
-  onOpenThread,
-});
+const RAIL_STROKE = {
+  live: "stroke-info/45 [stroke-width:1.6]",
+  future: "stroke-foreground/20 [stroke-width:1.4] [stroke-dasharray:3_4]",
+  dropped: "stroke-foreground/20 [stroke-width:1.4] [stroke-dasharray:1_4]",
+} as const;
 
-function coordinatorPhrase(
-  coordinator: MilestoneCoordinator,
-  awaitingUser: boolean,
-  activity: string | null,
-): string {
-  if (awaitingUser) return "Waiting for you";
-  switch (coordinator.status) {
-    case "waiting":
-      return activity ?? `Waiting on ${plural(coordinator.liveAgents, "agent")}`;
-    case "working":
-      return activity ?? "Working";
-    case "failed":
-      return "Failed";
-    case "interrupted":
-      return "Stopped";
-    case "idle":
-      return "Idle";
-  }
-}
-
-function overallBadge(
-  coordinator: MilestoneCoordinator,
-  awaitingUser: boolean,
-  allDone: boolean,
-): { readonly label: string; readonly tone: Tone } {
-  if (awaitingUser) return { label: "Needs you", tone: "warning" };
-  switch (coordinator.status) {
-    case "working":
-    case "waiting":
-      return { label: "Working", tone: "info" };
-    case "failed":
-      return { label: "Failed", tone: "error" };
-    case "interrupted":
-      return { label: "Stopped", tone: "warning" };
-    case "idle":
-      return allDone ? { label: "Done", tone: "success" } : { label: "Idle", tone: "outline" };
-  }
-}
-
-function rowBadge(status: TraceRow["status"]): { readonly label: string; readonly tone: Tone } {
-  switch (status) {
-    case "active":
-      return { label: "In progress", tone: "info" };
-    case "done":
-      return { label: "Done", tone: "success" };
-    case "failed":
-      return { label: "Failed", tone: "error" };
-    case "stopped":
-      return { label: "Stopped", tone: "outline" };
-    case "dropped":
-      return { label: "Dropped", tone: "outline" };
-    case "planned":
-      return { label: "Planned", tone: "outline" };
-  }
-}
-
-const AGENT_BADGE: Record<TraceAgent["status"], { readonly label: string; readonly tone: Tone }> = {
-  running: { label: "Running", tone: "info" },
-  "needs-you": { label: "Needs you", tone: "warning" },
-  done: { label: "Done", tone: "success" },
-  failed: { label: "Failed", tone: "error" },
-  queued: { label: "Queued", tone: "outline" },
-  stopped: { label: "Stopped", tone: "outline" },
-};
-
-function StatusBadge(props: {
-  readonly label: string;
-  readonly tone: Tone;
-  readonly dot?: boolean;
+function MapHeader(props: {
+  readonly map: MilestoneMap;
+  readonly lead: ReactNode;
+  readonly narrow: boolean;
+  readonly selected: {
+    readonly node: MapMilestone;
+    readonly index: number;
+    readonly count: number;
+  } | null;
+  readonly onZoomOut: () => void;
+  readonly onStep: (delta: number) => void;
 }) {
-  return (
-    <Badge variant={props.tone}>
-      {props.dot === false ? null : (
-        <span aria-hidden className="size-1.5 rounded-full bg-current" />
-      )}
-      {props.label}
-    </Badge>
-  );
-}
-
-const live = (counts: TraceCounts) => counts.running + counts.needsYou;
-
-/** "1 of 3 done · 1 failed · needs you" for a group sub-row. */
-function groupSummary(group: TraceGroup): ReactNode {
-  const { counts } = group;
-  return (
-    <>
-      {counts.done} of {group.agents.length} done
-      {counts.failed > 0 ? (
-        <span className="text-destructive"> · {counts.failed} failed</span>
-      ) : null}
-      {counts.needsYou > 0 ? <span className="text-warning"> · needs you</span> : null}
-    </>
-  );
-}
-
-/** "1 running · 1/3 done · 1 failed" for a group header in a zoomed milestone. */
-function groupDetail(group: TraceGroup): ReactNode {
-  const { counts } = group;
-  return (
-    <>
-      {live(counts) > 0 ? `${live(counts)} running · ` : ""}
-      {counts.done}/{group.agents.length} done
-      {counts.failed > 0 ? (
-        <span className="text-destructive"> · {counts.failed} failed</span>
-      ) : null}
-      {counts.needsYou > 0 ? (
-        <span className="text-warning"> · {counts.needsYou} needs you</span>
-      ) : null}
-    </>
-  );
-}
-
-function RowDuration(props: { readonly row: TraceRow }) {
-  const { span } = props.row;
-  if (span === null) return null;
-  return span.endMs === null ? (
-    <AgentElapsed agent={{ status: "running", startedAt: iso(span.startMs), completedAt: null }} />
-  ) : (
-    <span className="tabular-nums">{formatTraceDuration(span.endMs - span.startMs)}</span>
-  );
-}
-
-function rowMeta(row: TraceRow, trace: ThreadTrace, posts: number): ReactNode {
-  if (row.status === "planned") return trace.kind === "turns" ? "Queued" : "Planned";
-  const parts: Array<ReactNode> = [
-    row.status === "dropped" ? "Dropped" : <RowDuration key="time" row={row} />,
-  ];
-  if (row.agentCount > 0) {
-    parts.push(plural(row.agentCount, "agent"));
-    if (live(row.counts) > 1) {
-      parts.push(
-        <span key="parallel" className="text-info">
-          {live(row.counts)} in parallel
-        </span>,
-      );
-    } else if (row.counts.failed > 0) {
-      parts.push(
-        <span key="failed" className="text-destructive">
-          {row.counts.failed} failed
-        </span>,
-      );
-    } else if (row.peakParallel > 1) {
-      parts.push(`${row.peakParallel} in parallel`);
-    }
-  }
-  if (posts > 0 && parts.length < 3) parts.push(`${posts} on the board`);
-  return parts.flatMap((part, index) => (index === 0 ? [part] : [" · ", part]));
-}
-
-function Revision(props: { readonly milestone: OrchestrationV2Milestone }) {
-  const { milestone } = props;
-  if (milestone.revision !== undefined) {
+  const { map, selected } = props;
+  const turns = map.mode === "turns";
+  if (selected !== null) {
     return (
-      <p className="mt-1.5 max-w-152 border-l-2 border-warning/45 pl-2.5 text-xs text-muted-foreground">
-        <span className="font-medium text-warning">Changed</span> from{" "}
-        <s className="text-muted-foreground/70">{milestone.revision.previousTitle}</s>
-        <br />
-        {milestone.revision.reason}
-      </p>
+      <div className="flex h-13 shrink-0 items-center gap-2.5 border-b bg-background px-3.5">
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          aria-label={turns ? "All turns" : "All milestones"}
+          onClick={props.onZoomOut}
+        >
+          <ArrowLeftIcon />
+        </Button>
+        <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-semibold">
+          <span className="shrink-2 truncate font-medium text-muted-foreground">
+            {turns ? "All turns" : "All milestones"}
+          </span>
+          <span className="shrink-0 font-normal text-muted-foreground/60">/</span>
+          <span className="min-w-0 truncate">{selected.node.title}</span>
+        </div>
+        <span className="shrink-0 text-sm text-muted-foreground tabular-nums">
+          {selected.index + 1} of {selected.count}
+        </span>
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          aria-label="Previous"
+          disabled={selected.index === 0}
+          onClick={() => props.onStep(-1)}
+        >
+          <ChevronUpIcon />
+        </Button>
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          aria-label="Next"
+          disabled={selected.index === selected.count - 1}
+          onClick={() => props.onStep(1)}
+        >
+          <ChevronDownIcon />
+        </Button>
+        <Kbd variant="outline">Esc</Kbd>
+      </div>
     );
   }
-  return milestone.note === undefined ? null : (
-    <p className="mt-1.5 max-w-152 text-sm text-muted-foreground">{milestone.note}</p>
-  );
-}
-
-function AnswerAgentButton(props: {
-  readonly threadRef: ScopedThreadRef;
-  readonly agent: OrchestrationV2Subagent;
-  readonly onOpenThread: (threadId: ThreadId) => void;
-}) {
-  const link = useSubagentLink(linkProps(props.threadRef, props.agent, props.onOpenThread));
-  if (link.open === null) return null;
-  return (
-    <Button size="xs" variant="outline" className="pointer-events-auto" onClick={link.open}>
-      Answer
-    </Button>
-  );
-}
-
-/** A subagent that waits on you, answerable from the whole-thread view. */
-function AgentNeedsYouRow(props: {
-  readonly threadRef: ScopedThreadRef;
-  readonly agent: OrchestrationV2Subagent;
-  readonly approval: boolean;
-  readonly group: string | null;
-  readonly rowTitle: string;
-  readonly onOpenThread: (threadId: ThreadId) => void;
-}) {
-  return (
-    <div className="flex min-w-0 items-center gap-2.5 rounded-xl border border-warning/45 bg-warning/10 py-1.5 pr-2 pl-3 text-sm">
-      <TriangleAlertIcon className="size-3.5 shrink-0 text-warning" />
-      <span className="min-w-0 flex-1 truncate">
-        <span className="font-medium">
-          {formatSubagentDisplayTitle(props.agent.title ?? "Subagent")}
-        </span>{" "}
-        {props.approval ? "needs your approval" : "has a question for you"}{" "}
-        <span className="text-xs text-muted-foreground">
-          {props.group === null ? "" : `· ${props.group} `}· {props.rowTitle}
-        </span>
+  const { stats } = map;
+  const items = [
+    props.narrow ? null : (
+      <span key="done">
+        {turns ? plural(stats.total, "turn") : `${stats.done} of ${stats.total} done`}
       </span>
-      <AnswerAgentButton
-        threadRef={props.threadRef}
-        agent={props.agent}
-        onOpenThread={props.onOpenThread}
+    ),
+    stats.agents > 0 && !props.narrow ? (
+      <span key="agents">{plural(stats.agents, "agent")}</span>
+    ) : null,
+    stats.running > 0 && !props.narrow ? <span key="running">{stats.running} running</span> : null,
+    stats.needsYou > 0 ? (
+      <span key="needs" className="text-warning">
+        {stats.needsYou} need{stats.needsYou === 1 ? "s" : ""} you
+      </span>
+    ) : null,
+    <span key="time" className="font-semibold text-foreground">
+      <AgentElapsed
+        agent={{
+          status: stats.endMs === null ? "running" : "completed",
+          startedAt: iso(stats.startMs),
+          completedAt: iso(stats.endMs),
+        }}
       />
-    </div>
-  );
-}
-
-/** One agent in a zoomed milestone; the row opens its chat. */
-function TraceAgentRow(props: {
-  readonly threadRef: ScopedThreadRef;
-  readonly entry: TraceAgent;
-  readonly domain: TraceDomain;
-  readonly indented: boolean;
-  readonly highlighted: boolean;
-  readonly approval: boolean;
-  readonly onOpenThread: (threadId: ThreadId) => void;
-}) {
-  const { entry, domain } = props;
-  const { agent, status } = entry;
-  const link = useSubagentLink(linkProps(props.threadRef, agent, props.onOpenThread));
-  const title = formatSubagentDisplayTitle(agent.title ?? "Subagent");
-  const detail =
-    status === "needs-you"
-      ? props.approval
-        ? "Needs your approval"
-        : "Has a question for you"
-      : status === "failed"
-        ? (subagentDetailLine(link.liveStatus, link.result, link.progress) ?? "Failed")
-        : null;
-  const model = agent.model ? formatModelSlugName(agent.model) : null;
-  const badge = AGENT_BADGE[status];
+    </span>,
+  ];
   return (
-    <div
-      ref={(node) => {
-        if (node && props.highlighted) node.scrollIntoView({ block: "nearest" });
-      }}
-      data-milestone-agent={agent.id}
-      className={cn(
-        traceRowClass,
-        "min-h-[46px] border-transparent",
-        props.highlighted && "bg-info/12",
-      )}
-    >
-      {link.open === null ? null : (
-        <Tooltip>
-          <TooltipTrigger
-            delay={500}
-            render={
-              <button
-                type="button"
-                aria-label={`Open ${title}`}
-                aria-description={badge.label}
-                onClick={link.open}
-                className={traceCoverClass}
-              />
-            }
-          />
-          <SubagentHoverCard
-            {...linkProps(props.threadRef, agent, props.onOpenThread)}
-            link={link}
-          />
-        </Tooltip>
-      )}
-      <TraceLabel className={props.indented ? "pl-10" : undefined}>
-        <EnvironmentSubagentAvatar
-          environmentId={props.threadRef.environmentId}
-          providerInstanceId={agent.providerInstanceId}
-          driver={agent.driver}
-          remote={link.remote}
-        />
-        <TraceText
-          title={title}
-          metaClassName={
-            status === "failed"
-              ? "text-destructive"
-              : status === "needs-you"
-                ? "text-warning"
-                : undefined
-          }
-          meta={
-            detail ?? (
-              <>
-                {[model, link.remote === undefined ? null : `on ${link.remote.label}`]
-                  .filter(Boolean)
-                  .join(" · ")}
-                {status === "queued" ? (
-                  model ? null : (
-                    "Queued"
-                  )
-                ) : (
-                  <>
-                    {model || link.remote ? " · " : ""}
-                    <AgentElapsed agent={link.timing} />
-                  </>
-                )}
-              </>
-            )
-          }
-        />
-      </TraceLabel>
-      <TracePlot>
-        {entry.span === null ? (
-          <TraceBar tone="queued" style={{ ...atNowStyle, width: "5%" }} />
-        ) : (
-          <TraceBar tone={status} style={spanStyle(domain, entry.span)} />
-        )}
-      </TracePlot>
-      <div className="pointer-events-none relative flex items-center justify-end pr-3">
-        {status === "needs-you" ? (
-          <AnswerAgentButton
-            threadRef={props.threadRef}
-            agent={agent}
-            onOpenThread={props.onOpenThread}
-          />
-        ) : (
-          <StatusBadge {...badge} dot={status === "running"} />
-        )}
+    <div className="flex h-13 shrink-0 items-center gap-2.5 border-b bg-background px-3.5">
+      <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-semibold">
+        {props.lead}
+        <span className="min-w-0 truncate">{map.title ?? "Plan"}</span>
+      </div>
+      <div className="flex shrink-0 gap-3.5 text-sm whitespace-nowrap text-muted-foreground tabular-nums">
+        {items}
       </div>
     </div>
   );
 }
 
+function DetailNote(props: { readonly children: ReactNode; readonly style: CSSProperties }) {
+  return (
+    <div
+      style={props.style}
+      className="absolute w-72 rounded-xl border border-dashed px-3 py-2.25 text-xs text-muted-foreground motion-safe:animate-map-enter [&_b]:font-medium [&_b]:text-foreground/80"
+    >
+      {props.children}
+    </div>
+  );
+}
+
+function DetailLabel(props: {
+  readonly name: string;
+  readonly text: string;
+  readonly style: CSSProperties;
+}) {
+  return (
+    <div
+      style={props.style}
+      className="absolute flex h-5 items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground motion-safe:animate-map-enter"
+    >
+      <b className="font-semibold text-foreground/80">{props.name}</b>
+      <span>{props.text}</span>
+    </div>
+  );
+}
+
+function BoardCard(props: {
+  readonly item: MilestoneBoardItem;
+  readonly lead: ReactNode;
+  readonly style: CSSProperties;
+  readonly onJump: (entryId: string) => void;
+}) {
+  const { item } = props;
+  const base =
+    "absolute grid w-72 gap-1.25 rounded-xl border px-3 py-2.5 text-sm text-foreground/78 motion-safe:animate-map-enter";
+  if (item.kind === "visual") {
+    return (
+      <button
+        type="button"
+        style={props.style}
+        onClick={() => props.onJump(item.id)}
+        aria-label={`Show ${item.title} in chat`}
+        className={cn(
+          base,
+          "bg-card text-left shadow-xs/5 hover:shadow-lg/10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none",
+        )}
+      >
+        <span className="grid h-18.5 place-items-center rounded-lg border bg-linear-135 from-info/14 to-success/10 text-muted-foreground">
+          <ImageIcon className="size-3.5" />
+        </span>
+        <span className="truncate text-xs text-muted-foreground">{item.title}</span>
+      </button>
+    );
+  }
+  if (item.kind === "comment") {
+    return (
+      <div style={props.style} className={cn(base, "border-transparent bg-foreground/6")}>
+        <b className="text-xs font-medium text-foreground">You</b>
+        <p className="line-clamp-2">{item.text}</p>
+      </div>
+    );
+  }
+  const images = item.attachments.length;
+  return (
+    <button
+      type="button"
+      style={props.style}
+      onClick={() => props.onJump(item.id)}
+      aria-label="Show this post in chat"
+      className={cn(
+        base,
+        "bg-card text-left shadow-xs/5 hover:shadow-lg/10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none",
+      )}
+    >
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        {props.lead}
+        Coordinator
+        {images > 0 ? (
+          <span className="ml-auto inline-flex items-center gap-1">
+            <ImageIcon className="size-3" />
+            {images}
+          </span>
+        ) : null}
+      </span>
+      {item.text === null ? null : <span className="line-clamp-2">{item.text}</span>}
+    </button>
+  );
+}
+
+function DetailPartView(props: {
+  readonly part: DetailPart;
+  readonly node: MapMilestone;
+  readonly turns: boolean;
+  readonly threadRef: ScopedThreadRef;
+  readonly leadSmall: ReactNode;
+  readonly onOpenThread: (threadId: ThreadId) => void;
+  readonly onJump: (entryId: string) => void;
+  readonly onComment: ((milestone: OrchestrationV2Milestone) => void) | null;
+}) {
+  const { part, node } = props;
+  const style = { left: part.x, top: part.y };
+  switch (part.kind) {
+    case "revision":
+      return (
+        <DetailNote style={style}>
+          <b>Changed from “{node.revision?.previousTitle}”.</b> {node.revision?.reason}
+        </DetailNote>
+      );
+    case "note":
+      return (
+        <DetailNote style={style}>
+          {part.note === "dropped" ? (
+            <>
+              <b>Dropped.</b> {node.why ?? ""}
+            </>
+          ) : part.note === "not-started" ? (
+            <>
+              <b>Not started yet.</b> Its agents show up here once it starts.
+            </>
+          ) : (
+            <>
+              <b>No agents.</b> The {props.turns ? "agent" : "coordinator"} did this one itself.
+            </>
+          )}
+        </DetailNote>
+      );
+    case "group":
+      return (
+        <DetailLabel
+          style={style}
+          name={part.group.name ?? "Other"}
+          text={`${part.group.done}/${part.group.total} done${part.group.parallel ? " · in parallel" : ""}`}
+        />
+      );
+    case "agent":
+      return (
+        <AgentCard
+          entry={part.agent}
+          threadRef={props.threadRef}
+          style={style}
+          width={part.width}
+          onOpenThread={props.onOpenThread}
+          onAnswer={focusAgentAsk}
+        />
+      );
+    case "posts":
+      return <DetailLabel style={style} name="Posts" text={String(part.count)} />;
+    case "board":
+      return (
+        <BoardCard item={part.item} lead={props.leadSmall} style={style} onJump={props.onJump} />
+      );
+    case "comment": {
+      const { milestone } = node;
+      const comment = props.onComment;
+      if (milestone === null || comment === null) return null;
+      return (
+        <button
+          type="button"
+          style={style}
+          onClick={() => comment(milestone)}
+          className="absolute flex h-8.5 w-72 items-center gap-1.75 rounded-lg border border-dashed px-2.75 text-xs text-muted-foreground/70 hover:bg-accent hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none motion-safe:animate-map-enter"
+        >
+          <MessageSquareIcon className="size-3.25" />
+          Comment on this milestone…
+        </button>
+      );
+    }
+  }
+}
+
+function MapWorld(props: {
+  readonly map: MilestoneMap;
+  readonly layout: MapLayout;
+  readonly selected: MapMilestone | null;
+  readonly threadRef: ScopedThreadRef;
+  readonly leadSmall: ReactNode;
+  readonly leadDriver: Parameters<typeof MilestoneCard>[0]["lead"];
+  readonly onSelect: (id: string) => void;
+  readonly onOpenThread: (threadId: ThreadId) => void;
+  readonly onJump: (entryId: string) => void;
+  readonly onComment: ((milestone: OrchestrationV2Milestone) => void) | null;
+}) {
+  const { map, layout, selected } = props;
+  const faded = (id: string) => selected !== null && id !== selected.id;
+  const fadeClass = "transition-opacity duration-200 motion-reduce:transition-none";
+  return (
+    <>
+      <svg
+        aria-hidden
+        width={layout.width}
+        height={layout.height}
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="pointer-events-none absolute top-0 left-0 overflow-visible"
+      >
+        {layout.rail.map(({ edge, d }) => (
+          <path
+            key={`${edge.from}>${edge.to}`}
+            d={d}
+            className={cn(RAIL_STROKE[edge.style], fadeClass, faded(edge.to) && "opacity-42")}
+          />
+        ))}
+        {layout.detail?.wires.map((d) => (
+          <path key={d} d={d} className={RAIL_STROKE.live} />
+        ))}
+        {layout.detail?.ports.map((port) => (
+          <circle
+            key={`${port.x},${port.y}`}
+            cx={port.x}
+            cy={port.y}
+            r={4}
+            className="fill-card stroke-info/45 [stroke-width:1.6]"
+          />
+        ))}
+      </svg>
+      {map.nodes.map((node) => {
+        const box = layout.boxes.get(node.id)!;
+        const dot = (
+          <span key={`dot:${node.id}`} className={cn(fadeClass, faded(node.id) && "opacity-42")}>
+            <RailDot
+              status={node.kind === "you" ? "you" : node.status}
+              style={{ left: box.dotX, top: box.dotY }}
+            />
+          </span>
+        );
+        if (node.kind === "you") {
+          return [
+            dot,
+            <div
+              key={node.id}
+              style={{ left: box.x, top: box.top, width: CARD_W }}
+              className={cn(
+                "absolute flex h-10 items-center gap-1.5 overflow-hidden rounded-xl bg-foreground/6 px-3 text-sm whitespace-nowrap text-foreground/78",
+                fadeClass,
+                selected !== null && "opacity-42",
+              )}
+            >
+              <b className="shrink-0 font-semibold text-foreground">You</b>
+              <span className="truncate">{node.text}</span>
+            </div>,
+          ];
+        }
+        return [
+          dot,
+          <MilestoneCard
+            key={node.id}
+            node={node}
+            threadRef={props.threadRef}
+            lead={props.leadDriver}
+            style={{ left: box.x, top: box.top }}
+            selected={selected?.id === node.id}
+            faded={faded(node.id)}
+            onSelect={() => props.onSelect(node.id)}
+          />,
+        ];
+      })}
+      {selected === null || layout.detail === null
+        ? null
+        : layout.detail.parts.map((part, index) => (
+            <DetailPartView
+              key={part.kind === "agent" ? part.agent.agent.id : `${part.kind}:${index}`}
+              part={part}
+              node={selected}
+              turns={map.mode === "turns"}
+              threadRef={props.threadRef}
+              leadSmall={props.leadSmall}
+              onOpenThread={props.onOpenThread}
+              onJump={props.onJump}
+              onComment={props.onComment}
+            />
+          ))}
+    </>
+  );
+}
+
 /**
- * The thread on one time axis. Zoomed out it shows every milestone (or turn) with its groups of
- * agents running side by side; zoomed in it rescales to one milestone and lists each agent.
+ * The thread as a map: milestones down a rail in the order work started, with detours and new
+ * plans on their own lanes. Selecting one zooms in and fans its agents and posts out beside it.
  */
 export function ThreadMilestonesView(props: {
   readonly threadRef: ScopedThreadRef;
@@ -454,46 +480,202 @@ export function ThreadMilestonesView(props: {
 }) {
   const { threadRef, projection } = props;
   const environmentId = threadRef.environmentId;
-  const [clockMs, setClockMs] = useState(() => Date.now());
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  const [transition, setTransition] = useState<"in" | "out" | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const waiting = useAgentsWaitingOnYou(threadRef);
-  const storedZoom = useThreadViewModeStore(
-    (state) => state.zoomByThreadKey[scopedThreadKey(threadRef)] ?? null,
-  );
-  const setStoredZoom = useThreadViewModeStore((state) => state.setZoom);
-  const setMode = useThreadViewModeStore((state) => state.setMode);
-  const revealInChat = useThreadViewModeStore((state) => state.revealInChat);
+  const asks = useAgentAsks(threadRef);
+  const map = deriveMilestoneMap({
+    environmentId,
+    projection,
+    turnItems: props.turnItems,
+    asks,
+    coordinatorAsks: props.coordinatorAsk !== null,
+  });
   const boards = deriveMilestoneBoards(props.turnItems, (item) =>
     item.textOmitted
       ? (projection.messages.find(({ id }) => id === item.messageId)?.text ?? "")
       : item.text,
   );
-  const trace = deriveThreadTrace({
-    projection,
-    turnItems: props.turnItems,
-    boards,
-    needsYou: waiting.needsYou,
-    nowMs: clockMs,
-  });
-  const activity = deriveCoordinatorActivity(props.turnItems);
-  const rows = trace?.rows ?? [];
-  const zoomIndex = storedZoom === null ? -1 : rows.findIndex(({ id }) => id === storedZoom.rowId);
-  const zoomedRow = rows[zoomIndex] ?? null;
-  const highlight = zoomedRow === null ? null : storedZoom!.highlight;
+  const leadInstance = map?.coordinatorRun?.providerInstanceId ?? null;
+  const leadDriver = useAtomValue(
+    serverEnvironment.providersValueAtom(environmentId),
+    (providers) =>
+      providers?.find((provider) => provider.instanceId === leadInstance)?.driver ?? null,
+  );
+  const storedZoom = useThreadViewModeStore(
+    (state) => state.zoomByThreadKey[scopedThreadKey(threadRef)] ?? null,
+  );
+  const setStoredZoom = useThreadViewModeStore((state) => state.setZoom);
+  const revealInChat = useThreadViewModeStore((state) => state.revealInChat);
 
-  const zoom = (next: MilestoneZoom | null) => {
-    setTransition(next === null ? "out" : "in");
-    setStoredZoom(threadRef, next);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const worldRef = useRef<HTMLDivElement>(null);
+  const camera = useRef<Camera>({ x: 0, y: 0, s: 1 });
+  const drag = useRef<{ x: number; y: number; cx: number; cy: number } | null>(null);
+  // Survives pointerup, so the click that ends a pan doesn't select the card under it.
+  const dragged = useRef(false);
+  const firstPlace = useRef(true);
+  const [scale, setScale] = useState(1);
+  const [width, setWidth] = useState(0);
+
+  const milestones = map?.nodes.filter(isMilestoneNode) ?? [];
+  const index =
+    storedZoom === null ? -1 : milestones.findIndex(({ id }) => id === storedZoom.rowId);
+  const selected = milestones[index] ?? null;
+  const wide = width >= WIDE_MIN_WIDTH;
+  const layout =
+    map === null || width === 0
+      ? null
+      : layoutMilestoneMap({
+          map,
+          selectedId: selected?.id ?? null,
+          wide,
+          board: (id) => boards.get(id) ?? [],
+          commentable: props.onComment !== null,
+        });
+
+  const setCamera = (next: Camera, animate: boolean) => {
+    camera.current = next;
+    const world = worldRef.current;
+    if (world !== null) {
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      world.style.transition =
+        animate && !reduced ? "transform 320ms cubic-bezier(.22,.8,.24,1)" : "none";
+      world.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.s})`;
+    }
+    setScale(next.s);
   };
+  const insets = () => ({ top: 14, bottom: props.bottomInset + 12, side: 12 });
+  const place = useEffectEvent((animate: boolean, zoomedId: string | null) => {
+    const canvas = canvasRef.current;
+    if (canvas === null || layout === null || map === null || zoomedId !== (selected?.id ?? null))
+      return;
+    const { top, bottom, side } = insets();
+    const room = canvas.clientWidth - side * 2;
+    const s = selected !== null ? 1 : Math.min(1, Math.max(0.86, room / layout.width));
+    const x = side + Math.max(0, (room - layout.width * s) / 2);
+    let y = top;
+    if (selected !== null) {
+      y = top - layout.boxes.get(selected.id)!.top + 4;
+    } else if (map.live) {
+      const current =
+        milestones.find(({ live }) => live) ??
+        milestones.findLast(({ endMs }) => endMs !== null) ??
+        milestones.at(-1);
+      const box = current === undefined ? undefined : layout.boxes.get(current.id);
+      if (box !== undefined) {
+        y = Math.min(top, canvas.clientHeight - bottom - (box.top + box.h + 30) * s);
+      }
+    }
+    setCamera({ x, y, s }, animate);
+    if (selected !== null) focusZoomedPanel(canvas);
+  });
+  const placed = width > 0;
+  const selectedId = selected?.id ?? null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the camera, which lives on the DOM, to the zoomed milestone or the overview whenever the zoom changes
+  useLayoutEffect(() => {
+    if (!placed) return;
+    place(!firstPlace.current, selectedId);
+    firstPlace.current = false;
+  }, [selectedId, placed]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks the canvas width, which picks between fanning agents out and nesting them
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    return observeResize(canvas, ([entry]) => setWidth(entry?.contentRect.width ?? 0));
+  }, []);
+
+  const zoomAt = (cx: number, cy: number, factor: number, animate: boolean) => {
+    const { x, y, s } = camera.current;
+    const next = clampScale(s * factor);
+    setCamera({ x: cx - ((cx - x) * next) / s, y: cy - ((cy - y) * next) / s, s: next }, animate);
+  };
+  const zoomBy = (factor: number) => {
+    const canvas = canvasRef.current;
+    if (canvas !== null) zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, factor, true);
+  };
+  const fitAll = () => {
+    const canvas = canvasRef.current;
+    if (canvas === null || layout === null) return;
+    const { top, bottom, side } = insets();
+    const room = canvas.clientWidth - side * 2;
+    const s = Math.max(
+      MIN_SCALE,
+      Math.min(1, room / layout.width, (canvas.clientHeight - top - bottom) / layout.height),
+    );
+    setCamera({ x: side + Math.max(0, (room - layout.width * s) / 2), y: top, s }, true);
+  };
+  const onWheel = useEffectEvent((event: WheelEvent) => {
+    event.preventDefault();
+    if (event.ctrlKey || event.metaKey) {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      zoomAt(
+        event.clientX - rect.left,
+        event.clientY - rect.top,
+        Math.exp(-event.deltaY * 0.01),
+        false,
+      );
+    } else {
+      const { x, y, s } = camera.current;
+      setCamera({ x: x - event.deltaX, y: y - event.deltaY, s }, false);
+    }
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- React's wheel listener is passive, and panning and pinch-zoom must stop the page from scrolling
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const listener = (event: WheelEvent) => onWheel(event);
+    canvas.addEventListener("wheel", listener, { passive: false });
+    return () => canvas.removeEventListener("wheel", listener);
+  }, []);
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    dragged.current = false;
+    if (event.button !== 0 || (event.target as Element).closest("button, a, input, textarea"))
+      return;
+    drag.current = {
+      x: event.clientX,
+      y: event.clientY,
+      cx: camera.current.x,
+      cy: camera.current.y,
+    };
+  };
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = drag.current;
+    if (current === null) return;
+    if (
+      !dragged.current &&
+      Math.abs(event.clientX - current.x) + Math.abs(event.clientY - current.y) > 4
+    ) {
+      dragged.current = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.currentTarget.dataset.dragging = "";
+    }
+    if (!dragged.current) return;
+    // Panning writes the transform directly so cards don't re-render per frame.
+    camera.current = {
+      ...camera.current,
+      x: current.cx + event.clientX - current.x,
+      y: current.cy + event.clientY - current.y,
+    };
+    const world = worldRef.current;
+    if (world !== null) {
+      world.style.transition = "none";
+      world.style.transform = `translate(${camera.current.x}px, ${camera.current.y}px) scale(${camera.current.s})`;
+    }
+  };
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    drag.current = null;
+    delete event.currentTarget.dataset.dragging;
+    if (dragged.current) setScale(camera.current.s);
+  };
+
+  const zoom = (id: string | null) => setStoredZoom(threadRef, id === null ? null : { rowId: id });
   const step = (delta: number) => {
-    const next = rows[zoomIndex + delta];
-    if (next !== undefined) zoom({ rowId: next.id, highlight: null });
+    const next = milestones[index + delta];
+    if (next !== undefined) zoom(next.id);
   };
   const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
     if (
-      zoomedRow === null ||
+      selected === null ||
       event.defaultPrevented ||
       event.isComposing ||
       event.altKey ||
@@ -507,13 +689,13 @@ export function ThreadMilestonesView(props: {
     // composer, a dialog or a field.
     if (
       !(target instanceof Element) ||
-      (target !== document.body && !containerRef.current?.contains(target)) ||
+      (target !== document.body && !canvasRef.current?.parentElement?.contains(target)) ||
       target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")
     )
       return;
     if (event.key === "Escape") zoom(null);
-    else if (event.key === "ArrowLeft") step(-1);
-    else if (event.key === "ArrowRight") step(1);
+    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") step(-1);
+    else if (event.key === "ArrowDown" || event.key === "ArrowRight") step(1);
     else return;
     event.preventDefault();
   });
@@ -523,556 +705,85 @@ export function ThreadMilestonesView(props: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const answerInChat = () => setMode(threadRef, "chat");
-  const jump = (entryId: string) => revealInChat(threadRef, entryId);
-  const recompute = () => setClockMs(Date.now());
-  const noun = trace?.kind === "turns" ? "turn" : "milestone";
-  const coordinatorAvatar =
-    trace?.coordinator.run == null ? null : (
-      <EnvironmentSubagentAvatar
-        environmentId={environmentId}
-        providerInstanceId={trace.coordinator.run.providerInstanceId}
-      />
-    );
-
-  let body: ReactNode;
-  if (trace === null) {
-    body = (
-      <div className="pt-2">
-        <h3 className="text-sm font-medium">Describe what you want built</h3>
-        <p className="mt-0.5 max-w-120 text-xs text-muted-foreground">
-          The coordinator's plan shows up here as milestones while it works.
-        </p>
-      </div>
-    );
-  } else if (zoomedRow === null) {
-    body = (
-      <ZoomedOut
-        trace={trace}
-        threadRef={threadRef}
-        coordinatorAsk={props.coordinatorAsk}
-        coordinatorAvatar={coordinatorAvatar}
-        activity={activity}
-        approvals={waiting.approvals}
-        boardPosts={(rowId) =>
-          (boards.get(rowId) ?? []).filter(({ kind }) => kind !== "comment").length
-        }
-        expanded={expanded}
-        onToggle={(rowId) =>
-          setExpanded((current) => {
-            const next = new Set(current);
-            if (!next.delete(rowId)) next.add(rowId);
-            return next;
-          })
-        }
-        onZoom={zoom}
-        onHorizon={recompute}
-        onAnswerInChat={answerInChat}
-        onOpenThread={props.onOpenThread}
-      />
-    );
-  } else {
-    const row = zoomedRow;
-    const items = boards.get(row.id) ?? [];
-    const named = row.groups.some(({ name }) => name !== null);
-    const domain = traceRowDomain(trace, row);
-    const isActive = row.status === "active";
-    const coordinatorRuns = trace.coordinator.runs.filter(
-      (run) =>
-        row.span !== null &&
-        run.startMs <= (row.span.endMs ?? trace.nowMs) &&
-        (run.endMs ?? trace.nowMs) >= row.span.startMs,
-    );
-    const model = trace.coordinator.run
-      ? formatModelSlugName(trace.coordinator.run.modelSelection.model)
-      : null;
-    body = (
-      <>
-        <div className="mb-2.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Button size="xs" variant="ghost" onClick={() => zoom(null)}>
-            <ArrowLeftIcon />
-            All {noun}s
-          </Button>
-          <Kbd>Esc</Kbd>
-          <span className="flex-1" />
-          <span className="tabular-nums">
-            {noun === "turn" ? "Turn" : "Milestone"} {zoomIndex + 1} of {rows.length}
-          </span>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label={`Previous ${noun}`}
-            disabled={zoomIndex === 0}
-            onClick={() => step(-1)}
-          >
-            <ChevronLeftIcon />
-          </Button>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label={`Next ${noun}`}
-            disabled={zoomIndex === rows.length - 1}
-            onClick={() => step(1)}
-          >
-            <ChevronRightIcon />
-          </Button>
-        </div>
-        <div className="flex min-w-0 items-start gap-2.5">
-          <span className="pt-0.5">
-            <MilestoneStatusIcon status={row.status} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h2
-              className={cn(
-                "truncate text-base font-semibold",
-                row.status === "dropped" && "text-muted-foreground line-through",
-              )}
-            >
-              {row.title}
-            </h2>
-            <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-              <span>{row.span === null ? "Not started" : <RowDuration row={row} />}</span>
-              {row.agentCount > 0 ? (
-                <span>
-                  {plural(row.agentCount, "agent")}
-                  {named ? ` in ${plural(row.groups.length, "group")}` : ""}
-                </span>
-              ) : null}
-            </div>
-          </div>
-          <StatusBadge {...rowBadge(row.status)} dot={isActive} />
-        </div>
-        {row.milestone === null ? null : <Revision milestone={row.milestone} />}
-        {isActive && props.coordinatorAsk !== null ? (
-          <div className="mt-3">
-            <CoordinatorAskCard
-              environmentId={environmentId}
-              ask={props.coordinatorAsk}
-              onAnswerInChat={answerInChat}
-            />
-          </div>
-        ) : null}
-        {domain === null ? (
-          <p className="mt-1.5 text-sm text-muted-foreground">
-            {row.status === "planned"
-              ? `This ${noun} starts after the current one. The coordinator may change it before then.`
-              : `This ${noun} never started.`}
-          </p>
-        ) : (
-          <div className="mt-3.5">
-            <TraceChart
-              domain={domain}
-              nowMs={trace.nowMs}
-              live={trace.live && row.span?.endMs === null}
-              zoomed
-              axisLabel={`Since this ${noun} started`}
-              onHorizon={recompute}
-              legend={
-                row.groups.length > 1 && named ? (
-                  <span>
-                    {plural(row.groups.length, "group")} ran in parallel; overlapping bars ran at
-                    the same time.
-                  </span>
-                ) : undefined
-              }
-            >
-              <div className={cn(traceRowClass, "min-h-[46px]")}>
-                <TraceLabel>
-                  {coordinatorAvatar}
-                  <TraceText
-                    title="Coordinator"
-                    meta={[
-                      model,
-                      isActive
-                        ? coordinatorPhrase(
-                            trace.coordinator,
-                            props.coordinatorAsk !== null,
-                            activity,
-                          )
-                        : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  />
-                </TraceLabel>
-                <TracePlot>
-                  {coordinatorRuns.map((run) => (
-                    <TraceBar key={run.startMs} tone="coordinator" style={spanStyle(domain, run)} />
-                  ))}
-                </TracePlot>
-                <div className="relative flex items-center justify-end pr-3">
-                  {isActive && trace.live ? <StatusBadge label="Working" tone="info" /> : null}
-                </div>
-              </div>
-              {row.groups.flatMap((group) => {
-                const headed = named;
-                const groupHighlighted =
-                  highlight?.kind === "group" && highlight.name === group.name;
-                return [
-                  headed ? (
-                    <div
-                      key={`group:${group.name ?? ""}`}
-                      className={cn(
-                        traceRowClass,
-                        "min-h-[30px] bg-muted/50",
-                        groupHighlighted &&
-                          "before:absolute before:inset-y-0 before:left-0 before:w-0.75 before:bg-info",
-                      )}
-                    >
-                      <TraceLabel className="gap-1.5 py-1">
-                        <span className="shrink-0 text-xs font-semibold">
-                          {group.name ?? "Agents"}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                          {groupDetail(group)}
-                        </span>
-                      </TraceLabel>
-                      <TracePlot>
-                        {group.span === null ? null : (
-                          <TraceBar tone="group" style={spanStyle(domain, group.span, "1%")} />
-                        )}
-                      </TracePlot>
-                    </div>
-                  ) : null,
-                  ...group.agents.map((entry) => (
-                    <TraceAgentRow
-                      key={entry.agent.id}
-                      threadRef={threadRef}
-                      entry={entry}
-                      domain={domain}
-                      indented={headed}
-                      highlighted={highlight?.kind === "agent" && highlight.id === entry.agent.id}
-                      approval={
-                        entry.agent.childThreadId !== null &&
-                        waiting.approvals.has(entry.agent.childThreadId)
-                      }
-                      onOpenThread={props.onOpenThread}
-                    />
-                  )),
-                ];
-              })}
-              {row.agentCount === 0 ? (
-                <div className={cn(traceRowClass, "min-h-[46px]")}>
-                  <TraceLabel>
-                    <span className="text-xs text-muted-foreground">No agents in this {noun}.</span>
-                  </TraceLabel>
-                </div>
-              ) : null}
-            </TraceChart>
-          </div>
-        )}
-        {items.length === 0 &&
-        !(isActive && props.onComment !== null && row.milestone !== null) ? null : (
-          <section className="mt-4 grid gap-2">
-            <div className="flex items-baseline gap-2 text-xs text-muted-foreground">
-              <span className="text-xs font-semibold text-foreground">Board</span>
-              <span className="min-w-0 truncate">
-                {boardCounts(items)
-                  .map(({ text }) => text)
-                  .join(" · ")}
-              </span>
-            </div>
-            <MilestoneBoard environmentId={environmentId} items={items} onJump={jump} />
-            {props.onComment === null || row.milestone === null ? null : (
-              <CommentButton onComment={() => props.onComment!(row.milestone!)} />
-            )}
-          </section>
-        )}
-      </>
-    );
-  }
-
+  const lead = <ProviderTile driver={leadDriver} size="sm" />;
+  const leadSmall = <ProviderTile driver={leadDriver} size="xs" />;
   return (
     <div
-      ref={containerRef}
       data-thread-milestones-view
-      className="scrollbar-gutter-both h-full min-h-0 overflow-y-auto overscroll-y-contain ps-(--chat-lane-inset-start) pe-(--chat-lane-inset-end)"
+      className="relative flex h-full min-h-0 flex-col bg-background"
     >
-      <div
-        key={zoomedRow?.id ?? "all"}
-        ref={zoomedRow === null ? undefined : focusZoomedPanel}
-        tabIndex={zoomedRow === null ? undefined : -1}
-        data-milestone-zoom={zoomedRow === null ? undefined : ""}
-        className={cn(
-          "mx-auto w-full max-w-(--chat-content-max-width) origin-top px-3 pt-4 outline-none sm:px-12",
-          transition === "in" && "motion-safe:animate-trace-zoom-in",
-          transition === "out" && "motion-safe:animate-trace-zoom-out",
-        )}
-        style={{ paddingBottom: props.bottomInset + 24 }}
-      >
-        {body}
-      </div>
-    </div>
-  );
-}
-
-function ZoomedOut(props: {
-  readonly trace: ThreadTrace;
-  readonly threadRef: ScopedThreadRef;
-  readonly coordinatorAsk: CoordinatorAsk | null;
-  readonly coordinatorAvatar: ReactNode;
-  readonly activity: string | null;
-  readonly approvals: ReadonlySet<string>;
-  readonly boardPosts: (rowId: string) => number;
-  readonly expanded: ReadonlySet<string>;
-  readonly onToggle: (rowId: string) => void;
-  readonly onZoom: (zoom: MilestoneZoom) => void;
-  readonly onHorizon: () => void;
-  readonly onAnswerInChat: () => void;
-  readonly onOpenThread: (threadId: ThreadId) => void;
-}) {
-  const { trace } = props;
-  const domain = threadTraceDomain(trace);
-  const turns = trace.kind === "turns";
-  const counted = trace.rows.filter(({ current, status }) => current && status !== "dropped");
-  const awaitingUser = props.coordinatorAsk !== null;
-  const overall = overallBadge(
-    trace.coordinator,
-    awaitingUser || trace.needsYou.length > 0,
-    counted.length > 0 && counted.every(({ status }) => status === "done"),
-  );
-  const running = live(trace.counts);
-  const firstFailed = trace.firstFailed;
-  const titles = new Map(trace.rows.map((row) => [row.id, row.title]));
-  return (
-    <>
-      <div className="flex min-w-0 items-start gap-2.5">
-        {props.coordinatorAvatar}
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate text-base font-semibold">{trace.title ?? "Plan"}</h2>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-            <span className="font-medium text-foreground/85">
-              {turns ? "Turn" : "Milestone"} {trace.position} of {trace.total}
-            </span>
-            {trace.agentCount > 0 ? <span>{plural(trace.agentCount, "agent")}</span> : null}
-            {running > 0 ? <span className="text-info">{running} running</span> : null}
-            {firstFailed === null ? null : (
-              <button
-                type="button"
-                onClick={() =>
-                  props.onZoom({
-                    rowId: firstFailed.rowId,
-                    highlight: { kind: "agent", id: firstFailed.agentId },
-                  })
-                }
-                className="rounded-sm text-destructive underline decoration-current/35 underline-offset-2 outline-none hover:decoration-current focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-              >
-                {trace.counts.failed} failed
-              </button>
-            )}
-            <AgentElapsed
-              agent={{
-                status: trace.live ? "running" : "completed",
-                startedAt: iso(trace.startMs),
-                completedAt: trace.live ? null : iso(trace.nowMs),
-              }}
-            />
-          </div>
-        </div>
-        <StatusBadge {...overall} />
-      </div>
-      {props.coordinatorAsk === null ? null : (
-        <div className="mt-3">
-          <CoordinatorAskCard
-            environmentId={props.threadRef.environmentId}
-            ask={props.coordinatorAsk}
-            onAnswerInChat={props.onAnswerInChat}
-          />
-        </div>
-      )}
-      {trace.needsYou.length === 0 ? null : (
-        <div className="mt-3 grid gap-1.5">
-          {trace.needsYou.map(({ agent, group, rowId }) => (
-            <AgentNeedsYouRow
-              key={agent.id}
-              threadRef={props.threadRef}
-              agent={agent}
-              approval={agent.childThreadId !== null && props.approvals.has(agent.childThreadId)}
-              group={group}
-              rowTitle={titles.get(rowId) ?? ""}
-              onOpenThread={props.onOpenThread}
-            />
-          ))}
-        </div>
-      )}
-      <div className="mt-3.5">
-        <TraceChart
-          domain={domain}
-          nowMs={trace.nowMs}
-          live={trace.live}
-          zoomed={false}
-          axisLabel={turns ? "Turns" : "Plan"}
-          onHorizon={props.onHorizon}
-          legend={
-            <>
-              <TraceLegendSwatch tone="done" label="Done" />
-              <TraceLegendSwatch tone="active" label="Working" />
-              {trace.rows.some(({ estimate }) => estimate !== null) ? (
-                <TraceLegendSwatch tone="planned" label="Planned, by average time" />
-              ) : null}
-              <span className="flex-1" />
-              <span>Select a {turns ? "turn" : "milestone"} to zoom in</span>
-            </>
-          }
-        >
-          <div className={cn(traceRowClass, "min-h-11")}>
-            <TraceLabel>
-              <span className="w-4 shrink-0" />
-              {props.coordinatorAvatar}
-              <TraceText
-                title="Coordinator"
-                meta={coordinatorPhrase(
-                  trace.coordinator,
-                  props.coordinatorAsk !== null,
-                  props.activity,
-                )}
-              />
-            </TraceLabel>
-            <TracePlot>
-              {trace.coordinator.runs.map((run) => (
-                <TraceBar key={run.startMs} tone="coordinator" style={spanStyle(domain, run)} />
-              ))}
-            </TracePlot>
-          </div>
-          {trace.rows.map((row) => (
-            <OverviewRow
-              key={row.id}
-              row={row}
-              trace={trace}
-              domain={domain}
-              ask={row.status === "active" && props.coordinatorAsk !== null}
-              posts={props.boardPosts(row.id)}
-              open={props.expanded.has(row.id) !== (row.status === "active")}
-              onToggle={() => props.onToggle(row.id)}
-              onZoom={props.onZoom}
-            />
-          ))}
-        </TraceChart>
-      </div>
-    </>
-  );
-}
-
-const agentStrandStyle = (domain: TraceDomain, entry: TraceAgent, top: number) => ({
-  top,
-  ...(entry.span === null ? { ...atNowStyle, width: "3%" } : spanStyle(domain, entry.span, "3px")),
-});
-
-function OverviewRow(props: {
-  readonly row: TraceRow;
-  readonly trace: ThreadTrace;
-  readonly domain: TraceDomain;
-  readonly ask: boolean;
-  readonly posts: number;
-  readonly open: boolean;
-  readonly onToggle: () => void;
-  readonly onZoom: (zoom: MilestoneZoom) => void;
-}) {
-  const { row, domain } = props;
-  const agents = row.groups.flatMap(({ agents: members }) => members);
-  const expandable = agents.length > 0;
-  const strands = expandable && !props.open;
-  const barStyle =
-    row.estimate !== null
-      ? afterNowStyle(domain, row.estimate.offsetMs, row.estimate.durationMs)
-      : row.span !== null
-        ? spanStyle(domain, row.span)
-        : null;
-  return (
-    <>
-      <div className={cn(traceRowClass, "min-h-11", strands && "min-h-[46px]")}>
-        <button
-          type="button"
-          aria-label={`Zoom into ${row.title}`}
-          onClick={() => props.onZoom({ rowId: row.id, highlight: null })}
-          className={traceCoverClass}
+      {map === null ? null : (
+        <MapHeader
+          map={map}
+          lead={lead}
+          narrow={!wide}
+          selected={selected === null ? null : { node: selected, index, count: milestones.length }}
+          onZoomOut={() => zoom(null)}
+          onStep={step}
         />
-        <TraceLabel>
-          {expandable ? (
-            <button
-              type="button"
-              aria-expanded={props.open}
-              aria-label={props.open ? "Hide agents" : "Show agents"}
-              onClick={props.onToggle}
-              className="pointer-events-auto grid size-4 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-            >
-              <ChevronRightIcon
-                className={cn(
-                  "size-3.5 transition-transform motion-reduce:transition-none",
-                  props.open && "rotate-90",
-                )}
+      )}
+      <div
+        ref={canvasRef}
+        tabIndex={selected === null ? undefined : -1}
+        data-milestone-zoom={selected === null ? undefined : ""}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onClickCapture={(event) => {
+          // A drag that ends over a card is a pan, not a click on it.
+          if (dragged.current) {
+            event.stopPropagation();
+            event.preventDefault();
+          }
+        }}
+        className="relative min-h-0 flex-1 cursor-grab touch-none overflow-hidden bg-foreground/[0.022] outline-none data-dragging:cursor-grabbing"
+      >
+        {map === null ? (
+          <div className="px-6 pt-6">
+            <h3 className="text-sm font-medium">Describe what you want built</h3>
+            <p className="mt-0.5 max-w-120 text-xs text-muted-foreground">
+              The coordinator's plan shows up here as milestones while it works.
+            </p>
+          </div>
+        ) : (
+          <div ref={worldRef} className="absolute top-0 left-0 origin-top-left">
+            {layout === null ? null : (
+              <MapWorld
+                map={map}
+                layout={layout}
+                selected={selected}
+                threadRef={threadRef}
+                leadSmall={leadSmall}
+                leadDriver={leadDriver}
+                onSelect={zoom}
+                onOpenThread={props.onOpenThread}
+                onJump={(entryId) => revealInChat(threadRef, entryId)}
+                onComment={props.onComment}
               />
-            </button>
-          ) : (
-            <span className="w-4 shrink-0" />
-          )}
-          <MilestoneStatusIcon status={row.status} />
-          <TraceText
-            title={row.title}
-            titleClassName={cn(
-              row.status === "active" && "font-semibold",
-              row.status === "planned" && "font-normal text-muted-foreground",
-              row.status === "dropped" && "font-normal text-muted-foreground/70 line-through",
             )}
-            meta={rowMeta(row, props.trace, props.posts)}
-          />
-        </TraceLabel>
-        <TracePlot>
-          {barStyle === null ? null : (
-            <TraceBar tone={row.status} style={barStyle} raised={strands} />
-          )}
-          {row.pins.map((pin) => (
-            <TracePin key={pin.id} style={atStyle(domain, pin.atMs)} raised={strands} />
-          ))}
-          {props.ask ? <TracePin style={atNowStyle} ask raised={strands} /> : null}
-          {strands
-            ? agents.map((entry, index) => (
-                <TraceStrand
-                  key={entry.agent.id}
-                  status={entry.status}
-                  style={agentStrandStyle(domain, entry, 30 + (index % 4) * 4)}
-                />
-              ))
-            : null}
-        </TracePlot>
+          </div>
+        )}
       </div>
-      {props.open
-        ? row.groups.map((group) => (
-            <div
-              key={group.name ?? ""}
-              className={cn(traceRowClass, "border-transparent")}
-              style={{ minHeight: Math.max(26, 12 + group.agents.length * 6) }}
-            >
-              <button
-                type="button"
-                aria-label={`Zoom into ${group.name ?? "agents"} in ${row.title}`}
-                onClick={() =>
-                  props.onZoom({ rowId: row.id, highlight: { kind: "group", name: group.name } })
-                }
-                className={traceCoverClass}
-              />
-              <TraceLabel className="gap-1.5 py-1 pl-10">
-                <span className="my-0.5 w-[3px] self-stretch rounded-full bg-foreground/20" />
-                <span className="shrink-0 text-xs font-medium text-foreground/85">
-                  {group.name ?? "Agents"}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                  {groupSummary(group)}
-                </span>
-              </TraceLabel>
-              <TracePlot>
-                {group.agents.map((entry, index) => (
-                  <TraceStrand
-                    key={entry.agent.id}
-                    status={entry.status}
-                    thick
-                    style={agentStrandStyle(domain, entry, 8 + index * 6)}
-                  />
-                ))}
-              </TracePlot>
-            </div>
-          ))
-        : null}
-    </>
+      {map === null ? null : (
+        <div
+          style={{ bottom: props.bottomInset + 12 }}
+          className="absolute left-3 z-11 flex flex-col items-center gap-px rounded-lg border bg-card p-0.75 shadow-xs/5"
+        >
+          <Button size="icon-xs" variant="ghost" aria-label="Zoom out" onClick={() => zoomBy(0.8)}>
+            <MinusIcon />
+          </Button>
+          <span className="py-0.5 text-2xs text-muted-foreground tabular-nums">
+            {Math.round(scale * 100)}%
+          </span>
+          <Button size="icon-xs" variant="ghost" aria-label="Zoom in" onClick={() => zoomBy(1.25)}>
+            <PlusIcon />
+          </Button>
+          <Button size="icon-xs" variant="ghost" aria-label="Fit everything" onClick={fitAll}>
+            <ScanIcon />
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
