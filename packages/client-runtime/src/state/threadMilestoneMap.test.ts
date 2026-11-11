@@ -16,6 +16,7 @@ import {
   type AgentAsk,
   type MapMilestone,
   agentLine,
+  BEFORE_PLAN_NODE_ID,
   deriveMilestoneMap,
   flattenAgents,
   layoutMilestoneGraph,
@@ -221,7 +222,6 @@ const derive = (
     turnItems,
     asks,
     coordinatorAsks: false,
-    nowMs: BASE_MS + 1131_000,
   })!;
 
 /** id, set, in the plan, dropped, started (seconds). */
@@ -432,6 +432,31 @@ describe("deriveMilestoneMap", () => {
     });
   });
 
+  it("puts agents that ran before the first plan on their own node, outside the counts", () => {
+    const { milestoneId: _unstamped, ...early } = agent("a0", "m1", "completed", 2, 8);
+    const map = derive(
+      { ...OAUTH, subagents: [early as never, ...OAUTH.subagents] },
+      OAUTH_ITEMS,
+      OAUTH_ASKS,
+    );
+    expect(rows(map).slice(0, 3)).toEqual([
+      ["you", 0],
+      [BEFORE_PLAN_NODE_ID, 0],
+      ["m1", 0],
+    ]);
+    expect(card(map, BEFORE_PLAN_NODE_ID)).toMatchObject({
+      title: "Before the plan",
+      status: "done",
+      milestone: null,
+      rollup: { text: "1 agent done" },
+    });
+    expect(edges(map).slice(0, 2)).toEqual([
+      ["you", BEFORE_PLAN_NODE_ID, "live"],
+      [BEFORE_PLAN_NODE_ID, "m1", "live"],
+    ]);
+    expect(map.stats).toMatchObject({ done: 5, total: 8, agents: 11 });
+  });
+
   it("turns titles started again into detours and forks the next plan from the last of them", () => {
     const map = derive(TRACE_GROUPS, TRACE_GROUPS_ITEMS);
     expect(rows(map)).toEqual([
@@ -484,7 +509,6 @@ describe("deriveMilestoneMap", () => {
       turnItems: [],
       asks: new Map(),
       coordinatorAsks: false,
-      nowMs: BASE_MS,
     })!;
     expect(map.mode).toBe("turns");
     expect(

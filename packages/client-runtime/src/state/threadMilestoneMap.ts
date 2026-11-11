@@ -10,6 +10,7 @@ import { copySorted } from "@t3tools/shared/Array";
 
 import type { ThreadStructureTurnItem } from "./models.ts";
 import { isActiveSubagentStatus } from "./subagentRuntime.ts";
+import { MILESTONE_BOARD_ROOT } from "./threadMilestoneBoard.ts";
 import { deriveThreadMilestoneGraph } from "./threadMilestoneGraph.ts";
 import { resolveActiveThreadRun } from "./threadWorkflows.ts";
 
@@ -262,7 +263,7 @@ export interface MapMilestone {
   readonly id: string;
   readonly row: number;
   readonly col: number;
-  /** Null for a turn on a thread that never planned. */
+  /** Null for a turn on a thread that never planned, and for the work before the first plan. */
   readonly milestone: OrchestrationV2Milestone | null;
   readonly title: string;
   readonly subtitle: string;
@@ -307,7 +308,8 @@ export interface MilestoneMap {
     readonly agents: number;
     readonly running: number;
     readonly needsYou: number;
-    readonly startMs: number;
+    /** Null only when nothing has run yet. */
+    readonly startMs: number | null;
     /** Null while the thread is live. */
     readonly endMs: number | null;
   };
@@ -319,7 +321,7 @@ const firstLine = (text: string) => text.trim().split("\n")[0]?.trim() ?? "";
 const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
 const NEW_PLAN_GAP_MS = 10 * 60_000;
 /** The node for agents that ran before the first plan. */
-const BEFORE_PLAN_NODE_ID = "before-plan";
+export const BEFORE_PLAN_NODE_ID = MILESTONE_BOARD_ROOT;
 
 export const flattenAgents = (agents: ReadonlyArray<MapAgent>): ReadonlyArray<MapAgent> =>
   agents.flatMap((agent) => [agent, ...flattenAgents(agent.children)]);
@@ -448,7 +450,7 @@ function groupsOf(agents: ReadonlyArray<MapAgent>): ReadonlyArray<MapGroup> {
 function rollup(status: MapStatus, agents: ReadonlyArray<MapAgent>): MapMilestone["rollup"] {
   const all = flattenAgents(agents);
   if (status === "running" || status === "needs-you") {
-    const needs = all.filter(({ ask }) => ask !== null).length;
+    const needs = all.filter(({ status }) => status === "needs-you").length;
     if (needs > 0) return { tone: "needs-you", text: `${needs} need${needs === 1 ? "s" : ""} you` };
     const running = all.filter((agent) => agent.status === "running").length;
     return {
@@ -518,7 +520,6 @@ export function deriveMilestoneMap(input: {
   readonly asks: ReadonlyMap<string, AgentAsk>;
   /** The coordinator itself waits on you. */
   readonly coordinatorAsks: boolean;
-  readonly nowMs: number;
 }): MilestoneMap | null {
   const { projection, asks, environmentId } = input;
   const graph = deriveThreadMilestoneGraph(projection);
@@ -546,7 +547,7 @@ export function deriveMilestoneMap(input: {
     readonly endMs: number | null;
   }): Omit<MapMilestone, "row" | "col"> => {
     const agents = buildAgents(fields.agents, asks, environmentId);
-    const asking = flattenAgents(agents).some(({ ask }) => ask !== null);
+    const asking = flattenAgents(agents).some(({ status }) => status === "needs-you");
     const status: MapStatus =
       fields.state === "active"
         ? !live
@@ -766,7 +767,9 @@ export function deriveMilestoneMap(input: {
   }
 
   const milestones = nodes.filter((node): node is MapMilestone => node.kind === "milestone");
-  const counted = milestones.filter(({ status }) => status !== "dropped");
+  const counted = milestones.filter(
+    (node) => node.status !== "dropped" && (graph.mode === "turns" || node.milestone !== null),
+  );
   const agents = milestones.flatMap(({ groups }) =>
     flattenAgents(groups.flatMap(({ agents: members }) => members)),
   );
@@ -785,7 +788,7 @@ export function deriveMilestoneMap(input: {
   const startMs =
     msOrNull(firstRun?.startedAt ?? null) ??
     msOrNull(firstRun?.requestedAt ?? null) ??
-    (recorded.length > 0 ? Math.min(...recorded) : input.nowMs);
+    (recorded.length > 0 ? Math.min(...recorded) : null);
   return {
     mode: graph.mode,
     title: firstRun === undefined ? null : firstLine(runText(projection, firstRun) ?? "") || null,
@@ -799,7 +802,7 @@ export function deriveMilestoneMap(input: {
       total: counted.length,
       agents: agents.length,
       running: agents.filter(({ status }) => status === "running" || status === "needs-you").length,
-      needsYou: agents.filter(({ ask }) => ask !== null).length,
+      needsYou: agents.filter(({ status }) => status === "needs-you").length,
       startMs,
       endMs: live ? null : recorded.length > 0 ? Math.max(...recorded) : startMs,
     },
