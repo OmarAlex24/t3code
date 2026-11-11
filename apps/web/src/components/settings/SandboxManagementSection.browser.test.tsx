@@ -13,6 +13,12 @@ const mocks = vi.hoisted(() => ({
   deleteSandbox: vi.fn(async () => AsyncResult.success({ warnings: [] })),
   stopSandbox: vi.fn(async () => AsyncResult.success(undefined)),
   navigate: vi.fn(),
+  threads: [] as Array<unknown>,
+}));
+
+vi.mock(import("~/state/entities"), async (original) => ({
+  ...(await original()),
+  useThreadShells: (() => mocks.threads) as never,
 }));
 
 vi.mock(import("@tanstack/react-router"), async (original) => ({
@@ -86,8 +92,10 @@ vi.mock(import("~/state/query"), async (original) => ({
   })) as never,
 }));
 
+import "~/index.css";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { SandboxManagementSection } from "./SandboxManagementSection";
+import { SettingsGroup } from "./SettingsGroup";
 
 const boatInfo = {
   kind: "boat",
@@ -96,7 +104,10 @@ const boatInfo = {
   apiKeyLabel: "Boat API key",
   apiKeyPlaceholder: "",
   docsUrl: "https://boat.dev",
-  sizes: [{ id: "small", label: "Small", detail: "2 vCPU" }],
+  sizes: [
+    { id: "small", label: "Small", detail: "2 vCPU" },
+    { id: "default", label: "Default", detail: "4 vCPU" },
+  ],
   defaultSize: "small",
   configured: true,
   diskRetentionDays: 14,
@@ -128,6 +139,7 @@ function setup(state: SandboxRecord["state"], patch: Partial<SandboxRecord> = {}
   mocks.sandboxes = [{ ...sandbox(state), ...patch }];
   mocks.orphans = [];
   mocks.configs = [];
+  mocks.threads = [];
   mocks.deleteSandbox.mockClear();
   mocks.stopSandbox.mockClear();
 }
@@ -305,5 +317,122 @@ describe("SandboxManagementSection", () => {
 
     await userEvent.click(page.getByRole("button", { name: "Delete sandbox" }).first());
     await expect.element(page.getByText("It also deletes the fork its agent made.")).toBeVisible();
+  });
+
+  it("nests subagents' sandboxes under the thread that delegated their tasks", async () => {
+    const hostEnvironmentId = EnvironmentId.make("11111111-1111-4111-8111-111111111111");
+    const chatThreadId = ThreadId.make("thread-chat");
+    const plainThreadId = ThreadId.make("thread-plain");
+    const config = {
+      id: "config-1",
+      label: "Boat small",
+      provider: "boat",
+      size: "small",
+      passGithubToken: false,
+      joinTailnet: false,
+      access: "public",
+      envFiles: {},
+      idleMinutes: 30,
+      maxRunningMinutes: 480,
+      createdAt: "2026-11-01T09:00:00.000Z",
+      updatedAt: "2026-11-01T09:00:00.000Z",
+    };
+    const subagent = (patch: Partial<SandboxRecord>): SandboxRecord => ({
+      ...sandbox("running"),
+      configId: "config-1",
+      projectTitle: "hello",
+      label: "hello subagent on Boat small",
+      ...patch,
+    });
+    setup("running");
+    mocks.configs = [config];
+    mocks.threads = [
+      {
+        environmentId: EnvironmentId.make("22222222-2222-4222-8222-222222222222"),
+        id: chatThreadId,
+        title: "Try the new parser",
+      },
+      { environmentId: hostEnvironmentId, id: plainThreadId, title: "Speed up the test suite" },
+    ];
+    mocks.sandboxes = [
+      {
+        ...sandbox("running"),
+        instanceId: "instance-chat",
+        sandboxId: "bx_chat1234",
+        configId: "config-1",
+        threadId: chatThreadId,
+        projectTitle: "hello",
+        label: "hello on Boat small",
+        size: "small",
+      },
+      subagent({
+        instanceId: "instance-sub-chat",
+        sandboxId: "bx_subchat1",
+        parentThreadId: chatThreadId,
+        size: "default",
+      }),
+      subagent({
+        instanceId: "instance-sub-1",
+        sandboxId: "bx_subone12",
+        parentThreadId: plainThreadId,
+        size: "default",
+      }),
+      subagent({
+        instanceId: "instance-sub-2",
+        sandboxId: "bx_subtwo12",
+        parentThreadId: plainThreadId,
+        size: "small",
+        state: "stopped",
+        runningSince: null,
+        stoppedAt: "2026-11-01T11:30:00.000Z",
+      }),
+    ];
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    await page.viewport(820, 560);
+    await using _viewport = {
+      [Symbol.asyncDispose]: () => page.viewport(viewport.width, viewport.height),
+    };
+    await using _screen = await render(
+      // The settings card the section sits in, which the mocked layout leaves out.
+      <div className="w-[760px] bg-background p-6">
+        <SettingsGroup>
+          <SandboxManagementSection />
+        </SettingsGroup>
+      </div>,
+    );
+
+    // The plain thread gets a line of its own, with its two subagent sandboxes under it.
+    await expect.element(page.getByText("Speed up the test suite", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Parent thread · 2 subagent sandboxes")).toBeVisible();
+    await expect
+      .element(page.getByText("Subagent's sandbox · bx_subo · Default · up 2 h · stops in 6 h"))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Subagent's sandbox · bx_subt · Small · stopped 30 min"))
+      .toBeVisible();
+    // The sandbox chat's own subagent sits under that chat's sandbox, with no line of its own.
+    await expect
+      .element(page.getByText("Subagent's sandbox · bx_subc · Default · up 2 h · stops in 6 h"))
+      .toBeVisible();
+    await expect
+      .element(page.getByText(/Parent thread · 1 subagent sandbox$/u))
+      .not.toBeInTheDocument();
+    // A subagent's sandbox is never offered as a template source.
+    await expect
+      .element(page.getByRole("button", { name: "Save as template…" }))
+      .not.toBeInTheDocument();
+    await page.screenshot({ path: "__screenshots__/sub-sandbox/sandboxes-list.png" });
+
+    // The second Open thread is the plain parent's; the first opens the sandbox chat.
+    await userEvent.click(page.getByRole("button", { name: "Open thread" }).nth(1));
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/$environmentId/$threadId",
+      params: expect.objectContaining({ threadId: plainThreadId }),
+    });
+    await userEvent.click(page.getByRole("button", { name: "Delete sandbox" }).nth(2));
+    await expect
+      .element(page.getByText(/along with any work its subagent left that is not pushed/u))
+      .toBeVisible();
+    await page.screenshot({ path: "__screenshots__/sub-sandbox/delete-confirmation.png" });
   });
 });
