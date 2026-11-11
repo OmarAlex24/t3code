@@ -337,6 +337,8 @@ function CoordinatorCard(props: {
   readonly awaitingUser: boolean;
   /** Absent when the question already shows on a milestone. */
   readonly onAnswer?: (() => void) | undefined;
+  /** A secret or link card to answer here, when no milestone holds it. */
+  readonly askCard?: ReactNode;
   readonly lineAbove: Line;
   readonly line: Line;
   readonly last: boolean;
@@ -395,6 +397,7 @@ function CoordinatorCard(props: {
           </Badge>
         ) : null}
       </div>
+      {props.askCard ? <div className="mt-2">{props.askCard}</div> : null}
     </SpineItem>
   );
 }
@@ -547,7 +550,7 @@ export function ThreadMilestonesView(props: {
   const coordinatorCard = (
     options: Pick<
       Parameters<typeof CoordinatorCard>[0],
-      "lineAbove" | "line" | "last" | "onAnswer"
+      "lineAbove" | "line" | "last" | "onAnswer" | "askCard"
     >,
   ) => (
     <CoordinatorCard
@@ -610,7 +613,20 @@ export function ThreadMilestonesView(props: {
             )}
           </SpineItem>
         ))}
-        {coordinatorCard({ lineAbove: "solid", line: "none", last: true, onAnswer: answer })}
+        {props.coordinatorAsk?.kind === "card"
+          ? coordinatorCard({
+              lineAbove: "solid",
+              line: "none",
+              last: true,
+              askCard: (
+                <CoordinatorAskCard
+                  environmentId={environmentId}
+                  ask={props.coordinatorAsk}
+                  onAnswerInChat={answer}
+                />
+              ),
+            })
+          : coordinatorCard({ lineAbove: "solid", line: "none", last: true, onAnswer: answer })}
       </ol>
     );
   } else {
@@ -711,7 +727,11 @@ export function ThreadMilestonesView(props: {
           <div className="grid gap-3 px-3.5 pt-3 pb-3.5">
             {userTurns(node)}
             {props.coordinatorAsk === null ? null : (
-              <CoordinatorAskCard ask={props.coordinatorAsk} onAnswerInChat={answer} />
+              <CoordinatorAskCard
+                environmentId={environmentId}
+                ask={props.coordinatorAsk}
+                onAnswerInChat={answer}
+              />
             )}
             {agents.length === 0 ? null : (
               <section>
@@ -889,7 +909,11 @@ export function ThreadMilestonesView(props: {
               (coordinatorAfter !== -1 || props.coordinatorAsk === null) ? null : (
                 <div className="mt-2 grid gap-2">
                   {coordinatorAfter === -1 && props.coordinatorAsk !== null ? (
-                    <CoordinatorAskCard ask={props.coordinatorAsk} onAnswerInChat={answer} />
+                    <CoordinatorAskCard
+                      environmentId={environmentId}
+                      ask={props.coordinatorAsk}
+                      onAnswerInChat={answer}
+                    />
                   ) : null}
                   <AgentTray
                     threadRef={threadRef}
