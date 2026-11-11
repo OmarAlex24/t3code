@@ -395,6 +395,10 @@
       "types": "./src/state/threadMilestoneGraph.ts",
       "default": "./src/state/threadMilestoneGraph.ts"
     },
+    "./state/thread-milestone-trace": {
+      "types": "./src/state/threadMilestoneTrace.ts",
+      "default": "./src/state/threadMilestoneTrace.ts"
+    },
     "./state/thread-milestone-board": {
       "types": "./src/state/threadMilestoneBoard.ts",
       "default": "./src/state/threadMilestoneBoard.ts"
