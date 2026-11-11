@@ -428,10 +428,64 @@ without pairing with the sandbox.
 - **Placeholder projects.** A project whose root `isSandboxHostProjectRoot` matches gets no git
   status, scripts, open-in, files or terminal in the web app.
 - **Stopped sandbox.** A run starting on a `sandboxes` thread whose sandbox is stopped makes the
-  host resume it. Meanwhile the bridge retries for `SANDBOX_RESUME_WAIT_SECONDS` (15½ minutes:
+  host resume it. Meanwhile the bridge retries for `SANDBOX_RESUME_WAIT_SECONDS` (16 minutes:
   every step of a resume at its limit, `SANDBOX_RESUME_STEP_SECONDS`, plus a minute), showing
   "Starting sandbox bx_…", then says the sandbox is not answering. Messages sent meanwhile queue
   behind that run on the host, so they go out after it whether or not a client stays open.
+
+## Sub-sandboxes
+
+`delegate_task` with `target.sandbox` starts the child on a sandbox of its own
+([`SubSandboxes.ts`](../../apps/server/src/sandbox/SubSandboxes.ts), rules in
+[`subSandboxPolicy.ts`](../../apps/server/src/sandbox/subSandboxPolicy.ts)): the parent's sandbox
+config or the project's, a place held within the config's `subSandboxes` limits, `createSubSandbox`,
+a peer link, and `RemoteDelegation.delegate`. When the task ends, `settle` runs `checkWork` and
+deletes the sandbox when it is clean, else stops and keeps it.
+
+Agents on a sandbox reach the same path through a helper the host installs, since the sandbox runs
+the official T3 Code ([`subSandboxHelper.ts`](../../apps/server/src/sandbox/subSandboxHelper.ts),
+[`SubSandboxRequests.ts`](../../apps/server/src/sandbox/SubSandboxRequests.ts)).
+
+- **The helper** is a stdio MCP server, `~/.t3/userdata/sub-sandbox/mcp.mjs`, using only Node
+  built-ins. Node is what the fork already needs to register MCP servers in Claude's
+  `~/.claude.json`, where it is registered as `t3-sub-sandbox` with the absolute path of the Node
+  that installed it. The name goes in `~/.t3/mcp-servers.json`, so `MCP_SERVERS_SCRUB` removes it.
+  The official `t3` binary is a Node single executable and gives no `node` of its own. Claude
+  hands its environment, `T3CODE_THREAD_ID` included, to the MCP servers it spawns. The helper
+  sends that id, its working directory, the upstream branch there and the thread's model, read
+  with `t3 thread show <id> --json`.
+- **Files.** `requests/<id>.json` is written by the helper with a temp file and a rename. The
+  host's poll claims each request by moving it to `claimed/`. A helper that gets no response
+  within its wait (45 seconds, or 20 when `host-seen` is over 3 minutes old; every call stays
+  under 60 seconds, which some MCP clients allow a tool) moves the request to
+  `withdrawn/` instead. Each rename has one winner, so a withdrawn request never starts.
+  `responses/<id>.json` is written by the host, also with a temp file and a rename. Its statuses
+  are `queued`, `starting_sandbox`, `running` (with `taskId` and the sub-sandbox),
+  `completed`/`failed`/`cancelled` (with `result`, or `code` for a refusal). The last one moves
+  the request to `done/`.
+- **Host poll.** `SubSandboxRequests` ticks every 5 seconds and runs `SUB_SANDBOX_POLL_SCRIPT`
+  through `SandboxProvisioner.runScript` (`driver.execute`). It polls a running chat sandbox
+  (`threadId` set, no `parentThreadId`, not resuming) every 15 seconds while the chat's thread
+  here has an active run, a request is open, or one came in the last 5 minutes. Otherwise it polls
+  every 60 seconds. A sandbox whose poll finds no helper is not polled again until its next
+  running stretch. The bridge's bearer cannot be used instead: it has only `orchestration:*`
+  scopes, and the official server's file RPCs need `filesystem:*`.
+- **Handling.** A new request gets `queued` written first, and nothing starts until that write
+  lands. The parent is the chat's thread here (`SandboxRecord.threadId`, the bridge's mirror),
+  with its latest active run, since `RemoteDelegation` records tasks on a running turn. The
+  sandbox's clone comes from `record.repository` at the request's upstream branch. Env files are
+  copied only when the host project is a real checkout. The scope acts as that thread, on the
+  run's provider instance (`sandboxes`). The child runs on the request's model, or the bridge's
+  Claude fallback, with `mode: "wait"`, so a result is not delivered again to a turn that is
+  still running.
+- **Restarts.** In-flight state lives in memory and on the sandbox. A claimed request that already
+  has a response is recovered from that response. With a `taskId` it is followed until the task
+  has a result. Without one, the server stopped while starting its sandbox, so it is failed and
+  never started again.
+- **Install.** `setUpTools` writes the helper after T3 Code's skill on every launch except a
+  subagent's sandbox. Every resume of a chat sandbox rewrites it before T3 starts
+  (`SANDBOX_RESUME_STEP_SECONDS.subSandboxHelper`). A failure is a warning. The template scrub
+  removes the folder (`SUB_SANDBOX_HELPER_SCRUB`) before T3's userdata goes.
 
 ## Lifecycle and hard limits
 
