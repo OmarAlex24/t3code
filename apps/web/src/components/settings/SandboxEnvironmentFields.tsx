@@ -128,7 +128,7 @@ function MinutesField({
   label,
   hint,
   unit = "minutes",
-  inputLabel = `${label} in minutes`,
+  inputLabel,
   step = 5,
   value,
   min,
@@ -166,7 +166,7 @@ function MinutesField({
         >
           <NumberFieldGroup>
             <NumberFieldDecrement aria-label={`Decrease ${label.toLowerCase()}`} />
-            <NumberFieldInput aria-label={inputLabel} />
+            <NumberFieldInput aria-label={inputLabel ?? `${label} in minutes`} />
             <NumberFieldIncrement aria-label={`Increase ${label.toLowerCase()}`} />
           </NumberFieldGroup>
         </NumberField>
