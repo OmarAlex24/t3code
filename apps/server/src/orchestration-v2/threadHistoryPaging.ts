@@ -648,8 +648,15 @@ export function buildBoundedThreadProjection(input: {
       latestTodoListOrdinal = ordinal;
     }
   }
+  const currentMilestoneSetId = input.projection.milestones.at(-1)?.setId;
   const controlProjection = {
     ...input.projection,
+    // There is no limit on milestones: older sets travel compact, their detail in turn items.
+    milestones: input.projection.milestones.map((milestone) => {
+      if (milestone.setId === currentMilestoneSetId) return milestone;
+      const { note: _note, revision: _revision, ...compact } = milestone;
+      return { ...compact, detailInTurnItem: true as const };
+    }),
     plans: input.projection.plans.filter(
       (plan) => plan.status === "active" || plan.id === latestTodoList?.id,
     ),

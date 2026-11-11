@@ -28,6 +28,7 @@ import {
 import { CheckpointRestoreError, CheckpointServiceV2 } from "./CheckpointService.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { milestonesAfterRollback } from "./MilestoneDecider.ts";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import { GIT_INDEX_LOCKED_DETAIL } from "../vcs/VcsProcess.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -362,6 +363,37 @@ export const layer: Layer.Layer<
                 }),
               );
             }
+          }
+          // Transitions the rolled-back runs made no longer count. Only the runs that marked
+          // milestones are read, so unrelated run payloads stay undecoded.
+          const rollingBack = runsToRollback.map((run) => run.id);
+          const { turnItems: milestoneItems } = yield* projections.getThreadRecords(
+            input.threadId,
+            ["turnItems"],
+            { turnItemTypes: ["milestone"], messageRoles: [] },
+          );
+          const milestoneRunIds = [
+            ...new Set(milestoneItems.flatMap((item) => (item.runId === null ? [] : [item.runId]))),
+          ];
+          const milestones = milestoneRunIds.some((runId) => rollingBack.includes(runId))
+            ? milestonesAfterRollback({
+                items: milestoneItems,
+                runs: (yield* projections.getThreadRecords(input.threadId, ["runs"], {
+                  runIds: milestoneRunIds,
+                })).runs,
+                rollingBack,
+              })
+            : undefined;
+          if (milestones !== undefined) {
+            events.push(
+              yield* makeEvent({
+                type: "thread.milestones-updated",
+                threadId: input.threadId,
+                providerInstanceId: providerThread.providerInstanceId,
+                occurredAt: now,
+                payload: { milestones, replace: true },
+              }),
+            );
           }
           yield* eventSink.write({ events });
         }),

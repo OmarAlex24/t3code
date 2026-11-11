@@ -131,6 +131,7 @@ function shouldPublishAgentAwarenessEvent(
       return isTurnItemPayload(event.payload) && turnItemUpdateCanEndBackgroundWork(event.payload);
     case "message.updated":
     case "plan.updated":
+    case "thread.milestones-updated":
     case "checkpoint-scope.created":
     case "checkpoint.captured":
     case "checkpoint.rollback-requested":

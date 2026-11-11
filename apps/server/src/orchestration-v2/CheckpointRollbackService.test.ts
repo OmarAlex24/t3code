@@ -17,6 +17,7 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -39,6 +40,11 @@ import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as EventSink from "./EventSink.ts";
+import {
+  foldMilestoneItems,
+  type MilestoneItemDetail,
+  milestoneTurnItem,
+} from "./MilestoneDecider.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -268,6 +274,7 @@ it.effect.each([
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getThread: () => Effect.succeed(projection.thread),
             getCheckpointRollbackContext: () => Effect.succeed(projection),
+            getThreadRecords: () => Effect.succeed({ turnItems: [], runs: [] } as never),
             getShellSnapshot: () =>
               Effect.succeed({
                 schemaVersion: 1,
@@ -618,6 +625,7 @@ const seedRollbackHistory = Effect.gen(function* () {
     }).pipe(Effect.provide(serviceLayer));
 
   return {
+    apply,
     store,
     now,
     threadId,
@@ -701,10 +709,67 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
       () =>
         Effect.gen(function* () {
           const history = yield* seedRollbackHistory;
+          // Run 1 plans two milestones; run 3 starts the second.
+          const items = (
+            [
+              [
+                1,
+                {
+                  event: "plan",
+                  milestoneId: "m1",
+                  title: "A",
+                  planned: [
+                    { id: "m1", title: "A" },
+                    { id: "m2", title: "B" },
+                  ],
+                },
+              ],
+              [3, { event: "started", milestoneId: "m2", title: "B", closedMilestoneId: "m1" }],
+            ] as const
+          ).map(([run, detail], index) =>
+            milestoneTurnItem({
+              base: {
+                id: TurnItemId.make(`rollback-history-milestone-${index}`),
+                threadId: history.threadId,
+                runId: history.runId(run),
+                nodeId: history.nodeId(run),
+                providerThreadId: null,
+                providerTurnId: null,
+                ordinal: index + 1,
+              },
+              detail: { type: "milestone", setId: "s1", ...detail } as MilestoneItemDetail,
+              now: history.now,
+            }),
+          );
+          for (const item of items)
+            yield* history.apply({ type: "turn-item.updated", payload: item });
+          yield* history.apply({
+            type: "thread.milestones-updated",
+            payload: { milestones: foldMilestoneItems(items, new Set()).milestones },
+          });
+          const milestoneStates = () =>
+            history.store
+              .getThreadRecords(history.threadId, ["milestones"])
+              .pipe(
+                Effect.map(({ milestones }) =>
+                  milestones.map(({ id, status }) => `${id}:${status}`),
+                ),
+              );
+          assert.deepEqual(yield* milestoneStates(), ["m1:done", "m2:active"]);
+
           yield* history.rollback(5);
+          assert.deepEqual(yield* milestoneStates(), ["m1:done", "m2:active"]);
           yield* history.rollback(2);
+          assert.deepEqual(yield* milestoneStates(), ["m1:active", "m2:planned"]);
           yield* history.rollback(0);
           yield* history.rollback(0);
+          assert.deepEqual(yield* milestoneStates(), []);
+          assert.deepEqual(
+            history.committed
+              .filter((event) => event.type === "thread.milestones-updated")
+              .map((event) => event.payload.milestones.length),
+            [2, 0],
+          );
 
           assert.deepEqual(history.rollbackCounts, [1, 3, 3]);
           assert.sameMembers(history.deletedRefs, [1, 2, 3, 4, 5, 6].map(history.checkpointId));

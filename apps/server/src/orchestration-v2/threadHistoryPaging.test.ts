@@ -1,5 +1,7 @@
 import {
   MessageId,
+  MILESTONE_NOTE_MAX_CHARS,
+  MILESTONE_TITLE_MAX_CHARS,
   NodeId,
   RunId,
   RuntimeRequestId,
@@ -168,6 +170,7 @@ function makeProjection(visibleTurnItems: OrchestrationV2ProjectedTurnItem[]) {
     runtimeRequests: [{ id: "req-1" }],
     messages: [],
     plans: [],
+    milestones: [],
     turnItems: visibleTurnItems.map((row) => row.item),
     checkpointScopes: [],
     checkpoints: [],
@@ -801,6 +804,25 @@ describe("threadHistoryPaging", () => {
         createdAt: NOW,
         updatedAt: NOW,
       })),
+      // Milestones have no limit: 40 replanned sets of 10, then a current set of 300.
+      milestones: Array.from({ length: 700 }, (_, index) => {
+        const set = index < 400 ? Math.floor(index / 10) + 1 : 41;
+        const anchor = { runId: "run-1", itemId: `milestone-item-${index}` };
+        return {
+          id: `m${index + 1}`,
+          setId: `s${set}`,
+          title: "t".repeat(MILESTONE_TITLE_MAX_CHARS),
+          status: set < 41 ? "done" : index === 400 ? "active" : "planned",
+          note: "n".repeat(MILESTONE_NOTE_MAX_CHARS),
+          revision: {
+            previousTitle: "p".repeat(MILESTONE_TITLE_MAX_CHARS),
+            reason: "r".repeat(MILESTONE_NOTE_MAX_CHARS),
+          },
+          startedAt: NOW,
+          completedAt: set < 41 ? NOW : null,
+          anchors: { planned: anchor, started: anchor, changed: anchor, done: anchor },
+        };
+      }),
     } as unknown as typeof projection;
 
     const bounded = buildBoundedThreadProjection({
@@ -812,6 +834,15 @@ describe("threadHistoryPaging", () => {
     expect(serializedBytes).toBeLessThanOrEqual(THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes);
     expect(bounded.projection.plans).toEqual([]);
     expect(bounded.projection.contextHandoffs).toEqual([]);
+    // Every milestone travels; only the current set keeps its note and revision.
+    const milestones = bounded.projection.milestones;
+    expect(milestones).toHaveLength(700);
+    expect(milestones.filter((milestone) => milestone.detailInTurnItem === true)).toHaveLength(400);
+    expect(milestones[0]).not.toHaveProperty("note");
+    expect(milestones[0]).not.toHaveProperty("revision");
+    expect(milestones[0]).toMatchObject({ id: "m1", status: "done", anchors: { done: {} } });
+    expect(milestones[400]).toMatchObject({ id: "m401", status: "active" });
+    expect(milestones[699]?.note).toHaveLength(MILESTONE_NOTE_MAX_CHARS);
     expect(populated.plans).toHaveLength(120);
     expect(
       populated.plans[0]?.kind === "proposed_plan" ? populated.plans[0].markdown.length : 0,

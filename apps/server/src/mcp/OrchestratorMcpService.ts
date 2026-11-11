@@ -972,6 +972,14 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
         : `Asked the user to link ${item.label ?? item.url ?? "an environment"}: ${item.linkStatus}.`;
     case "subagent":
       return item.result ?? item.progress ?? item.prompt;
+    case "milestone":
+      return [
+        `Milestone ${item.milestoneId ?? ""} ${item.event}: ${item.title ?? ""}`,
+        item.note,
+        item.reason,
+      ]
+        .filter((line): line is string => line !== undefined)
+        .join("\n");
     case "dynamic_tool":
       return jsonText({ toolName: item.toolName, input: item.input, output: item.output });
   }

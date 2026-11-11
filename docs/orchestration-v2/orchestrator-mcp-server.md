@@ -465,6 +465,28 @@ Without `runId`, it selects the newest interruptible run. A terminal run is
 returned unchanged, and a thread with no active provider turn returns
 `no_active_run`.
 
+### `t3_milestone`
+
+Marks coarse phases of the calling thread's own work. It needs that thread's
+running turn (`parent_not_active` otherwise) and is hidden from delegated
+children. Actions:
+
+- `plan` opens a new set and starts its first milestone;
+- `start` begins the next planned milestone, one by `id`, or a new one by `title`;
+- `done`, `change`, and `drop` act on one milestone; and
+- `post` attaches a note and images (absolute paths on the server) to the
+  active one.
+
+Starting or planning closes the active milestone as done. Ids (`m1`, `m2`…)
+keep counting across sets. An invalid transition fails with `invalid_request`
+and a short fix. The result is one line, such as `m3 active · 3/6 · next m4`.
+
+Each transition is a `milestone` turn item, which is the source of truth: the
+`thread.milestone.apply` internal command folds those items to decide, and
+rollback replays them without the rolled-back runs, never reusing their ids.
+A fork starts with no milestones. A subagent records the milestone that was
+active when it first appeared.
+
 ### Scheduled tasks
 
 `schedule_task`, `list_scheduled_tasks`, and `delete_scheduled_task` manage
