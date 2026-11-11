@@ -79,6 +79,18 @@ const iso = (ms: number | null) =>
   ms === null ? null : DateTime.formatIso(DateTime.makeUnsafe(ms));
 const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
 
+/** Zooming in, from the view or the Plan panel, takes focus so Esc and the arrows reach the view. */
+function focusZoomedPanel(node: HTMLDivElement | null) {
+  const active = document.activeElement;
+  if (
+    node === null ||
+    (active instanceof HTMLElement &&
+      (active.isContentEditable || active.closest("input, textarea, select") !== null))
+  )
+    return;
+  node.focus({ preventScroll: true });
+}
+
 const linkProps = (
   threadRef: ScopedThreadRef,
   agent: OrchestrationV2Subagent,
@@ -778,8 +790,11 @@ export function ThreadMilestonesView(props: {
     >
       <div
         key={zoomedRow?.id ?? "all"}
+        ref={zoomedRow === null ? undefined : focusZoomedPanel}
+        tabIndex={zoomedRow === null ? undefined : -1}
+        data-milestone-zoom={zoomedRow === null ? undefined : ""}
         className={cn(
-          "mx-auto w-full max-w-(--chat-content-max-width) origin-top px-3 pt-4 sm:px-12",
+          "mx-auto w-full max-w-(--chat-content-max-width) origin-top px-3 pt-4 outline-none sm:px-12",
           transition === "in" && "motion-safe:animate-trace-zoom-in",
           transition === "out" && "motion-safe:animate-trace-zoom-out",
         )}
