@@ -29,6 +29,15 @@ const mocks = vi.hoisted(() => ({
   removeEnvironment: vi.fn(async () => AsyncResult.success(undefined)),
   deleteSandboxThread: vi.fn(async () => AsyncResult.success(undefined)),
   renameThread: vi.fn(async () => AsyncResult.success(undefined)),
+  pairLaunch: vi.fn(async () =>
+    AsyncResult.success({
+      environmentId: "22222222-2222-4222-8222-222222222222",
+      httpBaseUrl: "https://bx.example.test",
+      pairingCode: "code-1",
+      projectId: "project-sandbox",
+    }),
+  ),
+  connectPairing: vi.fn(async () => AsyncResult.success(undefined)),
   // A bridged thread also lives on the host, under the same id.
   hostThread: false,
   hostTitle: "Fix the login bug",
@@ -79,6 +88,10 @@ vi.mock(import("~/state/threads"), async (original) => {
     },
   };
 });
+vi.mock(import("~/connection/onboarding"), async (original) => ({
+  ...(await original()),
+  connectPairing: mocks.connectPairing as never,
+}));
 vi.mock(import("~/state/sandboxes"), async (original) => ({
   ...(await original()),
   useSandboxProvisionerEnvironmentId: (() => EnvironmentId.make(HOST_ENV)) as never,
@@ -116,6 +129,7 @@ vi.mock(import("~/state/server"), async (original) => {
       sandboxesDelete: mocks.deleteSandbox as never,
       sandboxesCheckWork: mocks.checkWork as never,
       sandboxesSaveConfig: mocks.saveConfig as never,
+      sandboxesPairLaunch: mocks.pairLaunch as never,
     },
   };
 });
@@ -586,6 +600,56 @@ describe("SandboxThreadCoordinator", () => {
 
       await expect(ensureSandboxThreadRunning(hostRef)).resolves.toBe(true);
       expect(mocks.resumeSandbox).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("pairing", () => {
+    const linked = {
+      ...sandbox,
+      hostProjectId: "project-host",
+      bridge: {
+        sessionId: "bridge-session-1",
+        secret: "sandbox-bridge-1",
+        expiresAt: "2027-01-01T00:00:00.000Z",
+      },
+    };
+
+    it("pairs with a sandbox the host finished launching, with no chat open", async () => {
+      setup("ask", undefined, { bridged: true });
+      // Only the coordinator is mounted: nobody has the thread open.
+      mocks.sandboxConnected = false;
+      mocks.sandboxes = [linked];
+      mocks.pairLaunch.mockClear();
+      mocks.connectPairing.mockClear();
+      await using _screen = await render(<SandboxThreadCoordinator />);
+
+      await vi.waitFor(() =>
+        expect(mocks.connectPairing).toHaveBeenCalledWith({
+          host: "https://bx.example.test",
+          pairingCode: "code-1",
+        }),
+      );
+      expect(mocks.pairLaunch).toHaveBeenCalledWith({
+        environmentId: HOST_ENV,
+        input: { threadId: "thread-1" },
+      });
+      // One attempt, not one per render.
+      expect(mocks.pairLaunch).toHaveBeenCalledOnce();
+    });
+
+    it("leaves a sandbox alone while it starts, once this app is paired, or when it is stopped", async () => {
+      setup("ask", undefined, { bridged: true });
+      mocks.pairLaunch.mockClear();
+      // Paired already: its environment is in this app.
+      mocks.sandboxes = [linked];
+      await using _paired = await render(<SandboxThreadCoordinator />);
+      mocks.sandboxConnected = false;
+      mocks.sandboxes = [
+        { ...linked, state: "provisioning" },
+        { ...linked, instanceId: "instance-2", threadId: "thread-2", state: "stopped" },
+      ];
+      await using _screen = await render(<SandboxThreadCoordinator />);
+      expect(mocks.pairLaunch).not.toHaveBeenCalled();
     });
   });
 });

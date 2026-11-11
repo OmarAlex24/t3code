@@ -19,6 +19,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
+import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { useThreadShells } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
@@ -31,6 +32,7 @@ import {
   isHostThreadRef,
   registerSandboxThreadHandlers,
   sandboxMirrorTitleUpdates,
+  sandboxesToPair,
   type SandboxSettleUndo,
   shortSandboxId,
 } from "~/state/sandboxThreads";
@@ -55,6 +57,8 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 
 // How long a resumed sandbox gets to answer again before a send or un-settle gives up.
 const RESUME_WAIT_MS = 4 * 60_000;
+// How long this app waits before it tries again to pair with a sandbox that refused.
+const PAIR_RETRY_MS = 2 * 60_000;
 // How long a remembered delete waits after a settle, with Undo, before it deletes anything.
 export const SETTLE_DELETE_DELAY_MS = 10_000;
 
@@ -178,6 +182,10 @@ export function SandboxThreadCoordinator() {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
+  const pairLaunch = useAtomCommand(serverEnvironment.sandboxesPairLaunch, {
+    reportFailure: false,
+  });
+  const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
   const deleteRemoteThread = useOrchestrationCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
@@ -218,6 +226,39 @@ export function SandboxThreadCoordinator() {
       if (!isConnected(environmentId)) continue;
       waiters.current.delete(environmentId);
       for (const done of resolve) done();
+    }
+  });
+
+  // When this app last tried to pair with each sandbox, so a refusal is not retried at once.
+  const pairAttempts = useRef(new Map<string, number>());
+  const canPair =
+    provisionerEnvironmentId !== null &&
+    readEnvironmentScope(provisionerEnvironmentId, AuthSettingsWriteScope);
+  const unpaired = canPair
+    ? sandboxesToPair(
+        sandboxes,
+        provisionerEnvironmentId,
+        new Set(environments.map((environment) => environment.environmentId)),
+      )
+    : [];
+  const pair = useStableCallback(async (sandbox: SandboxRecord) => {
+    if (provisionerEnvironmentId === null || sandbox.threadId === undefined) return;
+    const paired = await pairLaunch({
+      environmentId: provisionerEnvironmentId,
+      input: { threadId: sandbox.threadId },
+    });
+    if (paired._tag === "Failure") return;
+    await connectPairing({ host: paired.value.httpBaseUrl, pairingCode: paired.value.pairingCode });
+  });
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pairs this app with a sandbox the host finished launching, so its own thread opens here
+  useEffect(() => {
+    const now = Date.now();
+    for (const sandbox of unpaired) {
+      const last = pairAttempts.current.get(sandbox.instanceId);
+      if (last !== undefined && now - last < PAIR_RETRY_MS) continue;
+      pairAttempts.current.set(sandbox.instanceId, now);
+      void pair(sandbox);
     }
   });
 
