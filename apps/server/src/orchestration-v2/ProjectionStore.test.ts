@@ -9190,6 +9190,139 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("shells carry the latest tool action, from the list and from the projection", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const suffix = "shell-latest-action";
+      const threadId = yield* addRolledBackRecoveryCandidate(suffix);
+      const runId = RunId.make(`run:${suffix}:live`);
+      const nodeId = NodeId.make(`node:${suffix}:live`);
+      const now = yield* DateTime.now;
+      yield* projectionStore.apply({
+        id: EventId.make(`event:${suffix}:live-run`),
+        type: "run.created",
+        threadId,
+        runId,
+        nodeId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: runId,
+          threadId,
+          ordinal: 2,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: null,
+          userMessageId: MessageId.make(`message:${suffix}:live`),
+          rootNodeId: nodeId,
+          activeAttemptId: null,
+          status: "running",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      });
+      const base = {
+        threadId,
+        runId,
+        nodeId,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        status: "running" as const,
+        title: null,
+        completedAt: null,
+      };
+      const addItem = (
+        id: string,
+        ordinal: number,
+        item:
+          | { readonly type: "command_execution"; readonly input: string; readonly output?: string }
+          | { readonly type: "file_change"; readonly fileName: string; readonly diffStr?: string }
+          | { readonly type: "reasoning"; readonly text: string; readonly streaming: boolean },
+      ) =>
+        projectionStore.apply({
+          id: EventId.make(`event:${suffix}:${id}`),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            ...base,
+            ...item,
+            id: TurnItemId.make(`item:${suffix}:${id}`),
+            ordinal,
+            startedAt: DateTime.add(now, { seconds: ordinal }),
+            updatedAt: DateTime.add(now, { seconds: ordinal + 30 }),
+          },
+        });
+      const latestActions = Effect.gen(function* () {
+        const listed = (yield* projectionStore.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        );
+        const projected = ProjectionStore.threadShellFromProjection(
+          yield* projectionStore.getThreadProjection(threadId),
+        );
+        return [listed?.latestAction, projected.latestAction];
+      });
+
+      // Only the rolled-back run's command so far.
+      assert.deepEqual(yield* latestActions, [null, null]);
+
+      yield* addItem("command", 2, {
+        type: "command_execution",
+        input: "pnpm test",
+        output: "x".repeat(4096),
+      });
+      const ranCommand = {
+        summary: "Ran command",
+        detail: "pnpm test",
+        at: DateTime.add(now, { seconds: 2 }),
+      };
+      assert.deepEqual(yield* latestActions, [ranCommand, ranCommand]);
+
+      yield* addItem("edit", 3, {
+        type: "file_change",
+        fileName: "src/auth/session.ts",
+        diffStr: "+".repeat(4096),
+      });
+      const changedFile = {
+        summary: "Changed files",
+        detail: "src/auth/session.ts",
+        at: DateTime.add(now, { seconds: 3 }),
+      };
+      assert.deepEqual(yield* latestActions, [changedFile, changedFile]);
+
+      yield* addItem("thought", 4, { type: "reasoning", text: "Next, the tests", streaming: true });
+      assert.deepEqual(yield* latestActions, [changedFile, changedFile]);
+
+      const longCommand = `echo ${"a".repeat(300)}`;
+      yield* addItem("long", 5, { type: "command_execution", input: longCommand });
+      const [listed] = yield* latestActions;
+      assert.lengthOf(listed?.detail ?? "", 120);
+      assert.isTrue(listed?.detail?.endsWith("…"));
+
+      const { statements, tracer } = traceSqlStatements();
+      yield* projectionStore.getShellSnapshot().pipe(Effect.withTracer(tracer));
+      const statement = statements.find((query) => query.includes("AS latest_tool_payload_json"));
+      assert.isDefined(statement);
+      const plan = (yield* sql.unsafe<{ readonly detail: string }>(
+        `EXPLAIN QUERY PLAN ${statement}`,
+      )).map((row) => row.detail);
+      assert.isTrue(
+        plan.some((detail) => detail.includes("turn_items_latest_tool_idx (thread_id=?)")),
+        plan.join("\n"),
+      );
+    }),
+  );
+
   it.effect("counts history inherited by fork shells, but not by side chats", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
