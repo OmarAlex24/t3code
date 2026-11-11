@@ -13,6 +13,7 @@ import { copySorted } from "@t3tools/shared/Array";
 import { scopedThreadKey, scopeThreadRef } from "../environment/scoped.ts";
 
 import type { ThreadStructureTurnItem } from "./models.ts";
+import { plainSubagentDetail, subagentDetailPreview } from "./subagentDisplay.ts";
 import { isActiveSubagentStatus } from "./subagentRuntime.ts";
 import { MILESTONE_BOARD_ROOT } from "./threadMilestoneBoard.ts";
 import { deriveThreadMilestoneGraph } from "./threadMilestoneGraph.ts";
@@ -244,8 +245,6 @@ export interface MapAgent {
   readonly agent: Subagent;
   readonly status: MapStatus;
   readonly ask: AgentAsk | null;
-  /** The same task again after an earlier try failed. */
-  readonly retry: boolean;
   readonly startMs: number | null;
   readonly endMs: number | null;
   readonly children: ReadonlyArray<MapAgent>;
@@ -320,6 +319,8 @@ export interface MilestoneMap {
 const ms = (value: DateTime.Utc) => DateTime.toEpochMillis(value);
 const msOrNull = (value: DateTime.Utc | null) => (value === null ? null : ms(value));
 const firstLine = (text: string) => text.trim().split("\n")[0]?.trim() ?? "";
+const plainNote = (text: string | null) =>
+  text === null ? null : plainSubagentDetail(text) || null;
 const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
 const NEW_PLAN_GAP_MS = 10 * 60_000;
 /** The node for agents that ran before the first plan. */
@@ -339,10 +340,14 @@ export function agentThreadRef(
   return agent.childThreadId === null ? null : scopeThreadRef(environmentId, agent.childThreadId);
 }
 
-/** An agent's one line: its ask while it needs you, else what it did last, else nothing. */
+/**
+ * An agent's one line: its ask while it needs you, else what it did last, else its result (its
+ * progress while it runs) as plain text.
+ */
 export function agentLine(
   ask: AgentAsk | null,
   latestAction: Pick<OrchestrationV2LatestActionSummary, "summary" | "detail"> | null | undefined,
+  agent: Pick<Subagent, "status" | "result" | "progress">,
 ): string | null {
   if (ask !== null) {
     switch (ask.kind) {
@@ -354,7 +359,16 @@ export function agentLine(
         return "Has a question for you";
     }
   }
-  return actionLine(latestAction);
+  const plain = (text: string | null | undefined) =>
+    text == null ? null : plainSubagentDetail(text);
+  return (
+    actionLine(latestAction) ??
+    subagentDetailPreview({
+      status: agent.status,
+      result: plain(agent.result),
+      progress: plain(agent.progress),
+    })
+  );
 }
 
 export function actionLine(
@@ -395,18 +409,13 @@ function overlaps(agents: ReadonlyArray<MapAgent>): boolean {
   );
 }
 
-/**
- * Agents nested by their real parent link, in start order. A task given again after its earlier
- * try failed is a retry: same title and group, started once that try ended. There is no retry link
- * in the record, so this is inferred.
- */
+/** Agents nested by their real parent link, in start order. */
 function buildAgents(
   subagents: ReadonlyArray<Subagent>,
   asks: ReadonlyMap<string, AgentAsk>,
   environmentId: EnvironmentId,
 ): ReadonlyArray<MapAgent> {
   const ids = new Set(subagents.map(({ id }) => id));
-  const failed: Array<{ key: string; endMs: number }> = [];
   const build = (agent: Subagent): MapAgent => {
     const ref = agentThreadRef(agent, environmentId);
     const ask = ref === null ? null : (asks.get(scopedThreadKey(ref)) ?? null);
@@ -416,16 +425,10 @@ function buildAgents(
     const endMs = live
       ? null
       : (msOrNull(agent.completedAt) ?? (startMs === null ? null : ms(agent.updatedAt)));
-    const identity = `${agent.group ?? ""}\u0000${agent.title ?? agent.prompt}`;
-    const retry = failed.some(
-      (earlier) => earlier.key === identity && startMs !== null && startMs >= earlier.endMs,
-    );
-    if (status === "failed" && endMs !== null) failed.push({ key: identity, endMs });
     return {
       agent,
       status,
       ask,
-      retry,
       startMs,
       endMs,
       children: subagents.filter((child) => child.parentNodeId === agent.id).map(build),
@@ -466,11 +469,7 @@ function rollup(status: MapStatus, agents: ReadonlyArray<MapAgent>): MapMileston
   if (all.length === 0) return { tone: "none", text: "No agents" };
   const failed = all.filter((agent) => agent.status === "failed").length;
   if (failed > 0) {
-    const retried = all.some(({ retry }) => retry) ? "retried" : "not retried";
-    return {
-      tone: "failed",
-      text: `${failed} failed, ${retried} · ${plural(all.length, "agent")}`,
-    };
+    return { tone: "failed", text: `${failed} failed · ${plural(all.length, "agent")}` };
   }
   return { tone: "done", text: all.length === 1 ? "1 agent done" : `All ${all.length} done` };
 }
@@ -482,7 +481,7 @@ function drivers(agents: ReadonlyArray<MapAgent>): ReadonlyArray<ProviderDriverK
 /** Older sets keep their notes and revisions only in their turn items. */
 function milestoneDetail(milestone: OrchestrationV2Milestone, items: ReadonlyArray<MilestoneItem>) {
   if (milestone.detailInTurnItem !== true) {
-    return { note: milestone.note ?? null, revision: milestone.revision ?? null };
+    return { note: plainNote(milestone.note ?? null), revision: milestone.revision ?? null };
   }
   const own = items.filter((item) => item.milestoneId === milestone.id);
   const changed = own.findLast((item) => item.event === "changed");
@@ -493,7 +492,9 @@ function milestoneDetail(milestone: OrchestrationV2Milestone, items: ReadonlyArr
         item.closedMilestoneId === milestone.id),
   );
   return {
-    note: closing?.event === "dropped" ? (closing.reason ?? null) : (closing?.note ?? null),
+    note: plainNote(
+      closing?.event === "dropped" ? (closing.reason ?? null) : (closing?.note ?? null),
+    ),
     revision:
       changed?.previousTitle !== undefined && changed.reason !== undefined
         ? { previousTitle: changed.previousTitle, reason: changed.reason }
@@ -510,7 +511,7 @@ const lastReply = (projection: Projection, run: Run): string | null => {
   const reply = projection.messages.findLast(
     (message) => message.runId === run.id && message.role === "assistant" && !message.streaming,
   );
-  return reply === undefined ? null : firstLine(reply.text) || null;
+  return reply === undefined ? null : plainNote(reply.text);
 };
 
 /**
