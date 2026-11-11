@@ -619,7 +619,16 @@ describe("v2 thread shell lists", () => {
     const dispose = harness.registry.mount(quietAtom);
     try {
       const first = harness.registry.get(quietAtom);
-      setThread({ ...running, updatedAt: at(1), itemCount: 4, visibleItemCount: 3 }, 2);
+      setThread(
+        {
+          ...running,
+          updatedAt: at(1),
+          itemCount: 4,
+          visibleItemCount: 3,
+          latestAction: { summary: "Ran command", detail: "pnpm test", at: at(1) },
+        },
+        2,
+      );
       expect(harness.registry.get(quietAtom)).toBe(first);
       expect(harness.registry.get(harness.threads.threadShellAtom(ref))?.itemCount).toBe(4);
 

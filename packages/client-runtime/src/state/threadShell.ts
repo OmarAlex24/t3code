@@ -174,8 +174,8 @@ export function childThreadInputsTitle(
 
 const sameWireThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
 
-// While a run streams, the server bumps the shell's timestamps, item counts and
-// latest message several times a second. Only the zero crossing of the counts
+// While a run streams, the server bumps the shell's timestamps, item counts, latest
+// message and latest action several times a second. Only the zero crossing of the counts
 // says anything (whether the thread has started). Once the run stops every
 // field counts again, so snooze wakes and failure times read the current value.
 function sameApartFromStreaming(
@@ -201,6 +201,8 @@ function sameApartFromStreaming(
         itemCount: after.itemCount,
         visibleItemCount: after.visibleItemCount,
         latestVisibleMessage: after.latestVisibleMessage,
+        // Optional on the wire: an explicit undefined would not equal an absent key.
+        ...("latestAction" in after ? { latestAction: after.latestAction } : {}),
       },
       after,
     )
