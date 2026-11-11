@@ -55,6 +55,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { layerHttpClient, requestJson } from "./SandboxProvider.ts";
 import { bridgeLinkSecretName } from "@t3tools/sandbox-bridge/link";
 import { boatDriver } from "./providers/boat.ts";
+import { SANDBOX_FILES_SKILL } from "./sandboxSetup.ts";
 import { celestoDriver } from "./providers/celesto.ts";
 import { daytonaDriver } from "./providers/daytona.ts";
 import { upstashDriver } from "./providers/upstash.ts";
@@ -6594,6 +6595,124 @@ describe("SandboxProvisioner per-thread launches", () => {
         expect(repository.records.size).toBe(0);
       }).pipe(
         Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
+
+  const skillWarning =
+    "T3 Code's t3-sandbox-files skill could not be added, so agents on this sandbox may keep files in /tmp, which a stop empties.";
+  const skillCommands = (fake: BoatFake) =>
+    fake.commands.filter((command) => command.includes("skills/t3-sandbox-files"));
+
+  it.effect("gives every launched sandbox T3 Code's skill, even with no skills chosen", () => {
+    const fake = boatFake();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      expect(config.skills ?? []).toEqual([]);
+      expect(config.claudeMd).not.toBe(true);
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      const done = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+      // A launch writes it whether or not a copy is there, so a template's older one goes.
+      const [written, ...rest] = skillCommands(fake);
+      expect(rest).toEqual([]);
+      expect(written).toContain('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/t3-sandbox-files"');
+      expect(written).not.toContain("exit 0");
+      expect(written).toContain(Buffer.from(SANDBOX_FILES_SKILL, "utf8").toString("base64"));
+      // Nothing the config asked for, so the step still reads as nothing to set up.
+      expect(stageOf(done, "tools")).toMatchObject({ status: "skipped" });
+      expect(done.warnings).not.toContain(skillWarning);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, memoryRepository().layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("only warns when the launch cannot write T3 Code's skill", () => {
+    const fake = boatFake({ failing: { text: "skills/t3-sandbox-files", times: 1 } });
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+      const done = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+      expect(done.warnings).toContain(skillWarning);
+      expect(stageOf(done, "tools")).toMatchObject({
+        status: "warning",
+        detail: "Finished with warnings",
+      });
+      expect(repository.records.get(instanceId)?.state).toBe("running");
+      expect(deletes(fake)).toEqual([]);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect(
+    "adds T3 Code's skill on a resume when it is missing, before T3 starts, and only warns when it cannot",
+    () => {
+      const fake = boatFake({ failing: { text: "skills/t3-sandbox-files", times: 1 } });
+      const config: SandboxEnvironmentConfig = {
+        ...configInput,
+        id: "config-before-skill",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+      };
+      // A thread's sandbox made before T3 Code wrote its skill.
+      const older: SandboxRecord = {
+        instanceId: "before-skill",
+        environmentId: testEnvironmentId,
+        configId: config.id,
+        threadId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "hello on Boat small",
+        size: "small",
+        state: "stopped",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        runningSince: null,
+        maxRunningMinutes: 480,
+        repoDir: "/home/boat/work/hello",
+      };
+      const repository = memoryRepository([older]);
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        // The first try fails: the sandbox still resumes, with a warning.
+        const failed = yield* provisioner.resume({ instanceId: "before-skill" });
+        expect(failed.sandbox.state).toBe("running");
+        expect(failed.warnings).toContain(skillWarning);
+
+        yield* provisioner.stop({ instanceId: "before-skill" });
+        fake.commands.length = 0;
+        const resumed = yield* provisioner.resume({ instanceId: "before-skill" });
+        expect(resumed.warnings ?? []).not.toContain(skillWarning);
+        // Only a missing skill is written, so one already there keeps its copy.
+        const [backfill, ...rest] = skillCommands(fake);
+        expect(rest).toEqual([]);
+        expect(backfill).toContain('[ -f "$dir/SKILL.md" ] && exit 0');
+        expect(fake.commands.indexOf(backfill!)).toBeLessThan(
+          fake.commands.findIndex((command) => command.includes("t3 serve")),
+        );
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+            { configs: memoryConfigs([config]).layer },
+          ),
+        ),
         Effect.provideService(HttpClient.HttpClient, fake.client),
       );
     },
