@@ -40,7 +40,9 @@ import {
 
 import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { serverEnvironment } from "../../state/server";
+import { threadFamilies } from "../../state/threads";
 import { useThreadViewModeStore } from "../../threadViewModeStore";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
@@ -481,6 +483,12 @@ export function ThreadMilestonesView(props: {
   const { threadRef, projection } = props;
   const environmentId = threadRef.environmentId;
   const asks = useAgentAsks(threadRef);
+  const threadId = threadRef.threadId;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the shell omits finished subagent threads; their family read brings in the rows that hold each agent's last action
+  useEffect(
+    () => threadFamilies.mount(appAtomRegistry, environmentId, threadId),
+    [environmentId, threadId],
+  );
   const map = deriveMilestoneMap({
     environmentId,
     projection,
