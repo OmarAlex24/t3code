@@ -97,6 +97,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { requireSettingsSecret } from "../secrets/settingsSecretValue.ts";
 import { type CliproxyHub, makeCliproxyApi } from "../usage/cliproxyApi.ts";
 import * as SandboxHostAccess from "./SandboxHostAccess.ts";
+import { SUB_SANDBOX_HELPER_SCRUB, subSandboxHelperScript } from "./subSandboxHelper.ts";
 import {
   CLAUDE_SETTINGS_SCRUB,
   claudeSettingsScript,
@@ -287,6 +288,7 @@ while answering; do
   sleep 1
 done
 ${KEEP_ALIVE_SCRUB}
+${SUB_SANDBOX_HELPER_SCRUB}
 rm -rf "$HOME/.t3/userdata" "$HOME/.t3/environment-label" "$HOME/.t3/usage-host-id"
 ${CLAUDE_SETTINGS_SCRUB}
 ${GITHUB_LOGIN_SCRUB}
@@ -490,6 +492,9 @@ const scriptHash = (script: string) => {
 
 // A minted Maple key also expires on its own, in case a revoke never reaches Maple.
 const MAPLE_KEY_SECONDS = 30 * 24 * 60 * 60;
+const SUB_SANDBOX_HELPER_WARNING =
+  "T3 Code's sub-sandbox helper could not be added, so agents on this sandbox cannot ask this computer for a sandbox of their own.";
+
 const SANDBOX_FILES_SKILL_WARNING =
   "T3 Code's t3-sandbox-files skill could not be added, so agents on this sandbox may keep files in /tmp, which a stop empties.";
 // A sandbox's GitHub token is replaced this long before it expires.
@@ -613,6 +618,15 @@ export class SandboxProvisioner extends Context.Service<
     readonly checkWork: (
       input: SandboxLifecycleInput,
     ) => Effect.Effect<SandboxCheckWorkResult, SandboxProviderError>;
+    /**
+     * Runs one of T3 Code's own scripts on a running sandbox through its provider, as the poll for
+     * its agents' sub-sandbox requests does. Fails when the sandbox is gone or not running.
+     */
+    readonly runScript: (input: {
+      readonly instanceId: string;
+      readonly script: SandboxScript;
+      readonly timeoutSeconds: number;
+    }) => Effect.Effect<SandboxExecResult, SandboxProviderError>;
     readonly templates: (
       input: SandboxTemplatesInput,
     ) => Effect.Effect<SandboxTemplatesResult, SandboxProviderError>;
@@ -2992,6 +3006,15 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       steps += 1;
       yield* fail(SANDBOX_FILES_SKILL_WARNING);
     }
+    // A chat's agents can ask this host for sandboxes of their own; a subagent's sandbox has no
+    // chat on this host to hold their tasks, so it never gets the helper. Only a failure shows.
+    if (machine.record().parentThreadId === undefined) {
+      const helperWritten = yield* machine.run(subSandboxHelperScript(), 60).pipe(Effect.exit);
+      if (Exit.isFailure(helperWritten)) {
+        steps += 1;
+        yield* fail(SUB_SANDBOX_HELPER_WARNING);
+      }
+    }
     return { steps, failed };
   });
 
@@ -3808,6 +3831,20 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     } satisfies SandboxCheckWorkResult;
   });
 
+  const runScript: SandboxProvisioner["Service"]["runScript"] = Effect.fn(
+    "SandboxProvisioner.runScript",
+  )(function* (input) {
+    const found = yield* records.get(input.instanceId).pipe(Effect.orDie);
+    if (Option.isNone(found) || found.value.state !== "running") {
+      return yield* new SandboxProviderError({
+        provider: Option.isNone(found) ? "boat" : found.value.provider,
+        stage: "start",
+        detail: "The sandbox is not running.",
+      });
+    }
+    return yield* runOnRecord(found.value)(input.script, input.timeoutSeconds);
+  });
+
   // A sandbox made before keep-alive has no idle window of its own, so its config's applies.
   const keepAliveSettingsOf = Effect.fn("SandboxProvisioner.keepAliveSettingsOf")(function* (
     record: SandboxRecord,
@@ -4056,6 +4093,22 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       Effect.as<string | null>(null),
       Effect.orElseSucceed(() => SANDBOX_FILES_SKILL_WARNING),
     );
+    // Every resume rewrites the sub-sandbox helper, so one made before it existed gets it and an
+    // older copy is replaced, again before T3 starts. Only a chat's sandbox has it.
+    const helper =
+      record.threadId === undefined || record.parentThreadId !== undefined
+        ? null
+        : yield* onHttp(
+            driver.execute({
+              config,
+              sandboxId: record.sandboxId,
+              timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.subSandboxHelper,
+              ...subSandboxHelperScript(),
+            }),
+          ).pipe(
+            Effect.as<string | null>(null),
+            Effect.orElseSucceed(() => SUB_SANDBOX_HELPER_WARNING),
+          );
     yield* onHttp(
       driver.execute({
         config,
@@ -4136,6 +4189,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       rejoined.warning,
       kept.warning,
       skill,
+      helper,
       github.warning,
       bridged.warning,
     ].filter((warning): warning is string => warning !== null);
@@ -4682,6 +4736,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     stop,
     resume,
     checkWork,
+    runScript,
     templates,
     saveTemplate,
     deleteTemplate,
