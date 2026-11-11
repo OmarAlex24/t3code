@@ -3,6 +3,7 @@ import type {
   ScopedThreadRef,
   ThreadId,
   OrchestrationV2ThreadProjection,
+  OrchestrationV2TurnItem,
   OrchestrationV2RuntimeRequest,
   OrchestrationV2UserInputQuestion,
   ProviderApprovalFullAccessOverride,
@@ -401,5 +402,55 @@ export function createChildThreadApprovalsAtom(input: {
     });
   });
   const empty = Atom.make<ReadonlyArray<ChildThreadApproval>>([]);
+  return (ref: ScopedThreadRef | null) => (ref === null ? empty : family(threadKey(ref)));
+}
+
+export interface ChildThreadSecretRequest {
+  readonly thread: ScopedThreadRef;
+  readonly title: string;
+  readonly item: Extract<OrchestrationV2TurnItem, { readonly type: "secret_request" }>;
+}
+
+/** Waiting secret cards of the child threads under `ref`, so the parent can answer them. */
+export function createChildThreadSecretRequestsAtom(input: {
+  readonly childThreadInputsAtom: (
+    ref: ScopedThreadRef,
+  ) => Atom.Atom<ReadonlyArray<EnvironmentThreadShell>>;
+  readonly visibleTurnItemsAtom: (
+    ref: ScopedThreadRef,
+  ) => Atom.Atom<OrchestrationV2ThreadProjection["visibleTurnItems"]>;
+}) {
+  const family = Atom.family((key: string) => {
+    let previous: ReadonlyArray<ChildThreadSecretRequest> = [];
+    return Atom.make((get) => {
+      const next = get(input.childThreadInputsAtom(parseThreadKey(key))).flatMap((child) => {
+        if (!child.hasPendingUserInput) return [];
+        const thread = { environmentId: child.environmentId, threadId: child.id };
+        // Only children waiting on input need a detail subscription.
+        return get(input.visibleTurnItemsAtom(thread)).flatMap(({ item, visibility }) =>
+          item.type === "secret_request" &&
+          item.secretStatus === "pending" &&
+          visibility === "local"
+            ? [{ thread, title: child.title, item }]
+            : [],
+        );
+      });
+      if (
+        next.length === previous.length &&
+        next.every((entry, index) => {
+          const old = previous[index]!;
+          return (
+            old.item === entry.item &&
+            old.title === entry.title &&
+            threadKey(old.thread) === threadKey(entry.thread)
+          );
+        })
+      )
+        return previous;
+      previous = next;
+      return next;
+    });
+  });
+  const empty = Atom.make<ReadonlyArray<ChildThreadSecretRequest>>([]);
   return (ref: ScopedThreadRef | null) => (ref === null ? empty : family(threadKey(ref)));
 }
