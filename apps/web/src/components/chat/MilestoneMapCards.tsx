@@ -299,7 +299,7 @@ export function MilestoneCard(props: {
 function AgentTask(props: { readonly entry: MapAgent; readonly threadRef: ScopedThreadRef }) {
   const ref = agentThreadRef(props.entry.agent, props.threadRef.environmentId);
   const shell = useThreadShell(ref);
-  const line = agentLine(props.entry.ask, shell?.latestAction);
+  const line = agentLine(props.entry.ask, shell?.latestAction, props.entry.agent);
   return <span className="min-w-0 flex-1 truncate">{line}</span>;
 }
 
@@ -387,13 +387,11 @@ export function AgentCard(props: {
           <AgentElapsed agent={link.timing} />
         </span>
         <span className="flex-1" />
-        {answer !== null ? (
+        {answer === null ? null : (
           <Button size="xs" variant="outline" onClick={answer}>
             Answer
           </Button>
-        ) : entry.retry ? (
-          <span>Second try</span>
-        ) : null}
+        )}
       </div>
     </div>
   );

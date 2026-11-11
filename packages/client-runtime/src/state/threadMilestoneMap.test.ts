@@ -208,7 +208,7 @@ const TRACE_GROUPS_ITEMS = [
     milestoneId: "m3" as never,
     setId: "s1" as never,
     closedMilestoneId: "m1" as never,
-    note: "Closed when a second “Construir” started.",
+    note: "## Closed when a second “Construir” started.",
   }),
 ];
 
@@ -344,7 +344,7 @@ describe("layoutMilestoneGraph", () => {
 });
 
 describe("deriveMilestoneMap", () => {
-  it("lays out a live OAuth task with its detour, changes, retries, nesting and asks", () => {
+  it("lays out a live OAuth task with its detour, changes, nesting and asks", () => {
     const map = derive(OAUTH, OAUTH_ITEMS, OAUTH_ASKS);
     expect(rows(map)).toEqual([
       ["you", 0],
@@ -366,7 +366,7 @@ describe("deriveMilestoneMap", () => {
     ).toEqual([
       ["m1", "done", "In the plan", "No agents"],
       ["m2", "done", "Changed from “Diseñar la API de sesión”", "No agents"],
-      ["m3", "done", "In the plan", "1 failed, retried · 6 agents"],
+      ["m3", "done", "In the plan", "1 failed · 6 agents"],
       ["m4", "done", "Not in the plan", "No agents"],
       ["m5", "done", "In the plan", "1 agent done"],
       ["m7", "needs-you", "New plan", "2 need you"],
@@ -383,11 +383,7 @@ describe("deriveMilestoneMap", () => {
         name,
         `${done}/${total}`,
         parallel,
-        agents.map(({ agent: { id }, retry, children }) => [
-          id,
-          retry,
-          children.map((child) => child.agent.id),
-        ]),
+        agents.map(({ agent: { id }, children }) => [id, children.map((child) => child.agent.id)]),
       ]),
     ).toEqual([
       [
@@ -395,9 +391,9 @@ describe("deriveMilestoneMap", () => {
         "3/4",
         true,
         [
-          ["a3", false, ["a3a"]],
-          ["a4", false, []],
-          ["a5", true, []],
+          ["a3", ["a3a"]],
+          ["a4", []],
+          ["a5", []],
         ],
       ],
       [
@@ -405,8 +401,8 @@ describe("deriveMilestoneMap", () => {
         "2/2",
         true,
         [
-          ["a1", false, []],
-          ["a2", false, []],
+          ["a1", []],
+          ["a2", []],
         ],
       ],
     ]);
@@ -415,9 +411,11 @@ describe("deriveMilestoneMap", () => {
     expect(live.live).toBe(true);
     expect(live.endMs).toBeNull();
     expect(
-      flattenAgents(live.groups.flatMap(({ agents }) => agents)).map(
-        ({ agent: { id }, status, ask }) => [id, status, agentLine(ask, null)],
-      ),
+      flattenAgents(live.groups.flatMap(({ agents }) => agents)).map(({ agent, status, ask }) => [
+        agent.id,
+        status,
+        agentLine(ask, null, agent),
+      ]),
     ).toEqual([
       ["a7", "needs-you", "Wants to run pnpm db:reset"],
       ["a8", "needs-you", "Asks you for GITHUB_CLIENT_SECRET"],
@@ -501,7 +499,7 @@ describe("deriveMilestoneMap", () => {
         runs: [run(1, "completed", 0, 5), run(2, "completed", 66, 71)],
         messages: [
           message("msg-1", "user", "go", 1),
-          message("reply-1", "assistant", "Ran the showcase.\nDetails.", 1),
+          message("reply-1", "assistant", "## Ran the showcase.\n- Details.", 1),
           message("msg-2", "user", "again", 2),
         ],
         milestones: [],
@@ -519,7 +517,7 @@ describe("deriveMilestoneMap", () => {
           : [],
       ),
     ).toEqual([
-      ["run-1", 0, "go", "Turn 1", "Ran the showcase.", "done"],
+      ["run-1", 0, "go", "Turn 1", "Ran the showcase. Details.", "done"],
       ["run-2", 0, "again", "Turn 2", null, "done"],
     ]);
     expect(edges(map)).toEqual([["run-1", "run-2", "live"]]);
@@ -527,16 +525,21 @@ describe("deriveMilestoneMap", () => {
 });
 
 describe("agentLine", () => {
+  const done = { status: "completed", result: "## Fase 1\n- `ok`", progress: "Reading" } as const;
+  const running = { ...done, status: "running" } as const;
   it.each([
-    [{ kind: "approval", command: "pnpm db:reset" }, null, "Wants to run pnpm db:reset"],
+    [{ kind: "approval", command: "pnpm db:reset" }, null, done, "Wants to run pnpm db:reset"],
     [
       { kind: "secret", label: "GITHUB_CLIENT_SECRET" },
       { summary: "Ran tests" },
+      done,
       "Asks you for GITHUB_CLIENT_SECRET",
     ],
-    [null, { summary: "Read", detail: "src/auth/session.ts" }, "Read · src/auth/session.ts"],
-    [null, null, null],
-  ] as const)("%o with %o reads %s", (ask, action, expected) => {
-    expect(agentLine(ask, action)).toBe(expected);
+    [null, { summary: "Read", detail: "src/auth/session.ts" }, done, "Read · src/auth/session.ts"],
+    [null, null, done, "Fase 1 ok"],
+    [null, null, running, "Reading"],
+    [null, null, { status: "completed", result: null }, null],
+  ] as const)("%o with %o and %o reads %s", (ask, action, agent, expected) => {
+    expect(agentLine(ask, action, agent)).toBe(expected);
   });
 });
