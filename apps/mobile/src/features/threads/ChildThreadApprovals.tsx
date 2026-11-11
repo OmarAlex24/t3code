@@ -1,6 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import { AuthOrchestrationOperateScope, type ScopedThreadRef } from "@t3tools/contracts";
-import type { ChildThreadApproval } from "@t3tools/client-runtime/state/thread-requests";
+import type {
+  ChildThreadApproval,
+  ChildThreadSecretRequest,
+} from "@t3tools/client-runtime/state/thread-requests";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -10,9 +13,15 @@ import { useEnvironmentScope } from "../../state/session";
 import { ScrollView, View } from "react-native";
 import Animated, { useAnimatedStyle, type DerivedValue } from "react-native-reanimated";
 import { AppText } from "../../components/ui/AppText";
-import { childThreadApprovalsAtom, threadEnvironment } from "../../state/threads";
+import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import {
+  childThreadApprovalsAtom,
+  childThreadSecretRequestsAtom,
+  threadEnvironment,
+} from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { PendingApprovalCard } from "./PendingApprovalCard";
+import { SecretRequestCard } from "./SecretRequestCard";
 
 function ChildApproval({ entry }: { entry: ChildThreadApproval }) {
   const canRespond = useEnvironmentScope(entry.thread.environmentId, AuthOrchestrationOperateScope);
@@ -59,6 +68,20 @@ function ChildApproval({ entry }: { entry: ChildThreadApproval }) {
   );
 }
 
+function ChildSecret({ entry }: { entry: ChildThreadSecretRequest }) {
+  const iconColor = useUniwindTheme()["--color-icon-subtle"];
+  return (
+    <View className="mx-3.5 my-2 gap-2">
+      <AppText className="font-t3-bold text-sm text-foreground">Secret from {entry.title}</AppText>
+      <SecretRequestCard
+        environmentId={entry.thread.environmentId}
+        projectedItem={{ item: entry.item, visibility: "local" }}
+        iconColor={iconColor}
+      />
+    </View>
+  );
+}
+
 export function ChildThreadApprovals({
   threadRef,
   maxHeight,
@@ -67,11 +90,18 @@ export function ChildThreadApprovals({
   maxHeight: DerivedValue<number>;
 }) {
   const approvals = useAtomValue(childThreadApprovalsAtom(threadRef));
+  const secrets = useAtomValue(childThreadSecretRequestsAtom(threadRef));
   const heightStyle = useAnimatedStyle(() => ({ maxHeight: Math.min(320, maxHeight.value / 2) }));
-  if (approvals.length === 0) return null;
+  if (approvals.length === 0 && secrets.length === 0) return null;
   return (
     <Animated.View style={heightStyle} className="overflow-hidden">
       <ScrollView keyboardShouldPersistTaps="handled" nestedScrollEnabled style={{ flexShrink: 1 }}>
+        {secrets.map((entry) => (
+          <ChildSecret
+            key={JSON.stringify([entry.thread.environmentId, entry.item.id])}
+            entry={entry}
+          />
+        ))}
         {approvals.map((entry) => (
           <ChildApproval
             key={JSON.stringify([

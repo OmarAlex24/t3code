@@ -38,7 +38,7 @@ const PRIVATE_SYMBOL: AppSymbolName = { ios: "checkmark.shield", android: "lock"
 
 export function SecretRequestCard(props: {
   readonly environmentId: EnvironmentId;
-  readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+  readonly projectedItem: Pick<OrchestrationV2ProjectedTurnItem, "item" | "visibility">;
   readonly iconColor: ColorValue;
 }) {
   const { item, visibility } = props.projectedItem;
