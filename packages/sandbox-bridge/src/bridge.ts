@@ -282,7 +282,8 @@ export const sandboxSelectionFor = (
   return sameSelection(next, sandbox) ? null : next;
 };
 
-const CLAUDE_FALLBACK_MODEL: ModelSelection = {
+/** What a sandbox thread runs on when nothing names its model. */
+export const CLAUDE_FALLBACK_MODEL: ModelSelection = {
   instanceId: "claudeAgent",
   model: "claude-opus-5-5",
 } as ModelSelection;
