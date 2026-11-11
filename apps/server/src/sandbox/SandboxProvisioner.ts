@@ -832,7 +832,9 @@ const make = Effect.gen(function* () {
   const githubInstallUrl = (slug: string) =>
     `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
 
-  // Null when the app is not installed on the repository, which only the user can change.
+  // Finds the installation through the sandbox's repository; the token then covers every repository
+  // that installation does. Null when the app is not installed on the repository, which only the
+  // user can change.
   const mintGithubToken = Effect.fn("SandboxProvisioner.mintGithubToken")(function* (
     app: GithubAppCredentials,
     repository: { readonly owner: string; readonly name: string },
@@ -841,11 +843,7 @@ const make = Effect.gen(function* () {
     const installationId =
       knownInstallation ?? (yield* githubAppApi.repositoryInstallation(app, repository));
     if (installationId === null) return null;
-    const minted = yield* githubAppApi.createInstallationToken(
-      app,
-      installationId,
-      repository.name,
-    );
+    const minted = yield* githubAppApi.createInstallationToken(app, installationId);
     const secret = `sandbox-github-token-${yield* secureRandom.uuidV4()}`;
     yield* secrets.set(secret, new TextEncoder().encode(Redacted.value(minted.token))).pipe(
       Effect.tapError(() => githubAppApi.revokeInstallationToken(minted.token).pipe(Effect.ignore)),

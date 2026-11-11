@@ -7634,11 +7634,13 @@ describe("SandboxProvisioner per-thread launches", () => {
             "local wasn't copied. Runs a program on this machine, so it can't be copied.",
           ]);
 
-          // An hour-long token for this repository alone, kept as a server secret.
+          // An hour-long token for every repository the installation covers, found through this
+          // one and kept as a server secret.
           const tokenRequest = services.state.calls.find((call) =>
             call.url.endsWith("/access_tokens"),
           );
-          expect(tokenRequest?.body).toEqual({ repositories: ["hello"] });
+          expect(tokenRequest).toBeDefined();
+          expect(tokenRequest?.body ?? {}).not.toHaveProperty("repositories");
           const record = repository.records.get(instanceId)!;
           expect(record.githubApp).toMatchObject({ installationId: 7, repository: "octo/hello" });
           expect(new TextDecoder().decode(secrets.values.get(record.githubApp!.secret))).toBe(
@@ -8038,6 +8040,10 @@ describe("SandboxProvisioner per-thread launches", () => {
             "POST https://api.github.com/app/installations/7/access_tokens",
             "DELETE https://api.github.com/installation/token",
           ]);
+          // The renewed token covers the whole installation too, and the record keeps the
+          // repository it finds the installation through.
+          expect(services.state.calls[0]?.body ?? {}).not.toHaveProperty("repositories");
+          expect(renewed.githubApp?.repository).toBe("octo/hello");
           expect(services.state.calls[1]?.auth).toBe("Bearer ghs_OLD");
           expect(secretsFileWith(fake, "T3_GITHUB_TOKEN")).toContain("ghs_SANDBOX1");
           // A stopped sandbox is not woken for it.
