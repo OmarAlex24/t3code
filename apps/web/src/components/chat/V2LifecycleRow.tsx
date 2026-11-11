@@ -484,7 +484,7 @@ export function SubagentHoverCard(
   );
 }
 
-export function SubagentTimelineLink(
+function SubagentTimelineLink(
   props: SubagentLinkProps & {
     readonly event?: {
       readonly status: OrchestrationV2TurnItem["status"] | null;
