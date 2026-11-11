@@ -38,8 +38,11 @@ const emptyShellSnapshot = {
 } as OrchestrationV2ShellSnapshot;
 
 describe("subagent shell events", () => {
-  const stored = (threadId: string, type: string) =>
-    ({ event: { threadId, type } }) as ApplicationStoredEvent;
+  const stored = (
+    threadId: string,
+    type: string,
+    payload: object = { type: "assistant_message", status: "running" },
+  ) => ({ event: { threadId, type, payload } }) as ApplicationStoredEvent;
 
   it("keeps regular threads and subagent state changes while omitting subagent transcript updates", () => {
     const subagents = new Set(["child"]);
@@ -58,6 +61,16 @@ describe("subagent shell events", () => {
     expect(shouldPublishShellApplicationEvent(stored("child", "run.updated"), subagents)).toBe(
       true,
     );
+  });
+
+  it("refreshes a subagent's latest action when one of its tools finishes", () => {
+    const subagents = new Set(["child"]);
+    const tool = (status: string) =>
+      shouldPublishShellApplicationEvent(
+        stored("child", "turn-item.updated", { type: "command_execution", status }),
+        subagents,
+      );
+    expect([tool("running"), tool("completed"), tool("failed")]).toEqual([false, true, true]);
   });
 
   it("tracks subagents created after the subscription starts", () => {
@@ -198,7 +211,13 @@ describe("omitIdleSubagentShells", () => {
     expect(omitted.threads.map((thread) => thread.id)).toEqual(["root"]);
     expect(
       shouldPublishShellApplicationEvent(
-        { event: { threadId: "idle", type: "turn-item.updated" } } as ApplicationStoredEvent,
+        {
+          event: {
+            threadId: "idle",
+            type: "turn-item.updated",
+            payload: { type: "reasoning", status: "running" },
+          },
+        } as ApplicationStoredEvent,
         omitted.subagentThreadIds,
       ),
     ).toBe(false);
