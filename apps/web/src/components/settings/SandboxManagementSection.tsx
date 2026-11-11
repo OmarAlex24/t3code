@@ -1,6 +1,7 @@
 import {
   CornerDownRightIcon,
   LayersIcon,
+  MessageSquareIcon,
   PencilIcon,
   PlayIcon,
   PlusIcon,
@@ -20,6 +21,7 @@ import {
   DEFAULT_SANDBOX_IDLE_MINUTES,
   type EnvironmentId,
   type SandboxEnvironmentConfig,
+  type ThreadId,
   type SandboxOrphan,
   type SandboxProviderInfo,
   type SandboxRecord,
@@ -194,7 +196,31 @@ export function SandboxManagementSection() {
   ) {
     return null;
   }
-  const { groups, other } = groupByConfig(sandboxes, configs);
+  // A subagent's sandbox sits under the thread that delegated its task: under that thread's own
+  // sandbox when it is a sandbox chat, else under a line for the thread in its config's group.
+  const subSandboxes = sandboxes.filter((sandbox) => sandbox.parentThreadId !== undefined);
+  const topLevel = sandboxes.filter((sandbox) => sandbox.parentThreadId === undefined);
+  const { groups, other } = groupByConfig(topLevel, configs);
+  const chatThreadIds = new Set(
+    topLevel.flatMap((sandbox) => (sandbox.threadId === undefined ? [] : [sandbox.threadId])),
+  );
+  const subSandboxesOf = (threadId: ThreadId) =>
+    subSandboxes.filter((sandbox) => sandbox.parentThreadId === threadId);
+  const knownConfigIds = new Set(configs.map((config) => config.id));
+  /** Parent threads with no sandbox of their own, whose subagents' sandboxes are in this group. */
+  const plainParentsIn = (configId: string | null) => [
+    ...new Set(
+      subSandboxes
+        .filter(
+          (sandbox) =>
+            !chatThreadIds.has(sandbox.parentThreadId!) &&
+            (configId === null
+              ? sandbox.configId === undefined || !knownConfigIds.has(sandbox.configId)
+              : sandbox.configId === configId),
+        )
+        .map((sandbox) => sandbox.parentThreadId!),
+    ),
+  ];
   // A fork an agent made sits under its sandbox; one whose sandbox is gone is simply untracked.
   const tracked = new Set(sandboxes.map((sandbox) => sandbox.instanceId));
   const forksOf = (instanceId: string) => orphans.filter((orphan) => orphan.forkOf === instanceId);
@@ -206,8 +232,23 @@ export function SandboxManagementSection() {
     void list.refresh();
     void configsQuery.refresh();
   };
+  // Their size can be a step above their config's, so their rows always name it.
+  const subRows = (members: ReadonlyArray<SandboxRecord>) =>
+    members.map((sandbox) => (
+      <SandboxRow
+        key={sandbox.instanceId}
+        environmentId={provisionerEnvironmentId}
+        sandbox={sandbox}
+        provider={providerOf(sandbox.provider)}
+        inConfig={false}
+        forkCount={forksOf(sandbox.instanceId).length}
+        nested
+        onChanged={refresh}
+      />
+    ));
   const row = (sandbox: SandboxRecord, inConfig: boolean) => {
     const forks = forksOf(sandbox.instanceId);
+    const subagents = sandbox.threadId === undefined ? [] : subSandboxesOf(sandbox.threadId);
     return (
       <Fragment key={sandbox.instanceId}>
         <SandboxRow
@@ -226,9 +267,28 @@ export function SandboxManagementSection() {
             onChanged={refresh}
           />
         ))}
+        {subRows(subagents)}
       </Fragment>
     );
   };
+  const parentRows = (configId: string | null) =>
+    plainParentsIn(configId).map((parentThreadId) => {
+      const members = subSandboxesOf(parentThreadId).filter((sandbox) =>
+        configId === null
+          ? sandbox.configId === undefined || !knownConfigIds.has(sandbox.configId)
+          : sandbox.configId === configId,
+      );
+      return (
+        <Fragment key={`parent:${parentThreadId}`}>
+          <ParentThreadRow
+            environmentId={provisionerEnvironmentId}
+            threadId={parentThreadId}
+            count={members.length}
+          />
+          {subRows(members)}
+        </Fragment>
+      );
+    });
 
   return (
     <SettingsSection
@@ -285,17 +345,20 @@ export function SandboxManagementSection() {
               Edit
             </Button>
           </div>
-          {members.length === 0 ? (
+          {members.length === 0 && plainParentsIn(config.id).length === 0 ? (
             <p className="px-3 py-3 text-xs text-muted-foreground sm:px-4">
               No sandboxes. Choose {config.label} under Sandbox in the composer's Run on menu to
               start a thread on its own machine.
             </p>
           ) : (
-            members.map((sandbox) => row(sandbox, true))
+            <>
+              {members.map((sandbox) => row(sandbox, true))}
+              {parentRows(config.id)}
+            </>
           )}
         </div>
       ))}
-      {other.length === 0 ? null : (
+      {other.length === 0 && plainParentsIn(null).length === 0 ? null : (
         <div className={GROUP_CLASSNAME}>
           {groups.length === 0 ? null : (
             <p className="px-3 py-2.5 text-sm font-medium text-foreground sm:px-4">
@@ -303,6 +366,7 @@ export function SandboxManagementSection() {
             </p>
           )}
           {other.map((sandbox) => row(sandbox, false))}
+          {parentRows(null)}
         </div>
       )}
       {untracked.length === 0 ? null : (
@@ -338,6 +402,58 @@ export function SandboxManagementSection() {
         onSaved={refresh}
       />
     </SettingsSection>
+  );
+}
+
+/** The thread that delegated the tasks of the subagent sandboxes listed under it. */
+function ParentThreadRow({
+  environmentId,
+  threadId,
+  count,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly count: number;
+}) {
+  const navigate = useNavigate();
+  const threads = useThreadShells();
+  const thread = threads.find(
+    (candidate) => candidate.environmentId === environmentId && candidate.id === threadId,
+  );
+  return (
+    <div className={ROW_CLASSNAME}>
+      <div className={ROW_INNER_CLASSNAME}>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-h-6 min-w-0 items-center gap-2">
+            <MessageSquareIcon aria-hidden className="size-3 shrink-0 text-muted-foreground/70" />
+            <p className="truncate text-sm font-medium text-foreground">
+              {thread?.title ?? "Deleted thread"}
+            </p>
+          </div>
+          <p className={`${ROW_INDENT_CLASSNAME} text-xs text-muted-foreground`}>
+            Parent thread · {count} subagent {count === 1 ? "sandbox" : "sandboxes"}
+          </p>
+        </div>
+        {thread === undefined ? null : (
+          <div className={ROW_ACTIONS_CLASSNAME}>
+            <span className="text-muted-foreground">
+              <Button
+                size="xs"
+                variant="link"
+                onClick={() =>
+                  void navigate({
+                    to: "/$environmentId/$threadId",
+                    params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
+                  })
+                }
+              >
+                Open thread
+              </Button>
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -468,6 +584,7 @@ function SandboxRow({
   provider,
   inConfig,
   forkCount,
+  nested = false,
   onChanged,
 }: {
   readonly environmentId: EnvironmentId;
@@ -477,6 +594,8 @@ function SandboxRow({
   readonly inConfig: boolean;
   /** Forks its agent made, which deleting it deletes too. */
   readonly forkCount: number;
+  /** A subagent's sandbox, indented under the thread that delegated its task. */
+  readonly nested?: boolean;
   readonly onChanged: () => void;
 }) {
   const navigate = useNavigate();
@@ -553,11 +672,13 @@ function SandboxRow({
         }
       : ATTENTION[sandbox.state];
   // Saving a template deletes its source, so a thread's machine is never offered.
+  const subagent = sandbox.parentThreadId !== undefined;
   const canSaveTemplate =
     provider !== undefined &&
     provider.capabilities.templates &&
     sandbox.state === "running" &&
-    sandbox.threadId === undefined;
+    sandbox.threadId === undefined &&
+    !subagent;
 
   const run = async (action: "stop" | "resume" | "delete") => {
     startCheck.cancel();
@@ -634,9 +755,11 @@ function SandboxRow({
       : (thread?.title ?? sandbox.projectTitle ?? sandbox.label);
   const dot = STATE_DOT[sandbox.state];
   const meta = [
-    sandbox.threadId === undefined
-      ? (provider?.label ?? sandbox.provider)
-      : (sandbox.projectTitle ?? "Project"),
+    subagent
+      ? "Subagent's sandbox"
+      : sandbox.threadId === undefined
+        ? (provider?.label ?? sandbox.provider)
+        : (sandbox.projectTitle ?? "Project"),
     ...(inConfig
       ? []
       : [
@@ -666,7 +789,7 @@ function SandboxRow({
   const warningClassName = `${ROW_INDENT_CLASSNAME} mt-0.5 text-xs text-warning-foreground`;
 
   return (
-    <div className={ROW_CLASSNAME}>
+    <div className={nested ? FORK_ROW_CLASSNAME : ROW_CLASSNAME}>
       <div className={ROW_INNER_CLASSNAME}>
         <div className="min-w-0 flex-1">
           <div className="flex min-h-6 min-w-0 items-center gap-2">
@@ -822,7 +945,7 @@ function SandboxRow({
         <div className={`${ROW_INDENT_CLASSNAME} pt-2`}>
           <SandboxStartConfirmation
             warnings={[
-              `This deletes the machine and its disk at ${provider?.label ?? sandbox.provider}${sandbox.threadId === undefined ? "" : ", along with any work in its thread that is not pushed"}. It cannot be undone.`,
+              `This deletes the machine and its disk at ${provider?.label ?? sandbox.provider}${sandbox.threadId !== undefined ? ", along with any work in its thread that is not pushed" : subagent ? ", along with any work its subagent left that is not pushed" : ""}. It cannot be undone.`,
               ...(forkCount === 0
                 ? []
                 : [
