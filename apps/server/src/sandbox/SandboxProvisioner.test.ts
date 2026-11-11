@@ -3634,6 +3634,8 @@ describe("SandboxProvisioner lifecycle", () => {
       ]);
       expect(commands[0]).toContain("t3 service uninstall");
       expect(commands[0]).toContain(`rm -rf "$HOME/.t3/userdata" "$HOME/.t3/environment-label"`);
+      // The sub-sandbox helper's queue goes, pending requests included, before T3's userdata.
+      expect(commands[0]).toContain(`rm -rf "$HOME/.t3/userdata/sub-sandbox"`);
       expect(commands[0]).not.toContain("pkill");
       // Without its T3 identity the source could only come back as a different environment.
       expect(repository.byEnvironment(testEnvironmentId) !== undefined).toBe(false);
@@ -5819,6 +5821,10 @@ describe("SandboxProvisioner per-thread launches", () => {
       });
       expect(record?.threadId).toBeUndefined();
       expect(record?.bridge).toBeUndefined();
+      // A subagent's sandbox has no chat here to hold more tasks, so it never gets the helper.
+      expect(fake.commands.filter((command) => command.includes("userdata/sub-sandbox"))).toEqual(
+        [],
+      );
       // The same clone and env files as a thread's launch, at the parent's pushed branch.
       const clone = fake.commands.find((command) =>
         command.includes("https://github.com/octo/hello.git"),
@@ -6705,6 +6711,128 @@ describe("SandboxProvisioner per-thread launches", () => {
         expect(fake.commands.indexOf(backfill!)).toBeLessThan(
           fake.commands.findIndex((command) => command.includes("t3 serve")),
         );
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+            { configs: memoryConfigs([config]).layer },
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
+
+  const helperWarning =
+    "T3 Code's sub-sandbox helper could not be added, so agents on this sandbox cannot ask this computer for a sandbox of their own.";
+  const helperCommands = (fake: BoatFake) =>
+    fake.commands.filter((command) => command.includes('dir="$HOME/.t3/userdata/sub-sandbox"'));
+
+  it.effect("installs the sub-sandbox helper on a launched chat's sandbox", () => {
+    const fake = boatFake();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      yield* provisioner.launch({ configId: config.id, threadId, project });
+      const done = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+      const [installed, ...rest] = helperCommands(fake);
+      expect(rest).toEqual([]);
+      // Registered in Claude's MCP list, and named so a template save removes the entry.
+      expect(installed).toContain('"$HOME/.t3/mcp-servers.json" "$dir/mcp.mjs" t3-sub-sandbox');
+      expect(installed).toContain('mv "$dir/mcp.mjs.tmp" "$dir/mcp.mjs"');
+      // Not something the config asked for, so the step still reads as nothing to set up.
+      expect(stageOf(done, "tools")).toMatchObject({ status: "skipped" });
+      expect(done.warnings).not.toContain(helperWarning);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, memoryRepository().layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("only warns when the launch cannot install the sub-sandbox helper", () => {
+    const fake = boatFake({ failing: { text: "userdata/sub-sandbox", times: 1 } });
+    const repository = memoryRepository();
+    const configs = memoryConfigs();
+    return Effect.gen(function* () {
+      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+      const { config } = yield* provisioner.saveConfig({
+        config: configInput,
+        apiKey: "boat_test",
+      });
+      const { instanceId } = yield* provisioner.launch({ configId: config.id, threadId, project });
+      const done = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+      expect(done.warnings).toContain(helperWarning);
+      expect(stageOf(done, "tools")).toMatchObject({ status: "warning" });
+      expect(repository.records.get(instanceId)?.state).toBe("running");
+      expect(deletes(fake)).toEqual([]);
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect(
+    "installs the sub-sandbox helper again on every resume of a chat's sandbox, before T3 starts, and only warns when it cannot",
+    () => {
+      const fake = boatFake({ failing: { text: "userdata/sub-sandbox", times: 1 } });
+      const config: SandboxEnvironmentConfig = {
+        ...configInput,
+        id: "config-before-helper",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+      };
+      // A chat's sandbox made before T3 Code installed the helper, and a subagent's sandbox.
+      const older: SandboxRecord = {
+        instanceId: "before-helper",
+        environmentId: testEnvironmentId,
+        configId: config.id,
+        threadId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "hello on Boat small",
+        size: "small",
+        state: "stopped",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        runningSince: null,
+        maxRunningMinutes: 480,
+        repoDir: "/home/boat/work/hello",
+      };
+      const { threadId: _threadId, ...withoutThread } = older;
+      const subagents: SandboxRecord = {
+        ...withoutThread,
+        instanceId: "subagent-sandbox",
+        parentThreadId: threadId,
+      };
+      const repository = memoryRepository([older, subagents]);
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        // The first try fails: the sandbox still resumes, with a warning.
+        const failed = yield* provisioner.resume({ instanceId: "before-helper" });
+        expect(failed.sandbox.state).toBe("running");
+        expect(failed.warnings).toContain(helperWarning);
+
+        yield* provisioner.stop({ instanceId: "before-helper" });
+        fake.commands.length = 0;
+        const resumed = yield* provisioner.resume({ instanceId: "before-helper" });
+        expect(resumed.warnings ?? []).not.toContain(helperWarning);
+        // Rewritten every time, so an older helper is replaced and Node's path stays current.
+        const [backfill, ...rest] = helperCommands(fake);
+        expect(rest).toEqual([]);
+        expect(fake.commands.indexOf(backfill!)).toBeLessThan(
+          fake.commands.findIndex((command) => command.includes("t3 serve")),
+        );
+
+        yield* provisioner.stop({ instanceId: "before-helper" });
+        fake.commands.length = 0;
+        yield* provisioner.resume({ instanceId: "subagent-sandbox" });
+        expect(helperCommands(fake)).toEqual([]);
       }).pipe(
         Effect.provide(
           provisionerLayer(
