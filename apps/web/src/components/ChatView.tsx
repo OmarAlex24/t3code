@@ -201,6 +201,12 @@ import {
   sandboxChatAliasTarget,
   shortSandboxId,
 } from "../state/sandboxThreads";
+import {
+  beginSandboxResend,
+  endSandboxResend,
+  isSandboxResendPending,
+  useSandboxResendPending,
+} from "../state/sandboxResends";
 import { CloudOffIcon } from "lucide-react";
 import { SandboxProviderLogo } from "./settings/SandboxProviderLogo";
 import { projectScriptIdFromCommand } from "~/projectScripts";
@@ -1027,7 +1033,8 @@ export default function ChatView(props: ChatViewProps) {
   // works there, so it shows no live run and nothing to interrupt.
   const sandboxRunHalted =
     activeSandboxStopped && !activeSandboxOnHost && (activeSandbox?.resumingSince ?? null) === null;
-  const [sandboxResendPending, setSandboxResendPending] = useState(false);
+  // Per thread, since this view moves from thread to thread: each waits on its own sandbox.
+  const sandboxResendPending = useSandboxResendPending(activeThreadKey);
   const activeEnvironmentServerBrowser = useEnvironmentSupportsServerBrowser(
     activeThreadRef?.environmentId ?? null,
   );
@@ -3093,24 +3100,50 @@ export default function ChatView(props: ChatViewProps) {
   });
   // A thread kept as a stopped sandbox: its server is off, so a send resumes it and goes once it
   // answers. The host never sees this thread's traffic, so the resume starts here.
+  // The message stays in this thread's composer until this thread's chat sends it, so it goes
+  // when the user is back on it, and a sandbox that does not come back loses nothing.
   const resumeSandboxAndSend = useStableCallback(() => {
-    if (activeThreadRef === null || sandboxResendPending) return;
-    setSandboxResendPending(true);
+    if (activeThreadRef === null || activeThreadKey === null) return;
+    const threadRef = activeThreadRef;
+    const threadKey = activeThreadKey;
+    const title = activeThread?.title ?? "this chat";
+    if (!beginSandboxResend(threadKey)) return;
     toastManager.add(
       stackedThreadToast({
         type: "info",
         title: "Resuming the sandbox",
         description: "Your message sends once it is running again.",
+        data: { threadRef },
       }),
     );
-    void ensureSandboxThreadRunning(activeThreadRef).then((running) => {
-      if (running) return;
-      setSandboxResendPending(false);
+    const openChat = () =>
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
+      });
+    void ensureSandboxThreadRunning(threadRef).then((running) => {
+      const away = currentRouteThreadKeyRef.current !== threadKey;
+      if (!running) {
+        endSandboxResend(threadKey);
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Message not sent",
+            description: away
+              ? `The sandbox for “${title}” did not come back. The message is still in its composer.`
+              : "The sandbox did not come back. Resume it from the Sandboxes list.",
+            ...(away ? { actionProps: { children: "Open chat", onClick: openChat } } : {}),
+          }),
+        );
+        return;
+      }
+      if (!away || !isSandboxResendPending(threadKey)) return;
       toastManager.add(
         stackedThreadToast({
-          type: "warning",
-          title: "Message not sent",
-          description: "The sandbox did not come back. Resume it from the Sandboxes list.",
+          type: "info",
+          title: "Sandbox running again",
+          description: `Your message to “${title}” sends when you open it.`,
+          actionProps: { children: "Open chat", onClick: openChat },
         }),
       );
     });
@@ -3319,10 +3352,18 @@ export default function ChatView(props: ChatViewProps) {
     !threadDetailLoading;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends the message that resumed the sandbox once its server answers again
   useEffect(() => {
-    if (!sandboxResendReady || sendInFlightRef.current) return;
-    setSandboxResendPending(false);
+    if (!sandboxResendReady || activeThreadKey === null || sendInFlightRef.current) return;
+    // Only from the thread that waits: the send takes whichever composer the route shows.
+    if (currentRouteThreadKeyRef.current !== activeThreadKey) return;
+    endSandboxResend(activeThreadKey);
     void onComposerSendStable();
-  }, [onComposerSendStable, sandboxResendReady, sendInFlightRef]);
+  }, [
+    activeThreadKey,
+    currentRouteThreadKeyRef,
+    onComposerSendStable,
+    sandboxResendReady,
+    sendInFlightRef,
+  ]);
 
   const onExpandTimelineImage = (preview: ExpandedImagePreview) => {
     openExpandedImagePreview(routeThreadKey, preview);

@@ -513,11 +513,7 @@ export function installFakeEnvironment(
       sandboxes = [];
       scopes = AuthStandardClientScopes;
       projectWorkspaceRoot = project.workspaceRoot;
-      if (offline) {
-        offline = false;
-        Effect.runSync(Deferred.succeed(backOnline, undefined));
-        backOnline = Deferred.makeUnsafe<void>();
-      }
+      bringFakeEnvironmentOnline();
     },
   };
 }
@@ -538,6 +534,14 @@ export async function takeFakeEnvironmentOffline(): Promise<void> {
   });
   for (const closed of openSessions) await Effect.runPromise(Deferred.fail(closed, error));
   openSessions.clear();
+}
+
+/** Lets the waiting reconnects through, as a resumed machine's server would. */
+export function bringFakeEnvironmentOnline(): void {
+  if (!offline) return;
+  offline = false;
+  Effect.runSync(Deferred.succeed(backOnline, undefined));
+  backOnline = Deferred.makeUnsafe<void>();
 }
 
 type ThreadEvent = Extract<OrchestrationV2ThreadStreamItem, { readonly kind: "event" }>["event"];
