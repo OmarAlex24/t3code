@@ -511,7 +511,7 @@ const lastReply = (projection: Projection, run: Run): string | null => {
   const reply = projection.messages.findLast(
     (message) => message.runId === run.id && message.role === "assistant" && !message.streaming,
   );
-  return reply === undefined ? null : plainNote(reply.text);
+  return reply === undefined ? null : plainNote(firstLine(reply.text));
 };
 
 /**
