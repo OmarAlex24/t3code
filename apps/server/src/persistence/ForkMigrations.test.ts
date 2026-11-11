@@ -12,6 +12,7 @@ const forkHistory: Array<readonly [number, string]> = [
   [1, "SandboxRecords"],
   [2, "SandboxPerThread"],
   [3, "ProjectionMilestones"],
+  [4, "LatestToolItemIndex"],
 ];
 
 const history = (table: string) =>

@@ -6,6 +6,7 @@ import { hasPendingMigrations, runMigrations, type RunMigrationsOptions } from "
 import Migration0001 from "./ForkMigrations/001_SandboxRecords.ts";
 import Migration0002 from "./ForkMigrations/002_SandboxPerThread.ts";
 import Migration0003 from "./ForkMigrations/003_ProjectionMilestones.ts";
+import Migration0004 from "./ForkMigrations/004_LatestToolItemIndex.ts";
 
 // This fork's migrations keep their own history so upstream's numbered list stays identical to
 // upstream's and its future ids never collide with them. Add new fork migrations here only.
@@ -13,6 +14,7 @@ const forkMigrationEntries = [
   [1, "SandboxRecords", Migration0001],
   [2, "SandboxPerThread", Migration0002],
   [3, "ProjectionMilestones", Migration0003],
+  [4, "LatestToolItemIndex", Migration0004],
 ] as const;
 
 export const FORK_MIGRATIONS_TABLE = "t3_fork_migrations";
