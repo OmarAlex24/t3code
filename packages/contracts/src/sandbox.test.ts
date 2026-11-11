@@ -198,7 +198,7 @@ describe("isSandboxHostProjectRoot", () => {
 
 describe("SANDBOX_RESUME_WAIT_SECONDS", () => {
   it("outlasts every resume step at its limit, the T3 start the slowest Boat resume adds", () => {
-    expect(SANDBOX_RESUME_WAIT_SECONDS).toBe(15 * 60 + 30);
+    expect(SANDBOX_RESUME_WAIT_SECONDS).toBe(16 * 60);
     const steps = Object.values(SANDBOX_RESUME_STEP_SECONDS);
     expect(SANDBOX_RESUME_WAIT_SECONDS).toBeGreaterThan(
       steps.reduce((sum: number, step) => sum + step, 0),
