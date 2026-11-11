@@ -40,7 +40,36 @@ describe("latestActionFromTurnItem", () => {
       { type: "dynamic_tool", toolName: "Grep", input: { pattern: "session", path: "src" } },
       { summary: "Searched session in src" },
     ],
-    [{ type: "dynamic_tool", toolName: "t3_milestone", input: {} }, { summary: "t3_milestone" }],
+    [
+      { type: "dynamic_tool", toolName: "t3_milestone", input: {} },
+      { summary: "Marked a milestone" },
+    ],
+    [
+      { type: "dynamic_tool", toolName: "mcp__t3-code__request_secret", input: {} },
+      { summary: "Asked for a secret" },
+    ],
+    [
+      {
+        type: "dynamic_tool",
+        toolName: "mcp__t3-code__delegate_task",
+        input: {},
+        status: "failed",
+      },
+      { summary: "Failed to delegate a child task" },
+    ],
+    [
+      { type: "dynamic_tool", toolName: "mcp__linear__create_issue", input: {} },
+      { summary: "create_issue" },
+    ],
+    [
+      {
+        type: "dynamic_tool",
+        toolName: "mcp__linear__create_issue",
+        title: "mcp__linear__create_issue",
+        input: {},
+      },
+      { summary: "create_issue" },
+    ],
     [{ type: "reasoning", text: "Thinking", streaming: false }, null],
     [{ type: "assistant_message", messageId: "message:x", text: "Done", streaming: false }, null],
   ] as const)("labels %o", (item, expected) => {
