@@ -586,6 +586,10 @@ describe("v2 thread shell lists", () => {
       );
       expect(harness.registry.get(quietAtom)).toBe(first);
       expect(harness.registry.get(harness.threads.threadShellAtom(ref))?.itemCount).toBe(4);
+      expect(harness.registry.get(harness.threads.threadShellAtom(ref))?.latestAction).toEqual({
+        summary: "Ran command",
+        detail: "pnpm test",
+      });
 
       setThread({ ...running, updatedAt: at(2), itemCount: 5, title: "Renamed" }, 3);
       const renamed = harness.registry.get(quietAtom);
