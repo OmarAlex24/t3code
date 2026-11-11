@@ -522,7 +522,10 @@ interface Reporter {
 
 const silentReporter: Reporter = { stage: () => Effect.void, warn: () => Effect.void };
 
-type RecordExtras = Pick<SandboxRecord, "configId" | "threadId" | "projectId" | "projectTitle">;
+type RecordExtras = Pick<
+  SandboxRecord,
+  "configId" | "threadId" | "parentThreadId" | "projectId" | "projectTitle"
+>;
 
 interface Machine {
   readonly prepared: Prepared;
@@ -565,6 +568,19 @@ export class SandboxProvisioner extends Context.Service<
     readonly create: (
       input: SandboxCreateInput,
     ) => Effect.Effect<SandboxCreateResult, SandboxProviderError>;
+    /**
+     * Creates a sandbox for one subagent of `parentThreadId`, with `project` cloned and set up
+     * from `config` as a thread's launch would, but no chat of its own. The record is `instanceId`
+     * from the start, so a caller counting its sandboxes can hold the place beforehand. The
+     * pairing code is for whoever links it.
+     */
+    readonly createSubSandbox: (input: {
+      readonly instanceId: string;
+      readonly config: SandboxEnvironmentConfig;
+      readonly project: SandboxLaunchInput["project"];
+      readonly parentThreadId: ThreadId;
+      readonly size: string;
+    }) => Effect.Effect<SandboxCreateResult, SandboxProviderError>;
     readonly delete: (
       input: SandboxDeleteInput,
     ) => Effect.Effect<SandboxDeleteResult, SandboxProviderError>;
@@ -1845,7 +1861,9 @@ const make = Effect.gen(function* () {
       access: prepared.access,
       runningSince: createdAt,
       maxRunningMinutes: prepared.maxRunningMinutes,
-      ...(driver.keepAlive === undefined || context.extras.threadId === undefined
+      // A thread's sandbox and a subagent's keep themselves up while they work; others never do.
+      ...(driver.keepAlive === undefined ||
+      (context.extras.threadId === undefined && context.extras.parentThreadId === undefined)
         ? {}
         : {
             idleMinutes: prepared.idleMinutes,
@@ -2366,9 +2384,26 @@ const make = Effect.gen(function* () {
           ),
         );
 
-  const create = Effect.fn("SandboxProvisioner.create")(function* (input: SandboxCreateInput) {
+  /**
+   * Makes a sandbox that no thread's launch tracks and pairs once with it. `setUp` readies the
+   * machine before the pairing; a failure anywhere releases all of it.
+   */
+  const createUntracked = Effect.fn("SandboxProvisioner.createUntracked")(function* (
+    input: SandboxCreateInput,
+    options: {
+      readonly instanceId?: string;
+      readonly extras?: RecordExtras;
+      readonly launch?: LaunchTooling;
+      readonly setUp?: (
+        machine: Machine,
+        owned: Owned,
+      ) => Effect.Effect<void, SandboxProviderError>;
+      /** Stops and releases the machine when the caller gives up, instead of finishing it. */
+      readonly endsWithCaller?: boolean;
+    } = {},
+  ) {
     const prepared = yield* prepare(input);
-    const instanceId = yield* secureRandom.uuidV4();
+    const instanceId = options.instanceId ?? (yield* secureRandom.uuidV4());
     const owned: Owned = {};
     const fiber = yield* tracked(
       instanceId,
@@ -2377,8 +2412,10 @@ const make = Effect.gen(function* () {
           instanceId,
           owned,
           report: silentReporter,
-          extras: {},
+          extras: options.extras ?? {},
+          ...(options.launch === undefined ? {} : { launch: options.launch }),
         });
+        if (options.setUp !== undefined) yield* options.setUp(machine, owned);
         const pairingCode = yield* pairMachine(machine);
         yield* machine.save({ state: "running" });
         return {
@@ -2397,7 +2434,62 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
-    return yield* Fiber.join(fiber);
+    return yield* options.endsWithCaller === true
+      ? Fiber.join(fiber).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)))
+      : Fiber.join(fiber);
+  });
+
+  const create = (input: SandboxCreateInput) => createUntracked(input);
+
+  const createSubSandbox: SandboxProvisioner["Service"]["createSubSandbox"] = Effect.fn(
+    "SandboxProvisioner.createSubSandbox",
+  )(function* (input) {
+    const { config, project } = input;
+    const repository = githubRepositoryOf(project.remoteUrl);
+    if (repository === null) {
+      return yield* launchConfigError(
+        "Only projects with a github.com remote can start in a sandbox.",
+        config.provider,
+      );
+    }
+    yield* checkLaunchTooling(config);
+    const joinTailnet = yield* launchJoinsTailnet(config);
+    const base = createInputFor(config, project, joinTailnet);
+    return yield* createUntracked(
+      { ...base, label: `${project.title} subagent on ${config.label}`, size: input.size },
+      {
+        instanceId: input.instanceId,
+        // Nothing else would ever use a subagent's sandbox whose task was given up on.
+        endsWithCaller: true,
+        extras: {
+          configId: config.id,
+          parentThreadId: input.parentThreadId,
+          projectId: project.id,
+          projectTitle: project.title,
+        },
+        launch: { config, repository: { owner: repository.owner, name: repository.name } },
+        setUp: (machine, owned) =>
+          setUpProject(machine, owned, config, project, silentReporter, {
+            retry: (effect) => effect,
+          }).pipe(
+            // Setup is over, so from here the sandbox stops once its task has been idle a while.
+            Effect.tap(({ keptAlive }) =>
+              keptAlive
+                ? keepAliveFromNow(
+                    machine.prepared.driver,
+                    machine.config,
+                    machine.sandboxId,
+                    keepAliveTtlMinutes(
+                      machine.prepared.idleMinutes,
+                      machine.prepared.maxTtlMinutes,
+                    ),
+                  )
+                : Effect.void,
+            ),
+            Effect.asVoid,
+          ),
+      },
+    );
   });
 
   /**
@@ -2918,6 +3010,78 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     }
   });
 
+  /**
+   * Readies a new machine for work on `project`: clones it, copies its env files and the config's
+   * tools, and lets it keep itself up while its threads work. `retry` wraps the clone, which a
+   * thread's launch retries on the user's word and a subagent's sandbox does not.
+   */
+  const setUpProject = Effect.fn("SandboxProvisioner.setUpProject")(function* (
+    machine: Machine,
+    owned: Owned,
+    config: SandboxEnvironmentConfig,
+    project: SandboxLaunchInput["project"],
+    reporter: Reporter,
+    options: {
+      readonly retry: <A>(
+        effect: Effect.Effect<A, SandboxProviderError>,
+      ) => Effect.Effect<A, SandboxProviderError>;
+    },
+  ) {
+    const cloned = yield* options.retry(cloneProject(machine, project));
+    const repository = githubRepositoryOf(project.remoteUrl);
+    yield* machine.save({
+      repoDir: cloned.directory,
+      // The host's sandbox bridge creates the thread in this project on the sandbox.
+      sandboxProjectId: cloned.projectId,
+      ...(repository === null ? {} : { repository: repository.label }),
+    });
+    yield* reporter.stage("repo", "done", cloned.directory.replace(/^.*\/work\//u, "~/work/"));
+
+    yield* reporter.stage("env-files", "running");
+    const hostCopy = yield* verifiedHostCopy(project);
+    const repositoryKey = repository?.key;
+    const copied =
+      hostCopy === null
+        ? { copied: 0, failed: [] as ReadonlyArray<string> }
+        : yield* copyEnvFiles(
+            machine,
+            hostCopy.workspaceRoot,
+            cloned.directory,
+            (repositoryKey === undefined ? undefined : config.envFiles[repositoryKey]) ??
+              config.envFiles[hostCopy.projectId],
+          );
+    if (copied.failed.length > 0) {
+      yield* reporter.warn(`Could not copy ${copied.failed.join(", ")} to the sandbox.`);
+    }
+    yield* reporter.stage(
+      "env-files",
+      copied.failed.length > 0 ? "warning" : copied.copied === 0 ? "skipped" : "done",
+      copied.failed.length > 0
+        ? `${copied.failed.length} not copied`
+        : copied.copied === 0
+          ? "None to copy"
+          : `${copied.copied} ${copied.copied === 1 ? "file" : "files"}`,
+    );
+
+    yield* reporter.stage("tools", "running");
+    const tools = yield* setUpTools(
+      machine,
+      owned,
+      config,
+      cloned.directory,
+      hostCopy?.workspaceRoot,
+      reporter.warn,
+    );
+    yield* reporter.stage(
+      "tools",
+      tools.steps === 0 ? "skipped" : tools.failed > 0 ? "warning" : "done",
+      tools.steps === 0 ? "Nothing to set up" : tools.failed > 0 ? "Finished with warnings" : null,
+    );
+
+    const keptAlive = yield* setUpKeepAlive(machine, owned, cloned.directory, reporter.warn);
+    return { directory: cloned.directory, keptAlive };
+  });
+
   const startLaunch = Effect.fn("SandboxProvisioner.startLaunch")(function* (
     input: SandboxLaunchInput,
     config: SandboxEnvironmentConfig,
@@ -2968,67 +3132,9 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
           },
         });
         const launch = state.launch!;
-        const cloned = yield* untilRetried(
-          launch,
-          threadId,
-          "repo",
-          cloneProject(machine, input.project),
-        );
-        const repository = githubRepositoryOf(input.project.remoteUrl);
-        yield* machine.save({
-          repoDir: cloned.directory,
-          // The host's sandbox bridge creates the thread in this project on the sandbox.
-          sandboxProjectId: cloned.projectId,
-          ...(repository === null ? {} : { repository: repository.label }),
+        const { keptAlive } = yield* setUpProject(machine, owned, config, input.project, reporter, {
+          retry: (effect) => untilRetried(launch, threadId, "repo", effect),
         });
-        yield* reporter.stage("repo", "done", cloned.directory.replace(/^.*\/work\//u, "~/work/"));
-
-        yield* reporter.stage("env-files", "running");
-        const hostCopy = yield* verifiedHostCopy(input.project);
-        const repositoryKey = repository?.key;
-        const copied =
-          hostCopy === null
-            ? { copied: 0, failed: [] as ReadonlyArray<string> }
-            : yield* copyEnvFiles(
-                machine,
-                hostCopy.workspaceRoot,
-                cloned.directory,
-                (repositoryKey === undefined ? undefined : config.envFiles[repositoryKey]) ??
-                  config.envFiles[hostCopy.projectId],
-              );
-        if (copied.failed.length > 0) {
-          yield* reporter.warn(`Could not copy ${copied.failed.join(", ")} to the sandbox.`);
-        }
-        yield* reporter.stage(
-          "env-files",
-          copied.failed.length > 0 ? "warning" : copied.copied === 0 ? "skipped" : "done",
-          copied.failed.length > 0
-            ? `${copied.failed.length} not copied`
-            : copied.copied === 0
-              ? "None to copy"
-              : `${copied.copied} ${copied.copied === 1 ? "file" : "files"}`,
-        );
-
-        yield* reporter.stage("tools", "running");
-        const tools = yield* setUpTools(
-          machine,
-          owned,
-          config,
-          cloned.directory,
-          hostCopy?.workspaceRoot,
-          reporter.warn,
-        );
-        yield* reporter.stage(
-          "tools",
-          tools.steps === 0 ? "skipped" : tools.failed > 0 ? "warning" : "done",
-          tools.steps === 0
-            ? "Nothing to set up"
-            : tools.failed > 0
-              ? "Finished with warnings"
-              : null,
-        );
-
-        const keptAlive = yield* setUpKeepAlive(machine, owned, cloned.directory, reporter.warn);
 
         // The host thread sends its first message through the bridge, so the launch is done only
         // once the bridge can reach the sandbox. Clients pair with it on their own afterwards.
@@ -4539,6 +4645,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
   return SandboxProvisioner.of({
     providers,
     create,
+    createSubSandbox,
     delete: remove,
     removed: Stream.fromPubSub(removedRecords),
     listChanges: SubscriptionRef.changes(listRevision).pipe(
