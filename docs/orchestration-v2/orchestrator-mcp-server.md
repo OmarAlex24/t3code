@@ -480,7 +480,9 @@ running turn (`parent_not_active` otherwise) and is hidden from delegated
 children. Actions:
 
 - `plan` opens a new set and starts its first milestone;
-- `start` begins the next planned milestone, one by `id`, or a new one by `title`;
+- `start` begins the next planned milestone, one by `id`, or one by `title`: a
+  planned one of that title in the current set, nothing if it is the active one,
+  otherwise a new one;
 - `done`, `change`, and `drop` act on one milestone; and
 - `post` attaches a note and images (absolute paths on the server) to the
   active one.
