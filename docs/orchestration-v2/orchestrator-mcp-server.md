@@ -240,6 +240,7 @@ type DelegateTaskInput = {
   };
   title?: string;
   role?: "implementation" | "research" | "review" | "design" | "test" | "general";
+  group?: string; // work stream clients group parallel subagents by, such as "UI"
   mode?: "async" | "wait";
   timeoutMs?: number;
   clientRequestId?: string;
