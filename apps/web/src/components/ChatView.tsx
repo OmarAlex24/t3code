@@ -43,6 +43,7 @@ import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
 import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { freshSessionBannerItem } from "./chat/ComposerFreshSession";
@@ -50,6 +51,7 @@ import { armFreshSession, disarmFreshSession, useFreshSessionArmed } from "./cha
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
 import { useWorktreeSetup } from "./chat/useWorktreeSetup";
 import { useSandboxLaunch } from "./chat/useSandboxLaunch";
+import { useSandboxThreadSetup } from "./chat/useSandboxThreadSetup";
 import { useChatShortcuts } from "./chat/useChatShortcuts";
 import { ChatBannerLane } from "./chat/ChatBannerLane";
 import * as Schema from "effect/Schema";
@@ -68,6 +70,7 @@ import {
   type ModelSelection,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
+  type SandboxLaunchMessage,
   type ServerProvider,
   type ScopedThreadRef,
   type ThreadId,
@@ -215,6 +218,7 @@ import {
 import { CloudOffIcon } from "lucide-react";
 import { SandboxProviderLogo } from "./settings/SandboxProviderLogo";
 import { projectScriptIdFromCommand } from "~/projectScripts";
+import { readFileAsDataUrl } from "~/lib/imageCompression";
 import { newMessageId } from "~/lib/utils";
 import { isInSideChatPane, type SideChatParentPanel } from "~/lib/sideChatPane";
 import {
@@ -1252,6 +1256,34 @@ export default function ChatView(props: ChatViewProps) {
     activeProject,
     activeProjectIsScratch && draftId !== null,
   );
+  // A sandbox chat's first message: the prompt and images, which the host keeps until it can send.
+  const readSandboxLaunchMessage = async (): Promise<SandboxLaunchMessage | string | null> => {
+    const context = composerRef.current?.getSendContext();
+    if (context === undefined) return null;
+    if (context.files.length > 0) {
+      return "Only images can go with a sandbox chat's first message. Remove the other files, or attach them once the chat has started.";
+    }
+    const text = promptRef.current.trim();
+    if (text === "" && context.images.length === 0) return null;
+    const attachments = await Promise.all(
+      context.images.map(async (image) => ({
+        type: "image" as const,
+        name: image.name,
+        mimeType: image.mimeType,
+        sizeBytes: image.sizeBytes,
+        dataUrl: await readFileAsDataUrl(image.file),
+      })),
+    );
+    return {
+      messageId: newMessageId(),
+      text,
+      attachments,
+      title: deriveThreadTitleSeed({ text, attachments: context.images }),
+      modelSelection: context.selectedModelSelection,
+      runtimeMode,
+      interactionMode: DEFAULT_INTERACTION_MODE,
+    };
+  };
   const sandboxLaunch = useSandboxLaunch({
     draftId,
     threadId: draftId === null ? null : (activeThread?.id ?? null),
@@ -1259,10 +1291,19 @@ export default function ChatView(props: ChatViewProps) {
     activeProject,
     logicalProjectEnvironments: projectEnvironments,
     envLocked: Boolean(activeThread && (activeMessageCount > 0 || activeRuntime !== null)),
-    onHandedOff: () => {
-      if (draftId !== null) setWorkLocallyResendDraftId(draftId);
+    readLaunchMessage: readSandboxLaunchMessage,
+    onLaunched: (threadRef) => {
+      if (draftId === null) return;
+      // The host thread holds the message now; the draft hands over to it like any sent draft.
+      promptRef.current = "";
+      const store = useComposerDraftStore.getState();
+      store.clearComposerContent(draftId);
+      store.markDraftThreadPromoting(draftId, threadRef);
+      store.finalizePromotedDraftThread(draftId);
     },
   });
+  // A sandbox chat's host thread shows its sandbox's setup while its first message waits.
+  const sandboxSetupCard = useSandboxThreadSetup(isServerThread ? routeThreadRef : null);
   const logicalProjectEnvironments = sandboxLaunch.logicalProjectEnvironments;
   // The thread's own sandbox shows its provider's mark rather than a generic machine.
   const ownSandboxProvider =
@@ -1678,7 +1719,7 @@ export default function ChatView(props: ChatViewProps) {
     isWorking,
     draftHeroDockRequested,
     backgroundSubmissionPending,
-    hasWorktreeSetupCard: worktreeSetup !== null || sandboxLaunch.card !== null,
+    hasWorktreeSetupCard: worktreeSetup !== null || sandboxSetupCard !== null,
   });
   const {
     transitionGroupRef: draftHeroTransitionGroupRef,
@@ -3399,15 +3440,15 @@ export default function ChatView(props: ChatViewProps) {
   // The end of the timeline holds the thread's present and next turns: what it is doing now,
   // its lifecycle status, guest messages awaiting you, then your queued messages.
   const timelineFooter =
-    sandboxLaunch.card === null &&
+    sandboxSetupCard === null &&
     pendingHandoff === null &&
     !hasThreadNow &&
     threadStatusLine === null &&
     pendingGuestMessageCount === 0 &&
     !hasQueuedTurns ? null : (
       <>
-        {sandboxLaunch.card === null ? null : (
-          <div className="chat-content-lane">{sandboxLaunch.card}</div>
+        {sandboxSetupCard === null ? null : (
+          <div className="chat-content-lane">{sandboxSetupCard}</div>
         )}
         {pendingHandoff === null ? null : (
           <div className="chat-content-lane">

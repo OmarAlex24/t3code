@@ -4,13 +4,16 @@ import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
   IsoDateTime,
+  MessageId,
   NonNegativeInt,
   ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
 } from "./baseSchemas.ts";
+import { UploadChatAttachment } from "./chatAttachment.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { WorktreeSetupPhase, WorktreeSetupStageStatus } from "./worktreeSetup.ts";
 
 /**
@@ -1013,6 +1016,23 @@ export const SandboxSetupSnapshot = Schema.Struct({
 });
 export type SandboxSetupSnapshot = typeof SandboxSetupSnapshot.Type;
 
+/**
+ * A sandbox chat's first message. The host makes the chat a thread of its own with this message
+ * queued, and sends it through the sandbox bridge once the sandbox is ready.
+ */
+export const SandboxLaunchMessage = Schema.Struct({
+  messageId: MessageId,
+  text: Schema.String,
+  /** Images the host saves for this thread and message before it queues the message. */
+  attachments: Schema.Array(UploadChatAttachment),
+  title: TrimmedNonEmptyString,
+  /** The model picked for the chat; the bridge carries it to the sandbox when the sandbox lists it. */
+  modelSelection: Schema.optional(ModelSelection),
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+});
+export type SandboxLaunchMessage = typeof SandboxLaunchMessage.Type;
+
 export const SandboxLaunchInput = Schema.Struct({
   configId: TrimmedNonEmptyString,
   /** The thread id the client allocated for the draft; the snapshot and record are keyed by it. */
@@ -1033,11 +1053,14 @@ export const SandboxLaunchInput = Schema.Struct({
       Schema.Struct({ projectId: ProjectId, workspaceRoot: TrimmedNonEmptyString }),
     ),
   }),
+  message: Schema.optional(SandboxLaunchMessage),
 });
 export type SandboxLaunchInput = typeof SandboxLaunchInput.Type;
 
 export const SandboxLaunchResult = Schema.Struct({
   instanceId: TrimmedNonEmptyString,
+  /** The host thread that holds the chat, with its first message queued, when one was sent. */
+  hostThread: Schema.optional(Schema.Struct({ threadId: ThreadId, projectId: ProjectId })),
 });
 export type SandboxLaunchResult = typeof SandboxLaunchResult.Type;
 

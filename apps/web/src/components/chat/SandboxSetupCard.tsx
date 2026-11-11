@@ -7,12 +7,10 @@ import { cn } from "~/lib/utils";
 import { WorkLogRow } from "./WorkLog";
 import { Elapsed, ShimmerOverlay, StageIcon, stageRowClassName } from "./WorktreeSetupCard";
 
-function headerLabel(snapshot: SandboxSetupSnapshot, connecting: boolean): string {
+function headerLabel(snapshot: SandboxSetupSnapshot): string {
   switch (snapshot.phase) {
     case "running":
-      return connecting
-        ? `Connecting to ${snapshot.label}…`
-        : `Starting a sandbox on ${snapshot.label}…`;
+      return `Starting a sandbox on ${snapshot.label}…`;
     case "done":
       return `Sandbox on ${snapshot.label} is ready`;
     case "failed":
@@ -25,23 +23,17 @@ function headerLabel(snapshot: SandboxSetupSnapshot, connecting: boolean): strin
 }
 
 /**
- * A thread's sandbox as it is made: one row per stage, beside where the worktree card sits. The
- * message waits in the composer until the thread moves onto the sandbox.
+ * A thread's sandbox as it is made: one row per stage, where the worktree card sits. The thread's
+ * first message waits above it and goes out once the sandbox is ready.
  */
 export function SandboxSetupCard({
   snapshot,
-  connecting,
-  localError,
   onCancel,
   onRetry,
   onDismiss,
   onSetUpTailscale,
 }: {
   readonly snapshot: SandboxSetupSnapshot;
-  /** The host handed the sandbox over and this client is pairing with it. */
-  readonly connecting: boolean;
-  /** A failure on this client's side of the handoff, which the host does not know about. */
-  readonly localError: string | null;
   readonly onCancel: () => void;
   readonly onRetry: () => void;
   readonly onDismiss: () => void;
@@ -49,9 +41,9 @@ export function SandboxSetupCard({
   readonly onSetUpTailscale: () => void;
 }) {
   const running = snapshot.phase === "running";
-  const failed = snapshot.phase === "failed" || localError !== null;
-  const text = headerLabel(snapshot, connecting);
-  const error = localError ?? snapshot.error;
+  const failed = snapshot.phase === "failed";
+  const text = headerLabel(snapshot);
+  const error = snapshot.error;
   return (
     <section
       aria-label="Sandbox setup"
@@ -139,7 +131,7 @@ export function SandboxSetupCard({
       {failed && error ? <p className="mt-1 ml-8 text-xs text-muted-foreground">{error}</p> : null}
 
       <div className="mt-0.5 ml-[calc(--spacing(6)+2px-(--spacing(2)-1px))] flex flex-wrap items-center gap-0.5">
-        {failed && localError === null && snapshot.recovery === "set-up-tailscale" ? (
+        {failed && snapshot.recovery === "set-up-tailscale" ? (
           <Button type="button" size="xs" variant="ghost-muted" onClick={onSetUpTailscale}>
             <NetworkIcon aria-hidden />
             Set up Tailscale
@@ -148,13 +140,13 @@ export function SandboxSetupCard({
         {failed ? (
           <Button type="button" size="xs" variant="ghost-muted" onClick={onRetry}>
             <RotateCwIcon aria-hidden />
-            {snapshot.recovery !== "retry" && localError === null ? "Start a new sandbox" : "Retry"}
+            {snapshot.recovery !== "retry" ? "Start a new sandbox" : "Retry"}
           </Button>
         ) : null}
         {running ? (
           <Button type="button" size="xs" variant="ghost-muted" onClick={onCancel}>
             <XIcon aria-hidden />
-            {failed ? "Discard sandbox" : "Cancel"}
+            Cancel
           </Button>
         ) : (
           <Button type="button" size="xs" variant="ghost-muted" onClick={onDismiss}>

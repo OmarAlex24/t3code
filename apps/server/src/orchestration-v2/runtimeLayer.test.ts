@@ -29,6 +29,7 @@ import {
   PullRequestOperationError,
   ProviderDriverKind,
   ProviderInstanceId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -165,6 +166,9 @@ const alternateProviderInstance = {
 } satisfies ProviderInstance;
 const claudeInstanceId = ProviderInstanceId.make("claude_test");
 const claudeDriver = ProviderDriverKind.make("claudeAgent");
+// The host's sandbox bridge, which a sandbox chat's thread runs on.
+const sandboxBridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
+
 const claudeProviderInstance = {
   ...providerInstance,
   instanceId: claudeInstanceId,
@@ -178,14 +182,23 @@ const claudeProviderInstance = {
   },
 } satisfies ProviderInstance;
 
+const sandboxBridgeProviderInstance = {
+  ...providerInstance,
+  instanceId: sandboxBridgeInstanceId,
+  continuationIdentity: { driverKind: driver, continuationKey: "codex:test:sandboxes" },
+};
+
 const layerTestProviderInstanceRegistry = Layer.succeed(
   ProviderInstanceRegistry.ProviderInstanceRegistry,
   {
     getInstance: (instanceId) =>
       Effect.succeed(
-        [providerInstance, alternateProviderInstance, claudeProviderInstance].find(
-          (instance) => instanceId === instance.instanceId,
-        ),
+        [
+          providerInstance,
+          alternateProviderInstance,
+          claudeProviderInstance,
+          sandboxBridgeProviderInstance,
+        ].find((instance) => instanceId === instance.instanceId),
       ),
     listInstances: Effect.succeed([
       providerInstance,
@@ -10285,3 +10298,115 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
     );
   },
 );
+
+const layerSandboxLaunchTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  ProjectStore.layer,
+  ProjectionStore.layer,
+  EffectOutbox.layer,
+  ThreadCommandExecutor.layer,
+).pipe(
+  Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(McpProviderSessions.layer),
+  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provide(layerCheckpointStoreTest),
+  Layer.provide(layerServerConfig),
+  Layer.provide(
+    ServerSettings.layerTest({
+      providerInstances: { [sandboxBridgeInstanceId]: { driver: "codex", enabled: true } },
+    }),
+  ),
+  Layer.provide(layerTestProviderInstanceRegistry),
+  Layer.provide(layerGitWorkflowTest),
+  Layer.provide(layerProjectServiceTest),
+  Layer.provide(layerPlatformTest),
+);
+
+it.layer(layerSandboxLaunchTest)("a sandbox chat's first message", (it) => {
+  const waitingMessage = (name: string, selection: ModelSelection) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make(`sandbox-launch-${name}`);
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId: ProjectId.make("sandbox-launch-project"),
+        title: "Fix the flaky test",
+        modelSelection: selection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      // Held while the sandbox launches: no workspace for the host to prepare.
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:message`),
+        threadId,
+        messageId: MessageId.make(`${threadId}:message`),
+        text: "Fix the flaky test",
+        attachments: [],
+        modelSelection: selection,
+        dispatchMode: { type: "defer_start" },
+      });
+      const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      assert.equal(run.status, "preparing");
+      yield* orchestrator.dispatch({
+        type: "prepared-run.fail",
+        commandId: CommandId.make(`${threadId}:fail`),
+        threadId,
+        runId: run.id,
+        failure: {
+          class: "provider_error",
+          message: "The sandbox could not be set up: Boat refused.",
+          code: null,
+          retryable: true,
+        },
+      });
+      return { threadId, runId: run.id };
+    });
+
+  it.effect("waits again when its launch is retried after a failure", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId, runId } = yield* waitingMessage("bridge", {
+        instanceId: sandboxBridgeInstanceId,
+        model: "sandbox",
+      } as ModelSelection);
+      assert.equal((yield* orchestrator.getThreadProjection(threadId)).runs[0]?.status, "failed");
+
+      yield* orchestrator.dispatch({
+        type: "prepared-run.retry",
+        commandId: CommandId.make(`${threadId}:retry`),
+        threadId,
+        runId,
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(projection.runs[0]?.status, "preparing");
+      const failure = projection.turnItems.find((item) => item.type === "error");
+      assert.equal(failure?.status, "cancelled");
+    }),
+  );
+
+  it.effect("still refuses a retry for a held run on any other provider", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId, runId } = yield* waitingMessage("codex", modelSelection);
+      const error = yield* orchestrator
+        .dispatch({
+          type: "prepared-run.retry",
+          commandId: CommandId.make(`${threadId}:retry`),
+          threadId,
+          runId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "OrchestratorDispatchError");
+    }),
+  );
+});
