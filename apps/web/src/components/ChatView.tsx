@@ -395,7 +395,10 @@ import {
 import { useDraftHeroLayoutTransition } from "./chat/useDraftHeroLayoutTransition";
 import { useLocalDispatchState } from "./chat/useLocalDispatchState";
 import { ThreadMilestonesView } from "./chat/ThreadMilestonesView";
-import { formatMilestoneCommentPrefix } from "@t3tools/client-runtime/state/thread-milestone-board";
+import {
+  formatMilestoneCommentPrefix,
+  pendingAskCard,
+} from "@t3tools/client-runtime/state/thread-milestone-board";
 import { selectThreadViewMode, useThreadViewModeStore } from "../threadViewModeStore";
 import { draftFanoutSelectionsAtom, draftSendState } from "./chat/chatViewSend";
 import {
@@ -2876,6 +2879,11 @@ export default function ChatView(props: ChatViewProps) {
     chatReveal !== null && chatReveal.threadKey === activeThreadKey ? chatReveal : null;
   const milestonesShortcutLabel = shortcutLabelForCommand(keybindings, "milestones.toggle");
   const milestoneTurnItems = serverVisibleTurnItems.map(({ item }) => item);
+  // A secret or link card waits on you in the timeline; Milestones shows the same card.
+  const milestoneAskCard =
+    showMilestones && activeThreadShell?.hasPendingUserInput === true
+      ? pendingAskCard(serverVisibleTurnItems)
+      : null;
   // A comment goes through the composer, so it queues or steers like any message you send.
   const commentOnMilestoneStable = useStableCallback((milestone: OrchestrationV2Milestone) => {
     const composer = composerRef.current;
@@ -3642,13 +3650,15 @@ export default function ChatView(props: ChatViewProps) {
                     coordinatorAsk={
                       activePendingApproval !== null
                         ? { kind: "approval" }
-                        : activePendingUserInput !== null ||
-                            activeThreadShell?.hasPendingUserInput === true
-                          ? {
-                              kind: "input",
-                              question: activePendingUserInput?.questions[0]?.question ?? null,
-                            }
-                          : null
+                        : milestoneAskCard !== null
+                          ? { kind: "card", item: milestoneAskCard }
+                          : activePendingUserInput !== null ||
+                              activeThreadShell?.hasPendingUserInput === true
+                            ? {
+                                kind: "input",
+                                question: activePendingUserInput?.questions[0]?.question ?? null,
+                              }
+                            : null
                     }
                     bottomInset={composerReservedHeight}
                     onOpenThread={openSubagentStable}
