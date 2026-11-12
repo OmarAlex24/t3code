@@ -122,9 +122,9 @@ it("opening the host's mirror of a running sandbox's chat opens the sandbox's ow
     .toBe(`/${SANDBOX}/${mirrored.id}`);
 });
 
-it("a stopped sandbox's own thread opens the host's mirror, taking the unsent draft along", async () => {
+it("a stopped sandbox's thread this app never listed opens the host's mirror, taking the unsent draft along", async () => {
   using _environment = installFakeEnvironment(THREADS, { sandboxes: SANDBOXES });
-  // Here the listed thread is the sandbox's own, and the mirror is on the other environment.
+  // Here the route is on the sandbox's own thread, and the mirror is on the other environment.
   const own = scopeThreadRef(ENVIRONMENT_ID, stoppedOwn.id);
   const mirror = scopeThreadRef(SANDBOX, stoppedOwn.id);
   aliases = new Map([[threadKey(own), mirror]]);
@@ -141,7 +141,7 @@ it("a stopped sandbox's own thread opens the host's mirror, taking the unsent dr
   expect(drafts.getComposerDraft(own)?.prompt ?? "").toBe("");
 });
 
-it("a message to a stopped sandbox goes to the host's mirror once and stays there when the user leaves", async () => {
+it("a message on the host's mirror of a stopped sandbox goes once and stays there when the user leaves", async () => {
   using _environment = installFakeEnvironment(THREADS, {
     sandboxes: SANDBOXES,
     acceptCommands: true,
@@ -150,7 +150,7 @@ it("a message to a stopped sandbox goes to the host's mirror once and stays ther
   const { router, app } = await openApp(`/${ENVIRONMENT_ID}/${queued.id}`);
   await using _app = app;
   await expect.element(page.getByText("Answer 0 for thread-queued.").first()).toBeVisible();
-  // The mirror is the conversation while its sandbox is stopped, so the route stays on it.
+  // The sandbox's own thread is not listed, so the mirror is the conversation and the route stays.
   await expect.element(page.getByText("Sandbox bx_9kq2 is stopped")).toBeVisible();
   expect(router.state.location.pathname).toBe(`/${ENVIRONMENT_ID}/${queued.id}`);
 

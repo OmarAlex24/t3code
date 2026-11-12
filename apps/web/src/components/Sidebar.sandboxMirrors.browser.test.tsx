@@ -195,11 +195,10 @@ describe("sandbox chats in the sidebar", () => {
 
   it.each([
     ["stopped", { state: "stopped" as const, runningSince: null }, [HOST, SANDBOX]],
-    // Its server may answer before the resume is done; the mirror holds on until it is.
     ["resuming", { resumingSince: "2026-11-10T00:00:00.000Z" }, [HOST, SANDBOX]],
     ["running but not connected", {}, [HOST]],
   ])(
-    "lists a sandbox chat once, as the host's mirror, while its sandbox is %s",
+    "lists a sandbox chat once, as the sandbox's own thread, while its sandbox is %s",
     async (_case, fields, connected) => {
       using stack = new DisposableStack();
       const previousSettings = getClientSettings();
@@ -228,9 +227,9 @@ describe("sandbox chats in the sidebar", () => {
         </SidebarProvider>,
       );
 
-      // The mirror holds the conversation and takes what is sent while the sandbox is away.
-      await expect.element(page.getByText("Greeting from boat.dev").first()).toBeVisible();
-      await expect.element(page.getByText("say high from boat.dev:)")).not.toBeInTheDocument();
+      // Its cached history is the real conversation; a send wakes the sandbox from there.
+      await expect.element(page.getByText("say high from boat.dev:)").first()).toBeVisible();
+      await expect.element(page.getByText("Greeting from boat.dev")).not.toBeInTheDocument();
       expect(document.querySelectorAll("li[data-thread-item]")).toHaveLength(1);
     },
   );

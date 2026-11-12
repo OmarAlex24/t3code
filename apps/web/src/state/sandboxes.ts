@@ -9,7 +9,7 @@ import {
 
 import { environmentCatalog } from "../connection/catalog";
 import { useQuietThreadShells } from "./entities";
-import { useConnectedEnvironmentIds, usePrimaryEnvironmentId } from "./environments";
+import { usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentPresentation } from "./presentation";
 import { useEnvironmentQuery } from "./query";
 import {
@@ -183,18 +183,12 @@ export function useSandboxlessBridgeThread(
   );
 }
 
-/**
- * The thread of each sandbox chat that its other thread stands for, by thread key, from whether
- * the sandbox runs and its server is connected; see `sandboxChatAliases`.
- */
+/** The thread of each sandbox chat that its other thread stands for, by thread key; see `sandboxChatAliases`. */
 export function useSandboxChatAliases(): ReadonlyMap<string, ScopedThreadRef> {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const threads = useQuietThreadShells();
   const sandboxes = useSandboxRecords();
-  const connected = useConnectedEnvironmentIds();
-  return sandboxChatAliases(sandboxes, threads, provisionerEnvironmentId, (environmentId) =>
-    connected.includes(environmentId),
-  );
+  return sandboxChatAliases(sandboxes, threads, provisionerEnvironmentId);
 }
 
 const NO_SANDBOXES: ReadonlyArray<SandboxRecord> = [];
