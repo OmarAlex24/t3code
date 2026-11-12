@@ -31,7 +31,7 @@ import {
 } from "../state/environments";
 import { useThreadSearch } from "../state/queries";
 import { useSandboxChatAliases, useSandboxRowStates } from "../state/sandboxes";
-import { sandboxChatAliasTarget } from "../state/sandboxThreads";
+import { sandboxChatAliasTarget, sandboxRowThread } from "../state/sandboxThreads";
 import { primaryServerProvidersAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -131,7 +131,14 @@ export function useCommandPaletteThreadItems(input: {
     ...(activeThread ? { activeThread } : {}),
     projectByKey,
     icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
-    renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
+    renderLeadingContent: (thread) => (
+      <ThreadRowLeadingStatus
+        thread={sandboxRowThread(
+          thread,
+          sandboxRowState(scopeThreadRef(thread.environmentId, thread.id)),
+        )}
+      />
+    ),
     renderTrailingContent: (thread) => (
       <>
         <ThreadSearchPullRequestNumber
