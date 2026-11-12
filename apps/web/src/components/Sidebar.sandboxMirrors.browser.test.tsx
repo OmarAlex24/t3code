@@ -415,7 +415,7 @@ describe("sandbox chats in the sidebar", () => {
     await page.screenshot({ path: "__screenshots__/sandbox-state-stopped-hover.png" });
   });
 
-  it("lists a stopped sandbox's chat that was mid-run with the active threads, not in Working", async () => {
+  it("lists a stopped sandbox's chat that was mid-run, or a mirror's leftover queue, with the active threads, not in Working", async () => {
     using stack = new DisposableStack();
     const previousSettings = getClientSettings();
     stack.defer(() => __setClientSettingsForTests(previousSettings));
@@ -426,6 +426,8 @@ describe("sandbox chats in the sidebar", () => {
     });
     const STARTING = EnvironmentId.make("sandbox-starting");
     const startingThreadId = ThreadId.make("thread-starting");
+    const AWAY = EnvironmentId.make("sandbox-away");
+    const awayThreadId = ThreadId.make("thread-away");
     mocks.sandboxes = [
       // Stopped at its running limit while a turn ran: its own thread still reads as running.
       sandbox({
@@ -454,6 +456,14 @@ describe("sandbox chats in the sidebar", () => {
         runningSince: null,
         resumingSince: "2026-11-10T11:00:00.000Z",
       }),
+      // Running, but its own thread is not listed; the mirror holds messages it never ran.
+      sandbox({
+        instanceId: "instance-4",
+        environmentId: AWAY,
+        threadId: awayThreadId,
+        sandboxId: "bx_3hw8qrst",
+        hostProjectId: ProjectId.make("project-host"),
+      }),
     ];
     vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
     vi.mocked(useProjects).mockReturnValue([
@@ -463,10 +473,13 @@ describe("sandbox chats in the sidebar", () => {
       project(REMOTE, "project-remote", "OmarAlex24/remote-stack"),
     ]);
     await page.viewport(1100, 640);
-    const running = (thread: EnvironmentThreadShell): EnvironmentThreadShell => ({
+    const running = (
+      thread: EnvironmentThreadShell,
+      status: "running" | "queued" = "running",
+    ): EnvironmentThreadShell => ({
       ...thread,
       runtime: {
-        status: "running",
+        status,
         activeRunId: null,
         providerInstanceId: ProviderInstanceId.make("claudeAgent"),
         providerName: "Claude",
@@ -479,6 +492,7 @@ describe("sandbox chats in the sidebar", () => {
       running(shell(HOST, legacyThreadId, "project-host", "Add retries to the importer")),
       running(shell(STARTING, startingThreadId, "project-starting", "Port the search index")),
       running(shell(REMOTE, remoteThreadId, "project-remote", "Runs on a paired Mac")),
+      running(shell(HOST, awayThreadId, "project-host", "Write the release notes"), "queued"),
     ]);
 
     await using _screen = await render(
@@ -507,6 +521,14 @@ describe("sandbox chats in the sidebar", () => {
       const row = page.getByText(title).first().element().closest("li[data-thread-item]")!;
       expect(row.textContent).toContain("Stopped");
     }
+    await expect.element(page.getByText("Write the release notes").first()).toBeVisible();
+    expect(above("Write the release notes")).toBe(true);
+    const away = page
+      .getByText("Write the release notes")
+      .first()
+      .element()
+      .closest("li[data-thread-item]")!;
+    expect(away.querySelector(".motion-safe\\:animate-status-pulse")).toBeNull();
     await page.screenshot({ path: "__screenshots__/sandbox-stopped-active.png" });
 
     await userEvent.click(page.getByTestId("sidebar-working-shelf-toggle"));

@@ -86,6 +86,7 @@ import {
   SANDBOX_STOPPED_LABEL,
   type SandboxRowState,
   sandboxRowPhase,
+  sandboxRowThread,
 } from "../../state/sandboxThreads";
 import {
   animateSidebarLayoutChanges,
@@ -779,7 +780,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     : null;
 
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const status = resolveSidebarThreadStatus(thread);
+  const status = resolveSidebarThreadStatus(sandboxRowThread(thread, props.sandbox));
   const sandboxPhase = sandboxRowPhase(props.sandbox);
   const sandboxProvider = props.sandbox?.provider ?? null;
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
