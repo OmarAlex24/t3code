@@ -47,7 +47,23 @@ export interface SandboxRowState {
   readonly state: SandboxLifecycleState;
   /** When a resume began, while one runs. */
   readonly resumingSince: string | null;
+  /** The row is the host thread the bridge drives, standing for the sandbox's own thread. */
+  readonly onHost: boolean;
 }
+
+/**
+ * A thread as its row reads it. A host mirror's queue can hold messages for days that never ran,
+ * while nothing runs on the sandbox; only that queue drops, so a bridge turn still reads as work.
+ */
+export const sandboxRowThread = <
+  T extends { readonly runtime: { readonly status: string } | null },
+>(
+  thread: T,
+  row: SandboxRowState | null,
+): T =>
+  row?.onHost === true && thread.runtime?.status === "queued"
+    ? { ...thread, runtime: null }
+    : thread;
 
 export const SANDBOX_STOPPED_LABEL = "Sandbox stopped";
 export const SANDBOX_RESUME_HINT = "send a message to resume it";
@@ -82,13 +98,14 @@ export const sandboxRowStates = (
       provider: sandbox.provider,
       state: sandbox.state,
       resumingSince: sandbox.resumingSince ?? null,
+      onHost: false,
     };
     // One that answers as the host would claim every host thread.
     if (sandbox.environmentId !== null && sandbox.environmentId !== provisionerEnvironmentId) {
       byEnvironment.set(sandbox.environmentId, row);
     }
     if (sandbox.threadId !== undefined && chatsOnHost(sandbox)) {
-      byHostThread.set(sandbox.threadId, row);
+      byHostThread.set(sandbox.threadId, { ...row, onHost: true });
     }
   }
   return (threadRef) =>

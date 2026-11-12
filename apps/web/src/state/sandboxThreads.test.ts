@@ -27,6 +27,7 @@ import {
   sandboxMirrorTitleUpdates,
   sandboxRowPhase,
   sandboxRowStates,
+  sandboxRowThread,
   sandboxesToPair,
   withSandboxHostMirrors,
 } from "./sandboxThreads";
@@ -83,9 +84,9 @@ describe("sandboxRowStates", () => {
 
   it("gives the sandbox's own thread and the host thread its bridge drives the same state", () => {
     const rows = sandboxRowStates([linked({ state: "stopped" })], HOST);
-    const stopped = { provider: "boat", state: "stopped", resumingSince: null };
+    const stopped = { provider: "boat", state: "stopped", resumingSince: null, onHost: false };
     expect(rows(sandboxRef)).toEqual(stopped);
-    expect(rows(hostRef)).toEqual(stopped);
+    expect(rows(hostRef)).toEqual({ ...stopped, onHost: true });
     // Any thread on the sandbox, such as a subagent's, runs on that machine too.
     expect(rows({ environmentId: SANDBOX, threadId: ThreadId.make("child") })).toEqual(stopped);
   });
@@ -102,7 +103,7 @@ describe("sandboxRowStates", () => {
     // A launch's host thread shows its sandbox's provider from the send on.
     expect(
       sandboxRowStates([record({ provider: "boat", state: "provisioning" })], HOST)(hostRef),
-    ).toEqual({ provider: "boat", state: "provisioning", resumingSince: null });
+    ).toEqual({ provider: "boat", state: "provisioning", resumingSince: null, onHost: true });
     const other = { environmentId: EnvironmentId.make("other"), threadId };
     expect(sandboxRowStates([linked()], HOST)(other)).toBeNull();
     // A record that answers as the host must not claim the host's own threads.
@@ -114,11 +115,35 @@ describe("sandboxRowStates", () => {
   });
 });
 
+describe("sandboxRowThread", () => {
+  const rows = sandboxRowStates(
+    [record({ state: "running", hostProjectId: ProjectId.make("project-host") })],
+    HOST,
+  );
+  const withRun = (status: string) => ({ runtime: { status } });
+
+  it("drops a host mirror's queue, which can sit for days, and keeps the turns it runs", () => {
+    const mirror = rows({ environmentId: HOST, threadId });
+    expect(sandboxRowThread(withRun("queued"), mirror).runtime).toBeNull();
+    for (const status of ["preparing", "starting", "running", "waiting", "idle", "failed"]) {
+      const thread = withRun(status);
+      expect(sandboxRowThread(thread, mirror)).toBe(thread);
+    }
+  });
+
+  it("keeps the runs of the sandbox's own thread and of other threads", () => {
+    const own = withRun("running");
+    expect(sandboxRowThread(own, rows({ environmentId: SANDBOX, threadId }))).toBe(own);
+    expect(sandboxRowThread(own, null)).toBe(own);
+  });
+});
+
 describe("sandboxRowPhase", () => {
   const row = (state: SandboxRecord["state"], resumingSince: string | null = null) => ({
     provider: "boat" as const,
     state,
     resumingSince,
+    onHost: false,
   });
 
   it("is starting during a resume, stopped while stopped, and nothing otherwise", () => {
