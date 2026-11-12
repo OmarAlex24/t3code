@@ -1302,6 +1302,13 @@ export default function ChatView(props: ChatViewProps) {
       store.clearComposerContent(draftId);
       store.markDraftThreadPromoting(draftId, threadRef);
       store.finalizePromotedDraftThread(draftId);
+      // The host thread runs the sandbox's model on the bridge; the draft's local pick would
+      // read as a switch off it.
+      const moved = store.getComposerDraft(threadRef);
+      const pick = moved?.activeProvider
+        ? moved.modelSelectionByProvider[moved.activeProvider]
+        : undefined;
+      if (pick !== undefined) store.releaseModelSelection(threadRef, pick);
     },
   });
   // A sandbox chat's host thread shows its sandbox's setup while its first message waits.

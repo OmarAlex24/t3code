@@ -151,6 +151,19 @@ describe("pending context handoff", () => {
     expect(resolvePendingHandoff(projection, { instanceId: from, model: "source" }, [])).toBeNull();
     expect(resolvePendingHandoff(projection, { instanceId: from, model: "other" }, [])).toBeNull();
   });
+  it("stays hidden for a switch onto or off the sandbox bridge, which carries no history", () => {
+    const bridge = ProviderInstanceId.make("sandboxes");
+    const sandboxChat = {
+      ...projection,
+      runs: [{ ...projection.runs[0]!, ...run("source", 1, bridge, "claude-opus-5-5") }],
+    };
+    expect(
+      resolvePendingHandoff(sandboxChat, { instanceId: to, model: "claude-opus-5-5" }, []),
+    ).toBeNull();
+    expect(
+      resolvePendingHandoff(projection, { instanceId: bridge, model: "claude-opus-5-5" }, []),
+    ).toBeNull();
+  });
   it("stays hidden while the thread's timeline is empty", () => {
     const empty = { ...projection, visibleTurnItems: [] };
     expect(resolvePendingHandoff(empty, { instanceId: to, model: "first" }, [])).toBeNull();

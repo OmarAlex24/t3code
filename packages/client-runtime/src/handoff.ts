@@ -7,6 +7,7 @@ import type {
   ServerProvider,
   ServerProviderModel,
 } from "@t3tools/contracts";
+import { isInternalProviderInstance } from "@t3tools/contracts";
 import {
   getModelSelectionStringOptionValue,
   getProviderOptionCurrentValue,
@@ -39,6 +40,12 @@ export function resolvePendingHandoff(
       (run.startedAt !== null || (run.status === "starting" && run.contextHandoffId !== null)),
   )?.modelSelection;
   if (from === undefined || selection == null) return null;
+  // The sandbox bridge carries no history: the sandbox's agent keeps its own.
+  if (
+    isInternalProviderInstance(from.instanceId) ||
+    isInternalProviderInstance(selection.instanceId)
+  )
+    return null;
   const source = providers.find((provider) => provider.instanceId === from.instanceId);
   const target = providers.find((provider) => provider.instanceId === selection.instanceId);
   const needsHandoff =

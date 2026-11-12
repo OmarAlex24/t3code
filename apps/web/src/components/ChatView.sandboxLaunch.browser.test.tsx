@@ -1,3 +1,4 @@
+import { ProviderInstanceId } from "@t3tools/contracts";
 import type * as Context from "effect/Context";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -5,13 +6,15 @@ import { page } from "vite-plus/test/browser";
 import "~/index.css";
 // The route loads ChatView lazily; importing it here keeps its first transform out of the test.
 import "~/components/ChatView";
-import type { FakeDriver } from "../../test/fakeEnvironment";
+import { useComposerDraftStore } from "~/composerDraftStore";
+import { ENVIRONMENT_ID, type FakeDriver } from "../../test/fakeEnvironment";
 import {
   launch,
   openChat,
   sandbox,
   SCREENSHOTS,
   sidebarRow,
+  threadId,
 } from "../../test/sandboxLaunchScenario";
 
 // The socket is the only fake layer; see test/appScenarios.renders.tsx.
@@ -53,5 +56,24 @@ describe("a sandbox chat's first message", () => {
     await page
       .elementLocator(row)
       .screenshot({ path: `${SCREENSHOTS}/sidebar-row-after-send.png` });
+  });
+
+  it("shows no context handoff once the launch hands the draft, with its model pick, over", async () => {
+    // The draft's pick of a provider on this computer moves onto the host thread with it.
+    const hostRef = { environmentId: ENVIRONMENT_ID, threadId };
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearDraftThread(hostRef),
+    };
+    useComposerDraftStore
+      .getState()
+      .setModelSelection(
+        hostRef,
+        { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        { explicit: true },
+      );
+    await using _chat = await openChat("released", { sandboxes: [sandbox("running")] });
+
+    await expect.element(page.getByText(/races the session cookie/u).first()).toBeVisible();
+    await expect.element(page.getByText("Context handoff pending")).not.toBeInTheDocument();
   });
 });
