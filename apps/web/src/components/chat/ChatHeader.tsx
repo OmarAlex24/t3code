@@ -43,7 +43,6 @@ import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
 import { SandboxThreadMenu } from "./SandboxThreadMenu";
-import { ThreadViewToggle } from "./ThreadViewToggle";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -58,8 +57,6 @@ interface ChatHeaderProps {
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
-  /** Shows the Chat | Milestones toggle; null when the shortcut is unbound. */
-  threadViewShortcutLabel?: string | null | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -85,7 +82,6 @@ export const ChatHeader = memo(function ChatHeader({
   onNewThreadInProject,
   onOpenProjectSettings,
   onFindInThread,
-  threadViewShortcutLabel,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -398,9 +394,6 @@ export const ChatHeader = memo(function ChatHeader({
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
-      {threadViewShortcutLabel === undefined ? null : (
-        <ThreadViewToggle threadRef={activeThreadRef} shortcutLabel={threadViewShortcutLabel} />
-      )}
       <SandboxThreadMenu threadRef={activeThreadRef} />
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
     </div>

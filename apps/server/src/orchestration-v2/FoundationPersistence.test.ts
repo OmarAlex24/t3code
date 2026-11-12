@@ -1154,6 +1154,169 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect("replays and reads a log the removed milestones feature wrote", () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const eventStore = yield* EventStore.EventStoreV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionReplay.ProjectionReplay;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:foundation-legacy-milestones");
+      yield* eventSink.write({
+        events: [
+          threadCreatedEvent({
+            id: "event:foundation-legacy-milestones:thread",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+        ],
+      });
+
+      // Rows exactly as the milestones feature stored them.
+      const at = "2026-11-10T19:00:00.000Z";
+      const anchor = (item: string) => ({ runId: "run:legacy", itemId: item });
+      const itemBase = (id: string, ordinal: number) => ({
+        id,
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        status: "completed",
+        startedAt: at,
+        completedAt: at,
+        updatedAt: at,
+        type: "milestone",
+      });
+      const legacyRows = [
+        [
+          "turn-item.updated",
+          {
+            ...itemBase("item:legacy-milestone:plan", 1),
+            title: "Design tokens",
+            event: "plan",
+            milestoneId: "m1",
+            setId: "s1",
+            planned: [
+              { id: "m1", title: "Design tokens" },
+              { id: "m2", title: "Swap middleware" },
+            ],
+          },
+        ],
+        [
+          "thread.milestones-updated",
+          {
+            milestones: [
+              {
+                id: "m1",
+                setId: "s1",
+                title: "Design tokens",
+                status: "active",
+                startedAt: at,
+                completedAt: null,
+                anchors: {
+                  planned: anchor("item:legacy-milestone:plan"),
+                  started: anchor("item:legacy-milestone:plan"),
+                },
+              },
+              {
+                id: "m2",
+                setId: "s1",
+                title: "Swap middleware",
+                status: "planned",
+                startedAt: null,
+                completedAt: null,
+                anchors: { planned: anchor("item:legacy-milestone:plan") },
+              },
+            ],
+          },
+        ],
+        [
+          "turn-item.updated",
+          {
+            ...itemBase("item:legacy-milestone:post", 2),
+            title: "Design tokens",
+            event: "post",
+            milestoneId: "m1",
+            setId: "s1",
+            note: "Rotation diagram",
+            attachments: [
+              {
+                type: "image",
+                id: "legacy-milestone-post",
+                name: "rotation.png",
+                mimeType: "image/png",
+                sizeBytes: 1234,
+              },
+            ],
+          },
+        ],
+        [
+          "subagent.updated",
+          {
+            id: "subagent:legacy-milestones",
+            threadId,
+            runId: null,
+            parentNodeId: "node:legacy-milestones",
+            origin: "app_owned",
+            createdBy: "agent",
+            driver: providerDriver,
+            providerInstanceId,
+            providerThreadId: null,
+            childThreadId: null,
+            nativeTaskRef: null,
+            prompt: "Swap the middleware",
+            title: "Middleware",
+            model: modelSelection.model,
+            status: "completed",
+            milestoneId: "m1",
+            result: "done",
+            startedAt: at,
+            completedAt: at,
+            updatedAt: at,
+          },
+        ],
+      ] as const;
+      for (const [index, [type, payload]] of legacyRows.entries()) {
+        yield* sql`INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          actor_kind, payload_json, metadata_json, application_event_version
+        ) VALUES (
+          ${`event:foundation-legacy-milestones:${index}`}, 'thread', ${threadId}, ${index + 1},
+          ${type}, ${at}, 'server', ${yield* encodeJson(payload)},
+          ${yield* encodeJson({ providerInstanceId })}, 2
+        )`;
+      }
+
+      const stored = yield* eventStore.read({ threadId }).pipe(Stream.runCollect);
+      assert.deepEqual(
+        Array.from(stored, ({ event }) => event.type),
+        [
+          "thread.created",
+          "turn-item.updated",
+          "thread.milestones-updated",
+          "turn-item.updated",
+          "subagent.updated",
+        ],
+      );
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      const projection = yield* projectionStore.getThreadProjection(threadId);
+      assert.deepEqual(
+        projection.turnItems.map((item) => item.type),
+        ["milestone", "milestone"],
+      );
+      assert.notProperty(projection.subagents[0], "milestoneId");
+      assert.equal((yield* projectionStore.getTimelinePage(threadId, { limit: 20 })).totalItems, 2);
+      assert.deepEqual(yield* projectionStore.getThreadAttachmentIds(threadId), [
+        "legacy-milestone-post",
+      ]);
+    }),
+  );
+
   it.effect("prunes covered history, imported v1 events, and legacy receipts", () =>
     Effect.gen(function* () {
       const eventSink = yield* EventSink.EventSinkV2;

@@ -114,6 +114,14 @@ const LATE_DEFAULT_KEYBINDINGS: ReadonlyArray<{
   },
 ];
 
+// Startup sync wrote these defaults into existing configs before their features were removed.
+const RETIRED_KEYBINDING_COMMANDS: ReadonlySet<unknown> = new Set(["milestones.toggle"]);
+
+const isRetiredKeybindingEntry = (entry: unknown) =>
+  typeof entry === "object" &&
+  entry !== null &&
+  RETIRED_KEYBINDING_COMMANDS.has((entry as { readonly command?: unknown }).command);
+
 function keybindingShortcutContext(rule: KeybindingRule): string | null {
   const parsed = parseKeybindingShortcut(rule.key);
   if (!parsed) return null;
@@ -335,6 +343,7 @@ const make = Effect.gen(function* () {
     const keybindings: KeybindingRule[] = [];
     const issues: ServerConfigIssue[] = [];
     for (const [index, entry] of decodedEntries.value.entries()) {
+      if (isRetiredKeybindingEntry(entry)) continue;
       const decodedRule = decodeKeybindingRuleExit(entry);
       if (decodedRule._tag === "Failure") {
         const detail = Cause.pretty(decodedRule.cause);

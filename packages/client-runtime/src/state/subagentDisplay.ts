@@ -113,27 +113,6 @@ export function resolveSubagentMetadata(input: {
   return { modelLabel, modelSlug: slug ?? model ?? null, workspace };
 }
 
-const LEADING_TAG_BLOCK = /^\s*(?:<|&lt;)([a-z][\w-]*)(?:>|&gt;)[\s\S]*?(?:<|&lt;)\/\1(?:>|&gt;)/iu;
-
-/** Claude opens a subagent's result with a `<tools-used-before-summary>` block; it isn't the result. */
-function withoutLeadingTagBlocks(text: string): string {
-  let rest = text;
-  for (let match = LEADING_TAG_BLOCK.exec(rest); match; match = LEADING_TAG_BLOCK.exec(rest)) {
-    rest = rest.slice(match[0].length);
-  }
-  return rest;
-}
-
-/** A subagent's result or progress as one plain line, without markdown or leading tag blocks. */
-export function plainSubagentDetail(text: string): string {
-  return withoutLeadingTagBlocks(text)
-    .replace(/\[([^\]]+)\]\([^)]*\)/gu, "$1")
-    .replace(/`/gu, "")
-    .replace(/^[ \t]*(?:[-*]|#{1,6})[ \t]+/gmu, "")
-    .replace(/\s+/gu, " ")
-    .trim();
-}
-
 export function subagentDetailPreview(input: {
   readonly status: OrchestrationV2TurnItemStatus;
   readonly result?: string | null | undefined;
@@ -142,9 +121,7 @@ export function subagentDetailPreview(input: {
   const terminal = isTerminalSubagentStatus(input.status);
   const preferred = terminal ? input.result : input.progress;
   const fallback = terminal ? input.progress : input.result;
-  const clean = (text: string | null | undefined) =>
-    text === null || text === undefined ? text : withoutLeadingTagBlocks(text).trimStart();
-  const detail = clean(preferred) || clean(fallback) || "";
+  const detail = preferred?.trimStart() || fallback?.trimStart() || "";
   if (detail.length <= 280) return detail.trimEnd().replace(/\s+/gu, " ") || null;
   const whitespace = /\s+/uy;
   let compact = "";

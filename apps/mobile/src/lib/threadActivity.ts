@@ -2387,7 +2387,8 @@ export function buildThreadFeed(
     const row = visibleTurnItems[index]!;
     const item = row.item;
     if (turnItemIsWorkspacePreparation(item) && !item.deferredWork) continue;
-    if (item.type === "todo_list" || item.type === "checkpoint") continue;
+    if (item.type === "todo_list" || item.type === "checkpoint" || item.type === "milestone")
+      continue;
     if (
       item.type === "user_message" &&
       item.inputIntent === "queued_turn" &&

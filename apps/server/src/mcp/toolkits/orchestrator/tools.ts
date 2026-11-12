@@ -36,8 +36,6 @@ import {
   OrchestratorMcpThreadWaitResult,
   ThreadMetadataMcpUpdateInput,
   ThreadMetadataMcpUpdateResult,
-  ThreadMilestoneMcpInput,
-  ThreadMilestoneMcpResult,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import { McpSchema, Tool, Toolkit } from "effect/ai";
@@ -52,7 +50,6 @@ import * as RemoteDelegation from "../../../peer/RemoteDelegation.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
-import * as ThreadMilestoneMcpService from "../../ThreadMilestoneMcpService.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -73,12 +70,6 @@ const threadMetadataDependencies = [
   McpInvocationContext.McpInvocationContext,
   ThreadManagementService.ThreadManagementService,
   ThreadMetadataMcpService.ThreadMetadataMcpService,
-];
-
-const milestoneDependencies = [
-  McpInvocationContext.McpInvocationContext,
-  ThreadManagementService.ThreadManagementService,
-  ThreadMilestoneMcpService.ThreadMilestoneMcpService,
 ];
 
 const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
@@ -171,20 +162,6 @@ const BackgroundWaitTool = Tool.make("t3_background_wait", {
   // Only marks which tasks keep the thread Working; Claude Plan mode blocks tools without this.
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
-
-// Every word here is paid on each turn; keep it terse (evals --context measures it).
-const MilestoneTool = Tool.make("t3_milestone", {
-  description:
-    "Phases of long multi-phase work. plan: titles, first starts. start: next, id or title; note closes active. done: id?, note. change (title?), drop: id, note=why. post: note, images (abs paths).",
-  parameters: ThreadMilestoneMcpInput,
-  success: ThreadMilestoneMcpResult,
-  failure: OrchestratorMcpFailure,
-  failureMode: "return",
-  dependencies: milestoneDependencies,
-})
-  .annotate(Tool.Title, "Mark a milestone")
-  .annotate(Tool.Destructive, false)
-  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromSubagents);
 
 const ScheduleTaskTool = Tool.make("schedule_task", {
   description:
@@ -386,7 +363,6 @@ export const OrchestratorToolkit = Toolkit.make(
   TaskCancelTool,
   WorkflowStopTool,
   BackgroundWaitTool,
-  MilestoneTool,
   ScheduleTaskTool,
   ListScheduledTasksTool,
   DeleteScheduledTaskTool,

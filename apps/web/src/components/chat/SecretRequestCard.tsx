@@ -22,51 +22,22 @@ import type {
   SecretProviderId,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import {
-  CheckIcon,
-  ChevronDownIcon,
-  ClockIcon,
-  ExternalLinkIcon,
-  LockIcon,
-  MinusIcon,
-  ShieldCheckIcon,
-} from "lucide-react";
-import { type FormEvent, type ReactNode, useId, useRef, useState } from "react";
+import { CheckIcon, ExternalLinkIcon, LockIcon, MinusIcon, ShieldCheckIcon } from "lucide-react";
+import { useId, useRef, useState, type FormEvent } from "react";
 
-import { cn } from "~/lib/utils";
 import { isSecretsFeatureEnabled } from "../../env";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { SecretSourceSelect } from "../settings/SecretSourceInput";
 import { WorkLogRow } from "./WorkLog";
 
-/** Who is asking, for a card shown away from the thread that asked. */
-export interface SecretRequestAttribution {
-  readonly icon: ReactNode;
-  readonly title: string;
-  readonly subtitle: string;
-}
-
-interface CardChrome {
-  readonly attribution?: SecretRequestAttribution | undefined;
-  /** Points the card out after you chose to answer it elsewhere. */
-  readonly flash?: boolean | undefined;
-  /** Folds the card to its header and an Answer button; the draft survives. */
-  readonly collapsed?: boolean | undefined;
-  readonly onCollapse?: (() => void) | undefined;
-  readonly onExpand?: (() => void) | undefined;
-}
-
-export function SecretRequestCard(
-  props: {
-    readonly environmentId: EnvironmentId;
-    readonly item: SecretRequestItem;
-    readonly visibility: OrchestrationV2ProjectedTurnItem["visibility"];
-  } & CardChrome,
-) {
+export function SecretRequestCard(props: {
+  readonly environmentId: EnvironmentId;
+  readonly item: SecretRequestItem;
+  readonly visibility: OrchestrationV2ProjectedTurnItem["visibility"];
+}) {
   const { item } = props;
   const display = secretRequestDisplay(item, props.visibility);
   if (display.kind === "answered" || display.kind === "pending-elsewhere") {
@@ -88,29 +59,7 @@ export function SecretRequestCard(
       />
     );
   }
-  return <PendingSecretRequestForm {...props} />;
-}
-
-function AttributionHeader(props: {
-  readonly attribution: SecretRequestAttribution;
-  readonly children: ReactNode;
-}) {
-  return (
-    <div className="flex min-w-0 items-start gap-2.5">
-      {props.attribution.icon}
-      <div className="min-w-0 flex-1 leading-tight">
-        <b className="block truncate text-sm font-medium text-foreground">
-          {props.attribution.title}
-        </b>
-        {props.attribution.subtitle ? (
-          <span className="block truncate text-xs text-muted-foreground">
-            {props.attribution.subtitle}
-          </span>
-        ) : null}
-      </div>
-      {props.children}
-    </div>
-  );
+  return <PendingSecretRequestForm environmentId={props.environmentId} item={item} />;
 }
 
 const NO_SOURCES: ReadonlyArray<SecretRequestSource> = [];
@@ -122,12 +71,10 @@ function useSecretRequestSources(environmentId: EnvironmentId) {
     : NO_SOURCES;
 }
 
-function PendingSecretRequestForm(
-  props: {
-    readonly environmentId: EnvironmentId;
-    readonly item: SecretRequestItem;
-  } & CardChrome,
-) {
+function PendingSecretRequestForm(props: {
+  readonly environmentId: EnvironmentId;
+  readonly item: SecretRequestItem;
+}) {
   const { item } = props;
   const inputId = useId();
   const errorId = useId();
@@ -181,29 +128,11 @@ function PendingSecretRequestForm(
   const draft = source === null ? secret : reference;
   const link = secretRequestLink(item);
   const describedBy = error !== null ? `${privacyId} ${errorId}` : privacyId;
-  const { attribution } = props;
-  const frame = cn(
-    "flex min-w-0 flex-col rounded-xl border bg-card",
-    attribution === undefined ? "gap-3 border-border/60 p-4" : "gap-2.75 p-3 pb-2.5 shadow-lg/5",
-    props.flash && "border-warning/60",
-  );
-
-  if (attribution !== undefined && props.collapsed) {
-    return (
-      <div data-v2-item-type={item.type} className={frame}>
-        <AttributionHeader attribution={attribution}>
-          <Button size="xs" variant="outline" onClick={props.onExpand}>
-            Answer
-          </Button>
-        </AttributionHeader>
-      </div>
-    );
-  }
 
   return (
     <form
       data-v2-item-type={item.type}
-      className={frame}
+      className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/60 bg-card p-4"
       onSubmit={onSubmit}
       autoComplete="off"
       // On click, not pointerdown: the mousedown that follows a pointerdown
@@ -216,25 +145,6 @@ function PendingSecretRequestForm(
         document.getElementById(inputId)?.focus();
       }}
     >
-      {attribution === undefined ? null : (
-        <AttributionHeader attribution={attribution}>
-          <Badge variant="warning" size="lg">
-            <ClockIcon />
-            Needs you
-          </Badge>
-          {props.onCollapse === undefined ? null : (
-            <Button
-              type="button"
-              size="icon-xs"
-              variant="ghost"
-              aria-label="Hide"
-              onClick={props.onCollapse}
-            >
-              <ChevronDownIcon />
-            </Button>
-          )}
-        </AttributionHeader>
-      )}
       <div className="flex min-w-0 flex-col gap-1">
         <label htmlFor={inputId} className="text-sm font-medium text-foreground">
           {item.label}

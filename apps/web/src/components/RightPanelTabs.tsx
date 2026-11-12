@@ -36,7 +36,6 @@ import { restrictToFirstScrollableAncestor, restrictToHorizontalAxis } from "@dn
 import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  BotIcon,
   Smartphone,
   ChevronDown,
   ChevronLeft,
@@ -597,8 +596,6 @@ function surfaceTitle(
       return surface.title ?? surface.target?.name ?? "Device";
     case "side-chat":
       return "Side chat";
-    case "subagent":
-      return "Subagent";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -689,8 +686,6 @@ function SurfaceIcon({
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
     case "side-chat":
       return <SideChatTabIcon environmentId={environmentId} threadId={surface.threadId} />;
-    case "subagent":
-      return <SideChatTabIcon environmentId={environmentId} threadId={surface.threadId} subagent />;
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-3 shrink-0" />
@@ -715,11 +710,7 @@ function sideChatTabState(shell: EnvironmentThreadShell | null) {
 }
 
 // Static dots: a side chat tab can stay open for a whole run.
-function SideChatTabIcon(props: {
-  environmentId: EnvironmentId | null;
-  threadId: ThreadId;
-  subagent?: boolean;
-}) {
+function SideChatTabIcon(props: { environmentId: EnvironmentId | null; threadId: ThreadId }) {
   const state = sideChatTabState(
     useQuietThreadShell(
       props.environmentId === null ? null : scopeThreadRef(props.environmentId, props.threadId),
@@ -727,11 +718,7 @@ function SideChatTabIcon(props: {
   );
   return (
     <>
-      {props.subagent ? (
-        <BotIcon className="size-3 shrink-0" />
-      ) : (
-        <MessagesSquare className="size-3 shrink-0" />
-      )}
+      <MessagesSquare className="size-3 shrink-0" />
       {state === null ? null : (
         <span
           className={cn(
@@ -916,7 +903,7 @@ function RightPanelTab(
     disabled: props.dragDisabled,
   });
   const sideChatShell = useQuietThreadShell(
-    (surface.kind === "side-chat" || surface.kind === "subagent") && props.environmentId !== null
+    surface.kind === "side-chat" && props.environmentId !== null
       ? scopeThreadRef(props.environmentId, surface.threadId)
       : null,
   );

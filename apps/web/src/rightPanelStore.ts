@@ -22,7 +22,6 @@ const RIGHT_PANEL_KINDS = [
   "pull-request",
   "pull-requests",
   "side-chat",
-  "subagent",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -79,11 +78,10 @@ export type RightPanelSurface =
       detailTab?: PullRequestDetailTab;
     }
   | { id: "pull-requests"; kind: "pull-requests" }
-  | { id: `side-chat:${string}`; kind: "side-chat"; threadId: ThreadId }
-  | { id: `subagent:${string}`; kind: "subagent"; threadId: ThreadId };
+  | { id: `side-chat:${string}`; kind: "side-chat"; threadId: ThreadId };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 14;
+const RIGHT_PANEL_STORAGE_VERSION = 15;
 
 export const PULL_REQUESTS_PANEL_REF = scopeThreadRef(
   EnvironmentId.make("pull-requests-panel"),
@@ -127,11 +125,9 @@ interface RightPanelStoreState {
   ) => boolean;
   open: (
     ref: ScopedThreadRef,
-    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "side-chat" | "subagent">,
+    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "side-chat">,
   ) => void;
   openSideChat: (ref: ScopedThreadRef, threadId: ThreadId) => void;
-  /** Opens a subagent's chat (a child thread in the same environment) beside `ref`. */
-  openSubagent: (ref: ScopedThreadRef, threadId: ThreadId) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
@@ -195,7 +191,7 @@ interface RightPanelStoreState {
   toggleVisibility: (ref: ScopedThreadRef) => void;
   toggle: (
     ref: ScopedThreadRef,
-    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "side-chat" | "subagent">,
+    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "side-chat">,
   ) => void;
   setThreadPanelOpen: (
     ref: ScopedThreadRef,
@@ -218,10 +214,7 @@ const DEFAULT_THREAD_PANEL_VISIBILITY: ThreadPanelVisibility = {
 };
 
 const singletonSurface = (
-  kind: Exclude<
-    RightPanelKind,
-    "file" | "preview" | "terminal" | "pull-request" | "side-chat" | "subagent"
-  >,
+  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal" | "pull-request" | "side-chat">,
 ): RightPanelSurface => {
   switch (kind) {
     case "diff":
@@ -509,7 +502,7 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
               const surfaces = Array.isArray(validThreadState?.surfaces)
                 ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
                     const kind = (surface as { kind?: string }).kind;
-                    if (kind === "plan" || kind === "agents") return [];
+                    if (kind === "plan" || kind === "agents" || kind === "subagent") return [];
                     if (
                       (surface.kind === "file" || surface.kind === "files") &&
                       "folderTrail" in surface &&
@@ -744,12 +737,6 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
         set((state) =>
           userAction(state, scopedThreadKey(ref), (current) =>
             upsertSurface(current, { id: `side-chat:${threadId}`, kind: "side-chat", threadId }),
-          ),
-        ),
-      openSubagent: (ref, threadId) =>
-        set((state) =>
-          userAction(state, scopedThreadKey(ref), (current) =>
-            upsertSurface(current, { id: `subagent:${threadId}`, kind: "subagent", threadId }),
           ),
         ),
       renameDevice: (ref, surfaceId, title) =>

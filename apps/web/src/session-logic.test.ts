@@ -1221,7 +1221,7 @@ describe("native provider presentation in the v2 timeline", () => {
       .toEqual(expectedMessageIds);
   });
 
-  it("excludes checkpoint-only work from the timeline", () => {
+  it("excludes checkpoint-only work and retired milestone items from the timeline", () => {
     const message: OrchestrationV2TurnItem = {
       ...base,
       type: "assistant_message",
@@ -1237,8 +1237,17 @@ describe("native provider presentation in the v2 timeline", () => {
       scopeId: CheckpointScopeId.make("scope"),
       files: [],
     };
+    const milestone: OrchestrationV2TurnItem = {
+      ...base,
+      id: TurnItemId.make("milestone"),
+      type: "milestone",
+      title: "Swap the middleware",
+      event: "started",
+      milestoneId: "m2",
+      setId: "s1",
+    };
     const entries = deriveTimelineEntriesFromVisibleTurnItems({
-      visibleTurnItems: [visible(message), visible(checkpoint)],
+      visibleTurnItems: [visible(message), visible(checkpoint), visible(milestone)],
       optimisticMessages: [],
     });
     expect(entries.map((entry) => entry.kind)).toEqual(["message"]);
@@ -1389,48 +1398,6 @@ describe("HTML renders in the timeline", () => {
       "work",
       "message",
     ]);
-  });
-
-  it("shows a marked milestone as a divider outside the fold, hiding only the call that worked", () => {
-    const call = (id: string, second: number, output: unknown): OrchestrationV2TurnItem => ({
-      ...renderCall("completed", output),
-      ...base(id, second),
-      type: "dynamic_tool",
-      toolName: "mcp__t3-code__t3_milestone",
-      input: { action: "plan", titles: ["Scope"] },
-      output,
-    });
-    const marked = call("marked", 1, {
-      content: [{ type: "text", text: '{"state":"m1 active"}' }],
-    });
-    const rejected = call("rejected", 2, {
-      content: [{ type: "text", text: '{"code":"invalid_request","message":"No milestone m9."}' }],
-      isError: true,
-    });
-    const milestone: OrchestrationV2TurnItem = {
-      ...base("milestone", 3),
-      type: "milestone",
-      event: "plan",
-      milestoneId: "m1",
-      setId: "s1",
-      title: "Scope",
-      planned: [{ id: "m1", title: "Scope" }],
-    };
-    const entries = turn(marked).flatMap((entry) =>
-      entry.id === "before" ? [] : entry.id === "after" ? [] : [entry],
-    );
-    const withMilestone = deriveTimelineEntriesFromVisibleTurnItems({
-      visibleTurnItems: [marked, rejected, milestone].map(visible),
-      optimisticMessages: [],
-    });
-    expect(entries.map((entry) => entry.id)).toEqual(["prompt", "reply"]);
-    expect(withMilestone.map((entry) => [entry.id, entry.kind])).toEqual([
-      ["rejected", "work"],
-      ["milestone", "event"],
-    ]);
-    expect(rowsFor([...entries.slice(0, 1), ...withMilestone, ...entries.slice(1)], false)).toEqual(
-      ["message", "turn-fold", "event", "message"],
-    );
   });
 
   it("hosts a captured MCP app after its tool row, from any provider's tool", () => {

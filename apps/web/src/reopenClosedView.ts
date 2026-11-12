@@ -157,9 +157,6 @@ export async function reopenClosedView(
     case "side-chat":
       panels.openSideChat(ref, surface.threadId);
       break;
-    case "subagent":
-      panels.openSubagent(ref, surface.threadId);
-      break;
     default:
       panels.open(ref, surface.kind);
   }

@@ -180,6 +180,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
           { key: "mod+j", command: "terminal.toggle" },
           { key: "mod+shift+d+o", command: "terminal.new" },
           { key: "mod+x", command: "invalid.command" },
+          { key: "mod+alt+m", command: "milestones.toggle" },
         ]),
       );
 

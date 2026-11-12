@@ -391,18 +391,6 @@
       "types": "./src/state/threadSubagents.ts",
       "default": "./src/state/threadSubagents.ts"
     },
-    "./state/thread-milestone-graph": {
-      "types": "./src/state/threadMilestoneGraph.ts",
-      "default": "./src/state/threadMilestoneGraph.ts"
-    },
-    "./state/thread-milestone-map": {
-      "types": "./src/state/threadMilestoneMap.ts",
-      "default": "./src/state/threadMilestoneMap.ts"
-    },
-    "./state/thread-milestone-board": {
-      "types": "./src/state/threadMilestoneBoard.ts",
-      "default": "./src/state/threadMilestoneBoard.ts"
-    },
     "./state/thread-undo": {
       "types": "./src/state/threadUndo.ts",
       "default": "./src/state/threadUndo.ts"

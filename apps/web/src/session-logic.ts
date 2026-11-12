@@ -16,8 +16,6 @@ import {
   type TurnItemId,
 } from "@t3tools/contracts";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
-import { t3ToolResultIndicatesFailure } from "@t3tools/client-runtime/t3ToolSummary";
-import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
 import {
   classifyToolActivity,
   collectToolFilePaths,
@@ -239,7 +237,6 @@ const STANDALONE_V2_ITEM_TYPES = new Set<OrchestrationV2ProjectedTurnItem["item"
   "secret_request",
   "link_request",
   "subagent",
-  "milestone",
 ]);
 
 const PERSISTENT_RESOURCE_V2_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
@@ -502,16 +499,6 @@ export interface TimelineEntriesProjection {
   readonly entries: TimelineEntry[];
 }
 
-/** A marked milestone shows as its divider; a rejected call stays so its error is visible. */
-function isMarkedMilestoneCall(item: OrchestrationV2TurnItem): boolean {
-  return (
-    item.type === "dynamic_tool" &&
-    item.status === "completed" &&
-    resolveT3McpToolId(item.toolName) === "t3_milestone" &&
-    !t3ToolResultIndicatesFailure(item.output)
-  );
-}
-
 export function deriveTimelineEntriesFromVisibleTurnItems(
   input: TimelineEntriesInput,
 ): TimelineEntry[] {
@@ -551,8 +538,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
   for (const row of input.visibleTurnItems) {
     const { item } = row;
     if (turnItemIsWorkspacePreparation(item) && !item.deferredWork) continue;
-    if (item.type === "checkpoint") continue;
-    if (isMarkedMilestoneCall(item)) continue;
+    if (item.type === "checkpoint" || item.type === "milestone") continue;
     if (
       item.type === "user_message" &&
       item.inputIntent === "queued_turn" &&
