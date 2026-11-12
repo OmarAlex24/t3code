@@ -9,6 +9,7 @@ import {
   type SandboxProviderInfo,
   type SandboxProviderKind,
   type SandboxRecord,
+  type SandboxSetupSnapshot,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -302,15 +303,21 @@ const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
 
 /**
  * Whether a host thread sent through the sandbox bridge and its sandbox is gone: the chat stays to
- * read, and nothing it sends could reach a sandbox. False while the sandbox list loads.
+ * read, and nothing it sends could reach a sandbox. False while the sandbox list or the thread's
+ * launch loads, and while that launch runs or failed: its sandbox may not be listed yet.
  */
 export const isSandboxlessBridgeThread = (input: {
   readonly sandboxes: ReadonlyArray<SandboxRecord> | null;
   readonly threadRef: ScopedThreadRef;
   readonly instanceId: string | undefined;
   readonly provisionerEnvironmentId: EnvironmentId | null;
+  /** The thread's launch on the host; null when it has none, undefined while that loads. */
+  readonly launch: Pick<SandboxSetupSnapshot, "phase"> | null | undefined;
 }) =>
   input.sandboxes !== null &&
+  input.launch !== undefined &&
+  input.launch?.phase !== "running" &&
+  input.launch?.phase !== "failed" &&
   input.instanceId === bridgeInstanceId &&
   input.threadRef.environmentId === input.provisionerEnvironmentId &&
   !input.sandboxes.some(
