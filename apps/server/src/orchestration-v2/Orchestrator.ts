@@ -103,14 +103,6 @@ import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
 import {
-  applyMilestoneItem,
-  changedMilestones,
-  decideMilestoneAction,
-  excludedMilestoneRunIds,
-  foldMilestoneItems,
-  milestoneTurnItem,
-} from "./MilestoneDecider.ts";
-import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
@@ -288,16 +280,6 @@ export class OrchestratorSubagentThreadReadOnlyError extends Schema.TaggedError<
   }
 }
 
-/** A milestone action that does not fit the thread's milestones; `detail` says what to pass. */
-export class OrchestratorMilestoneRejectedError extends Schema.TaggedError<OrchestratorMilestoneRejectedError>()(
-  "OrchestratorMilestoneRejectedError",
-  { commandId: CommandId, detail: Schema.String },
-) {
-  override get message(): string {
-    return this.detail;
-  }
-}
-
 export class OrchestratorThreadAboveModeLimitError extends Schema.TaggedError<OrchestratorThreadAboveModeLimitError>()(
   "OrchestratorThreadAboveModeLimitError",
   {
@@ -385,7 +367,6 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorCommandPreviouslyRejectedError,
   OrchestratorCommandIdConflictError,
   OrchestratorSubagentThreadReadOnlyError,
-  OrchestratorMilestoneRejectedError,
   OrchestratorThreadAboveModeLimitError,
   OrchestratorProviderSelectionBusyError,
   OrchestratorRuntimeModeAboveCeilingError,
@@ -684,7 +665,6 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
       return command.parentThreadId;
     case "secret_request.record":
     case "link_request.record":
-    case "thread.milestone.apply":
       return command.threadId;
     case "thread.fork":
     case "thread.merge_back":
@@ -1519,7 +1499,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...records,
           checkpoints: [],
           plans: [],
-          milestones: [],
           contextHandoffs: [],
           visibleTurnItems: [],
           updatedAt: records.thread.updatedAt,
@@ -9597,85 +9576,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   );
 
   /**
-   * State comes from the thread's `milestone` turn items rather than the milestones table, so
-   * a rollback that dropped some transitions cannot leave a stale state or reuse an id.
-   */
-  const dispatchMilestoneApply = Effect.fn("orchestrationV2.dispatch.milestoneApply")(function* (
-    command: Extract<OrchestrationV2InternalCommand, { readonly type: "thread.milestone.apply" }>,
-    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
-  ) {
-    const projection = yield* projectionStore
-      .getThreadRecords(command.threadId, ["runs", "turnItems", "attempts", "providerTurns"], {
-        turnItemTypes: ["milestone"],
-        messageRoles: [],
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-        ),
-      );
-    const run = projection.runs.find((candidate) => candidate.id === command.runId);
-    if (run === undefined || run.rootNodeId !== command.nodeId || !isActiveRun(run)) {
-      return yield* new OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: `Run ${command.runId} is not a live run of thread ${command.threadId}.`,
-      });
-    }
-    const state = foldMilestoneItems(
-      projection.turnItems,
-      excludedMilestoneRunIds(projection.runs),
-    );
-    const decision = decideMilestoneAction(state, command.action);
-    if (decision._tag === "rejected") {
-      return yield* new OrchestratorMilestoneRejectedError({
-        commandId: command.commandId,
-        detail: decision.message,
-      });
-    }
-    if (decision._tag === "unchanged") return;
-    const now = yield* DateTime.now;
-    const turnItem = milestoneTurnItem({
-      base: {
-        id: command.turnItemId,
-        threadId: command.threadId,
-        runId: command.runId,
-        nodeId: command.nodeId,
-        providerThreadId: run.providerThreadId,
-        providerTurnId: providerTurnForRun(projection, run)?.id ?? null,
-        ordinal: yield* nextTurnItemOrdinal(projection),
-      },
-      detail: decision.detail,
-      now,
-    });
-    const changed = changedMilestones(
-      state.milestones,
-      applyMilestoneItem(state.milestones, turnItem),
-    );
-    const emitEvent = emit(events, command);
-    yield* emitEvent({
-      type: "turn-item.updated",
-      threadId: command.threadId,
-      runId: command.runId,
-      nodeId: command.nodeId,
-      providerInstanceId: run.providerInstanceId,
-      occurredAt: now,
-      payload: turnItem,
-    });
-    if (changed.length > 0) {
-      yield* emitEvent({
-        type: "thread.milestones-updated",
-        threadId: command.threadId,
-        runId: command.runId,
-        nodeId: command.nodeId,
-        providerInstanceId: run.providerInstanceId,
-        occurredAt: now,
-        payload: { milestones: changed },
-      });
-    }
-  });
-
-  /**
    * Records or updates the card for a link an agent asked the user to make.
    * The pairing code goes straight to the link and never through orchestration.
    */
@@ -14259,9 +14159,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
-        break;
-      case "thread.milestone.apply":
-        yield* dispatchMilestoneApply(command, events);
         break;
       case "link_request.record":
         yield* dispatchLinkRequestRecord(command, events, effects);

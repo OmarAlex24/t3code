@@ -48,13 +48,8 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
-  activeMilestoneId,
-  applyMilestonesUpdate,
   IDLE_COMPACTION_TEXT,
   idleCompactionOf,
-  milestoneNumber,
-  OrchestrationV2MilestoneJson as OrchestrationV2MilestoneJsonSchema,
-  stampSubagentMilestone,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -819,7 +814,6 @@ export function emptyProjection(
     runtimeRequests: [],
     messages: [],
     plans: [],
-    milestones: [],
     turnItems: [],
     checkpointScopes: [],
     checkpoints: [],
@@ -930,20 +924,17 @@ export function applyToProjection(
         ...base,
         nodes: upsertById(base.nodes, event.payload),
       };
-    case "subagent.updated": {
-      const previous = base.subagents.find((task) => task.id === event.payload.id);
+    case "subagent.updated":
       return {
         ...base,
         subagents: upsertById(
           base.subagents,
-          stampSubagentMilestone(
-            previous,
-            preserveCompletionDelivery(previous, event.payload),
-            activeMilestoneId(base.milestones),
+          preserveCompletionDelivery(
+            base.subagents.find((task) => task.id === event.payload.id),
+            event.payload,
           ),
         ),
       };
-    }
     case "provider-session.attached":
     case "provider-session.updated":
       return {
@@ -995,11 +986,6 @@ export function applyToProjection(
         ...base,
         plans: upsertById(base.plans, event.payload),
       };
-    case "thread.milestones-updated":
-      return {
-        ...base,
-        milestones: applyMilestonesUpdate(base.milestones, event.payload),
-      };
     case "checkpoint-scope.created":
       return {
         ...base,
@@ -1011,6 +997,7 @@ export function applyToProjection(
         checkpoints: upsertById(base.checkpoints, event.payload),
       };
     case "checkpoint.rollback-requested":
+    case "thread.milestones-updated":
       return base;
     case "context-handoff.updated":
       return {
@@ -1159,9 +1146,6 @@ const encodeMessagePayload = Schema.encodeEffect(
 const encodePlanPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2PlanArtifactSchema),
 );
-const encodeMilestonePayload = Schema.encodeEffect(
-  Schema.fromJsonString(OrchestrationV2MilestoneJsonSchema),
-);
 const encodeTurnItemPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2TurnItemJsonSchema),
 );
@@ -1245,9 +1229,6 @@ const decodeMessagePayload = Schema.decodeUnknownEffect(
 );
 const decodePlanJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2PlanArtifactSchema),
-);
-const decodeMilestonePayload = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(OrchestrationV2MilestoneJsonSchema),
 );
 const decodeTurnItemPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2TurnItemJsonSchema),
@@ -2386,16 +2367,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${nullableStringField(payload, "completedAt")},
                 ${stringField(payload, "updatedAt")},
                 ${event.payload.completionDelivery?.state ?? null},
-                -- A new subagent belongs to the thread's active milestone.
-                COALESCE(
-                  (
-                    SELECT json_set(${payloadJson}, '$.milestoneId', milestone_id)
-                    FROM orchestration_v2_projection_milestones
-                    WHERE thread_id = ${event.payload.threadId} AND status = 'active'
-                    LIMIT 1
-                  ),
-                  ${payloadJson}
-                )
+                ${payloadJson}
               )
               ON CONFLICT(subagent_id)
               DO UPDATE SET
@@ -2416,32 +2388,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   excluded.completion_delivery_state,
                   orchestration_v2_projection_subagents.completion_delivery_state
                 ),
-                -- Later updates keep the milestone stamped when it was first recorded: copy
-                -- the stored one, then remove the key when there was none (json_set wrote null).
-                payload_json = json_remove(
-                  json_set(
-                    CASE
-                      WHEN json_type(excluded.payload_json, '$.completionDelivery') IS NULL
-                        AND json_type(orchestration_v2_projection_subagents.payload_json, '$.completionDelivery') IS NOT NULL
-                      THEN json_set(
-                        excluded.payload_json,
-                        '$.completionDelivery',
-                        json_extract(
-                          orchestration_v2_projection_subagents.payload_json,
-                          '$.completionDelivery'
-                        )
-                      )
-                      ELSE excluded.payload_json
-                    END,
-                    '$.milestoneId',
-                    json_extract(orchestration_v2_projection_subagents.payload_json, '$.milestoneId')
-                  ),
-                  CASE
-                    WHEN json_type(orchestration_v2_projection_subagents.payload_json, '$.milestoneId') IS NULL
-                    THEN '$.milestoneId'
-                    ELSE '$.__milestoneKept'
-                  END
-                )
+                payload_json = CASE
+                  WHEN json_type(excluded.payload_json, '$.completionDelivery') IS NULL
+                    AND json_type(orchestration_v2_projection_subagents.payload_json, '$.completionDelivery') IS NOT NULL
+                  THEN json_set(
+                    excluded.payload_json,
+                    '$.completionDelivery',
+                    json_extract(
+                      orchestration_v2_projection_subagents.payload_json,
+                      '$.completionDelivery'
+                    )
+                  )
+                  ELSE excluded.payload_json
+                END
             `;
               break;
             }
@@ -2717,38 +2676,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `;
               break;
             }
-            case "thread.milestones-updated": {
-              if (event.payload.replace === true) {
-                yield* sql`
-                DELETE FROM orchestration_v2_projection_milestones
-                WHERE thread_id = ${event.threadId}
-              `;
-              }
-              for (const milestone of event.payload.milestones) {
-                const payloadJson = yield* encodeMilestonePayload(milestone);
-                yield* sql`
-                INSERT INTO orchestration_v2_projection_milestones (
-                  thread_id,
-                  milestone_id,
-                  ordinal,
-                  status,
-                  payload_json
-                )
-                VALUES (
-                  ${event.threadId},
-                  ${milestone.id},
-                  ${milestoneNumber(milestone.id)},
-                  ${milestone.status},
-                  ${payloadJson}
-                )
-                ON CONFLICT(thread_id, milestone_id)
-                DO UPDATE SET
-                  status = excluded.status,
-                  payload_json = excluded.payload_json
-              `;
-              }
-              break;
-            }
             case "plan.updated": {
               const payloadJson = yield* encodePlanPayload(event.payload);
               yield* sql`
@@ -2914,6 +2841,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               break;
             }
             case "checkpoint.rollback-requested":
+            case "thread.milestones-updated":
               break;
             case "context-handoff.updated": {
               const payloadJson = yield* encodeContextHandoffPayload(event.payload);
@@ -3615,7 +3543,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           runtimeRequestRows,
           messageRows,
           planRows,
-          milestoneRows,
           checkpointScopeRows,
           checkpointRows,
           contextHandoffRows,
@@ -3923,13 +3850,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   THEN ${latestTodoList?.last_plan_id ?? null} ELSE plan_id END ASC,
                   plan_id = ${latestTodoList?.plan_id ?? null} ASC
               `,
-          // Control state: every window carries all of them; the bounded snapshot compacts old sets.
-          fields !== undefined && !fields.includes("milestones")
-            ? Effect.succeed([])
-            : sql<PayloadRow>`
-                SELECT payload_json FROM orchestration_v2_projection_milestones
-                WHERE thread_id = ${threadId} ORDER BY ordinal ASC
-              `,
           fields !== undefined && !fields.includes("checkpointScopes")
             ? Effect.succeed([])
             : window === undefined
@@ -4023,7 +3943,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           runtimeRequests,
           messages,
           plans,
-          milestones,
           checkpointScopes,
           checkpoints,
           contextHandoffs,
@@ -4039,7 +3958,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           decodeRows(decodeRuntimeRequestPayload, threadId)(runtimeRequestRows),
           decodeRows(decodeMessagePayload, threadId)(messageRows),
           decodeRows(decodePlanJson, threadId)(planRows),
-          decodeRows(decodeMilestonePayload, threadId)(milestoneRows),
           decodeRows(decodeCheckpointScopePayload, threadId)(checkpointScopeRows),
           decodeRows(decodeCheckpointPayload, threadId)(checkpointRows),
           decodeRows(decodeContextHandoffPayload, threadId)(contextHandoffRows),
@@ -4080,7 +3998,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           runtimeRequests,
           messages: orderedMessages,
           plans,
-          milestones,
           turnItems,
           checkpointScopes,
           checkpoints,
@@ -5923,6 +5840,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       WHERE item.thread_id = ${threadId}
         AND item.type = 'user_input_request'
     `,
+        // Images posted through the removed milestones feature; deleting the thread removes them.
         sql<{ id: string }>`
       SELECT DISTINCT json_extract(attachment.value, '$.id') AS id
       FROM orchestration_v2_projection_turn_items AS item,

@@ -9,7 +9,6 @@ import type {
   OrchestrationV2RunStatus,
   OrchestrationV2ProviderFailureClass,
   OrchestrationV2ThreadProjection,
-  OrchestrationV2LatestActionSummary,
   OrchestrationV2ThreadShell,
   PlanId,
   ProjectId,
@@ -160,8 +159,6 @@ export interface EnvironmentThreadShell {
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;
   readonly pendingUserInputAt?: string | null;
-  /** The thread's most recent tool step; absent from older servers. */
-  readonly latestAction?: Pick<OrchestrationV2LatestActionSummary, "summary" | "detail"> | null;
   readonly pendingSubagentRequest?: PendingSubagentRequest | null;
   /** Guest messages waiting for the owner to send or dismiss. */
   readonly pendingGuestMessageCount?: number;
@@ -321,15 +318,6 @@ export function presentThreadShell(
         ? iso(thread.pendingRuntimeRequest.createdAt)
         : null,
     pendingSubagentRequest,
-    latestAction:
-      thread.latestAction == null
-        ? null
-        : {
-            summary: thread.latestAction.summary,
-            ...(thread.latestAction.detail === undefined
-              ? {}
-              : { detail: thread.latestAction.detail }),
-          },
     pendingGuestMessageCount: thread.pendingGuestMessageCount ?? 0,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],

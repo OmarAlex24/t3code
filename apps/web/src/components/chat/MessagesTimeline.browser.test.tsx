@@ -1164,53 +1164,6 @@ describe("MessagesTimeline citations", () => {
   });
 });
 
-describe("MessagesTimeline entry reveal", () => {
-  it("pages history through an unloaded milestone, then scrolls to it and flashes it", async () => {
-    const onLoadEarlier = vi.fn();
-    const onSettled = vi.fn();
-    const props = baseProps();
-    const milestone: Entry = {
-      id: "milestone-item",
-      kind: "event",
-      createdAt: CREATED_AT,
-      projectedItem: v2Item("milestone", {
-        id: "milestone-item",
-        event: "started",
-        milestoneId: "m2",
-        setId: "s1",
-        title: "Build the session API",
-      }),
-    };
-    const later = Array.from({ length: 30 }, (_, index) =>
-      message(`Later message ${index}`, {}, `later-${index}`),
-    );
-    const timeline = (entries: Entry[]) => (
-      <MessagesTimeline
-        {...props}
-        timelineEntries={entries}
-        historyControls={{ hasMoreHistory: true, loading: false, error: null, onLoadEarlier }}
-        entryReveal={{ entryId: "milestone-item", requestId: 7 }}
-        onEntryRevealSettled={onSettled}
-      />
-    );
-    await using screen = await renderElement(timeline(later));
-    await vi.waitFor(() => expect(onLoadEarlier).toHaveBeenCalledWith("milestone-item"));
-    expect(onSettled).not.toHaveBeenCalled();
-
-    await screen.rerender(timeline([milestone, ...later]));
-    await vi.waitFor(() =>
-      expect(
-        document
-          .querySelector('[data-milestone-item="milestone-item"]')
-          ?.hasAttribute("data-revealed"),
-      ).toBe(true),
-    );
-    await expect.element(screen.getByText("Build the session API")).toBeInViewport();
-    expect(onSettled).toHaveBeenCalledWith(7);
-    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe("MessagesTimeline automation prompts", () => {
   it("folds an automation prompt into a bubble titled by its task", async () => {
     setup({ scheduledTasks: [{ id: TASK_ID, title: "Nightly triage" }] });

@@ -20,7 +20,6 @@ import { memo, useState, type ComponentProps } from "react";
 import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
-import { ThreadPlanSection } from "./ThreadPlanSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 import { ThreadServersPanel } from "./ThreadServersPanel";
@@ -88,8 +87,6 @@ interface ThreadDetailsPanelProps extends Pick<
   ) => Promise<ProjectScriptActionResult>;
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
   usage: ThreadDetailsUsageInput;
-  /** The thread's milestones, for the Plan section; null for drafts. */
-  plan: Omit<ComponentProps<typeof ThreadPlanSection>, "threadRef" | "density"> | null;
 }
 
 export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
@@ -168,14 +165,11 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
         return (
           <>
             <div className="group/details-items">
-              {visible.plan && props.plan !== null && !props.draftId ? (
-                <ThreadPlanSection threadRef={activeThreadRef} density={density} {...props.plan} />
-              ) : null}
-
               {show.environment || show.openIn || show.scripts ? (
                 <ThreadDetailsSection
                   headingId="thread-details-workspace-heading"
                   title="Workspace"
+                  separated={false}
                   showHeading={false}
                 >
                   <div className="flex flex-col">

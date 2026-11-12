@@ -41,10 +41,6 @@ describe("latestActionFromTurnItem", () => {
       { summary: "Searched session in src" },
     ],
     [
-      { type: "dynamic_tool", toolName: "t3_milestone", input: {} },
-      { summary: "Marked a milestone" },
-    ],
-    [
       { type: "dynamic_tool", toolName: "mcp__t3-code__request_secret", input: {} },
       { summary: "Asked for a secret" },
     ],
