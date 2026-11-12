@@ -34,7 +34,7 @@ import { render } from "./render";
 // Kept for a look at the in-thread state, like the sidebar's sandbox rows.
 export const SCREENSHOTS = "__screenshots__/sandbox-launch";
 const bridge = ProviderInstanceId.make("sandboxes");
-const threadId = ThreadId.make("thread-sandbox-chat");
+export const threadId = ThreadId.make("thread-sandbox-chat");
 const runId = RunId.make("run-sandbox-chat");
 const messageId = "message-sandbox-chat";
 const startedAt = new Date(Date.now() - 74_000).toISOString();

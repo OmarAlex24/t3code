@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   type ServerProvider,
   type ServerSettings,
+  isInternalProviderInstance,
 } from "@t3tools/contracts";
 import {
   type CustomModelDefinition,
@@ -281,6 +282,11 @@ export function resolveAppModelSelectionForInstance(
   if (resolvedSelection) {
     return resolvedSelection;
   }
+  // The sandbox bridge lists only a placeholder; a sandbox chat carries the sandbox's real model.
+  const bridgedModel = isInternalProviderInstance(entry.instanceId)
+    ? normalizeCustomModelSlug(selectedModel)
+    : null;
+  if (bridgedModel) return bridgedModel;
   if (resolutionOptions?.preserveUnavailableSelection && hasRuntimeModelCatalog(entry.driverKind)) {
     const unavailableSelection = normalizeCustomModelSlug(selectedModel);
     const hiddenModels = readInstanceModelPreferences(settings, entry.instanceId).hiddenModels;
