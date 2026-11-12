@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   type EnvironmentId,
   type ProjectId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   type SandboxRecord,
   type ScopedThreadRef,
   type ThreadId,
@@ -172,6 +173,18 @@ export function useSandboxlessBridgeThread(
           input: undefined,
         }),
   );
+  // The same subscription the thread's setup card reads, only for a bridge chat on the host.
+  const launch = useEnvironmentQuery(
+    provisionerEnvironmentId === null ||
+      threadRef === null ||
+      threadRef.environmentId !== provisionerEnvironmentId ||
+      instanceId !== SANDBOX_BRIDGE_INSTANCE_ID
+      ? null
+      : serverEnvironment.sandboxesLaunchState({
+          environmentId: provisionerEnvironmentId,
+          input: { threadId: threadRef.threadId },
+        }),
+  );
   return (
     threadRef !== null &&
     isSandboxlessBridgeThread({
@@ -179,6 +192,12 @@ export function useSandboxlessBridgeThread(
       threadRef,
       instanceId,
       provisionerEnvironmentId,
+      launch:
+        launch.data === undefined || launch.data === null
+          ? launch.data
+          : launch.data.threadId === threadRef.threadId
+            ? launch.data
+            : undefined,
     })
   );
 }

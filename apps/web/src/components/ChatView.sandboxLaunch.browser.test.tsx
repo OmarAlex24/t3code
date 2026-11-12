@@ -58,6 +58,15 @@ describe("a sandbox chat's first message", () => {
       .screenshot({ path: `${SCREENSHOTS}/sidebar-row-after-send.png` });
   });
 
+  it("is not a deleted sandbox's chat before the launch saves its sandbox", async () => {
+    // The host thread lists before the launch's sandbox record does.
+    await using _chat = await openChat("waiting", { sandboxes: [], launches: [launch] });
+
+    const card = page.getByRole("region", { name: "Sandbox setup" });
+    await expect.element(card).toBeVisible();
+    await expect.element(page.getByText("This chat's sandbox was deleted")).not.toBeInTheDocument();
+  });
+
   it("shows no context handoff once the launch hands the draft, with its model pick, over", async () => {
     // The draft's pick of a provider on this computer moves onto the host thread with it.
     const hostRef = { environmentId: ENVIRONMENT_ID, threadId };

@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   ProjectId,
   type SandboxRecord,
+  type SandboxSetupSnapshot,
   type ServerProvider,
   type ServerSettings,
   ThreadId,
@@ -277,17 +278,24 @@ describe("copiesToSandboxMirror", () => {
 });
 
 describe("isSandboxlessBridgeThread", () => {
-  const onHost = (sandboxes: ReadonlyArray<SandboxRecord> | null, instanceId = "sandboxes") =>
+  const onHost = (
+    sandboxes: ReadonlyArray<SandboxRecord> | null,
+    instanceId = "sandboxes",
+    launch: { readonly phase: SandboxSetupSnapshot["phase"] } | null = null,
+  ) =>
     isSandboxlessBridgeThread({
       sandboxes,
       threadRef: { environmentId: HOST, threadId },
       instanceId,
       provisionerEnvironmentId: HOST,
+      launch,
     });
 
   it("marks a bridge chat read-only once its sandbox is deleted", () => {
     expect(onHost([])).toBe(true);
     expect(onHost([record({ state: "deleted" })])).toBe(true);
+    // A launch that ended without a sandbox leaves nothing to send to either.
+    expect(onHost([], "sandboxes", { phase: "cancelled" })).toBe(true);
   });
 
   it("leaves a chat alone while its sandbox lives, the list loads, or it is no bridge chat", () => {
@@ -300,8 +308,24 @@ describe("isSandboxlessBridgeThread", () => {
         threadRef: { environmentId: SANDBOX, threadId },
         instanceId: "sandboxes",
         provisionerEnvironmentId: HOST,
+        launch: null,
       }),
     ).toBe(false);
+  });
+
+  it("leaves a chat alone while its launch loads, runs, or failed and can be retried", () => {
+    // The host thread lists before the launch saves its sandbox's record.
+    expect(
+      isSandboxlessBridgeThread({
+        sandboxes: [],
+        threadRef: { environmentId: HOST, threadId },
+        instanceId: "sandboxes",
+        provisionerEnvironmentId: HOST,
+        launch: undefined,
+      }),
+    ).toBe(false);
+    expect(onHost([], "sandboxes", { phase: "running" })).toBe(false);
+    expect(onHost([], "sandboxes", { phase: "failed" })).toBe(false);
   });
 });
 

@@ -1904,6 +1904,8 @@ const make = Effect.gen(function* () {
           }),
     };
     yield* records.put(record).pipe(Effect.orDie);
+    // A launch's host thread lists before this record; clients read it as deleted until they hear.
+    yield* listChanged;
     const save = (patch: Partial<SandboxRecord>, drop: ReadonlyArray<keyof SandboxRecord> = []) =>
       nowIso.pipe(
         Effect.map((updatedAt) => {
