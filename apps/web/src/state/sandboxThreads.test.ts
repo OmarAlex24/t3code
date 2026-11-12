@@ -16,6 +16,7 @@ import {
 } from "../providerInstances";
 
 import {
+  copiesToSandboxMirror,
   findThreadSandbox,
   isSandboxlessBridgeThread,
   sandboxChatAliases,
@@ -274,6 +275,22 @@ describe("sandboxMirrorOf", () => {
     const linked = record({ hostProjectId: ProjectId.make("p") });
     expect(sandboxMirrorOf([linked], { environmentId: HOST, threadId }, HOST)).toBeNull();
     expect(sandboxMirrorOf([{ ...linked, state: "deleted" }], ref, HOST)).toBeNull();
+  });
+});
+
+describe("copiesToSandboxMirror", () => {
+  it("copies messages but not commands the mirror's bridge run cannot run", () => {
+    expect(copiesToSandboxMirror("Fix the build")).toBe(true);
+    expect(copiesToSandboxMirror("/Users/omar/app.ts fails to build")).toBe(true);
+    for (const command of [
+      "/compact",
+      "  /COMPACT ",
+      "/autocompact on",
+      "/goal ship it",
+      "/plugin:run x",
+    ]) {
+      expect(copiesToSandboxMirror(command)).toBe(false);
+    }
   });
 });
 

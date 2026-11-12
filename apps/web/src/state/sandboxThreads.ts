@@ -306,6 +306,14 @@ export const sandboxMirrorOf = (
       };
 };
 
+// The mirror's bridge run would run a command such as `/compact` on the host, where it fails;
+// only the sandbox's own thread can run it.
+const SLASH_COMMAND = /^\/[a-z][\w-]*(?::[\w-]+)?(?:\s|$)/iu;
+
+/** Whether a message sent on a sandbox's own thread is copied to the host's mirror. */
+export const copiesToSandboxMirror = (text: string): boolean =>
+  !SLASH_COMMAND.test(text.trimStart());
+
 const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
 
 /**

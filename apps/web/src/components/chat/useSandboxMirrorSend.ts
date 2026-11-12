@@ -13,7 +13,7 @@ import {
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { useQuietThreadShells } from "../../state/entities";
 import { useSandboxProvisionerEnvironmentId, useSandboxRecords } from "../../state/sandboxes";
-import { sandboxMirrorOf } from "../../state/sandboxThreads";
+import { copiesToSandboxMirror, sandboxMirrorOf } from "../../state/sandboxThreads";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -66,6 +66,7 @@ export function useSandboxMirrorSend() {
     // A send on the host's mirror is already the phone's copy, and its run delivers it to the
     // sandbox; copying it again would send it twice.
     if (threadRef.environmentId === provisionerEnvironmentId) return;
+    if (!copiesToSandboxMirror(message.text)) return;
     const target = sandboxMirrorOf(sandboxes, threadRef, provisionerEnvironmentId);
     if (target === null) return;
     const { environmentId, threadId } = target.mirror;

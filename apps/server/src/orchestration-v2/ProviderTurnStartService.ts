@@ -55,7 +55,11 @@ import {
   historicalMessage,
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
-import { deliverContextHandoffs, withInlineContext } from "./ContextHandoffDelivery.ts";
+import {
+  deliverContextHandoffs,
+  receivesContextHandoffs,
+  withInlineContext,
+} from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -1086,7 +1090,7 @@ export const layer: Layer.Layer<
         function* (context: ReturnType<typeof handoffContextForThread>) {
           const { missedRunIds, coveredItemIds, missedRuns, acceptedAttempts } = context;
           const missedHistory =
-            missedRunIds.size === 0
+            missedRunIds.size === 0 || !receivesContextHandoffs(run.providerInstanceId)
               ? []
               : (yield* projectionStore.getTurnStartHistory(input.threadId, [
                   ...missedRunIds,
@@ -1410,12 +1414,14 @@ export const layer: Layer.Layer<
             }),
           );
         }
-        const uncertainDelivery = projection.contextHandoffs.some(
-          (handoff) =>
-            handoff.toProviderThreadId === providerThread.id &&
-            handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
-            handoff.delivery?.status === "pending",
-        );
+        const uncertainDelivery =
+          receivesContextHandoffs(run.providerInstanceId) &&
+          projection.contextHandoffs.some(
+            (handoff) =>
+              handoff.toProviderThreadId === providerThread.id &&
+              handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
+              handoff.delivery?.status === "pending",
+          );
         // A provider that cannot truncate rolls back into a fresh native session holding none of the kept turns.
         const nativeSessionLacksKeptTurns =
           !session.providerSession.capabilities.checkpointing.providerCanRollbackConversation &&
@@ -1530,6 +1536,7 @@ export const layer: Layer.Layer<
           }),
         );
         if (replacement === undefined) return undefined;
+        if (!receivesContextHandoffs(run.providerInstanceId)) return replacement;
         const { handoff, transferId, createdAt } = yield* recoveryHandoff;
         effectiveHandoffs = withRecoveryHandoff(handoff);
         resumeFellBack = true;
