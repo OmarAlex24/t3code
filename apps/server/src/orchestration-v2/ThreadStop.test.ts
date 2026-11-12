@@ -13,6 +13,8 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   RuntimeRequestId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_MODEL,
   ScheduledTaskId,
   ThreadId,
   TurnItemId,
@@ -51,6 +53,15 @@ const adapter = {
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
   openSession: () => Effect.die("Runs here never reach a provider"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
+const bridgeSelection = {
+  instanceId: ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID),
+  model: SANDBOX_BRIDGE_MODEL,
+};
+const bridgeAdapter = {
+  ...adapter,
+  instanceId: bridgeSelection.instanceId,
+  driver: ProviderDriverKind.make("acpRegistry"),
+} as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
 const layerTest = ThreadManagementService.layer.pipe(
   Layer.provideMerge(
@@ -61,7 +72,7 @@ const layerTest = ThreadManagementService.layer.pipe(
       EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
       ProviderReplayHarness.layerWithRegistry(
         { name: "thread-stop" },
-        ProviderAdapterRegistry.layerFromAdapters([adapter]),
+        ProviderAdapterRegistry.layerFromAdapters([adapter, bridgeAdapter]),
         { databaseLayer: layerDatabase, runEffectWorker: false },
       ),
     ),
@@ -793,6 +804,84 @@ it.effect("a message the user sends after Stop releases the held queue; an agent
       "starting",
       "queued",
     ]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  ["30 minutes", "queued"],
+  ["2 hours", "cancelled"],
+] as const)("a sandbox chat's message after %s leaves its held message %s", ([age, status]) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make(`thread:stop-sandbox-held:${status}`);
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`create:${threadId}`),
+      threadId,
+      projectId: ProjectId.make("project:thread-stop"),
+      title: threadId,
+      modelSelection: bridgeSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* send(threadId, "active", "start_immediately");
+    yield* send(threadId, "queued before the stop", "queue_after_active");
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make(`stop:${threadId}`),
+      threadId,
+    });
+    assert.deepEqual((yield* threadState(threadId)).runs, ["interrupted", "queued:held"]);
+
+    yield* TestClock.adjust(age);
+    yield* send(threadId, "back", "start_immediately");
+    assert.deepEqual((yield* threadState(threadId)).runs, ["interrupted", status, "starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  ["30 minutes", "starting"],
+  ["2 hours", "cancelled"],
+] as const)("a sandbox chat's message queued %s before its run ends is %s", ([age, status]) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make(`thread:sandbox-queued:${status}`);
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`create:${threadId}`),
+      threadId,
+      projectId: ProjectId.make("project:thread-stop"),
+      title: threadId,
+      modelSelection: bridgeSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* send(threadId, "active", "start_immediately");
+    yield* send(threadId, "queued behind it", "queue_after_active");
+    assert.deepEqual((yield* threadState(threadId)).runs, ["starting", "queued"]);
+
+    yield* TestClock.adjust(age);
+    const active = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make(`event:sandbox-queued:${status}`),
+      type: "run.updated",
+      threadId,
+      runId: active.id,
+      occurredAt: now,
+      payload: { ...active, status: "completed", completedAt: now },
+    } as OrchestrationV2DomainEvent);
+    yield* orchestrator.resumeQueuedRuns;
+    assert.deepEqual((yield* threadState(threadId)).runs, ["completed", status]);
   }).pipe(Effect.provide(layerTest)),
 );
 
