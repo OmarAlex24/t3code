@@ -7126,6 +7126,39 @@ describe("SandboxProvisioner per-thread launches", () => {
     }),
   );
 
+  it.effect("tells clients about a launch's sandbox as soon as its record is saved", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "t3.codes/install.sh", until } });
+      const repository = memoryRepository();
+      const configs = memoryConfigs();
+      yield* Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const revisions: Array<number> = [];
+        const watching = yield* Stream.runForEach(provisioner.listChanges, (revision) =>
+          Effect.sync(() => revisions.push(revision)),
+        ).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        const { config } = yield* provisioner.saveConfig({
+          config: configInput,
+          apiKey: "boat_test",
+        });
+        const before = revisions.length;
+        yield* provisioner.launch({ configId: config.id, threadId, project });
+        yield* snapshotWhere(
+          provisioner,
+          (snapshot) => stageOf(snapshot, "install")?.status === "running",
+        );
+        expect(repository.records.size).toBe(1);
+        expect(revisions.length).toBeGreaterThan(before);
+        yield* Fiber.interrupt(watching);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, repository.layer, { configs: configs.layer })),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
   // A launch held at install, so a test can act on it while it is still starting.
   const heldLaunch = (fake: BoatFake) =>
     Effect.gen(function* () {
