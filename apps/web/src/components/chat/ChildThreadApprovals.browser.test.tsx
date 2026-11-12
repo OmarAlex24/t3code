@@ -11,16 +11,13 @@ const state = vi.hoisted(() => ({ respond: vi.fn(), approvalsAtom: null as unkno
 vi.mock("../../state/session", () => ({ useEnvironmentScope: () => true }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.respond }));
 vi.mock("./SecretRequestCard", () => ({ SecretRequestCard: () => null }));
-vi.mock("./LinkRequestCard", () => ({ LinkRequestCard: () => null }));
-vi.mock("./MilestoneMapCards", () => ({ ProviderTile: () => null }));
-vi.mock("../../state/entities", () => ({ useChildThreadInputs: () => [] }));
 vi.mock("../../state/threads", () => ({
   childThreadApprovalsAtom: () => state.approvalsAtom,
   childThreadSecretRequestsAtom: () => Atom.make([]),
   threadEnvironment: { respondToApproval: {} },
 }));
 
-import { AgentAsks } from "./AgentAsks";
+import { ChildThreadApprovals } from "./ChildThreadApprovals";
 
 function setup() {
   state.respond.mockReset();
@@ -49,9 +46,7 @@ function setup() {
 
 it("shows a failed decision and clears the error when the user retries", async () => {
   const thread = setup();
-  await using screen = await render(
-    <AgentAsks threadRef={thread} subagents={[]} milestones={[]} coordinatorCard={null} />,
-  );
+  await using screen = await render(<ChildThreadApprovals threadRef={thread} />);
   await screen.getByRole("button", { name: "Approve", exact: true }).click();
   await expect.element(screen.getByRole("alert")).toHaveTextContent("Child environment offline");
   await screen.getByRole("button", { name: "Approve", exact: true }).click();

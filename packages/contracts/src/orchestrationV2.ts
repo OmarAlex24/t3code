@@ -42,17 +42,8 @@ import {
   TurnItemId,
 } from "./baseSchemas.ts";
 import { AuthMcpClientAccess } from "./auth.ts";
-import { ChatAttachment } from "./chatAttachment.ts";
+import { ChatAttachment, ChatImageAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
-import {
-  MilestoneId,
-  OrchestrationV2Milestone,
-  OrchestrationV2MilestoneJson,
-  OrchestrationV2MilestonesUpdate,
-  OrchestrationV2MilestonesUpdateJson,
-  OrchestrationV2MilestoneAction,
-  OrchestrationV2MilestoneTurnItemFields,
-} from "./milestones.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
 import { ThreadTitleRegenerationOutcome } from "./threadTitle.ts";
 import {
@@ -972,8 +963,6 @@ export const OrchestrationV2Subagent = Schema.Struct({
   ]),
   progress: Schema.optional(Schema.String),
   workflow: Schema.optional(OrchestrationV2SubagentWorkflow),
-  /** The parent's active milestone when the subagent was first recorded. */
-  milestoneId: Schema.optional(MilestoneId),
   group: Schema.optional(SubagentGroup),
   result: Schema.NullOr(Schema.String),
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -1626,6 +1615,29 @@ export type OrchestrationV2ModelSwitch = typeof OrchestrationV2ModelSwitch.Type;
 
 const AssistantMessagePhase = Schema.Literals(["commentary", "partial_answer", "final_answer"]);
 
+/**
+ * Read-only: the removed milestones feature left these turn items and `thread.milestones-updated`
+ * events in existing logs, which replay must still decode. Clients skip them; nothing writes them.
+ */
+const LegacyMilestoneTurnItemFields = {
+  type: Schema.Literal("milestone"),
+  event: Schema.String,
+  milestoneId: Schema.NullOr(Schema.String),
+  setId: Schema.NullOr(Schema.String),
+  planned: Schema.optional(
+    Schema.Array(Schema.Struct({ id: Schema.String, title: Schema.String })),
+  ),
+  closedMilestoneId: Schema.optional(Schema.String),
+  note: Schema.optional(Schema.String),
+  reason: Schema.optional(Schema.String),
+  previousTitle: Schema.optional(Schema.String),
+  attachments: Schema.optional(Schema.Array(ChatImageAttachment)),
+} as const;
+const LegacyMilestonesUpdatePayload = Schema.Struct({
+  milestones: Schema.Array(Schema.Unknown),
+  replace: Schema.optional(Schema.Literal(true)),
+});
+
 const OrchestrationV2TurnItemBaseFields = {
   /** Wire-only cursor for collapsed work; persisted items keep their complete history. */
   deferredWork: Schema.optionalKey(
@@ -1949,7 +1961,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
-    ...OrchestrationV2MilestoneTurnItemFields,
+    ...LegacyMilestoneTurnItemFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2055,7 +2067,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.milestones-updated"),
-    payload: OrchestrationV2MilestonesUpdate,
+    payload: LegacyMilestonesUpdatePayload,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2177,10 +2189,6 @@ export const OrchestrationV2ThreadProjection = Schema.Struct({
   runtimeRequests: Schema.Array(OrchestrationV2RuntimeRequest),
   messages: Schema.Array(OrchestrationV2ConversationMessage),
   plans: Schema.Array(OrchestrationV2PlanArtifact),
-  /** Absent from servers older than milestones; read as none. */
-  milestones: Schema.Array(OrchestrationV2Milestone).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-  ),
   turnItems: turnItemArray(OrchestrationV2TurnItem),
   checkpointScopes: Schema.Array(OrchestrationV2CheckpointScope),
   checkpoints: Schema.Array(OrchestrationV2Checkpoint),
@@ -2853,7 +2861,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
-    ...OrchestrationV2MilestoneTurnItemFields,
+    ...LegacyMilestoneTurnItemFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2890,9 +2898,6 @@ export const OrchestrationV2ThreadProjectionJson = OrchestrationV2ThreadProjecti
     runtimeRequests: Schema.Array(OrchestrationV2RuntimeRequestJson),
     messages: Schema.Array(OrchestrationV2ConversationMessageJson),
     plans: Schema.Array(OrchestrationV2PlanArtifact),
-    milestones: Schema.Array(OrchestrationV2MilestoneJson).pipe(
-      Schema.withDecodingDefault(Effect.succeed([])),
-    ),
     turnItems: turnItemArray(OrchestrationV2TurnItemJson),
     checkpointScopes: Schema.Array(OrchestrationV2CheckpointScopeJson),
     checkpoints: Schema.Array(OrchestrationV2CheckpointJson),
@@ -3033,7 +3038,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.milestones-updated"),
-    payload: OrchestrationV2MilestonesUpdateJson,
+    payload: LegacyMilestonesUpdatePayload,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -3670,16 +3675,6 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
-  /** Internal: only the calling thread's live run may mark its milestones (`t3_milestone`). */
-  Schema.Struct({
-    type: Schema.Literal("thread.milestone.apply"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    runId: RunId,
-    nodeId: NodeId,
-    turnItemId: TurnItemId,
-    action: OrchestrationV2MilestoneAction,
-  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),

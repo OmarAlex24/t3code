@@ -12,7 +12,6 @@ import { cn } from "~/lib/utils";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import { EnvironmentSubagentAvatar, SubagentElapsed, V2LifecycleRow } from "./V2LifecycleRow";
 import { LinkRequestCard } from "./LinkRequestCard";
-import { MilestoneDivider } from "./MilestoneDivider";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { TimelineRowCtx, type TimelineRow } from "./timelineRowContext";
 import { subagentGroupTiming } from "./TimelineV2EventRow.logic";
@@ -23,7 +22,6 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
   if (item.type === "subagent" && (row.subagents?.length ?? 1) > 1) {
     return <V2SubagentGroup key={row.id} row={row} />;
   }
-  if (item.type === "milestone") return <MilestoneDivider item={item} />;
   if (item.type === "secret_request") {
     return (
       <SecretRequestCard

@@ -31,27 +31,17 @@ const preview: ChatCanvasPreview = {
 
 describe("chat canvas model", () => {
   it("shows the details card inline only where the canvas fits it beside the chat", () => {
-    const resolve = (
-      width: number,
-      detailsCardInlineOpen = true,
-      fullContentHeight = 300,
-      narrowestWidth = width,
-    ) =>
+    const resolve = (width: number, narrowestWidth = width) =>
       resolveChatCanvasModel({
         measurements: { ...measurements(width), narrowestWidth },
-        detailsCardMeasurement: { threadRef, width: 280, fullContentHeight },
+        detailsCardMeasurement: null,
         threadRef,
         preview: null,
-        detailsCardInlineOpen,
-      });
-    expect(resolve(1400).detailsCardMode).toBe("inline");
-    expect(resolve(900).detailsCardMode).toBe("popover");
-    expect(resolve(1400, true, 300, 900).detailsCardMode).toBe("popover");
-    // Views beside the card, like the milestones map, lay out in what the open card leaves.
-    expect(resolve(1100).detailsCardInsetEnd).toBe(292);
-    expect(resolve(1100, false).detailsCardInsetEnd).toBe(0);
-    expect(resolve(900).detailsCardInsetEnd).toBe(0);
-    expect(resolve(1100, true, 0).detailsCardInsetEnd).toBe(0);
+        detailsCardInlineOpen: true,
+      }).detailsCardMode;
+    expect(resolve(1400)).toBe("inline");
+    expect(resolve(900)).toBe("popover");
+    expect(resolve(1400, 900)).toBe("popover");
   });
 
   it("moves the card into a popover when a preview below it leaves too little height", () => {

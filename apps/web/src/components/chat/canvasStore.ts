@@ -149,9 +149,6 @@ export function resolveChatCanvasModel({
     topInset: detailsCardTopInset,
   });
   const detailsCardMode: ThreadPanelPresentation = detailsCardPlacement ? "inline" : "popover";
-  // A measured card is one that renders; an embedded side chat has the open flag but no card.
-  const detailsCardInsetEnd =
-    detailsCard && detailsCardPlacement ? container.width - detailsCard.left : 0;
   return {
     container,
     lane,
@@ -160,6 +157,5 @@ export function resolveChatCanvasModel({
     preferredDetailsCard,
     detailsCardPlacement,
     detailsCardMode,
-    detailsCardInsetEnd,
   };
 }

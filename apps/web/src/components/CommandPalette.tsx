@@ -67,7 +67,6 @@ import {
   FolderGit2Icon,
   FolderIcon,
   FolderPlusIcon,
-  GitBranchIcon,
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
@@ -85,7 +84,6 @@ import {
 import { openThreadFind } from "./chat/threadFindStore";
 import { dispatchPreviewAction } from "./preview/previewActionBus";
 import { previewBridge } from "./preview/previewBridge";
-import { selectThreadViewMode, useThreadViewModeStore } from "../threadViewModeStore";
 import {
   useDeferredValue,
   useEffect,
@@ -709,12 +707,6 @@ function OpenCommandPaletteDialog(props: {
       : null;
   const activeThreadPreviewOpen = useRightPanelStore(
     (state) => selectActiveRightPanel(state.byThreadKey, previewPanelThreadRef) === "preview",
-  );
-  const activeThreadViewMode = useThreadViewModeStore((state) =>
-    selectThreadViewMode(
-      state,
-      activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
-    ),
   );
   const supportsThreadFind =
     environments.find((environment) => environment.environmentId === activeThread?.environmentId)
@@ -1404,26 +1396,6 @@ function OpenCommandPaletteDialog(props: {
       shortcutCommand: "preview.find",
       run: async () => {
         dispatchPreviewAction("find");
-      },
-    });
-  }
-
-  if (activeThread) {
-    const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
-    const showingMilestones = activeThreadViewMode === "milestones";
-    actionItems.push({
-      kind: "action",
-      value: "toggle-milestones",
-      title: showingMilestones ? "Show chat" : "Show milestones",
-      searchTerms: ["milestones", "plan", "progress", "agents", "chat", "view"],
-      icon: showingMilestones ? (
-        <MessageSquareIcon className={ITEM_ICON_CLASS} />
-      ) : (
-        <GitBranchIcon className={ITEM_ICON_CLASS} />
-      ),
-      shortcutCommand: "milestones.toggle",
-      run: async () => {
-        useThreadViewModeStore.getState().toggle(threadRef);
       },
     });
   }

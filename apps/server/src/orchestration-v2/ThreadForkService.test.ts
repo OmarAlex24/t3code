@@ -99,7 +99,6 @@ function makeSourceProjection(sourceRun: OrchestrationV2Run): OrchestrationV2Thr
     runtimeRequests: [],
     messages: [],
     plans: [],
-    milestones: [],
     turnItems: [],
     checkpointScopes: [],
     checkpoints: [],
