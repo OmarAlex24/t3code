@@ -165,61 +165,43 @@ describe("sandboxChatAliases", () => {
   const hostRef = { environmentId: HOST, threadId };
   const sandboxRef = { environmentId: SANDBOX, threadId };
   const both = [hostThread, sandboxThread];
-  const connected = () => true;
-  const aliases = (
-    sandbox: SandboxRecord,
-    threads: ReadonlyArray<typeof hostThread> = both,
-    isConnected: (environmentId: EnvironmentId) => boolean = connected,
-  ) => [...sandboxChatAliases([sandbox], threads, HOST, isConnected)];
+  const aliases = (sandbox: SandboxRecord, threads: ReadonlyArray<typeof hostThread> = both) => [
+    ...sandboxChatAliases([sandbox], threads, HOST),
+  ];
   const showsSandbox = [[threadKey(hostRef), sandboxRef]];
   const showsMirror = [[threadKey(sandboxRef), hostRef]];
 
-  it("shows the sandbox's own thread while it runs and its server is connected", () => {
+  it("shows the sandbox's own thread whatever the sandbox's state", () => {
     expect(aliases(linked())).toEqual(showsSandbox);
-    // A launch's thread opens on the sandbox as soon as it answers.
+    // A launch's thread opens on the sandbox as soon as it lists.
     expect(aliases(linked({ state: "provisioning" }))).toEqual(showsSandbox);
+    // Stopped or resuming, a send on its own thread resumes the sandbox and goes there.
+    expect(aliases(linked({ state: "stopped" }))).toEqual(showsSandbox);
+    expect(
+      aliases(linked({ state: "stopped", resumingSince: "2026-11-10T00:00:00.000Z" })),
+    ).toEqual(showsSandbox);
+    expect(aliases(linked({ resumingSince: "2026-11-10T00:00:00.000Z" }))).toEqual(showsSandbox);
+    expect(aliases(linked({ state: "error" }))).toEqual(showsSandbox);
   });
 
   it("keeps a launch's host thread as the chat until the sandbox's own thread lists", () => {
     // The launch links the host project at its end, so a starting sandbox moves nothing.
     expect(aliases(record({ state: "provisioning" }))).toEqual([]);
-    // Linked and connected, but the bridge has not made the sandbox's thread yet.
+    // Linked, but the bridge has not made the sandbox's thread yet.
     expect(aliases(linked(), [hostThread])).toEqual([]);
     expect(aliases(linked())).toEqual(showsSandbox);
   });
 
-  it("shows the host's mirror while the sandbox is stopped, resuming or not connected", () => {
-    expect(aliases(linked({ state: "stopped" }))).toEqual(showsMirror);
-    expect(
-      aliases(linked({ state: "stopped", resumingSince: "2026-11-10T00:00:00.000Z" })),
-    ).toEqual(showsMirror);
-    // Up again but still answering its first request: the mirror holds on until it connects.
-    expect(aliases(linked({ resumingSince: "2026-11-10T00:00:00.000Z" }))).toEqual(showsMirror);
-    expect(aliases(linked(), both, (environmentId) => environmentId !== SANDBOX)).toEqual(
-      showsMirror,
-    );
-    expect(aliases(linked({ state: "error" }))).toEqual(showsMirror);
-  });
-
-  it("sends a route on the stopped sandbox's thread to the mirror even before that thread lists", () => {
+  it("sends a route on a stopped sandbox's thread that never listed to the mirror", () => {
     expect(aliases(linked({ state: "stopped" }), [hostThread])).toEqual(showsMirror);
   });
 
-  it("goes back to the sandbox's thread once it connects again", () => {
-    let up = false;
-    const isConnected = (environmentId: EnvironmentId) => environmentId !== SANDBOX || up;
-    expect(aliases(linked(), both, isConnected)).toEqual(showsMirror);
-    up = true;
-    expect(aliases(linked(), both, isConnected)).toEqual(showsSandbox);
-  });
-
-  it("keeps the thread a chat has when the host has no mirror of it, or its own has not loaded", () => {
+  it("keeps the thread a chat has when the host has no mirror of it", () => {
     // A launch that could not link sends on its sandbox alone; its resume stays in this client.
     expect(aliases(linked({ state: "stopped" }), [sandboxThread])).toEqual([]);
     expect(aliases(record({ state: "stopped" }))).toEqual([]);
-    expect(aliases(linked(), [hostThread])).toEqual([]);
     expect(aliases(linked({ state: "deleted" }))).toEqual([]);
-    expect([...sandboxChatAliases([linked()], both, null, connected)]).toEqual([]);
+    expect([...sandboxChatAliases([linked()], both, null)]).toEqual([]);
   });
 });
 
