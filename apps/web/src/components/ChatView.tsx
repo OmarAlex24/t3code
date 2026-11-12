@@ -1023,8 +1023,8 @@ export default function ChatView(props: ChatViewProps) {
     activeSandbox !== undefined &&
     activeThreadRef !== null &&
     isHostThreadRef(activeSandbox, activeThreadRef);
-  // A sandbox chat opens on the sandbox's own thread while it is up and connected, and on the
-  // host's mirror otherwise, where a message waits on the host for the sandbox to resume.
+  // A sandbox chat opens on the sandbox's own thread, whatever its state; the host's mirror stands
+  // in only when this app has never listed that thread.
   const sandboxChatAliases = useSandboxChatAliases();
   const activeAliasTarget =
     activeThreadRef === null
@@ -1037,8 +1037,7 @@ export default function ChatView(props: ChatViewProps) {
     serverThread?.modelSelection.instanceId,
   );
   // A legacy sandbox thread's server is off on purpose, so the session cannot be read and the
-  // connection never comes up until a send or un-settle resumes it from this client. A chat the
-  // host mirrors sends on the mirror instead, which the route moves to.
+  // connection never comes up until a send or un-settle resumes it from this client.
   const legacySandboxStopped =
     activeSandboxStopped && !activeSandboxOnHost && activeAliasTarget === undefined;
   // A run the sandbox was in when it stopped ended with its machine, though the thread's last

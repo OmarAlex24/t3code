@@ -167,30 +167,14 @@ export const sandboxHostMirrors = (
 };
 
 /**
- * Whether a sandbox chat shows the sandbox's own thread, with its real model, files and terminal:
- * only while the sandbox is up, not resuming, and its server is connected. Otherwise the host's
- * mirror stands for it: the host keeps that thread live with the whole conversation, and a message
- * sent there waits on the host while the sandbox resumes, whatever this app does meanwhile.
- */
-const showsSandboxOwnThread = (
-  sandbox: SandboxRecord,
-  isConnected: (environmentId: EnvironmentId) => boolean,
-) =>
-  (sandbox.state === "running" || sandbox.state === "provisioning") &&
-  sandbox.resumingSince === undefined &&
-  sandbox.environmentId !== null &&
-  isConnected(sandbox.environmentId);
-
-/**
- * The thread of each sandbox chat that lists leave out, by key, with the one that stands for it, as
- * `showsSandboxOwnThread` picks. Lists, the sidebar's selection and the chat view all read this, so
- * a chat has one row and one view. A chat with no mirror listed keeps its sandbox's thread.
+ * The thread of each sandbox chat that lists, the sidebar and the chat view leave out, by key, with
+ * the one that stands for it. The sandbox's own thread is the chat whenever it lists, running or
+ * not (a send there resumes it); the mirror stands in only for a stopped one never listed here.
  */
 export const sandboxChatAliases = (
   sandboxes: ReadonlyArray<SandboxRecord>,
   threads: ReadonlyArray<ThreadEntry>,
   provisionerEnvironmentId: EnvironmentId | null,
-  isConnected: (environmentId: EnvironmentId) => boolean,
 ): ReadonlyMap<string, ScopedThreadRef> => {
   const aliases = new Map<string, ScopedThreadRef>();
   for (const { sandbox, real, mirror } of bridgedSandboxChats(
@@ -198,10 +182,10 @@ export const sandboxChatAliases = (
     provisionerEnvironmentId,
   )) {
     if (!listed(threads, mirror)) continue;
-    if (!showsSandboxOwnThread(sandbox, isConnected)) {
-      aliases.set(threadKey(real), mirror);
-    } else if (listed(threads, real)) {
+    if (listed(threads, real)) {
       aliases.set(threadKey(mirror), real);
+    } else if (sandbox.state !== "running" && sandbox.state !== "provisioning") {
+      aliases.set(threadKey(real), mirror);
     }
   }
   return aliases;
