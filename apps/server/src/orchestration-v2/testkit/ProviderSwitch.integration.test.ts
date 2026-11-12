@@ -3,6 +3,7 @@ import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudge
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
+  ContextHandoffId,
   type ChatAttachment,
   EventId,
   MessageId,
@@ -23,6 +24,8 @@ import {
   ThreadId,
   TurnItemId,
   ProviderDriverKind,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_MODEL,
 } from "@t3tools/contracts";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
@@ -1367,6 +1370,145 @@ describe("orchestration v2 provider switching", () => {
         ),
       );
     }),
+  );
+
+  it.live("starts a sandbox bridge turn past undelivered handoffs without a context budget", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("sandbox-bridge-handoffs");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const bridgeSelection = {
+          instanceId: ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID),
+          model: SANDBOX_BRIDGE_MODEL,
+        } satisfies ModelSelection;
+        // The bridge reports no context usage and reuses one native id, so its whole history
+        // counts against the window.
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          makeTestAdapter({
+            instanceId: bridgeSelection.instanceId,
+            driver: GROK_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            modelSelection: bridgeSelection,
+            responseByRunOrdinal: {},
+            capturedTurns,
+            getModelContextWindow: () => 32_000,
+            failedRunOrdinals: new Set([2]),
+          }),
+        ]);
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const dispatch = (ordinal: number, text: string) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`bridge:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`bridge:${ordinal}`),
+              createdBy: "user",
+              creationSource: "mobile",
+              text,
+              attachments: [],
+              modelSelection: bridgeSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          const settled = (ordinal: number) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.payload.ordinal === ordinal &&
+                  (event.payload.status === "completed" || event.payload.status === "failed"),
+              ),
+              Stream.runHead,
+              Effect.andThen(worker.drain()),
+              Effect.andThen(orchestrator.getThreadProjection(threadId)),
+            );
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("bridge:create"),
+            threadId,
+            projectId,
+            createdBy: "user",
+            creationSource: "web",
+            title: "Sandbox chat",
+            modelSelection: bridgeSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+          yield* dispatch(1, "x".repeat(20_000));
+          yield* settled(1);
+          yield* dispatch(2, "Second request");
+          const failed = yield* settled(2);
+          assert.equal(failed.runs.at(-1)?.status, "failed");
+          const bridgeThread = failed.providerThreads[0]!;
+          const nativeThreadId = bridgeThread.nativeThreadRef!.nativeId!;
+          const createdAt = yield* DateTime.now;
+          // The backlog earlier failed runs left: one never tried, one left mid-delivery.
+          yield* (yield* EventSink.EventSinkV2).write({
+            events: (["undelivered", "uncertain"] as const).map((kind) => ({
+              id: EventId.make(`bridge-handoff:${kind}`),
+              type: "context-handoff.updated" as const,
+              threadId,
+              runId: failed.runs[1]!.id,
+              providerInstanceId: bridgeSelection.instanceId,
+              occurredAt: createdAt,
+              payload: {
+                id: ContextHandoffId.make(`bridge-handoff:${kind}`),
+                transferId: null,
+                threadId,
+                targetRunId: failed.runs[1]!.id,
+                fromProviderThreadIds: [bridgeThread.id],
+                toProviderThreadId: bridgeThread.id,
+                coveredRunOrdinals: { from: 1, to: 1 },
+                strategy: "full_thread_summary" as const,
+                status: "ready" as const,
+                summaryMessageId: null,
+                summaryText: "y".repeat(30_000),
+                ...(kind === "uncertain"
+                  ? {
+                      delivery: {
+                        nativeThreadId,
+                        status: "pending" as const,
+                        itemIds: [],
+                      },
+                    }
+                  : {}),
+                createdByProviderInstanceId: bridgeSelection.instanceId,
+                createdAt,
+                updatedAt: createdAt,
+              },
+            })),
+          });
+          yield* dispatch(3, "Third request");
+          const resumed = yield* settled(3);
+          assert.equal(resumed.runs.at(-1)?.status, "completed");
+          const lastTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+          assert.equal(lastTurn.text, "Third request");
+          assert.equal(lastTurn.nativeThreadId, nativeThreadId);
+          assert.deepEqual(
+            resumed.contextHandoffs.map((handoff) => handoff.id),
+            ["bridge-handoff:undelivered", "bridge-handoff:uncertain"],
+          );
+          assert.isFalse(resumed.turnItems.some((item) => item.type === "handoff"));
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "sandbox-bridge-handoffs",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: { type: "readOnly" },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
   );
 
   it.live.each(["native", "legacy"] as const)(

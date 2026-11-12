@@ -862,6 +862,12 @@ function legacyPullRequestLink(
 }
 
 const DELEGATED_RESULT_INLINE_BYTES = 16_000;
+// A sandbox chat's host thread can hold messages for days while its sandbox is away. Older than
+// this, they are not the user coming back; sending them would hand the sandbox's agent stale work.
+const SANDBOX_STALE_RUN_AGE_MS = 60 * 60 * 1000;
+const isStaleSandboxBridgeRun = (run: OrchestrationV2Run, now: DateTime.Utc) =>
+  run.providerInstanceId === SANDBOX_BRIDGE_INSTANCE_ID &&
+  DateTime.toEpochMillis(now) - DateTime.toEpochMillis(run.requestedAt) > SANDBOX_STALE_RUN_AGE_MS;
 
 function delegatedCompletionWakeDetail(
   taskIds: ReadonlyArray<string>,
@@ -2342,9 +2348,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : projection.runs.find(
               (run) => run.id === options.queuedRunId && run.status === "queued",
             );
+      const pickedAt = yield* DateTime.now;
       while (
         storedQueuedRun !== undefined &&
-        isStalePullRequestWatchWake(projection, storedQueuedRun)
+        (isStalePullRequestWatchWake(projection, storedQueuedRun) ||
+          (options?.userStarted !== true && isStaleSandboxBridgeRun(storedQueuedRun, pickedAt)))
       ) {
         yield* writeSystemEvents(
           queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
@@ -7286,6 +7294,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : [];
     const releasedAt = yield* DateTime.now;
     for (const held of heldRunsToRelease) {
+      if (isStaleSandboxBridgeRun(held, releasedAt)) {
+        yield* emitQueuedRunCancellation({
+          command,
+          events,
+          projection,
+          run: { ...held, queueHeld: false },
+          now: releasedAt,
+        });
+        continue;
+      }
       yield* emit(
         events,
         command,
