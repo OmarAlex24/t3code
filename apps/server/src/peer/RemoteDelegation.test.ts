@@ -579,11 +579,6 @@ const makeLaptop = (
       Layer.provideMerge(Layer.merge(layerOrchestrator, ServerSettings.layerTest())),
     );
     const layerHere = McpHttpServer.layerOrchestratorToolkit.pipe(
-      Layer.provide(
-        ServerConfig.layerTest(process.cwd(), { prefix: "t3-remote-delegation-here-" }).pipe(
-          Layer.provideMerge(NodeServices.layer),
-        ),
-      ),
       Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
       Layer.provideMerge(
         RemoteDelegation.layer.pipe(

@@ -59,17 +59,3 @@ it("refocuses the composer on window return from a clicked area after a bare key
   expect(document.activeElement).toBe(conversation);
   expect(shouldRefocusComposerOnWindowFocus(document.activeElement)).toBe(false);
 });
-
-it("keeps focus in a zoomed-in milestone on window return so Esc still zooms out", () => {
-  const panel = document.createElement("div");
-  panel.tabIndex = -1;
-  panel.dataset.milestoneZoom = "";
-  panel.innerHTML = "<button>Open agent</button>";
-  document.body.append(panel);
-  using _panel = { [Symbol.dispose]: () => panel.remove() };
-
-  panel.focus();
-  expect(shouldRefocusComposerOnWindowFocus(document.activeElement)).toBe(false);
-  panel.querySelector("button")!.focus();
-  expect(shouldRefocusComposerOnWindowFocus(document.activeElement)).toBe(false);
-});

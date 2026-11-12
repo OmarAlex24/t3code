@@ -112,7 +112,6 @@ function makeProjection(input: {
     runtimeRequests: [],
     messages: [],
     plans: [],
-    milestones: [],
     turnItems: [],
     checkpointScopes: [],
     checkpoints: [],

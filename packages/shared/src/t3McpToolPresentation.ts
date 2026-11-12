@@ -23,7 +23,6 @@ export type T3McpToolSummaryAction =
   | "thread-interrupt"
   | "workflow-stop"
   | "background-wait"
-  | "milestone"
   | "thread-configuration"
   | "thread-configure"
   | "thread-fork"
@@ -177,7 +176,6 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Update", "Updating", "Updated", "background waits"],
     "background-wait",
   ),
-  t3_milestone: tool(["Mark", "Marking", "Marked", "a milestone"], "milestone"),
   t3_thread_interrupt: tool(
     ["Interrupt", "Interrupting", "Requested an interrupt of", "a T3 thread"],
     "thread-interrupt",
