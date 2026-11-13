@@ -15,13 +15,16 @@ import { StackActions, useNavigation, type StaticScreenProps } from "@react-navi
 import * as DateTime from "effect/DateTime";
 import { Atom } from "effect/reactivity";
 import * as Haptics from "expo-haptics";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SheetHeader } from "../../components/ui/SheetHeader";
 import { AppText as Text } from "../../components/ui/AppText";
-import { environmentThreadDetails } from "../../state/threads";
+import { isSandboxMirrorThread } from "@t3tools/client-runtime/state/sandbox-mirror";
+import { serverEnvironment } from "../../state/server";
+import { environmentThreadDetails, environmentThreadShells } from "../../state/threads";
+import { SandboxAgentSheet } from "./SandboxAgentSheet";
 import { useEnvironments } from "../../state/environments";
 import { SubagentRow } from "./SubagentRow";
 import { useVisibleSecondClock } from "./use-visible-second-clock";
@@ -38,11 +41,24 @@ const EMPTY_TURN_SUBAGENTS_ATOM = Atom.make<ThreadTurnSubagents | null>(null).pi
   Atom.withLabel("mobile-thread-turn-subagents:empty"),
 );
 
+const NO_THREAD_ATOM = Atom.make(null).pipe(Atom.withLabel("mobile-thread-agents:no-thread"));
+
+/** A sandbox chat's mirror has none of its agents; the host reads them from the sandbox. */
+function useIsSandboxMirror(target: AgentsTarget | null): boolean {
+  const thread = useAtomValue(
+    target === null ? NO_THREAD_ATOM : environmentThreadShells.threadShellAtom(target),
+  );
+  return thread != null && isSandboxMirrorThread(thread);
+}
+
 export function useThreadTurnSubagents(target: AgentsTarget | null): ThreadTurnSubagents | null {
+  const mirrored = useIsSandboxMirror(target);
   return useAtomValue(
     target === null
       ? EMPTY_TURN_SUBAGENTS_ATOM
-      : environmentThreadDetails.turnSubagentsAtom(target),
+      : mirrored
+        ? serverEnvironment.sandboxesThreadMirrorTurnSubagents(target)
+        : environmentThreadDetails.turnSubagentsAtom(target),
   );
 }
 
@@ -52,6 +68,11 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const openInspector = useOpenThreadInspector();
   const insets = useSafeAreaInsets();
   const turn = useThreadTurnSubagents(target);
+  const mirrored = useIsSandboxMirror(target);
+  const sandboxMirror = useAtomValue(
+    serverEnvironment.sandboxesThreadMirrorValue(mirrored ? target : null),
+  );
+  const [openSandboxAgent, setOpenSandboxAgent] = useState<ThreadId | null>(null);
   const subagents = turn?.subagents ?? [];
   const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
   const workflowGroups = useMemo(
@@ -67,6 +88,11 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
 
   const openChildThread = (child: { environmentId: EnvironmentId; threadId: ThreadId }) => {
     void Haptics.selectionAsync();
+    // The agent's thread lives on the sandbox, which this phone never connects to.
+    if (mirrored) {
+      setOpenSandboxAgent(child.threadId);
+      return;
+    }
     if (
       openInspector(target, {
         type: "thread",
@@ -93,6 +119,11 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
       contentContainerClassName="px-5 pb-6"
       contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 8 }}
     >
+      {sandboxMirror !== null && !sandboxMirror.available ? (
+        <Text className="pt-4 text-sm text-foreground-muted">
+          This chat's sandbox is stopped or not answering, so these are its agents as last seen.
+        </Text>
+      ) : null}
       {subagents.length === 0 ? (
         <Text className="pt-6 text-center text-sm text-foreground-muted">
           No agents in this turn.
@@ -106,6 +137,7 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
                 subagent={subagent}
                 environmentId={target.environmentId}
                 tickSeconds={hasLiveAgent}
+                readOnly={mirrored}
                 onOpen={openChildThread}
               />
             </View>
@@ -115,6 +147,7 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
               environmentId={target.environmentId}
               subagent={subagent}
               group={group}
+              readOnly={mirrored}
               onOpen={(threadId) =>
                 openChildThread({ environmentId: target.environmentId, threadId })
               }
@@ -129,6 +162,14 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
     <View collapsable={false} className="flex-1 bg-sheet">
       <SheetHeader title="Agents" onClose={() => navigation.goBack()} />
       <ScreenContent>{content}</ScreenContent>
+      {openSandboxAgent === null ? null : (
+        <SandboxAgentSheet
+          environmentId={target.environmentId}
+          threadId={target.threadId}
+          childThreadId={openSandboxAgent}
+          onClose={() => setOpenSandboxAgent(null)}
+        />
+      )}
     </View>
   );
 }
@@ -137,6 +178,7 @@ function AgentRow(props: {
   readonly environmentId: EnvironmentId;
   readonly subagent: OrchestrationV2Subagent;
   readonly tickSeconds: boolean;
+  readonly readOnly: boolean;
   readonly onOpen: (child: { environmentId: EnvironmentId; threadId: ThreadId }) => void;
 }) {
   const { subagent } = props;
@@ -183,7 +225,9 @@ function AgentRow(props: {
   return (
     <View className="flex-row items-center">
       {content}
-      <SubagentStopButton environmentId={props.environmentId} subagent={subagent} />
+      {props.readOnly ? null : (
+        <SubagentStopButton environmentId={props.environmentId} subagent={subagent} />
+      )}
     </View>
   );
 }
