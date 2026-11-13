@@ -356,6 +356,8 @@ describe("SandboxSettle", () => {
           resolved: true,
         });
         expect(harness.records[0]?.settlePending).toBeUndefined();
+        // Keep is a snapshot on every client: a running sandbox stops and keeps its disk.
+        expect(harness.stops).toEqual(["sandbox-1"]);
         expect(harness.records).toHaveLength(1);
         harness.records = [record({ settlePending: { since: SETTLED_AT, reason: "work" } })];
         expect(yield* service.resolve({ instanceId: "sandbox-1", choice: "delete" })).toEqual({
