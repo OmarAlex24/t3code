@@ -579,6 +579,11 @@ export interface AcpAdapterV2Flavor {
   ) => boolean;
   readonly deferFinalizeForBackgroundWork?: boolean;
   readonly assertComplete?: Effect.Effect<void, EffectAcpErrors.AcpError>;
+  /**
+   * `session/cancel` `_meta` for an interrupt that is not the user's Stop (no runtime restart
+   * requested), such as a steer's restart, so the agent can keep the work going.
+   */
+  readonly steerCancelMeta?: NonNullable<EffectAcpSchema.CancelNotification["_meta"]>;
   /** Interrupt the local prompt fiber before `session/cancel` (Grok wedged prompts). */
   readonly interruptPromptOnCancel?: boolean;
   /**
@@ -9405,7 +9410,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       } else {
                         // Settled soft interrupts have no prompt to cancel; cancel could kill background subagents.
                         if (!settledSoftInterrupt && (yield* promptStillRunsAfterHold(context))) {
-                          yield* runtime.cancel;
+                          const steerMeta =
+                            turnInput.requestRuntimeRestart === true
+                              ? undefined
+                              : flavor.steerCancelMeta;
+                          yield* steerMeta === undefined || runtime.cancelWith === undefined
+                            ? runtime.cancel
+                            : runtime.cancelWith(steerMeta);
                         }
                         if (restartRuntime && flavor.restartRuntimeAfterInterrupt === true) {
                           yield* Ref.set(runtimeRestartRequired, true);

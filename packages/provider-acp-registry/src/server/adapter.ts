@@ -20,8 +20,10 @@ import {
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
+  SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MESSAGE_META,
+  SANDBOX_BRIDGE_STEER_CANCEL,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
 } from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
@@ -276,6 +278,8 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
       ? {
           registerExtensions: registerSandboxBridgeExtensions,
           promptMeta: (message) => ({ [SANDBOX_BRIDGE_MESSAGE_META]: { ...message } }),
+          // A steer restarts the host's turn; the sandbox's run, and its tasks, keep going.
+          steerCancelMeta: { [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL },
           // The bridge lists the sandbox's models only while the sandbox answers, and reads the
           // pick from the thread when it sends, so a model it does not list now is no failure.
           applyModelSelection: ({ runtime, modelSelection }) =>

@@ -1104,6 +1104,12 @@ export const SANDBOX_PI_PROVIDER = "hub";
 export const sandboxPiModelSlug = (model: string) => `${SANDBOX_PI_PROVIDER}/${model}`;
 /** The host's prompt `_meta` key naming the T3 message, so the bridge reuses its id on the sandbox. */
 export const SANDBOX_BRIDGE_MESSAGE_META = "t3code/message";
+/**
+ * The host's `session/cancel` `_meta` key when it cancels a sandbox prompt only to send a newer
+ * message (a steer), not for the user's Stop; the bridge then leaves the sandbox's run working.
+ */
+export const SANDBOX_BRIDGE_CANCEL_META = "t3code/cancel";
+export const SANDBOX_BRIDGE_STEER_CANCEL = "steer";
 /** The bridge's ACP notification that its open approval or question was answered on the sandbox. */
 export const SANDBOX_BRIDGE_WITHDRAW_METHOD = "_t3code/sandbox_requests_withdrawn";
 

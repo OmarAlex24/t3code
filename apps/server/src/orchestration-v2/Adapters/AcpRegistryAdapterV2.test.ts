@@ -11,6 +11,9 @@ import {
   type ModelSelection,
   ProviderInstanceId,
   ProviderSessionId,
+  SANDBOX_BRIDGE_CANCEL_META,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_STEER_CANCEL,
   ThreadId,
 } from "@t3tools/contracts";
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -210,6 +213,7 @@ const openClaudeReplaySession = Effect.fn("openClaudeReplaySession")(function* (
   replayGate?: ProviderReplayGate,
   continuationEnabled = true,
   agentId = "claude-acp",
+  instance = "claude-lifecycle",
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -233,7 +237,7 @@ const openClaudeReplaySession = Effect.fn("openClaudeReplaySession")(function* (
         offers.push(request);
       }).pipe(Effect.andThen(Queue.offer(offered, undefined)), Effect.asVoid),
   };
-  const instanceId = ProviderInstanceId.make("claude-lifecycle");
+  const instanceId = ProviderInstanceId.make(instance);
   let onTermination: NonNullable<
     AcpSessionRuntime.AcpSessionRuntimeOptions["onTermination"]
   > = () => Effect.die("Runtime has not started");
@@ -1257,6 +1261,74 @@ describe("AcpRegistryAdapterV2", () => {
         supportsSteeringByInterruptRestart: true,
       });
     }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("tells the sandbox bridge a steer's cancel from the user's Stop", () =>
+    Effect.gen(function* () {
+      const cancel = (meta?: Record<string, unknown>) => ({
+        type: "expect_outbound",
+        frame: {
+          kind: "notification",
+          method: "session/cancel",
+          params: {
+            sessionId: CLAUDE_ROOT_SESSION,
+            ...(meta === undefined ? {} : { _meta: meta }),
+          },
+        },
+      });
+      // The bridge takes the thread's model before each prompt.
+      const pickModel = [
+        {
+          type: "expect_outbound",
+          frame: { kind: "request", method: "session/set_config_option", params: "<any>" },
+        },
+        {
+          type: "emit_inbound",
+          frame: {
+            kind: "response",
+            method: "session/set_config_option",
+            result: { configOptions: [] },
+          },
+        },
+      ];
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          ...pickModel,
+          ...claudeFrames.prompt(1),
+          claudeMarker("steer"),
+          cancel({ [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL }),
+          claudeFrames.idle("cancelled"),
+          ...claudeFrames.prompt(2),
+          claudeMarker("stop"),
+          cancel(),
+          claudeFrames.idle("cancelled"),
+          claudeFrames.closeRequest,
+          claudeFrames.closed,
+        ],
+        undefined,
+        false,
+        "fixture-agent",
+        SANDBOX_BRIDGE_INSTANCE_ID,
+      );
+      for (const [ordinal, marker, requestRuntimeRestart] of [
+        [1, "steer", false],
+        [2, "stop", true],
+      ] as const) {
+        yield* session.runtime.startTurn(session.turnInput(ordinal));
+        const running = (yield* session.throughMarker(marker)).findLast(
+          (event) => event.type === "provider_turn.updated",
+        );
+        if (running?.type !== "provider_turn.updated") throw new Error("Missing active turn");
+        // A steer restarts the turn without asking for a runtime restart; Stop asks for one.
+        yield* session.runtime.interruptTurn({
+          providerThread: session.providerThread,
+          providerTurnId: running.providerTurn.id,
+          requestRuntimeRestart,
+        });
+        assert.equal((yield* session.terminal).status, "interrupted");
+      }
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("gives Copilot T3's MCP server over HTTP when it advertises HTTP", () =>
