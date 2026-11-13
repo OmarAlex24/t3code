@@ -37,7 +37,7 @@ import {
   sandboxRowStates,
   sandboxRowThread,
   sandboxConnectOffer,
-  sandboxesToPair,
+  sandboxToPair,
   settleDecisionKeys,
   withSandboxHostMirrors,
 } from "./sandboxThreads";
@@ -529,7 +529,7 @@ describe("sandboxChatPickPartner", () => {
   });
 });
 
-describe("sandboxesToPair", () => {
+describe("sandboxToPair", () => {
   const linked = (fields: Partial<SandboxRecord> = {}) =>
     record({
       hostProjectId: ProjectId.make("project-host"),
@@ -540,20 +540,48 @@ describe("sandboxesToPair", () => {
       },
       ...fields,
     });
+  const mirror = { environmentId: HOST, threadId };
+  const saved = (phase: string) => [{ environmentId: SANDBOX, connection: { phase } }];
+  const target = { instanceId: "instance-1", environmentId: SANDBOX, threadId };
 
-  it("pairs with a linked, running sandbox this app has not paired with", () => {
-    const sandbox = linked();
-    expect(sandboxesToPair([sandbox], HOST, new Set())).toEqual([sandbox]);
-    expect(sandboxesToPair([sandbox], HOST, new Set([SANDBOX]))).toEqual([]);
+  it("pairs with the open chat's linked, running sandbox this app is not connected to", () => {
+    expect(sandboxToPair([linked()], mirror, HOST, [], [])).toEqual(target);
+    expect(sandboxToPair([linked()], { environmentId: SANDBOX, threadId }, HOST, [], [])).toEqual(
+      target,
+    );
+    // Saved here once, but not connected: a resumed sandbox can answer at a new address.
+    for (const phase of ["available", "offline", "reconnecting", "error"]) {
+      expect(sandboxToPair([linked()], mirror, HOST, saved(phase), [])).toEqual(target);
+    }
+    for (const phase of ["connected", "connecting"]) {
+      expect(sandboxToPair([linked()], mirror, HOST, saved(phase), [])).toBeNull();
+    }
   });
 
-  it("waits for a launch to finish, a stopped sandbox to run, and a link to exist", () => {
-    expect(sandboxesToPair([linked({ state: "provisioning" })], HOST, new Set())).toEqual([]);
-    expect(sandboxesToPair([linked({ state: "stopped" })], HOST, new Set())).toEqual([]);
-    expect(sandboxesToPair([record()], HOST, new Set())).toEqual([]);
+  it("pairs only with the open chat's sandbox", () => {
+    const other = linked({ instanceId: "instance-2", threadId: ThreadId.make("thread-2") });
+    expect(sandboxToPair([other, linked()], mirror, HOST, [], [])).toEqual(target);
+    expect(sandboxToPair([linked()], null, HOST, [], [])).toBeNull();
+    expect(
+      sandboxToPair(
+        [linked()],
+        { environmentId: HOST, threadId: ThreadId.make("thread-2") },
+        HOST,
+        [],
+        [],
+      ),
+    ).toBeNull();
+  });
+
+  it("waits for a launch to finish, a stopped sandbox to run, a link, and the user's connect", () => {
+    expect(sandboxToPair([linked({ state: "provisioning" })], mirror, HOST, [], [])).toBeNull();
+    expect(sandboxToPair([linked({ state: "stopped" })], mirror, HOST, [], [])).toBeNull();
+    expect(sandboxToPair([record()], mirror, HOST, [], [])).toBeNull();
+    // One the user disconnected from stays so until they connect again.
+    expect(sandboxToPair([linked()], mirror, HOST, [], [SANDBOX])).toBeNull();
     // One that answers as the host, or with no host to pair through.
-    expect(sandboxesToPair([linked({ environmentId: HOST })], HOST, new Set())).toEqual([]);
-    expect(sandboxesToPair([linked()], null, new Set())).toEqual([]);
+    expect(sandboxToPair([linked({ environmentId: HOST })], mirror, HOST, [], [])).toBeNull();
+    expect(sandboxToPair([linked()], mirror, null, [], [])).toBeNull();
   });
 });
 

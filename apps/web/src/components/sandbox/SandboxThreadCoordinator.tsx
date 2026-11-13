@@ -10,7 +10,6 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
-  AuthSettingsWriteScope,
   type EnvironmentId,
   type SandboxCheckWorkResult,
   type SandboxEnvironmentConfig,
@@ -23,7 +22,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
-import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
+import { useThreadRouteRef } from "~/hooks/useThreadRouteTarget";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { useThreadShells } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
@@ -39,17 +38,17 @@ import {
   registerSandboxThreadHandlers,
   sandboxMirrorOf,
   sandboxMirrorTitleUpdates,
-  sandboxesToPair,
+  sandboxToPair,
   type SandboxSettleUndo,
   settleDecisionKeys,
   shortSandboxId,
 } from "~/state/sandboxThreads";
 import { serverEnvironment } from "~/state/server";
-import { readEnvironmentScope } from "~/state/session";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { describeSandboxFailure } from "../settings/SandboxStartLimits";
+import { useConnectSandbox } from "./SandboxConnect";
 import {
   AlertDialog,
   AlertDialogDescription,
@@ -166,10 +165,6 @@ export function SandboxThreadCoordinator() {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
-  const pairLaunch = useAtomCommand(serverEnvironment.sandboxesPairLaunch, {
-    reportFailure: false,
-  });
-  const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
   const deleteRemoteThread = useOrchestrationCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
@@ -214,38 +209,30 @@ export function SandboxThreadCoordinator() {
 
   // When this app last tried to pair with each sandbox, so a refusal is not retried at once.
   const pairAttempts = useRef(new Map<string, number>());
-  const canManage =
-    provisionerEnvironmentId !== null &&
-    readEnvironmentScope(provisionerEnvironmentId, AuthSettingsWriteScope);
-  const canPair = canManage;
+  // A remote host's session loads after mount, so the grant is read where it updates.
+  const canManage = useAtomValue(
+    serverEnvironment.sandboxesResolveSettle.permissionAtom(provisionerEnvironmentId),
+  );
+  const canPair = useAtomValue(
+    serverEnvironment.sandboxesPairLaunch.permissionAtom(provisionerEnvironmentId),
+  );
+  const openThreadRef = useThreadRouteRef();
   const disconnected = useSandboxConnectionsStore((state) => state.disconnected);
-  const unpaired = canPair
-    ? sandboxesToPair(
-        sandboxes,
-        provisionerEnvironmentId,
-        // One the user disconnected from stays so until they connect again.
-        new Set([...environments.map((environment) => environment.environmentId), ...disconnected]),
-      )
-    : [];
-  const pair = useStableCallback(async (sandbox: SandboxRecord) => {
-    if (provisionerEnvironmentId === null || sandbox.threadId === undefined) return;
-    const paired = await pairLaunch({
-      environmentId: provisionerEnvironmentId,
-      input: { threadId: sandbox.threadId },
-    });
-    if (paired._tag === "Failure") return;
-    await connectPairing({ host: paired.value.httpBaseUrl, pairingCode: paired.value.pairingCode });
-  });
+  const connectSandbox = useConnectSandbox();
+  const toPair = canPair
+    ? sandboxToPair(sandboxes, openThreadRef, provisionerEnvironmentId, environments, disconnected)
+    : null;
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pairs this app with a sandbox the host finished launching, so its own thread opens here
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pairs this app with the open chat's running sandbox, so its own thread opens here
   useEffect(() => {
+    if (toPair === null) return;
     const now = Date.now();
-    for (const sandbox of unpaired) {
-      const last = pairAttempts.current.get(sandbox.instanceId);
-      if (last !== undefined && now - last < PAIR_RETRY_MS) continue;
-      pairAttempts.current.set(sandbox.instanceId, now);
-      void pair(sandbox);
-    }
+    const last = pairAttempts.current.get(toPair.instanceId);
+    if (last !== undefined && now - last < PAIR_RETRY_MS) return;
+    pairAttempts.current.set(toPair.instanceId, now);
+    void connectSandbox(toPair, false).then((failure) => {
+      if (failure !== null) console.warn("Could not connect to the chat's sandbox", failure);
+    });
   });
 
   // The rename last sent for each host mirror, as its title then and the title it was given, so
@@ -758,12 +745,7 @@ export function SandboxThreadCoordinator() {
             }
             providerLabel={providerLabel(prompt.sandbox)}
             retentionDays={providerOf(prompt.sandbox)?.diskRetentionDays}
-            rememberLabel={
-              provisionerEnvironmentId !== null &&
-              readEnvironmentScope(provisionerEnvironmentId, AuthSettingsWriteScope)
-                ? (configOf(prompt.sandbox)?.label ?? null)
-                : null
-            }
+            rememberLabel={canManage ? (configOf(prompt.sandbox)?.label ?? null) : null}
             onKeep={(rememberChoice) => {
               close(prompt.id);
               if (rememberChoice) void remember(prompt.sandbox, "snapshot");
