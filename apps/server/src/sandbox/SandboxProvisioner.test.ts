@@ -954,7 +954,11 @@ describe("celestoDriver", () => {
     Effect.gen(function* () {
       const cases = [
         { state: "running", expected: "running" },
-        ...["creating", "starting", "restoring"].map((state) => ({ state, expected: "starting" })),
+        // `restorable` and `restoring` are Celesto moving a sandbox after a spot interruption.
+        ...["creating", "pending", "starting", "restoring", "restorable"].map((state) => ({
+          state,
+          expected: "starting",
+        })),
         { state: "stopping", expected: "stopped" },
         { state: "stopped", expected: "stopped" },
         { state: "stopped", disk_delete_at: "2026-12-01T00:00:00Z", expected: "stopped" },
@@ -965,7 +969,7 @@ describe("celestoDriver", () => {
         { state: "deleting", expected: "deleted" },
         { state: "deleted", expected: "deleted" },
         { status: 404, expected: "deleted" },
-        { state: "restorable", expected: null },
+        { state: "hibernating", expected: null },
       ] as const;
       for (const testCase of cases) {
         const client = HttpClient.make((request) =>
