@@ -29,6 +29,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   isProviderNativeSubagentThread,
+  isSandboxHostProjectRoot,
   MessageId,
   ThreadId,
   type ProjectScript,
@@ -128,6 +129,7 @@ import { sandboxMirrorPicker, useSandboxMirror } from "../../state/sandbox-mirro
 import type { ThreadInspectorMode, ThreadInspectorTarget } from "./thread-inspector-navigation";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 
+const SANDBOX_WORKSPACE_ELSEWHERE = "Available from a computer connected to the sandbox";
 function firstRouteParam(value: string | string[] | undefined): string | null {
   const first = Array.isArray(value) ? value[0] : value;
   return first === undefined || first.trim().length === 0 ? null : first;
@@ -802,6 +804,10 @@ function ThreadRouteContent(
       terminalId: targetTerminalId,
     });
   };
+  // A sandbox chat's mirror lives in an empty placeholder folder; its workspace is on the sandbox,
+  // which this phone never pairs with.
+  const onSandboxPlaceholder =
+    selectedThreadProject != null && isSandboxHostProjectRoot(selectedThreadProject.workspaceRoot);
   const threadGitControlProps = {
     environmentId: environmentIdRaw ?? "",
     threadId: threadId ?? "",
@@ -815,9 +821,12 @@ function ThreadRouteContent(
     gitStatus: gitStatus.data,
     gitOperationLabel: gitState.gitOperationLabel,
     canOpenTerminal:
-      Boolean(selectedThreadProject?.workspaceRoot) && (canReadTerminal || canOperateTerminal),
+      !onSandboxPlaceholder &&
+      Boolean(selectedThreadProject?.workspaceRoot) &&
+      (canReadTerminal || canOperateTerminal),
     canOperateTerminal,
-    canOpenFiles: Boolean(selectedThreadProject?.workspaceRoot),
+    canOpenFiles: !onSandboxPlaceholder && Boolean(selectedThreadProject?.workspaceRoot),
+    ...(onSandboxPlaceholder ? { unavailableReason: SANDBOX_WORKSPACE_ELSEWHERE } : {}),
     projectScripts: selectedThreadProject
       ? resolveProjectScripts(
           routeEnvironmentRuntime?.serverConfig?.settings ?? DEFAULT_SERVER_SETTINGS,
