@@ -25,6 +25,7 @@ import {
   movesToSandboxChatAlias,
   sandboxChatAliases,
   sandboxChatAliasTarget,
+  sandboxChatOwnThread,
   sandboxChatPickPartner,
   sandboxHostMirrors,
   sandboxMirrorModelSource,
@@ -446,6 +447,21 @@ describe("sandboxMirrorModelSource", () => {
 
   it("leaves the bridge's list while the sandbox's provider is unknown here", () => {
     expect(sandboxMirrorModelSource(running, [])).toBeNull();
+  });
+});
+
+describe("sandboxChatOwnThread", () => {
+  const sandboxRef = { environmentId: SANDBOX, threadId };
+  const mirrorRef = { environmentId: HOST, threadId };
+  const mirrors = new Map([[threadKey(mirrorRef), sandboxRef]]);
+
+  // The mirror has no child threads: the sandbox's agents and tasks are on its own server.
+  it("reads a mirror's chat from the sandbox's own thread", () => {
+    expect(sandboxChatOwnThread(mirrors, mirrorRef)).toEqual(sandboxRef);
+  });
+
+  it("keeps any other thread", () => {
+    expect(sandboxChatOwnThread(mirrors, sandboxRef)).toBe(sandboxRef);
   });
 });
 

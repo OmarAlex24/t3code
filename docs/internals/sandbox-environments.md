@@ -439,7 +439,9 @@ without pairing with the sandbox.
   back, typing or not, and never moves a thread they sent in since opening it: a send on the mirror
   resumes the sandbox, whose own thread then lists, and moving then would swap the conversation
   under them. It carries an unsent draft across (`moveComposerPromptAndImages`). A chat with no
-  mirror listed keeps its sandbox's thread and the client-side resume path (`sandboxResendPending`). `sandboxHostMirrors` pairs the two threads when both are listed,
+  mirror listed keeps its sandbox's thread and the client-side resume path (`sandboxResendPending`).
+  The mirror has none of the chat's agents or tasks, so its details panel lists the lineage of the
+  sandbox's thread (`sandboxChatOwnThread`). `sandboxHostMirrors` pairs the two threads when both are listed,
   and the mirror takes the sandbox thread's title. Each
   message the composer sends on a linked sandbox thread (not on the mirror) is copied to the mirror with the same
   message id and `dispatchMode: "queue"`

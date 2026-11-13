@@ -187,6 +187,15 @@ export const sandboxHostMirrors = (
 };
 
 /**
+ * The thread a sandbox chat's details read: for a host mirror whose sandbox thread lists, that
+ * thread, which has the chat's agents and tasks; any other thread is its own.
+ */
+export const sandboxChatOwnThread = (
+  mirrors: ReadonlyMap<string, ScopedThreadRef>,
+  threadRef: ScopedThreadRef,
+): ScopedThreadRef => mirrors.get(threadKey(threadRef)) ?? threadRef;
+
+/**
  * What the host mirror's model picker shows of a sandbox chat whose own thread lists: the
  * sandbox's provider and selection, under the bridge's instance, which a send on the mirror carries
  * and the bridge hands to the sandbox. The host's bridge lists one set of models and options for
