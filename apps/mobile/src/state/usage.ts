@@ -8,6 +8,10 @@ import {
 } from "@t3tools/contracts";
 import { refreshUsage, usageSummaryInput } from "@t3tools/client-runtime/state/usage";
 import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
+import {
+  summarizeSandboxShare,
+  type SandboxShareSummary,
+} from "@t3tools/client-runtime/state/usage-sandbox-share";
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useMemo } from "react";
@@ -167,4 +171,51 @@ export function useUsage(
     isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,
   };
+}
+
+const sandboxSharesAtom = Atom.family((key: string) =>
+  Atom.make((get): ReadonlyMap<EnvironmentId, SandboxShareSummary> => {
+    const { environmentIds, timeZone } = JSON.parse(key) as {
+      readonly environmentIds: readonly EnvironmentId[];
+      readonly timeZone: string;
+    };
+    const shares = new Map<EnvironmentId, SandboxShareSummary>();
+    for (const environmentId of environmentIds) {
+      const share = AsyncResult.getOrElse(
+        get(serverEnvironment.usageSandboxShare({ environmentId, input: { timeZone } })),
+        () => null,
+      );
+      if (share !== null) shares.set(environmentId, summarizeSandboxShare(share));
+    }
+    return shares;
+  }).pipe(Atom.withLabel(`mobile-usage:sandbox-share:${key}`)),
+);
+
+export interface EnvironmentSandboxShare {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly summary: SandboxShareSummary;
+}
+
+/**
+ * Each selected environment's local versus sandbox chats. Only a sandbox host has sandbox chats,
+ * and environments with none, or servers without the read, are left out.
+ */
+export function useUsageSandboxShares(
+  selectedEnvironments: readonly EnvironmentUsageStatus[],
+  timeZone: string,
+): readonly EnvironmentSandboxShare[] {
+  const readable = selectedEnvironments.filter((environment) => environment.canReadDiagnostics);
+  const key = JSON.stringify({
+    // Hermes lacks toSorted.
+    environmentIds: readable.map((environment) => environment.environmentId).sort(),
+    timeZone,
+  });
+  const shares = useAtomValue(sandboxSharesAtom(key));
+  return readable.flatMap((environment) => {
+    const summary = shares.get(environment.environmentId);
+    return summary?.hasSandboxActivity
+      ? [{ environmentId: environment.environmentId, label: environment.label, summary }]
+      : [];
+  });
 }
