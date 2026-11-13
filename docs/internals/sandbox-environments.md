@@ -46,7 +46,9 @@ Drivers must keep two invariants:
 - **Tags.** `create` receives `tags: { host, instance }`, the host's environment id and the
   record's instance id. A driver that can label sandboxes stores both, and `listSandboxes` returns
   the sandboxes carrying this host's tag. Boat stores them as `t3.code/host` and `t3.code/instance`
-  labels; the other drivers do not tag yet, so they report no orphans.
+  labels; the other drivers do not tag yet, so they report no orphans. Celesto cannot: its create
+  takes no name, label, or project, and its list filters only by status, template, project, and
+  origin.
 
 ## Adding a provider
 
@@ -564,8 +566,12 @@ sandbox, disk included, even when stopped, so it is set 24 hours past the runnin
 is the session timeout, capped by the plan (45 minutes on Hobby, a day on Pro), so a Hobby sandbox
 stops early and the sweep records it as stopped. Its stopped disk is kept for 30 days. Upstash and
 Celesto have no lifetime of their own, so the sweep's stop is the only limit; a Celesto sandbox
-bills until T3 stops it. Upstash also pauses an idle box and wakes it on any visit to its URL,
-restarting T3 through the box's init command; the sweep records both.
+bills until T3 stops it. Celesto keeps the root disk, home included, across stop and start for 30
+days. Its persistent home (`external_volume_enabled`) would also keep `/home/ohm` across a spot move
+(`restorable`, then `restoring`, which the sweep treats as starting), but the `coding-agent`
+template refuses it, so a moved sandbox may lose its T3 state. Upstash also pauses an idle box
+and wakes it on any visit to its URL, restarting T3 through the box's init command; the sweep
+records both.
 
 The same sweep makes the record match the provider, because T3 usually runs where webhooks can't
 reach it. Each record gets at most one provider call per sweep, with a few in flight at a time. An
