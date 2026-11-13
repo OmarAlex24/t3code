@@ -42,6 +42,7 @@ import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
 import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
 import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { SANDBOX_MIRROR_MODELS_PENDING_REASON } from "@t3tools/client-runtime/state/sandbox-mirror";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
@@ -1357,8 +1358,8 @@ export default function ChatView(props: ChatViewProps) {
     : (primaryEnvironment?.serverConfig ?? null);
   const providerEnvironmentId = (activeThread ? activeEnvironment : primaryEnvironment)
     ?.environmentId;
-  // On a sandbox chat's host mirror, the sandbox's own provider and selection, not the bridge's.
-  const sandboxMirrorModelSource = useSandboxMirrorModelSource(activeThreadRef);
+  // On a sandbox chat's host mirror, the sandbox's own provider and selection, never the host's.
+  const sandboxMirrorModelSource = useSandboxMirrorModelSource(activeThreadRef, serverThread);
   const providerStatuses =
     sandboxMirrorModelSource?.providers ??
     (providerEnvironmentId === undefined
@@ -3993,6 +3994,11 @@ export default function ChatView(props: ChatViewProps) {
                                 lockedProvider={modelPickerLockedProvider}
                                 providerStatuses={providerStatuses as ServerProvider[]}
                                 providerCatalogKnown={serverConfig !== null}
+                                modelPickerReadOnlyReason={
+                                  sandboxMirrorModelSource?.readOnly
+                                    ? SANDBOX_MIRROR_MODELS_PENDING_REASON
+                                    : null
+                                }
                                 activeProjectDefaultModelSelection={
                                   activeProjectDefaultModelSelection
                                 }

@@ -1,8 +1,13 @@
 import { useAtomValue } from "@effect/atom-react";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
-import { sandboxMirrorModelSource } from "@t3tools/client-runtime/state/sandbox-mirror";
+import {
+  isSandboxMirrorThread,
+  sandboxMirrorModelSource,
+  sandboxMirrorPickerSource,
+} from "@t3tools/client-runtime/state/sandbox-mirror";
 import {
   type EnvironmentId,
+  type ModelSelection,
   type ProjectId,
   SANDBOX_BRIDGE_INSTANCE_ID,
   type SandboxRecord,
@@ -226,31 +231,46 @@ export function useSandboxChatOwnThread(threadRef: ScopedThreadRef): ScopedThrea
 }
 
 /**
- * The sandbox's provider and selection for the model picker on its chat's host mirror; see
- * `sandboxMirrorModelSource`. Null for any other thread, and while the sandbox's thread is unlisted.
+ * What every model picker on a sandbox chat's host mirror reads; see `sandboxMirrorPickerSource`.
+ * Null for any other thread. The host's read is followed only while this app has no paired one.
  */
-export function useSandboxMirrorModelSource(threadRef: ScopedThreadRef | null) {
+export function useSandboxMirrorModelSource(
+  threadRef: ScopedThreadRef | null,
+  thread: { readonly modelSelection: ModelSelection } | null | undefined,
+) {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const threads = useQuietThreadShells();
   const sandboxes = useSandboxRecords();
   const providersByEnvironment = useEnvironmentProviders();
-  if (threadRef === null || threadRef.environmentId !== provisionerEnvironmentId) return null;
-  const sandboxRef = sandboxHostMirrors(sandboxes, threads, provisionerEnvironmentId).get(
-    threadKey(threadRef),
-  );
+  const isMirror = threadRef !== null && thread != null && isSandboxMirrorThread(thread);
+  const sandboxRef = isMirror
+    ? sandboxHostMirrors(sandboxes, threads, provisionerEnvironmentId).get(threadKey(threadRef))
+    : undefined;
   const sandboxThread =
     sandboxRef === undefined
       ? undefined
       : threads.find(
-          (thread) =>
-            thread.environmentId === sandboxRef.environmentId && thread.id === sandboxRef.threadId,
+          (candidate) =>
+            candidate.environmentId === sandboxRef.environmentId &&
+            candidate.id === sandboxRef.threadId,
         );
-  return sandboxThread === undefined
-    ? null
-    : sandboxMirrorModelSource(
-        sandboxThread.modelSelection,
-        providersByEnvironment.get(sandboxThread.environmentId) ?? [],
-      );
+  const paired =
+    sandboxThread === undefined
+      ? null
+      : sandboxMirrorModelSource(
+          sandboxThread.modelSelection,
+          providersByEnvironment.get(sandboxThread.environmentId) ?? [],
+        );
+  const hostMirror = useAtomValue(
+    serverEnvironment.sandboxesThreadMirrorValue(isMirror && paired === null ? threadRef : null),
+  );
+  if (!isMirror) return null;
+  return sandboxMirrorPickerSource({
+    paired,
+    hostMirror,
+    mirrorSelection: thread.modelSelection,
+    hostProviders: providersByEnvironment.get(threadRef.environmentId) ?? [],
+  });
 }
 
 const NO_SANDBOXES: ReadonlyArray<SandboxRecord> = [];

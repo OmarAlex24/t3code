@@ -4,10 +4,12 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { isSandboxMirrorThread } from "@t3tools/client-runtime/state/sandbox-mirror";
 import { useContext } from "react";
 
 import { type ComposerThreadTarget, useComposerDraftStore } from "../../composerDraftStore";
 import { useQuietThreadShells } from "../../state/entities";
+import { serverEnvironment } from "../../state/server";
 import { useSandboxProvisionerEnvironmentId, useSandboxRecords } from "../../state/sandboxes";
 import { sandboxChatPickPartner, sandboxHostMirrors } from "../../state/sandboxThreads";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
@@ -21,6 +23,10 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 export function useApplyThreadModelPick() {
   const registry = useContext(RegistryContext);
   const setModelSelection = useOrchestrationCommand(threadEnvironment.setModelSelection, {
+    label: "change model",
+  });
+  // A mirror whose sandbox thread this app does not list sets it through the host, as the phone does.
+  const setSandboxMirrorModel = useOrchestrationCommand(serverEnvironment.sandboxesSetThreadModel, {
     label: "change model",
   });
   // A stopped sandbox's thread takes the pick from the bridge with the next message instead.
@@ -47,11 +53,11 @@ export function useApplyThreadModelPick() {
       target,
       pick,
     );
+    const input = { threadId: target.threadId, modelSelection: pick };
     const [result, partnerResult] = await Promise.all([
-      setModelSelection({
-        environmentId: target.environmentId,
-        input: { threadId: target.threadId, modelSelection: pick },
-      }),
+      partner === null && isSandboxMirrorThread(thread)
+        ? setSandboxMirrorModel({ environmentId: target.environmentId, input })
+        : setModelSelection({ environmentId: target.environmentId, input }),
       partner === null
         ? null
         : setPartnerModelSelection({

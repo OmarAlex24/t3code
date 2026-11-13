@@ -58,6 +58,37 @@ export const sandboxMirrorModelSourceOf = (mirror: SandboxThreadMirror | null) =
     ? null
     : sandboxMirrorModelSource(mirror.modelSelection, [mirror.provider]);
 
+/** Why a sandbox chat's mirror shows its model read-only; see `sandboxMirrorPickerSource`. */
+export const SANDBOX_MIRROR_MODELS_PENDING_REASON =
+  "The sandbox's models show once it has been reached.";
+
+/**
+ * Every picker on a sandbox chat's mirror: the sandbox's own thread where this client is paired
+ * with it, else what the host last read of it. With neither, the mirror's pick on the bridge alone,
+ * read-only: the bridge's shared list is another chat's, and the host refuses any other provider.
+ */
+export const sandboxMirrorPickerSource = (input: {
+  readonly paired: ReturnType<typeof sandboxMirrorModelSource>;
+  readonly hostMirror: SandboxThreadMirror | null;
+  readonly mirrorSelection: ModelSelection;
+  readonly hostProviders: ReadonlyArray<ServerProvider>;
+}): {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly modelSelection: ModelSelection;
+  readonly readOnly: boolean;
+} => {
+  const source = input.paired ?? sandboxMirrorModelSourceOf(input.hostMirror);
+  return source !== null
+    ? { ...source, readOnly: false }
+    : {
+        providers: input.hostProviders.filter(
+          (provider) => provider.instanceId === bridgeInstanceId,
+        ),
+        modelSelection: input.mirrorSelection,
+        readOnly: true,
+      };
+};
+
 /** Changes whenever the host reports the agent behind `childThreadId` changed, so its read follows. */
 const sandboxMirrorChildRevision = (
   mirror: SandboxThreadMirror | null,
