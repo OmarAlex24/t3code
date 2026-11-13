@@ -1263,7 +1263,7 @@ describe("AcpRegistryAdapterV2", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("tells the sandbox bridge a steer's cancel from the user's Stop", () =>
+  it.effect("tells the sandbox bridge a steer's cancel from a Stop or a detach", () =>
     Effect.gen(function* () {
       const cancel = (meta?: Record<string, unknown>) => ({
         type: "expect_outbound",
@@ -1300,6 +1300,10 @@ describe("AcpRegistryAdapterV2", () => {
           cancel({ [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL }),
           claudeFrames.idle("cancelled"),
           ...claudeFrames.prompt(2),
+          claudeMarker("detach"),
+          cancel(),
+          claudeFrames.idle("cancelled"),
+          ...claudeFrames.prompt(3),
           claudeMarker("stop"),
           cancel(),
           claudeFrames.idle("cancelled"),
@@ -1311,20 +1315,22 @@ describe("AcpRegistryAdapterV2", () => {
         "fixture-agent",
         SANDBOX_BRIDGE_INSTANCE_ID,
       );
-      for (const [ordinal, marker, requestRuntimeRestart] of [
-        [1, "steer", false],
-        [2, "stop", true],
+      // Only a steer's restart says so; a detach (force-stop, session replacement) asks for no
+      // runtime restart and is still a Stop to the bridge.
+      for (const [ordinal, marker, interrupt] of [
+        [1, "steer", { steer: true }],
+        [2, "detach", {}],
+        [3, "stop", { requestRuntimeRestart: true }],
       ] as const) {
         yield* session.runtime.startTurn(session.turnInput(ordinal));
         const running = (yield* session.throughMarker(marker)).findLast(
           (event) => event.type === "provider_turn.updated",
         );
         if (running?.type !== "provider_turn.updated") throw new Error("Missing active turn");
-        // A steer restarts the turn without asking for a runtime restart; Stop asks for one.
         yield* session.runtime.interruptTurn({
           providerThread: session.providerThread,
           providerTurnId: running.providerTurn.id,
-          requestRuntimeRestart,
+          ...interrupt,
         });
         assert.equal((yield* session.terminal).status, "interrupted");
       }
