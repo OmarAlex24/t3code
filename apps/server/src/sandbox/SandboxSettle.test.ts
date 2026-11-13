@@ -20,6 +20,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { describe, expect } from "vite-plus/test";
 
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as SandboxMirror from "./SandboxMirror.ts";
 import * as SandboxProvisioner from "./SandboxProvisioner.ts";
 import * as SandboxSettle from "./SandboxSettle.ts";
 import type { SandboxLaunchLifecycle } from "./sandboxLaunches.ts";
@@ -44,6 +45,11 @@ interface Harness {
   records: Array<SandboxRecord>;
   onSettle: SandboxSettleAction | undefined;
   work: SandboxCheckWorkResult["status"];
+  /** What the sandbox's own thread is doing, read through the bridge's link. */
+  sandboxActivity: SandboxMirror.SandboxActivity;
+  /** The host thread's runs and tasks, such as a sub-sandbox task an agent there started. */
+  hostRuns: Array<{ readonly status: string }>;
+  hostSubagents: Array<{ readonly status: string }>;
   settled: boolean;
   stops: Array<string>;
   deletes: Array<string>;
@@ -82,6 +88,9 @@ const withHarness = <A, E>(
       records: [record()],
       onSettle: undefined,
       work: "clean",
+      sandboxActivity: "idle",
+      hostRuns: [],
+      hostSubagents: [],
       settled: true,
       stops: [],
       deletes: [],
@@ -144,7 +153,12 @@ const withHarness = <A, E>(
           settledOverride: harness.settled ? "settled" : "active",
           settledAt: harness.settled ? DateTime.makeUnsafe(SETTLED_AT) : null,
         })),
+      getThreadRecords: () =>
+        Effect.sync(() => ({ runs: harness.hostRuns, subagents: harness.hostSubagents })),
     } as unknown as Orchestrator.OrchestratorV2["Service"];
+    const mirror = {
+      activity: () => Effect.sync(() => harness.sandboxActivity),
+    } as unknown as SandboxMirror.SandboxMirror["Service"];
     const layer = SandboxSettle.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -153,6 +167,7 @@ const withHarness = <A, E>(
             provisioner as SandboxProvisioner.SandboxProvisioner["Service"],
           ),
           Layer.succeed(Orchestrator.OrchestratorV2, orchestrator),
+          Layer.succeed(SandboxMirror.SandboxMirror, mirror),
         ),
       ),
     );
@@ -299,6 +314,25 @@ describe("SandboxSettle", () => {
           expect(pendingOf(harness)).toBe("work");
         }),
       ),
+  );
+
+  it.effect.each([
+    ["the sandbox thread still runs", { sandboxActivity: "busy" }],
+    ["the sandbox does not answer", { sandboxActivity: "unknown" }],
+    ["a task of the chat still runs here", { hostSubagents: [{ status: "running" }] }],
+    ["a run of the chat still runs here", { hostRuns: [{ status: "running" }] }],
+  ] as const)("asks instead of deleting while %s", ([, state]) =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        harness.onSettle = "delete";
+        Object.assign(harness, state);
+        const service = yield* settle();
+        yield* TestClock.adjust("10 seconds");
+        yield* service.drain;
+        expect(harness.deletes).toEqual([]);
+        expect(pendingOf(harness)).toBe("work");
+      }),
+    ),
   );
 
   it.effect(

@@ -17,6 +17,7 @@ import * as Stream from "effect/Stream";
 
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import { forkParked } from "../serverActivation.ts";
+import * as SandboxMirror from "./SandboxMirror.ts";
 import * as SandboxProvisioner from "./SandboxProvisioner.ts";
 
 /** How long a remembered delete waits after a settle, so the settle's Undo still keeps everything. */
@@ -55,6 +56,7 @@ export class SandboxSettle extends Context.Service<
 const make = Effect.gen(function* () {
   const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const mirror = yield* SandboxMirror.SandboxMirror;
   // Keyed by instance: an un-settle, a newer settle, or the user's answer replaces what waits.
   const inHand = yield* FiberMap.make<string, void, never>();
   // The settle each thread was last handled for. Settling a settled chat again keeps its time.
@@ -119,6 +121,11 @@ const make = Effect.gen(function* () {
     const current = yield* recordOf(record.instanceId);
     if (current === undefined) return;
     if (current.state !== "running") return yield* ask(current, "work", settle);
+    // A settle says nothing of the agents: the sandbox thread, its tasks, or a sub-sandbox task the
+    // host runs for it may still work. A sandbox that does not answer may too.
+    const host = yield* orchestrator.getThreadRecords(threadId, ["runs", "subagents"]);
+    if (SandboxMirror.hasLiveWork(host)) return yield* ask(current, "work", settle);
+    if ((yield* mirror.activity(threadId)) !== "idle") return yield* ask(current, "work", settle);
     const work = yield* provisioner.checkWork({ instanceId: current.instanceId });
     if (work.status !== "clean") return yield* ask(current, "work", settle);
     // The check takes seconds; an un-settle meanwhile still keeps the sandbox.

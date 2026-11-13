@@ -9,7 +9,7 @@ import type {
 export interface SandboxSettleDecision {
   readonly instanceId: string;
   readonly provider: SandboxProviderKind;
-  /** `work`: its config deletes on settle, but the sandbox may hold work that is not pushed. */
+  /** `work`: its config deletes on settle, but agents may still run or work may not be pushed. */
   readonly reason: "ask" | "work";
   /** A stopped sandbox's work cannot be checked before a delete. */
   readonly stopped: boolean;

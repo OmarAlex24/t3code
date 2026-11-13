@@ -64,6 +64,19 @@ const ENDED_RUN = new Set<OrchestrationV2Run["status"]>([
   "rolled_back",
 ]);
 
+const LIVE_SUBAGENT = new Set<OrchestrationV2Subagent["status"]>(["pending", "running", "waiting"]);
+
+/** Whether a thread still has a run or a delegated task that has not ended, queued ones included. */
+export const hasLiveWork = (records: {
+  readonly runs: ReadonlyArray<Pick<OrchestrationV2Run, "status">>;
+  readonly subagents: ReadonlyArray<Pick<OrchestrationV2Subagent, "status">>;
+}) =>
+  records.runs.some((run) => !ENDED_RUN.has(run.status)) ||
+  records.subagents.some((subagent) => LIVE_SUBAGENT.has(subagent.status));
+
+/** What a sandbox chat's own thread is doing; `unknown` when it could not be read. */
+export type SandboxActivity = "idle" | "busy" | "unknown";
+
 /**
  * The runs a client needs to tell the agents' turn (see `deriveThreadTurnSubagents`): the agents'
  * own runs, the latest one that started, and any still to finish. A long thread's other runs would
@@ -175,6 +188,8 @@ export class SandboxMirror extends Context.Service<
     readonly setModelSelection: (
       input: SandboxSetThreadModelInput,
     ) => Effect.Effect<{ readonly sandboxUpdated: boolean }, SandboxProviderError>;
+    /** Reads once whether the sandbox thread or its delegated tasks still run. */
+    readonly activity: (threadId: ThreadId) => Effect.Effect<SandboxActivity>;
   }
 >()("t3/sandbox/SandboxMirror") {}
 
@@ -340,7 +355,18 @@ const make = Effect.fn("SandboxMirror.make")(function* (connect: SandboxConnect)
     return { sandboxUpdated: Option.isSome(sandboxPick) };
   });
 
-  return SandboxMirror.of({ subscribe, readChild, setModelSelection });
+  const activity = Effect.fn("SandboxMirror.activity")(function* (threadId: ThreadId) {
+    const link = yield* readLink(threadId);
+    if (Option.isNone(link)) return "unknown" as const;
+    const read = yield* Effect.gen(function* () {
+      const sandbox = yield* reach(link.value);
+      return yield* sandbox.projection(threadId);
+    }).pipe(Effect.scoped, Effect.option);
+    if (Option.isNone(read) || Option.isNone(read.value)) return "unknown" as const;
+    return hasLiveWork(read.value.value) ? ("busy" as const) : ("idle" as const);
+  });
+
+  return SandboxMirror.of({ subscribe, readChild, setModelSelection, activity });
 });
 
 export const layerWith = (connect: SandboxConnect) => Layer.effect(SandboxMirror, make(connect));

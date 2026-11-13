@@ -119,7 +119,7 @@ function SettleQuestion(props: {
       <Text className="text-sm font-t3-medium text-foreground">Keep this chat's sandbox?</Text>
       <Text className="text-sm text-foreground-muted">
         {decision.reason === "work"
-          ? "Its settings delete it on settle, but it may hold work that hasn't been pushed. "
+          ? "Its settings delete it on settle, but its agents may still be working, or it may hold work that hasn't been pushed. "
           : ""}
         {decision.stopped
           ? "It is stopped, so its work can't be checked. "

@@ -336,6 +336,33 @@ describe("SandboxMirror", () => {
     }),
   );
 
+  it.effect("says whether the sandbox thread or its tasks still run, or that it cannot tell", () =>
+    Effect.gen(function* () {
+      const { sandbox, secrets, layer } = yield* makeHarness;
+      const mirror = yield* SandboxMirror.SandboxMirror.pipe(Effect.provide(layer));
+      sandbox.projections.set(
+        threadId,
+        projection({ runs: [run("run-1", 1, "completed")], subagents: [] }),
+      );
+      expect(yield* mirror.activity(threadId)).toBe("idle");
+      sandbox.projections.set(
+        threadId,
+        projection({
+          runs: [run("run-1", 1, "completed")],
+          subagents: [subagent("task-1", "run-1", "running")],
+        }),
+      );
+      expect(yield* mirror.activity(threadId)).toBe("busy");
+      sandbox.projections.set(threadId, projection({ runs: [run("run-2", 2, "queued")] }));
+      expect(yield* mirror.activity(threadId)).toBe("busy");
+      sandbox.reachable = false;
+      expect(yield* mirror.activity(threadId)).toBe("unknown");
+      sandbox.reachable = true;
+      secrets.clear();
+      expect(yield* mirror.activity(threadId)).toBe("unknown");
+    }),
+  );
+
   it.effect("refuses a model the sandbox does not offer, changing neither thread", () =>
     Effect.gen(function* () {
       const { sandbox, hostCommands, layer } = yield* makeHarness;

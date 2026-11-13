@@ -441,7 +441,7 @@ export const SandboxRecord = Schema.Struct({
   resumingSince: Schema.optionalKey(TrimmedString),
   /**
    * The chat was settled and the host could not act alone: its config asks (`ask`), or deletes but
-   * the sandbox may hold work (`work`). Clients offer Delete and Keep (`sandboxes.resolveSettle`);
+   * the sandbox may hold work or its agents may still run (`work`). Clients offer Delete and Keep (`sandboxes.resolveSettle`);
    * un-settling the chat clears it.
    */
   settlePending: Schema.optionalKey(

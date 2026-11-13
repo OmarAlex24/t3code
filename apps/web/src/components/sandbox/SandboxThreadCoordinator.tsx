@@ -802,7 +802,7 @@ function SandboxThreadPrompt({
               {threadTitle === null ? "This chat" : `"${threadTitle}"`}{" "}
               {prompt.bridged ? "runs on" : "lives on"} {providerLabel} sandbox {short}.{" "}
               {prompt.sandbox.settlePending?.reason === "work"
-                ? "Its settings delete it on settle, but it may hold work that hasn't been pushed. "
+                ? "Its settings delete it on settle, but its agents may still be working, or it may hold work that hasn't been pushed. "
                 : ""}
               {prompt.sandbox.state === "stopped"
                 ? "It is stopped, so its work can't be checked. A snapshot keeps its disk, and sending a message resumes it."

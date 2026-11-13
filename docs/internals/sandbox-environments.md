@@ -606,7 +606,10 @@ matched by thread id) and applies the config's `onSettle` (`ask` when unset):
 
 - `snapshot` stops a running sandbox; a stopped one is already kept.
 - `delete` waits 10 seconds (Effect time) so the settle's Undo keeps everything, re-checks that the
-  thread is still settled, runs `checkWork`, and deletes only on `clean`, re-checking once more.
+  thread is still settled, and asks (`work`) while anything of the chat still runs: a run or task
+  of the host thread (a sub-sandbox task is one), or of the sandbox's own thread, read through the
+  bridge's link (`SandboxMirror.activity`; a sandbox that does not answer counts as running). Then
+  it runs `checkWork` and deletes only on `clean`, re-checking once more.
 - `ask`, a `delete` whose check is not clean, and a stopped sandbox under `delete` (its work cannot
   be checked) record `settlePending` on the record (`reason` `ask` or `work`) instead of acting.
   A failed stop records `ask`.
