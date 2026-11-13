@@ -12,6 +12,17 @@ const SANDBOX_ENV = "22222222-2222-4222-8222-222222222222";
 const mocks = vi.hoisted(() => ({
   sandboxes: [] as Array<unknown>,
   navigate: vi.fn(async () => undefined),
+  // Null once this app is connected to the sandbox.
+  connection: null as null | {
+    readonly allowed: boolean;
+    readonly connecting: boolean;
+    readonly connect: () => void;
+  },
+}));
+
+vi.mock(import("../sandbox/SandboxConnect"), async (original) => ({
+  ...(await original()),
+  useSandboxConnect: (() => mocks.connection) as never,
 }));
 
 vi.mock(import("@tanstack/react-router"), async (original) => ({
@@ -85,6 +96,7 @@ const sandbox: SandboxRecord = {
 describe("SandboxThreadMenu", () => {
   it("opens the sandbox's own thread from the host thread the bridge drives", async () => {
     mocks.sandboxes = [{ ...sandbox, hostProjectId: "project-host" }];
+    mocks.connection = null;
     mocks.navigate.mockClear();
     await using _screen = await render(
       <SandboxThreadMenu threadRef={{ environmentId: EnvironmentId.make(HOST_ENV), threadId }} />,
@@ -98,7 +110,24 @@ describe("SandboxThreadMenu", () => {
     });
   });
 
+  it("connects to the sandbox instead while this app is not connected to it", async () => {
+    mocks.sandboxes = [{ ...sandbox, hostProjectId: "project-host" }];
+    const connect = vi.fn();
+    mocks.connection = { allowed: true, connecting: false, connect };
+    await using _screen = await render(
+      <SandboxThreadMenu threadRef={{ environmentId: EnvironmentId.make(HOST_ENV), threadId }} />,
+    );
+
+    await userEvent.click(page.getByRole("button", { name: /Sandbox bx_46wr/u }));
+    await expect
+      .element(page.getByRole("menuitem", { name: "Open sandbox thread" }))
+      .not.toBeInTheDocument();
+    await userEvent.click(page.getByRole("menuitem", { name: "Connect to the sandbox" }));
+    expect(connect).toHaveBeenCalledOnce();
+  });
+
   it("does not offer the sandbox thread on the sandbox thread itself", async () => {
+    mocks.connection = null;
     mocks.sandboxes = [{ ...sandbox, hostProjectId: "project-host" }];
     await using _screen = await render(
       <SandboxThreadMenu
@@ -114,6 +143,7 @@ describe("SandboxThreadMenu", () => {
   });
 
   it("does not claim a host thread for a sandbox the bridge never linked", async () => {
+    mocks.connection = null;
     mocks.sandboxes = [sandbox];
     await using _screen = await render(
       <SandboxThreadMenu threadRef={{ environmentId: EnvironmentId.make(HOST_ENV), threadId }} />,
