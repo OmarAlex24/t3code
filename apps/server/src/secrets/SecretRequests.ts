@@ -129,7 +129,13 @@ const make = Effect.gen(function* () {
         return yield* new SecretRequestError({ reason: "already_answered" });
       }
       const run = records.runs.find((candidate) => candidate.id === item.runId);
-      if (run === undefined || ThreadManagementService.isTerminalRunStatus(run.status)) {
+      // Declining only closes the card, so it works after the asking turn is gone.
+      if (
+        input.answer.type !== "decline" &&
+        (run === undefined ||
+          ThreadManagementService.isTerminalRunStatus(run.status) ||
+          run.rootNodeId !== item.nodeId)
+      ) {
         return yield* new SecretRequestError({ reason: "agent_stopped" });
       }
       const secret =
