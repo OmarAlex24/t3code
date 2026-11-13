@@ -55,7 +55,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { layerHttpClient, requestJson } from "./SandboxProvider.ts";
 import { bridgeLinkSecretName } from "@t3tools/sandbox-bridge/link";
 import { boatDriver } from "./providers/boat.ts";
-import { SANDBOX_FILES_SKILL } from "./sandboxSetup.ts";
+import { SANDBOX_AGENT_INSTRUCTIONS, SANDBOX_FILES_SKILL } from "./sandboxSetup.ts";
 import { celestoDriver } from "./providers/celesto.ts";
 import { daytonaDriver } from "./providers/daytona.ts";
 import { upstashDriver } from "./providers/upstash.ts";
@@ -5825,6 +5825,12 @@ describe("SandboxProvisioner per-thread launches", () => {
       expect(fake.commands.filter((command) => command.includes("userdata/sub-sandbox"))).toEqual(
         [],
       );
+      // Its agents still learn that the machine is disposable.
+      expect(
+        fake.commands.filter((command) =>
+          command.includes(Buffer.from(SANDBOX_AGENT_INSTRUCTIONS, "utf8").toString("base64")),
+        ),
+      ).toHaveLength(1);
       // The same clone and env files as a thread's launch, at the parent's pushed branch.
       const clone = fake.commands.find((command) =>
         command.includes("https://github.com/octo/hello.git"),
@@ -6607,39 +6613,46 @@ describe("SandboxProvisioner per-thread launches", () => {
   );
 
   const skillWarning =
-    "T3 Code's t3-sandbox-files skill could not be added, so agents on this sandbox may keep files in /tmp, which a stop empties.";
+    "T3 Code's sandbox instructions could not be written, so agents on this sandbox may not know that a stop empties /tmp and the sandbox is deleted when its chat ends.";
   const skillCommands = (fake: BoatFake) =>
     fake.commands.filter((command) => command.includes("skills/t3-sandbox-files"));
 
-  it.effect("gives every launched sandbox T3 Code's skill, even with no skills chosen", () => {
-    const fake = boatFake();
-    const configs = memoryConfigs();
-    return Effect.gen(function* () {
-      const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
-      const { config } = yield* provisioner.saveConfig({
-        config: configInput,
-        apiKey: "boat_test",
-      });
-      expect(config.skills ?? []).toEqual([]);
-      expect(config.claudeMd).not.toBe(true);
-      yield* provisioner.launch({ configId: config.id, threadId, project });
-      const done = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
-      // A launch writes it whether or not a copy is there, so a template's older one goes.
-      const [written, ...rest] = skillCommands(fake);
-      expect(rest).toEqual([]);
-      expect(written).toContain('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/t3-sandbox-files"');
-      expect(written).not.toContain("exit 0");
-      expect(written).toContain(Buffer.from(SANDBOX_FILES_SKILL, "utf8").toString("base64"));
-      // Nothing the config asked for, so the step still reads as nothing to set up.
-      expect(stageOf(done, "tools")).toMatchObject({ status: "skipped" });
-      expect(done.warnings).not.toContain(skillWarning);
-    }).pipe(
-      Effect.provide(provisionerLayer({}, memoryRepository().layer, { configs: configs.layer })),
-      Effect.provideService(HttpClient.HttpClient, fake.client),
-    );
-  });
+  it.effect(
+    "gives every launched sandbox T3 Code's skill and instructions, even with none chosen",
+    () => {
+      const fake = boatFake();
+      const configs = memoryConfigs();
+      return Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const { config } = yield* provisioner.saveConfig({
+          config: configInput,
+          apiKey: "boat_test",
+        });
+        expect(config.skills ?? []).toEqual([]);
+        expect(config.claudeMd).not.toBe(true);
+        yield* provisioner.launch({ configId: config.id, threadId, project });
+        const done = yield* snapshotWhere(provisioner, (snapshot) => snapshot.phase === "done");
+        const [written, ...rest] = skillCommands(fake);
+        expect(rest).toEqual([]);
+        expect(written).toContain('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/t3-sandbox-files"');
+        expect(written).toContain(Buffer.from(SANDBOX_FILES_SKILL, "utf8").toString("base64"));
+        expect(written).toContain(
+          Buffer.from(SANDBOX_AGENT_INSTRUCTIONS, "utf8").toString("base64"),
+        );
+        for (const dir of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR"]) {
+          expect(written).toContain(`"\${${dir}:-`);
+        }
+        // Nothing the config asked for, so the step still reads as nothing to set up.
+        expect(stageOf(done, "tools")).toMatchObject({ status: "skipped" });
+        expect(done.warnings).not.toContain(skillWarning);
+      }).pipe(
+        Effect.provide(provisionerLayer({}, memoryRepository().layer, { configs: configs.layer })),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    },
+  );
 
-  it.effect("only warns when the launch cannot write T3 Code's skill", () => {
+  it.effect("only warns when the launch cannot write T3 Code's skill and instructions", () => {
     const fake = boatFake({ failing: { text: "skills/t3-sandbox-files", times: 1 } });
     const repository = memoryRepository();
     const configs = memoryConfigs();
@@ -6665,7 +6678,7 @@ describe("SandboxProvisioner per-thread launches", () => {
   });
 
   it.effect(
-    "adds T3 Code's skill on a resume when it is missing, before T3 starts, and only warns when it cannot",
+    "rewrites T3 Code's skill and instructions on a resume, before T3 starts, and only warns when it cannot",
     () => {
       const fake = boatFake({ failing: { text: "skills/t3-sandbox-files", times: 1 } });
       const config: SandboxEnvironmentConfig = {
@@ -6704,11 +6717,12 @@ describe("SandboxProvisioner per-thread launches", () => {
         fake.commands.length = 0;
         const resumed = yield* provisioner.resume({ instanceId: "before-skill" });
         expect(resumed.warnings ?? []).not.toContain(skillWarning);
-        // Only a missing skill is written, so one already there keeps its copy.
-        const [backfill, ...rest] = skillCommands(fake);
+        const [rewrite, ...rest] = skillCommands(fake);
         expect(rest).toEqual([]);
-        expect(backfill).toContain('[ -f "$dir/SKILL.md" ] && exit 0');
-        expect(fake.commands.indexOf(backfill!)).toBeLessThan(
+        expect(rewrite).toContain(
+          Buffer.from(SANDBOX_AGENT_INSTRUCTIONS, "utf8").toString("base64"),
+        );
+        expect(fake.commands.indexOf(rewrite!)).toBeLessThan(
           fake.commands.findIndex((command) => command.includes("t3 serve")),
         );
       }).pipe(
