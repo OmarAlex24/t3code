@@ -31,6 +31,7 @@ import {
   SandboxListResult,
   SandboxProviderError,
   SandboxProvidersResult,
+  SandboxResolveSettleInput,
   SandboxResumeResult,
   SandboxSaveConfigInput,
   SandboxSaveConfigResult,
@@ -54,6 +55,7 @@ export const SANDBOX_WS_METHODS = {
   sandboxesStop: "sandboxes.stop",
   sandboxesResume: "sandboxes.resume",
   sandboxesCheckWork: "sandboxes.checkWork",
+  sandboxesResolveSettle: "sandboxes.resolveSettle",
   sandboxesTemplates: "sandboxes.templates",
   sandboxesSaveTemplate: "sandboxes.saveTemplate",
   sandboxesDeleteTemplate: "sandboxes.deleteTemplate",
@@ -107,6 +109,12 @@ const WsSandboxesStopRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesStop, {
 const WsSandboxesCheckWorkRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCheckWork, {
   payload: SandboxLifecycleInput,
   success: SandboxCheckWorkResult,
+  error: SandboxFailure,
+});
+
+const WsSandboxesResolveSettleRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesResolveSettle, {
+  payload: SandboxResolveSettleInput,
+  success: SandboxDeleteResult,
   error: SandboxFailure,
 });
 
@@ -244,6 +252,7 @@ export const SandboxRpcs = [
   WsSandboxesStopRpc,
   WsSandboxesResumeRpc,
   WsSandboxesCheckWorkRpc,
+  WsSandboxesResolveSettleRpc,
   WsSandboxesTemplatesRpc,
   WsSandboxesSaveTemplateRpc,
   WsSandboxesDeleteTemplateRpc,
@@ -270,6 +279,7 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesStop]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesResume]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesCheckWork]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesResolveSettle]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesSaveTemplate]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesDeleteTemplate]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesSaveConfig]: AuthSettingsWriteScope,

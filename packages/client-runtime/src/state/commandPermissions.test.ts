@@ -163,6 +163,7 @@ describe("command permissions", () => {
     { method: WS_METHODS.serverReclaimDatabaseSpace, scope: AuthEnvironmentMaintainScope },
     // Sandbox writes start billable machines or change what the account keeps.
     { method: WS_METHODS.sandboxesLaunch, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesResolveSettle, scope: AuthSettingsWriteScope },
     { method: WS_METHODS.sandboxesSaveTemplate, scope: AuthSettingsWriteScope },
     { method: WS_METHODS.sandboxesDeleteTemplate, scope: AuthSettingsWriteScope },
   ])("requires the destination $scope grant for $method", ({ method, scope }) =>
