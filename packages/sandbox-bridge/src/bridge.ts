@@ -727,6 +727,7 @@ export type TurnAction =
  * Follows a sandbox thread for one host turn, until the run carrying the message ends. Text and
  * tools last touched before the turn began (the newest `baseline` item, or the message when
  * `replay`) count as sent: the first read is a window while the stream's snapshot is the whole thread.
+ * When `replay`, items begun before the message count as sent up to what the baseline holds.
  */
 export class TurnTracker {
   private readonly runs = new Map<string, OrchestrationV2Run>();
@@ -762,6 +763,15 @@ export class TurnTracker {
       message === undefined
         ? since
         : DateTime.toEpochMillis(message.startedAt ?? message.updatedAt);
+    // Following a steer, an answer begun before the message was streamed by the host's earlier
+    // turn: only what it adds after this read is new.
+    if (message !== undefined && this.since !== undefined) {
+      for (const item of this.items.values()) {
+        if (item.startedAt != null && DateTime.toEpochMillis(item.startedAt) < this.since) {
+          this.markSent(item);
+        }
+      }
+    }
   }
 
   /** The actions the baseline owes the host: whatever it holds from the message on. */
