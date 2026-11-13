@@ -107,6 +107,8 @@ const info = {
     { id: "celesto-large", label: "Large", detail: "4 vCPU · 16 GB · 60 GB" },
     { id: "celesto-xl", label: "Extra large", detail: "8 vCPU · 32 GB · 100 GB" },
   ],
+  // https://celesto.ai/pricing: "Stopped root disks are retained free for 30 days."
+  diskRetentionDays: 30,
 } satisfies SandboxProviderDriver["info"];
 
 const computerUrl = (sandboxId: string, path = "") =>
