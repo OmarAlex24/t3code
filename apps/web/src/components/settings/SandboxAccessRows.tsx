@@ -1,4 +1,5 @@
 import {
+  ChevronRightIcon,
   EllipsisIcon,
   ExternalLinkIcon,
   GithubIcon,
@@ -23,11 +24,12 @@ import {
 
 import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "~/hooks/useSettings";
 import { readLocalApi } from "~/localApi";
-import { randomUUID } from "~/lib/utils";
+import { cn, randomUUID } from "~/lib/utils";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import {
   Dialog,
   DialogDescription,
@@ -40,6 +42,7 @@ import { Input } from "../ui/input";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { describeSandboxFailure } from "./SandboxStartLimits";
 import { SandboxTailscaleForm } from "./SandboxTailscaleForm";
 import {
@@ -224,19 +227,23 @@ const INTEGRATIONS: Record<
   },
 };
 
+function IntegrationGlyph({ id }: { readonly id: IntegrationId }) {
+  return id === "tailscale" ? (
+    <TailscaleMark />
+  ) : id === "github" ? (
+    <GithubIcon aria-hidden className="size-4" />
+  ) : (
+    <KeyRoundIcon aria-hidden className="size-3.5 text-muted-foreground" />
+  );
+}
+
 function IntegrationIcon({ id }: { readonly id: IntegrationId }) {
   return (
     <span
       aria-hidden
       className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-foreground"
     >
-      {id === "tailscale" ? (
-        <TailscaleMark />
-      ) : id === "github" ? (
-        <GithubIcon className="size-4" />
-      ) : (
-        <KeyRoundIcon className="size-3.5 text-muted-foreground" />
-      )}
+      <IntegrationGlyph id={id} />
     </span>
   );
 }
@@ -581,12 +588,17 @@ function IntegrationRow({
   id,
   status,
   extraItems,
+  focusActions,
+  onActionsFocused,
   onReplace,
   onRemove,
 }: {
   readonly id: IntegrationId;
   readonly status: string;
   readonly extraItems?: ReactNode;
+  /** Set when its icon in the folded list was picked, so the keyboard lands on its actions. */
+  readonly focusActions: boolean;
+  readonly onActionsFocused: () => void;
   readonly onReplace: () => void;
   readonly onRemove: () => void;
 }) {
@@ -609,6 +621,12 @@ function IntegrationRow({
         <MenuTrigger
           render={
             <Button
+              ref={(button: HTMLButtonElement | null) => {
+                if (button === null || !focusActions) return;
+                // The panel is still growing, so scrolling here would shift its contents.
+                button.focus({ preventScroll: true });
+                onActionsFocused();
+              }}
               type="button"
               variant="ghost-muted"
               size="icon-xs"
@@ -676,6 +694,22 @@ export function SandboxAccessRows({ environmentId }: { readonly environmentId: E
     setAnswered(requested ?? null);
     if (requested !== undefined) open(requested);
   }
+  // A link to one that is connected lands on its row, which only exists while the list is open.
+  const [expanded, setExpanded] = useState(false);
+  const landing = INTEGRATION_IDS.find(
+    (id) => INTEGRATIONS[id].anchor === targetId && connected[id],
+  );
+  const [expandedFor, setExpandedFor] = useState<IntegrationId | null>(null);
+  if ((landing ?? null) !== expandedFor) {
+    setExpandedFor(landing ?? null);
+    if (landing !== undefined) setExpanded(true);
+  }
+  const [focusRow, setFocusRow] = useState<IntegrationId | null>(null);
+  const reveal = (id: IntegrationId) => {
+    setExpanded(true);
+    setFocusRow(id);
+  };
+
   const clearTarget = useEffectEvent(() => onTargetHandled());
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the router address's settings target once its panel opened
   useEffect(() => {
@@ -712,6 +746,8 @@ export function SandboxAccessRows({ environmentId }: { readonly environmentId: E
   const listed = INTEGRATION_IDS.filter((id) => connected[id]);
   const addable = INTEGRATION_IDS.filter((id) => !connected[id]);
   const shown = panel === null ? null : INTEGRATIONS[panel.id];
+  const summary = (id: IntegrationId) =>
+    status[id] === "" ? INTEGRATIONS[id].name : `${INTEGRATIONS[id].name} · ${status[id]}`;
 
   return (
     <SettingsRow
@@ -744,38 +780,76 @@ export function SandboxAccessRows({ environmentId }: { readonly environmentId: E
             None connected. Sandboxes get no credentials from this machine until you add one.
           </p>
         ) : (
-          <ul
-            aria-label="Connected integrations"
-            className="divide-y divide-border/50 rounded-lg border border-border/60"
-          >
-            {listed.map((id) => (
-              <IntegrationRow
-                key={id}
-                id={id}
-                status={status[id]}
-                onReplace={() => open(id)}
-                onRemove={remove[id]}
-                {...(id === "github"
-                  ? {
-                      extraItems: (
-                        <MenuItem
-                          render={
-                            <a
-                              href={installUrlOf(tooling.githubAppSlug)}
-                              target="_blank"
-                              rel="noreferrer"
-                            />
-                          }
-                        >
-                          <GithubIcon />
-                          Install on repositories
-                        </MenuItem>
-                      ),
-                    }
-                  : {})}
-              />
-            ))}
-          </ul>
+          <Collapsible open={expanded} onOpenChange={setExpanded}>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <CollapsibleTrigger render={<Button type="button" variant="ghost-muted" size="xs" />}>
+                <ChevronRightIcon
+                  aria-hidden
+                  className={cn(
+                    "transition-transform duration-150 motion-reduce:transition-none",
+                    expanded && "rotate-90",
+                  )}
+                />
+                {listed.length} connected
+              </CollapsibleTrigger>
+              {expanded
+                ? null
+                : listed.map((id) => (
+                    <Tooltip key={id}>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={summary(id)}
+                            onClick={() => reveal(id)}
+                          />
+                        }
+                      >
+                        <IntegrationGlyph id={id} />
+                      </TooltipTrigger>
+                      <TooltipPopup>{summary(id)}</TooltipPopup>
+                    </Tooltip>
+                  ))}
+            </div>
+            <CollapsiblePanel>
+              <ul
+                aria-label="Connected integrations"
+                className="mt-1.5 divide-y divide-border/50 rounded-lg border border-border/60"
+              >
+                {listed.map((id) => (
+                  <IntegrationRow
+                    key={id}
+                    id={id}
+                    status={status[id]}
+                    focusActions={focusRow === id}
+                    onActionsFocused={() => setFocusRow(null)}
+                    onReplace={() => open(id)}
+                    onRemove={remove[id]}
+                    {...(id === "github"
+                      ? {
+                          extraItems: (
+                            <MenuItem
+                              render={
+                                <a
+                                  href={installUrlOf(tooling.githubAppSlug)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                />
+                              }
+                            >
+                              <GithubIcon />
+                              Install on repositories
+                            </MenuItem>
+                          ),
+                        }
+                      : {})}
+                  />
+                ))}
+              </ul>
+            </CollapsiblePanel>
+          </Collapsible>
         )}
       </div>
       <Dialog
