@@ -209,6 +209,7 @@ describe("SandboxAccessRows", () => {
               statuses: "read",
               actions: "read",
               workflows: "write",
+              issues: "write",
             },
           }),
         },

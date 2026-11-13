@@ -54,6 +54,7 @@ export const SANDBOX_FOLLOWED_SERVER_SETTING_KEYS = [
   "usagePriceOverrides",
   "usageModelAliases",
   "usageModelFilter",
+  "offeredSourceControlProviders",
 ] as const satisfies ReadonlyArray<keyof ServerSettings>;
 
 /** Settings that never leave the host, grouped by why. */
@@ -85,6 +86,7 @@ export const SANDBOX_HOST_ONLY_SERVER_SETTING_KEYS = [
   "enableDeviceSupport",
   "deviceOnboardingCompleted",
   "simlockDeviceHostsEnabled",
+  "keepAwakeWhileAgentsWork",
   // The host machine's identity and its links to other machines and guests.
   "environmentIcon",
   "guestSharingEnabled",
