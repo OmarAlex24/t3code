@@ -2,6 +2,7 @@ import { threadKey } from "@t3tools/client-runtime/state/entities";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
+  type ModelSelection,
   type ProjectId,
   ProviderInstanceId,
   SANDBOX_BRIDGE_INSTANCE_ID,
@@ -11,6 +12,7 @@ import {
   type SandboxRecord,
   type SandboxSetupSnapshot,
   type ScopedThreadRef,
+  type ServerProvider,
   type ThreadId,
 } from "@t3tools/contracts";
 
@@ -182,6 +184,74 @@ export const sandboxHostMirrors = (
     }
   }
   return mirrors;
+};
+
+/**
+ * What the host mirror's model picker shows of a sandbox chat whose own thread lists: the
+ * sandbox's provider and selection, under the bridge's instance, which a send on the mirror carries
+ * and the bridge hands to the sandbox. The host's bridge lists one set of models and options for
+ * every sandbox, so its own entry would show another chat's. Null while the provider is unknown.
+ */
+export const sandboxMirrorModelSource = (
+  sandboxSelection: ModelSelection,
+  sandboxProviders: ReadonlyArray<ServerProvider>,
+): {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly modelSelection: ModelSelection;
+} | null => {
+  const provider = sandboxProviders.find(
+    (candidate) => candidate.instanceId === sandboxSelection.instanceId,
+  );
+  return provider === undefined
+    ? null
+    : {
+        providers: [{ ...provider, instanceId: bridgeInstanceId }],
+        modelSelection: { ...sandboxSelection, instanceId: bridgeInstanceId } as ModelSelection,
+      };
+};
+
+/**
+ * Where a model pick on one thread of a sandbox chat also goes, so the two agree: the sandbox's
+ * thread takes it on its own provider, the mirror on the bridge. A mirror left behind would have
+ * the bridge hand its older pick to the sandbox with the phone's next message.
+ */
+export const sandboxChatPickPartner = (
+  mirrors: ReadonlyMap<string, ScopedThreadRef>,
+  threads: ReadonlyArray<ThreadEntry & { readonly modelSelection: ModelSelection }>,
+  target: ScopedThreadRef,
+  pick: ModelSelection,
+): { readonly ref: ScopedThreadRef; readonly modelSelection: ModelSelection } | null => {
+  const shellOf = (ref: ScopedThreadRef) =>
+    threads.find(
+      (thread) => thread.environmentId === ref.environmentId && thread.id === ref.threadId,
+    );
+  const sandboxRef = mirrors.get(threadKey(target));
+  if (sandboxRef !== undefined) {
+    const sandboxThread = shellOf(sandboxRef);
+    return sandboxThread === undefined
+      ? null
+      : {
+          ref: sandboxRef,
+          modelSelection: {
+            ...pick,
+            instanceId: sandboxThread.modelSelection.instanceId,
+          } as ModelSelection,
+        };
+  }
+  for (const [mirrorKey, real] of mirrors) {
+    if (threadKey(real) !== threadKey(target)) continue;
+    const mirror = threads.find(
+      (thread) =>
+        threadKey({ environmentId: thread.environmentId, threadId: thread.id }) === mirrorKey,
+    );
+    return mirror === undefined
+      ? null
+      : {
+          ref: { environmentId: mirror.environmentId, threadId: mirror.id },
+          modelSelection: { ...pick, instanceId: bridgeInstanceId } as ModelSelection,
+        };
+  }
+  return null;
 };
 
 /**

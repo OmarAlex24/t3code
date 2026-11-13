@@ -199,6 +199,7 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import {
   useSandboxChatAliases,
+  useSandboxMirrorModelSource,
   useSandboxlessBridgeThread,
   useThreadSandbox,
 } from "../state/sandboxes";
@@ -1356,10 +1357,14 @@ export default function ChatView(props: ChatViewProps) {
     : (primaryEnvironment?.serverConfig ?? null);
   const providerEnvironmentId = (activeThread ? activeEnvironment : primaryEnvironment)
     ?.environmentId;
+  // On a sandbox chat's host mirror, the sandbox's own provider and selection, not the bridge's.
+  const sandboxMirrorModelSource = useSandboxMirrorModelSource(activeThreadRef);
   const providerStatuses =
+    sandboxMirrorModelSource?.providers ??
     (providerEnvironmentId === undefined
       ? undefined
-      : providersByEnvironment.get(providerEnvironmentId)) ?? EMPTY_PROVIDERS;
+      : providersByEnvironment.get(providerEnvironmentId)) ??
+    EMPTY_PROVIDERS;
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
     activeThread?.modelSelection.instanceId ??
@@ -3991,7 +3996,10 @@ export default function ChatView(props: ChatViewProps) {
                                 activeProjectDefaultModelSelection={
                                   activeProjectDefaultModelSelection
                                 }
-                                activeThreadModelSelection={activeThread?.modelSelection}
+                                activeThreadModelSelection={
+                                  sandboxMirrorModelSource?.modelSelection ??
+                                  activeThread?.modelSelection
+                                }
                                 activeProjectId={activeProject?.id ?? null}
                                 projectName={activeProject?.title}
                                 compactThreadUnavailable={compactThreadUnavailable}
