@@ -10,6 +10,7 @@ import {
   type SandboxProviderInfo,
   type SandboxProviderKind,
   type SandboxRecord,
+  type SandboxSettleAction,
   type SandboxSetupSnapshot,
   type ScopedThreadRef,
   type ServerProvider,
@@ -475,6 +476,39 @@ export interface SandboxSettleUndo {
   readonly claim: { readonly isCurrent: () => boolean; readonly finish: () => void };
   readonly undo: () => Promise<AtomCommandResult<unknown, unknown>>;
 }
+
+/**
+ * What a settle does to the thread's sandbox. A live one gets the config's `onSettle`; a remembered
+ * delete waits with Undo first (`delete-later`). A stopped one's work cannot be checked, so a
+ * delete always asks (`confirm-delete`), and a snapshot is already what it is (`kept`). One that is
+ * launching or resuming is left alone (`starting`); an expired or deleted one has nothing to keep.
+ */
+export type SandboxSettleOutcome =
+  | "ask"
+  | "snapshot"
+  | "delete-later"
+  | "kept"
+  | "confirm-delete"
+  | "starting"
+  | "none";
+
+export const sandboxSettleOutcome = (
+  sandbox: SandboxRecord | undefined,
+  onSettle: SandboxSettleAction | undefined,
+): SandboxSettleOutcome => {
+  if (sandbox === undefined) return "none";
+  if (sandbox.state === "provisioning" || sandbox.resumingSince !== undefined) return "starting";
+  const action = onSettle ?? "ask";
+  switch (sandbox.state) {
+    case "running":
+    case "error":
+      return action === "delete" ? "delete-later" : action;
+    case "stopped":
+      return action === "delete" ? "confirm-delete" : action === "snapshot" ? "kept" : "ask";
+    default:
+      return "none";
+  }
+};
 
 /**
  * What the thread actions ask of the one mounted sandbox coordinator. A legacy thread lives on its
