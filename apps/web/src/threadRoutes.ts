@@ -31,6 +31,7 @@ export function isThreadRouteSnapshotAuthoritative(
 
 export function resolveThreadRouteRenderState(input: {
   bootstrapComplete: boolean;
+  shellHasSnapshot: boolean;
   serverThreadExists: boolean;
   serverThreadDeleted: boolean;
   unlistedThreadDetail: EnvironmentThreadState;
@@ -39,20 +40,29 @@ export function resolveThreadRouteRenderState(input: {
   if (input.draftThreadExists || (input.serverThreadExists && !input.serverThreadDeleted)) {
     return "ready";
   }
+  // Shell membership can lag a new thread, and never holds an idle subagent; once the shell has
+  // loaded, its detail decides without waiting for a reconnecting shell.
+  const projection = input.serverThreadExists
+    ? null
+    : Option.getOrNull(input.unlistedThreadDetail.data);
+  const removed =
+    projection !== null &&
+    (projection.thread.deletedAt !== null || projection.thread.archivedAt !== null);
+  if (
+    input.shellHasSnapshot &&
+    projection !== null &&
+    !removed &&
+    input.unlistedThreadDetail.status !== "deleted"
+  ) {
+    return "ready";
+  }
   if (!input.bootstrapComplete) {
     return "loading";
   }
   if (input.serverThreadExists || input.unlistedThreadDetail.status === "deleted") {
     return "missing";
   }
-  // Shell membership can lag a new thread; its detail decides.
-  const projection = Option.getOrNull(input.unlistedThreadDetail.data);
-  if (projection === null) {
-    return "loading";
-  }
-  return projection.thread.deletedAt !== null || projection.thread.archivedAt !== null
-    ? "missing"
-    : "ready";
+  return removed ? "missing" : "loading";
 }
 
 export function buildThreadRouteParams(ref: ScopedThreadRef): {
@@ -65,10 +75,22 @@ export function buildThreadRouteParams(ref: ScopedThreadRef): {
   };
 }
 
-/** Whether a (decoded) location pathname is `ref`'s own thread route, `/$environmentId/$threadId`. */
+/**
+ * Whether a location pathname is `ref`'s own thread route, `/$environmentId/$threadId`. The router
+ * leaves reserved escapes and `%25` in it, so each segment is decoded as the router decodes params.
+ */
 export function isThreadRoutePathname(pathname: string, ref: ScopedThreadRef): boolean {
   const { environmentId, threadId } = buildThreadRouteParams(ref);
-  return pathname.replace(/\/$/, "") === `/${environmentId}/${threadId}`;
+  const segments = pathname.replace(/\/$/, "").split("/");
+  if (segments.length !== 3 || segments[0] !== "") return false;
+  try {
+    return (
+      decodeURIComponent(segments[1]!) === environmentId &&
+      decodeURIComponent(segments[2]!) === threadId
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function buildDraftThreadRouteParams(draftId: DraftId): {

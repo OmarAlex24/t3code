@@ -25,6 +25,16 @@ describe("threadRoutes", () => {
     expect(isThreadRoutePathname("/env-2/thread-1", ref)).toBe(false);
     expect(isThreadRoutePathname("/draft/thread-1", ref)).toBe(false);
     expect(isThreadRoutePathname("/env-1/thread-1/extra", ref)).toBe(false);
+
+    // The router keeps the escapes it wrote for a delegated task's id.
+    const child = scopeThreadRef(
+      "env-1" as never,
+      ThreadId.make("thread:delegated-task:command%3Amcp%3Ab629%3Adelegate-task%3Aq-1"),
+    );
+    const childPath =
+      "/env-1/thread%3Adelegated-task%3Acommand%253Amcp%253Ab629%253Adelegate-task%253Aq-1";
+    expect(isThreadRoutePathname(childPath, child)).toBe(true);
+    expect(isThreadRoutePathname(childPath.replace("q-1", "q-2"), child)).toBe(false);
   });
 
   it("resolves the backing thread while a draft route is being promoted", () => {
@@ -63,6 +73,7 @@ describe("threadRoutes", () => {
       expect(
         resolveThreadRouteRenderState({
           bootstrapComplete: isThreadRouteSnapshotAuthoritative(status),
+          shellHasSnapshot: true,
           serverThreadExists: source === "server thread",
           serverThreadDeleted: false,
           unlistedThreadDetail: EMPTY_ENVIRONMENT_THREAD_STATE,
@@ -76,6 +87,7 @@ describe("threadRoutes", () => {
     expect(
       resolveThreadRouteRenderState({
         bootstrapComplete: false,
+        shellHasSnapshot: false,
         serverThreadExists: false,
         serverThreadDeleted: false,
         unlistedThreadDetail: { ...EMPTY_ENVIRONMENT_THREAD_STATE, status: "deleted" },
@@ -85,6 +97,7 @@ describe("threadRoutes", () => {
     expect(
       resolveThreadRouteRenderState({
         bootstrapComplete: true,
+        shellHasSnapshot: true,
         serverThreadExists: false,
         serverThreadDeleted: false,
         unlistedThreadDetail: { ...EMPTY_ENVIRONMENT_THREAD_STATE, status: "deleted" },
@@ -96,6 +109,7 @@ describe("threadRoutes", () => {
   it("opens an unlisted server thread once its detail arrives, without waiting for the shell", () => {
     const route = {
       bootstrapComplete: isThreadRouteSnapshotAuthoritative("live"),
+      shellHasSnapshot: true,
       serverThreadExists: false,
       serverThreadDeleted: false,
       draftThreadExists: false,
@@ -136,6 +150,31 @@ describe("threadRoutes", () => {
         },
       }),
     ).toBe("ready");
+    // Until the shell first loads, it may yet list or hide the thread.
+    expect(
+      resolveThreadRouteRenderState({
+        ...route,
+        bootstrapComplete: isThreadRouteSnapshotAuthoritative("synchronizing"),
+        shellHasSnapshot: false,
+        unlistedThreadDetail: {
+          ...EMPTY_ENVIRONMENT_THREAD_STATE,
+          status: "live",
+          data: Option.some(makeThreadProjectionFixture()),
+        },
+      }),
+    ).toBe("loading");
+    // A sandbox's subagent, left out of a shell that is still reconnecting.
+    expect(
+      resolveThreadRouteRenderState({
+        ...route,
+        bootstrapComplete: isThreadRouteSnapshotAuthoritative("synchronizing"),
+        unlistedThreadDetail: {
+          ...EMPTY_ENVIRONMENT_THREAD_STATE,
+          status: "cached",
+          data: Option.some(makeThreadProjectionFixture()),
+        },
+      }),
+    ).toBe("ready");
   });
 
   it.each(["missing", "deleted", "archived"] as const)(
@@ -143,6 +182,7 @@ describe("threadRoutes", () => {
     (outcome) => {
       const route = {
         bootstrapComplete: isThreadRouteSnapshotAuthoritative("live"),
+        shellHasSnapshot: true,
         serverThreadExists: false,
         serverThreadDeleted: false,
         draftThreadExists: false,
@@ -186,6 +226,7 @@ describe("threadRoutes", () => {
     expect(
       resolveThreadRouteRenderState({
         bootstrapComplete: isThreadRouteSnapshotAuthoritative("cached"),
+        shellHasSnapshot: true,
         serverThreadExists: true,
         serverThreadDeleted: true,
         unlistedThreadDetail: EMPTY_ENVIRONMENT_THREAD_STATE,
