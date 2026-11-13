@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { MessageId, ThreadId } from "./baseSchemas.ts";
+import { MessageId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
   OrchestrationV2ConversationMessage,
@@ -8,16 +8,17 @@ import {
   OrchestrationV2Subagent,
 } from "./orchestrationV2.ts";
 import { ServerProvider } from "./server.ts";
+import { ThreadPullRequestLink } from "./threadPullRequest.ts";
 
 /** A sandbox chat's host mirror thread; the sandbox's own thread has the same id. */
 export const SandboxThreadMirrorInput = Schema.Struct({ threadId: ThreadId });
 export type SandboxThreadMirrorInput = typeof SandboxThreadMirrorInput.Type;
 
 /**
- * What the host reads of a sandbox chat's own thread for a client of the host: its provider (with
- * the models a picker offers) and selection, and its agents and delegated tasks. While the sandbox
- * is stopped or not answering, `available` is false and the rest is what the host last read.
- * `runs` holds only the runs the agents' turn is told from.
+ * A sandbox chat's own thread as the host reads it for its clients: provider (with the picker's
+ * models), selection, agents, branch and visible linked pull requests (without their watches).
+ * `runs` holds only the runs the agents' turn is told from. While the sandbox is stopped or not
+ * answering, `available` is false and the rest is what the host last read.
  */
 export const SandboxThreadMirror = Schema.Struct({
   available: Schema.Boolean,
@@ -25,6 +26,9 @@ export const SandboxThreadMirror = Schema.Struct({
   modelSelection: Schema.NullOr(ModelSelection),
   runs: Schema.Array(OrchestrationV2Run),
   subagents: Schema.Array(OrchestrationV2Subagent),
+  // Optional so a client can still read an older host's mirror.
+  branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
 });
 export type SandboxThreadMirror = typeof SandboxThreadMirror.Type;
 

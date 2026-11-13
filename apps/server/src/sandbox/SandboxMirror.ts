@@ -1,11 +1,13 @@
 /**
  * A sandbox chat's own thread for the host's clients. The phone never pairs with a sandbox, so the
  * host reads that thread through the bridge's link and bearer: its real provider and selection for
- * the mirror's picker, its agents and delegated tasks, and their messages.
+ * the mirror's picker, its agents and delegated tasks and their messages, its branch and the pull
+ * requests linked to it.
  */
 import {
   CommandId,
   type ModelSelection,
+  type OrchestrationV2AppThread,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadStreamItem,
@@ -19,6 +21,7 @@ import {
   type SandboxThreadMirrorInput,
   type ServerProvider,
   type ThreadId,
+  type ThreadPullRequestLink,
   WS_METHODS,
 } from "@t3tools/contracts";
 import {
@@ -44,6 +47,11 @@ import { FetchHttpClient } from "effect/http";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import {
+  threadPullRequestKeysEqual,
+  threadPullRequestsOf,
+  visibleThreadPullRequests,
+} from "../sourceControl/threadPullRequests.ts";
 
 export type SandboxConnect = (
   link: SandboxBridgeLink,
@@ -105,7 +113,36 @@ interface MirrorRecords {
   readonly modelSelection: ModelSelection;
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly subagents: ReadonlyArray<OrchestrationV2Subagent>;
+  readonly branch: string | null;
+  readonly pullRequests: ReadonlyArray<ThreadPullRequestLink>;
 }
+
+/** The links a mirror shows: the visible ones, without the watches only the sandbox acts on. */
+const shownPullRequests = (links: ReadonlyArray<ThreadPullRequestLink>) =>
+  visibleThreadPullRequests(links).map(
+    ({ watch: _watch, endedWatch: _endedWatch, ...link }): ThreadPullRequestLink => link,
+  );
+
+// Each thread event decodes new link objects; keeping the old list lets an unchanged one send nothing.
+const keepSameLinks = (
+  previous: ReadonlyArray<ThreadPullRequestLink>,
+  next: ReadonlyArray<ThreadPullRequestLink>,
+) =>
+  previous.length === next.length &&
+  previous.every((link, index) => JSON.stringify(link) === JSON.stringify(next[index]))
+    ? previous
+    : next;
+
+const withThread = (records: MirrorRecords, thread: OrchestrationV2AppThread): MirrorRecords => {
+  const branch = thread.branch ?? null;
+  const pullRequests = keepSameLinks(
+    records.pullRequests,
+    shownPullRequests(threadPullRequestsOf(thread)),
+  );
+  return branch === records.branch && pullRequests === records.pullRequests
+    ? records
+    : { ...records, branch, pullRequests };
+};
 
 const upsert = <A extends { readonly id: string }>(items: ReadonlyArray<A>, item: A) => {
   const index = items.findIndex((candidate) => candidate.id === item.id);
@@ -119,14 +156,37 @@ const foldMirror = (
 ): MirrorRecords | null => {
   if (item.kind === "snapshot") {
     const { thread, runs, subagents } = item.projection;
-    return { modelSelection: thread.modelSelection, runs, subagents };
+    return {
+      modelSelection: thread.modelSelection,
+      runs,
+      subagents,
+      branch: thread.branch ?? null,
+      pullRequests: shownPullRequests(threadPullRequestsOf(thread)),
+    };
   }
   if (item.kind !== "event" || records === null) return records;
   const event = item.event;
   switch (event.type) {
     case "thread.model-selection-updated":
     case "thread.provider-switched":
-      return { ...records, modelSelection: event.payload.modelSelection };
+      return withThread(
+        { ...records, modelSelection: event.payload.modelSelection },
+        event.payload,
+      );
+    case "thread.metadata-updated":
+    case "thread.pull-request-synced":
+      return withThread(records, event.payload);
+    case "thread.pull-request-link-updated": {
+      const [updated] = shownPullRequests([event.payload]);
+      if (updated === undefined) return records;
+      const pullRequests = keepSameLinks(
+        records.pullRequests,
+        records.pullRequests.map((link) =>
+          threadPullRequestKeysEqual(link, updated) ? updated : link,
+        ),
+      );
+      return pullRequests === records.pullRequests ? records : { ...records, pullRequests };
+    }
     case "run.created":
     case "run.updated":
       return { ...records, runs: upsert(records.runs, event.payload) };
@@ -147,6 +207,8 @@ const viewOf = (
   modelSelection: records.modelSelection,
   runs: mirrorRuns(records.runs, records.subagents),
   subagents: records.subagents,
+  branch: records.branch,
+  pullRequests: records.pullRequests,
 });
 
 const sameItems = <A>(left: ReadonlyArray<A>, right: ReadonlyArray<A>) =>
@@ -157,7 +219,9 @@ const sameView = (left: SandboxThreadMirror, right: SandboxThreadMirror) =>
   left.provider === right.provider &&
   left.modelSelection === right.modelSelection &&
   sameItems(left.runs, right.runs) &&
-  sameItems(left.subagents, right.subagents);
+  sameItems(left.subagents, right.subagents) &&
+  left.branch === right.branch &&
+  sameItems(left.pullRequests ?? [], right.pullRequests ?? []);
 
 const NOTHING_READ: SandboxThreadMirror = {
   available: false,
@@ -165,6 +229,8 @@ const NOTHING_READ: SandboxThreadMirror = {
   modelSelection: null,
   runs: [],
   subagents: [],
+  branch: null,
+  pullRequests: [],
 };
 
 export class SandboxMirror extends Context.Service<

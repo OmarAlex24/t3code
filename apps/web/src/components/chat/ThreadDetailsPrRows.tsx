@@ -9,12 +9,19 @@ import type {
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   pullRequestListLines,
+  resolveThreadCurrentPullRequestLink,
   resolveThreadPullRequestChains,
   threadPullRequestKeyOf,
   visibleThreadPullRequests,
 } from "@t3tools/client-runtime/thread-pull-requests";
 import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
-import { useState, type ComponentProps, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  Fragment,
+  useState,
+  type ComponentProps,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import {
@@ -80,58 +87,32 @@ function ThreadDetailsPrLinkRow({
   );
 }
 
-function ThreadDetailsPrRows({
-  threadRef,
-  links,
-  currentLink,
-  onOpenLink,
-  ...row
-}: ComponentProps<typeof ThreadDetailsPrRow> & {
-  threadRef: ScopedThreadRef;
-  links: ReadonlyArray<ThreadPullRequestLink>;
-  currentLink: ThreadPullRequestLink | null;
-  onOpenLink: (event: ReactMouseEvent<HTMLElement>, url: string) => void;
+/** The thread's other visible pull requests, in list order, after the one shown first. */
+const otherPullRequests = (
+  links: ReadonlyArray<ThreadPullRequestLink>,
+  current: ThreadPullRequestLink,
+) =>
+  pipe(visibleThreadPullRequests(links), resolveThreadPullRequestChains, pullRequestListLines)
+    .map((line) => line.link)
+    .filter((link) => threadPullRequestKeyOf(link) !== threadPullRequestKeyOf(current));
+
+function ExpandablePrRows({
+  first,
+  rest,
+}: {
+  first: ReactNode;
+  rest: ReadonlyArray<{ key: string; row: ReactNode }>;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const watch = useAtomCommand(threadEnvironment.watchPullRequest, { reportFailure: true });
-  const stopWatching = (link: ThreadPullRequestLink | null) =>
-    link?.watch === undefined
-      ? undefined
-      : () =>
-          void watch({
-            environmentId: threadRef.environmentId,
-            input: {
-              threadId: threadRef.threadId,
-              host: link.host,
-              repository: link.repository,
-              number: link.number,
-              watching: false,
-            },
-          });
-  const currentRow = <ThreadDetailsPrRow {...row} onStopWatching={stopWatching(currentLink)} />;
-  const rest =
-    currentLink === null
-      ? []
-      : pipe(visibleThreadPullRequests(links), resolveThreadPullRequestChains, pullRequestListLines)
-          .map((line) => line.link)
-          .filter((link) => threadPullRequestKeyOf(link) !== threadPullRequestKeyOf(currentLink));
-  if (rest.length === 0) return currentRow;
+  if (rest.length === 0) return first;
 
   return (
     <>
-      {currentRow}
+      {first}
       {expanded ? (
         <div data-thread-details-pr-list className="flex flex-col">
-          {rest.map((link) => (
-            <ThreadDetailsPrLinkRow
-              key={threadPullRequestKeyOf(link)}
-              environmentId={row.environmentId}
-              link={link}
-              onOpen={(event) => onOpenLink(event, link.url)}
-              onActed={row.onActed}
-              onStopWatching={stopWatching(link)}
-              composerTarget={row.composerTarget}
-            />
+          {rest.map(({ key, row }) => (
+            <Fragment key={key}>{row}</Fragment>
           ))}
         </div>
       ) : null}
@@ -211,6 +192,91 @@ export function ThreadDetailsThreadPrRows({
       onOpen={(event) => openPrLink(event, url)}
       composerTarget={composerTarget}
       {...(onActed ? { onActed } : {})}
+    />
+  );
+}
+
+/**
+ * Pull requests linked to a thread this client reads from elsewhere (a sandbox chat's own thread,
+ * through its host mirror): the current one, then the rest on demand. Their watches stay there.
+ */
+export function ThreadDetailsLinkedPrRows({
+  environmentId,
+  links,
+  onOpenLink,
+}: {
+  environmentId: EnvironmentId;
+  links: ReadonlyArray<ThreadPullRequestLink>;
+  onOpenLink: (event: ReactMouseEvent<HTMLElement>, url: string) => void;
+}) {
+  const current = resolveThreadCurrentPullRequestLink(links);
+  if (current === null) return null;
+  const row = (link: ThreadPullRequestLink) => (
+    <ThreadDetailsPrLinkRow
+      environmentId={environmentId}
+      link={link}
+      onOpen={(event) => onOpenLink(event, link.url)}
+    />
+  );
+  return (
+    <ExpandablePrRows
+      first={row(current)}
+      rest={otherPullRequests(links, current).map((link) => ({
+        key: threadPullRequestKeyOf(link),
+        row: row(link),
+      }))}
+    />
+  );
+}
+
+function ThreadDetailsPrRows({
+  threadRef,
+  links,
+  currentLink,
+  onOpenLink,
+  ...row
+}: ComponentProps<typeof ThreadDetailsPrRow> & {
+  threadRef: ScopedThreadRef;
+  links: ReadonlyArray<ThreadPullRequestLink>;
+  currentLink: ThreadPullRequestLink | null;
+  onOpenLink: (event: ReactMouseEvent<HTMLElement>, url: string) => void;
+}) {
+  const watch = useAtomCommand(threadEnvironment.watchPullRequest, { reportFailure: true });
+  const stopWatching = (link: ThreadPullRequestLink | null) =>
+    link?.watch === undefined
+      ? undefined
+      : () =>
+          void watch({
+            environmentId: threadRef.environmentId,
+            input: {
+              threadId: threadRef.threadId,
+              host: link.host,
+              repository: link.repository,
+              number: link.number,
+              watching: false,
+            },
+          });
+  const currentRow = <ThreadDetailsPrRow {...row} onStopWatching={stopWatching(currentLink)} />;
+  return (
+    <ExpandablePrRows
+      first={currentRow}
+      rest={
+        currentLink === null
+          ? []
+          : otherPullRequests(links, currentLink).map((link) => ({
+              key: threadPullRequestKeyOf(link),
+              row: (
+                <ThreadDetailsPrLinkRow
+                  environmentId={row.environmentId}
+                  link={link}
+                  onOpen={(event) => onOpenLink(event, link.url)}
+                  onActed={row.onActed}
+                  onStopWatching={stopWatching(link)}
+                  composerTarget={row.composerTarget}
+                />
+              ),
+            }))
+      }
     />
   );
 }
