@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   type ModelSelection,
+  type OrchestrationV2Subagent,
   ProjectId,
   ProviderInstanceId,
   type SandboxRecord,
@@ -10,6 +11,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -26,9 +28,9 @@ import {
   newSettleDecisions,
   sandboxChatAliases,
   sandboxChatAliasTarget,
-  sandboxChatOwnThread,
   sandboxChatPickPartner,
   sandboxHostMirrors,
+  sandboxMirrorLineage,
   sandboxMirrorOf,
   sandboxMirrorTitleUpdates,
   sandboxRowPhase,
@@ -448,18 +450,39 @@ describe("the sandbox bridge as an internal provider instance", () => {
   });
 });
 
-describe("sandboxChatOwnThread", () => {
-  const sandboxRef = { environmentId: SANDBOX, threadId };
-  const mirrorRef = { environmentId: HOST, threadId };
-  const mirrors = new Map([[threadKey(mirrorRef), sandboxRef]]);
+describe("sandboxMirrorLineage", () => {
+  const agent = (
+    id: string,
+    childThreadId: string | null,
+    status: OrchestrationV2Subagent["status"],
+    at: string,
+    origin: OrchestrationV2Subagent["origin"] = "app_owned",
+  ) =>
+    ({
+      id,
+      threadId,
+      origin,
+      childThreadId: childThreadId === null ? null : ThreadId.make(childThreadId),
+      status,
+      startedAt: DateTime.makeUnsafe(at),
+      updatedAt: DateTime.makeUnsafe(at),
+    }) as OrchestrationV2Subagent;
+  const task = "thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3Areview";
 
-  // The mirror has no child threads: the sandbox's agents and tasks are on its own server.
-  it("reads a mirror's chat from the sandbox's own thread", () => {
-    expect(sandboxChatOwnThread(mirrors, mirrorRef)).toEqual(sandboxRef);
-  });
-
-  it("keeps any other thread", () => {
-    expect(sandboxChatOwnThread(mirrors, sandboxRef)).toBe(sandboxRef);
+  // The mirror's own projection has no agents, paired with the sandbox or not; the host's read does.
+  it("lists each agent thread once, as last recorded, newest thread first", () => {
+    const lineage = sandboxMirrorLineage([
+      agent("task-first", task, "completed", "2026-11-13T10:00:00Z"),
+      agent("native", "native-child", "interrupted", "2026-11-13T11:00:00Z", "provider_native"),
+      // A follow-up to a delegated task records its thread again.
+      agent("task-again", task, "running", "2026-11-13T12:00:00Z"),
+      agent("threadless", null, "running", "2026-11-13T12:30:00Z", "provider_native"),
+    ]);
+    expect(lineage.agents.map((entry) => [entry.id, entry.status])).toEqual([
+      ["native", "interrupted"],
+      ["task-again", "running"],
+    ]);
+    expect(lineage.runningWithoutThread).toBe(1);
   });
 });
 
