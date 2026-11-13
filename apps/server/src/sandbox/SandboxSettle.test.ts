@@ -368,6 +368,25 @@ describe("SandboxSettle", () => {
     ),
   );
 
+  it.effect("leaves alone a sandbox launched after the chat's settle, such as a relaunch", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        harness.onSettle = "snapshot";
+        // The bridge settled the chat when its abandoned sandbox went; a new launch replaced it.
+        harness.records = [record({ createdAt: "2026-11-13T10:00:05.000Z" })];
+        const service = yield* settle();
+        yield* service.drain;
+        yield* service.reconcile;
+        yield* service.drain;
+        const restarted = yield* harness.restart();
+        yield* restarted.reconcile;
+        yield* restarted.drain;
+        expect(harness.stops).toEqual([]);
+        expect(harness.records[0]?.settlePending).toBeUndefined();
+      }),
+    ),
+  );
+
   it.effect("ignores a settle of a thread no sandbox belongs to", () =>
     withHarness((harness) =>
       Effect.gen(function* () {
