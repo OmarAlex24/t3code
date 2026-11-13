@@ -716,9 +716,31 @@ export class SandboxProvisioner extends Context.Service<
   }
 >()("t3/sandbox/SandboxProvisioner") {}
 
+/**
+ * Only `setSettlePending` writes a record's settle fields. Any other write may carry a record read
+ * before a step that takes minutes (a resume, a stop), so it keeps the settle fields stored now.
+ */
+const keepingStoredSettle = (repository: SandboxRecords.SandboxRecordRepository["Service"]) => ({
+  ...repository,
+  put: (record: SandboxRecord) =>
+    repository.get(record.instanceId).pipe(
+      Effect.flatMap((stored) => {
+        if (Option.isNone(stored)) return repository.put(record);
+        const { settlePending: _settlePending, settleHandled: _settleHandled, ...rest } = record;
+        const { settlePending, settleHandled } = stored.value;
+        return repository.put({
+          ...rest,
+          ...(settlePending === undefined ? {} : { settlePending }),
+          ...(settleHandled === undefined ? {} : { settleHandled }),
+        });
+      }),
+    ),
+});
+
 const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
-  const records = yield* SandboxRecords.SandboxRecordRepository;
+  const repository = yield* SandboxRecords.SandboxRecordRepository;
+  const records = keepingStoredSettle(repository);
   const configStore = yield* SandboxRecords.SandboxConfigRepository;
   const environmentIdentity = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
@@ -3855,7 +3877,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     }
     const { settlePending: _settlePending, ...rest } = stored.value;
     // A new `updatedAt` makes a sweep that read the record earlier skip its write.
-    yield* records.put({
+    yield* repository.put({
       ...rest,
       ...(pending === undefined ? {} : { settlePending: pending }),
       ...(handled === undefined ? {} : { settleHandled: handled }),

@@ -612,7 +612,9 @@ matched by thread id) and applies the config's `onSettle` (`ask` when unset):
   A failed stop records `ask`.
 - A launch or resume writes back the record it started with, so a settle on a starting sandbox
   waits for it to end (woken by `listChanges` and `launchLifecycle`, with a minute's backstop),
-  then decides as above.
+  then decides as above. The settle fields are the exception to that write-back: only
+  `setSettlePending` writes them, and every other record write keeps the stored ones, so a resume
+  or stop that read the record minutes earlier cannot bring back a cleared `settlePending`.
 
 An un-settle (`thread.unsettled`, or `thread.pinned` off a settled thread) interrupts the wait and
 clears `settlePending`. Each thread's settle is decided once: settling a settled thread keeps its
