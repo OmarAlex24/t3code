@@ -660,17 +660,32 @@ export function createEnvironmentThreadShellAtoms(input: {
     return next;
   }).pipe(Atom.withLabel("environment-visible-thread-shell-list"));
 
+  // Complete like threadShellsAtom, for code that asks whether a thread exists.
+  let previousQuietCompleteThreadShells: ReadonlyArray<EnvironmentThreadShell> = [];
+  const quietCompleteThreadShellsAtom = Atom.make((get) => {
+    const next: EnvironmentThreadShell[] = [];
+    for (const ref of get(threadRefsAtom)) {
+      const shell = get(quietThreadShellAtomFamily(threadKey(ref)));
+      if (shell !== null) next.push(shell);
+    }
+    if (arrayElementsEqual(previousQuietCompleteThreadShells, next)) {
+      return previousQuietCompleteThreadShells;
+    }
+    previousQuietCompleteThreadShells = next;
+    return next;
+  }).pipe(Atom.withLabel("environment-quiet-complete-thread-shell-list"));
+
   // Lists that arrange threads read this, so a running thread's streaming
   // ticks reach only what reads its live shell.
   let previousQuietThreadShells: ReadonlyArray<EnvironmentThreadShell> = [];
   const quietThreadShellsAtom = Atom.make((get) => {
-    const next: EnvironmentThreadShell[] = [];
+    const all = get(quietCompleteThreadShellsAtom);
     const hidden = get(hiddenThreadKeysAtom);
-    for (const ref of get(threadRefsAtom)) {
-      if (hidden.has(threadKey(ref))) continue;
-      const shell = get(quietThreadShellAtomFamily(threadKey(ref)));
-      if (shell !== null) next.push(shell);
-    }
+    if (hidden.size === 0) return all;
+    const next = all.filter(
+      (thread) =>
+        !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id })),
+    );
     if (arrayElementsEqual(previousQuietThreadShells, next)) return previousQuietThreadShells;
     previousQuietThreadShells = next;
     return next;
@@ -738,6 +753,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     hiddenThreadKeysAtom,
     anyEnvironmentHidingAtom,
     quietThreadShellsAtom,
+    quietCompleteThreadShellsAtom,
     navigationThreadShellsAtom,
     delegatedUnderParentAtom,
     pendingSubagentRequestsAtom,
