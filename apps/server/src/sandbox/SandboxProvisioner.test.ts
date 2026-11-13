@@ -6091,6 +6091,53 @@ describe("SandboxProvisioner per-thread launches", () => {
     }),
   );
 
+  it.effect("keeps a settle decision changed while a resume runs", () =>
+    Effect.gen(function* () {
+      const until = yield* Deferred.make<void>();
+      const reached = yield* Deferred.make<void>();
+      const fake = boatFake({ holding: { text: "t3 serve", until, reached } });
+      const stopped: SandboxRecord = {
+        instanceId: "resumed",
+        environmentId: testEnvironmentId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "hello on Boat small",
+        size: "small",
+        state: "stopped",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        runningSince: null,
+        stoppedAt: "1970-01-01T00:00:00.000Z",
+        maxRunningMinutes: 480,
+        settlePending: { since: "1970-01-01T00:00:00.000Z", reason: "ask" },
+      };
+      const repository = memoryRepository([stopped]);
+      yield* Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const resuming = yield* provisioner
+          .resume({ instanceId: "resumed" })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(reached);
+        // The chat is un-settled, then settled and answered, while the sandbox starts.
+        yield* provisioner.setSettlePending("resumed", undefined, "2026-11-13T10:00:00.000Z");
+        yield* Deferred.succeed(until, undefined);
+        yield* Fiber.join(resuming);
+        expect(repository.records.get("resumed")?.state).toBe("running");
+        expect(repository.records.get("resumed")?.settlePending).toBeUndefined();
+        expect(repository.records.get("resumed")?.settleHandled).toBe("2026-11-13T10:00:00.000Z");
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
   it.effect("clears the starting mark when a resume fails or a server died mid-resume", () => {
     const fake = boatFake({ failing: { text: "t3 serve", times: 1 } });
     const base: SandboxRecord = {
