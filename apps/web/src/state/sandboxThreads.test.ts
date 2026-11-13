@@ -230,8 +230,14 @@ describe("sandboxHostMirrors", () => {
 describe("sandboxChatAliases", () => {
   const linked = (fields: Partial<SandboxRecord> = {}) =>
     record({ hostProjectId: ProjectId.make("project-host"), ...fields });
-  const hostThread = { environmentId: HOST, id: threadId };
-  const sandboxThread = { environmentId: SANDBOX, id: threadId };
+  const shell = (environmentId: EnvironmentId, latestUserMessageAt: string | null) => ({
+    environmentId,
+    id: threadId,
+    latestUserMessageAt,
+  });
+  const hostThread = shell(HOST, "2026-11-10T00:00:00.000Z");
+  const sandboxThread = shell(SANDBOX, "2026-11-10T00:00:01.000Z");
+  const emptySandboxThread = shell(SANDBOX, null);
   const hostRef = { environmentId: HOST, threadId };
   const sandboxRef = { environmentId: SANDBOX, threadId };
   const both = [hostThread, sandboxThread];
@@ -243,7 +249,7 @@ describe("sandboxChatAliases", () => {
 
   it("shows the sandbox's own thread whatever the sandbox's state", () => {
     expect(aliases(linked())).toEqual(showsSandbox);
-    // A launch's thread opens on the sandbox as soon as it lists.
+    // A launch's thread opens on the sandbox as soon as it holds the first message.
     expect(aliases(linked({ state: "provisioning" }))).toEqual(showsSandbox);
     // Stopped or resuming, a send on its own thread resumes the sandbox and goes there.
     expect(aliases(linked({ state: "stopped" }))).toEqual(showsSandbox);
@@ -260,6 +266,13 @@ describe("sandboxChatAliases", () => {
     // Linked, but the bridge has not made the sandbox's thread yet.
     expect(aliases(linked(), [hostThread])).toEqual([]);
     expect(aliases(linked())).toEqual(showsSandbox);
+  });
+
+  // The sandbox makes its thread, then takes the message, which can fail and leave it empty.
+  it("keeps a launch's host thread as the chat while the sandbox's own thread has no message", () => {
+    for (const state of ["provisioning", "running", "stopped"] as const) {
+      expect(aliases(linked({ state }), [hostThread, emptySandboxThread])).toEqual(showsMirror);
+    }
   });
 
   it("sends a route on a stopped sandbox's thread that never listed to the mirror", () => {

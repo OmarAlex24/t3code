@@ -259,6 +259,7 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
+  handOverLaunchedDraft,
   useComposerDraftStore,
   DraftId,
 } from "../composerDraftStore";
@@ -1045,8 +1046,8 @@ export default function ChatView(props: ChatViewProps) {
     activeSandbox !== undefined &&
     activeThreadRef !== null &&
     isHostThreadRef(activeSandbox, activeThreadRef);
-  // A sandbox chat opens on the sandbox's own thread, whatever its state; the host's mirror stands
-  // in only when this app has never listed that thread.
+  // A sandbox chat opens on the sandbox's own thread, whatever its state, once that thread holds the
+  // conversation; until then the host's mirror stands in.
   const sandboxChatAliases = useSandboxChatAliases();
   const activeAliasTarget =
     activeThreadRef === null
@@ -1328,17 +1329,7 @@ export default function ChatView(props: ChatViewProps) {
       if (draftId === null) return;
       // The host thread holds the message now; the draft hands over to it like any sent draft.
       promptRef.current = "";
-      const store = useComposerDraftStore.getState();
-      store.clearComposerContent(draftId);
-      store.markDraftThreadPromoting(draftId, threadRef);
-      store.finalizePromotedDraftThread(draftId);
-      // The host thread runs the sandbox's model on the bridge; the draft's local pick would
-      // read as a switch off it.
-      const moved = store.getComposerDraft(threadRef);
-      const pick = moved?.activeProvider
-        ? moved.modelSelectionByProvider[moved.activeProvider]
-        : undefined;
-      if (pick !== undefined) store.releaseModelSelection(threadRef, pick);
+      handOverLaunchedDraft(draftId, threadRef);
     },
   });
   // A sandbox chat's host thread shows its sandbox's setup while its first message waits.

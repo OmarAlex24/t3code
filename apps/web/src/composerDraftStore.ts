@@ -4716,6 +4716,22 @@ export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): vo
   clearBackgroundDraftSubmissionByRef(threadRef);
 }
 
+/** A sandbox launch made `threadRef`, holding the draft's message; the draft hands over to it. */
+export function handOverLaunchedDraft(draftId: DraftId, threadRef: ScopedThreadRef): void {
+  const store = useComposerDraftStore.getState();
+  store.markDraftThreadPromoting(draftId, threadRef);
+  store.finalizePromotedDraftThread(draftId);
+  // Cleared where the draft went, since promotion may have carried it, message and all, already.
+  store.clearComposerContent(threadRef);
+  // The host thread runs the sandbox's model on the bridge; the draft's local pick would read as a
+  // switch off it.
+  const moved = store.getComposerDraft(threadRef);
+  const pick = moved?.activeProvider
+    ? moved.modelSelectionByProvider[moved.activeProvider]
+    : undefined;
+  if (pick !== undefined) store.releaseModelSelection(threadRef, pick);
+}
+
 type DraftPromotionShell = Pick<EnvironmentThreadShell, "latestRun" | "latestUserMessageAt">;
 
 /** The server owns a draft's send once its message persisted or its run started or stopped. */
