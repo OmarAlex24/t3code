@@ -362,8 +362,11 @@ without pairing with the sandbox.
   sandbox's latest message. A new message launches the thread there (same id, the sandbox project,
   the sandbox's default model or Claude) or is dispatched, after moving the sandbox thread to the
   host thread's runtime and interaction modes. It streams new text, plans and summarized tool,
-  command and subagent activity, ignores what was on the thread before, and ends the ACP turn
-  (`state_update` idle) when the run carrying the message ends.
+  command and subagent activity, and ends the ACP turn (`state_update` idle) when the run carrying
+  the message ends. What was on the thread before is never streamed, judged by when the sandbox
+  last touched each item, not by membership in its first read or by ordinal:
+  `getThreadProjection` returns a bounded window while `subscribeThread`'s snapshot is the whole
+  thread, and item ordinals restart with each provider thread.
 - **Modes.** The sandbox thread runs in the host thread's runtime and interaction modes. The host
   forwards a mode change on a `sandboxes` thread as soon as it happens (`SandboxThreadRemote`), and
   each new message re-checks them, so Supervised asks and other modes do not wait.
