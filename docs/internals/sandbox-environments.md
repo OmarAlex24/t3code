@@ -490,7 +490,17 @@ without pairing with the sandbox.
   A host thread never takes the client-side resume path; un-settle and the header's **Resume** call
   `sandboxes.resume` without waiting, and a send relies on the watcher below.
 - **Placeholder projects.** A project whose root `isSandboxHostProjectRoot` matches gets no git
-  status, scripts, open-in, files or terminal in the web app.
+  status, scripts, open-in, files or terminal in the web app or the phone. On the computer, the
+  mirror's surfaces that need the sandbox offer **Connect to the sandbox** (the empty surface
+  launcher, the details card and the header's sandbox menu): `sandboxes.connectThread` resumes a
+  stopped sandbox, then pairs like `pairLaunch`, and the client registers the environment with
+  `expectedEnvironmentId`, so a saved one takes the sandbox's current address. The alias above then
+  moves the chat to the sandbox's thread. The phone never pairs with a sandbox, so it says these
+  are available from a computer connected to the sandbox.
+- **Pairing on its own.** `SandboxThreadCoordinator` pairs every linked, running sandbox it has
+  not registered, silently and at most every two minutes. Settings → Sandboxes connects and
+  disconnects a mirrored chat's sandbox by hand; a disconnect is remembered per device
+  (`sandboxConnections.ts`), so the coordinator leaves that sandbox alone until it connects again.
 - **Stopped sandbox.** A run starting on a `sandboxes` thread whose sandbox is stopped makes the
   host resume it. Meanwhile the bridge retries for `SANDBOX_RESUME_WAIT_SECONDS` (16 minutes:
   every step of a resume at its limit, `SANDBOX_RESUME_STEP_SECONDS`, plus a minute), then says
