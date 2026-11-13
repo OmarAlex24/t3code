@@ -2,7 +2,6 @@ import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
-import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
 import {
@@ -684,7 +683,6 @@ type ThreadStatusInput = Pick<
   | "runtime"
 > & {
   lastVisitedAt?: string | null | undefined;
-  pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
   blockedOnThreadWait?: boolean | undefined;
 };
 
@@ -976,14 +974,12 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   if (thread.runtime?.status === "preparing") {
     return "preparing";
   }
+  // An idle runtime is a finished turn held open by background work the agent waits on.
   if (
     thread.runtime !== null &&
-    ["queued", "starting", "running", "waiting"].includes(thread.runtime.status)
+    ["queued", "starting", "running", "waiting", "idle"].includes(thread.runtime.status)
   ) {
     return "working";
-  }
-  if (thread.runtime?.status === "idle") {
-    return "waiting";
   }
   if (thread.runtime?.status === "failed") {
     return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
@@ -1001,10 +997,9 @@ export function resolveWindowTitleThreadStatus(thread: SidebarThreadStatusInput)
       return THREAD_STATUS_TEXT.input;
     case "preparing":
     case "working":
-      return THREAD_STATUS_TEXT.working;
+    // Waiting on a child thread is still this turn, so it must not read as finished.
     case "waiting":
-      // Waiting on a child thread is still this turn, so it must not read as finished.
-      return thread.runtime?.status === "running" ? THREAD_STATUS_TEXT.working : null;
+      return THREAD_STATUS_TEXT.working;
     default:
       return null;
   }
@@ -1012,7 +1007,7 @@ export function resolveWindowTitleThreadStatus(thread: SidebarThreadStatusInput)
 
 /**
  * The dot on a closed boring-sidebar folder: the most urgent state among its
- * hidden threads. Waiting threads stay quiet, like their rows.
+ * hidden threads. Threads waiting on a child thread stay quiet, like their rows.
  */
 export function resolveSidebarFolderDot(
   threads: ReadonlyArray<ThreadStatusInput & SidebarThreadStatusInput>,
@@ -1205,7 +1200,10 @@ export function reduceSidebarProjectScopeMenuState(
 export function resolveWorkingStartedAt(
   thread: Pick<SidebarThreadSummary, "latestRun" | "runtime">,
 ): string | null {
-  return resolveThreadWorkingStartedAt(thread);
+  // A turn held open by background work counts from when the turn itself ended.
+  return thread.runtime?.status === "idle"
+    ? (thread.latestRun?.completedAt ?? null)
+    : resolveThreadWorkingStartedAt(thread);
 }
 
 export function resolveThreadStatusPill(input: {
@@ -1242,7 +1240,8 @@ export function resolveThreadStatusPill(input: {
 
   if (
     (thread.runtime?.status === "running" && thread.blockedOnThreadWait !== true) ||
-    thread.runtime?.status === "waiting"
+    thread.runtime?.status === "waiting" ||
+    thread.runtime?.status === "idle"
   ) {
     return {
       label: "Working",
@@ -1265,10 +1264,7 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (
-    (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) ||
-    backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
-  ) {
+  if (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) {
     return {
       label: "Waiting",
       colorClass: "text-sidebar-muted-foreground",

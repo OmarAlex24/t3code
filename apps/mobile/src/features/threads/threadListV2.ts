@@ -281,14 +281,14 @@ export function resolveThreadListV2Status(
   if (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) {
     return "waiting";
   }
+  // An idle runtime is a finished turn held open by background work the agent waits on.
   if (
     thread.runtime !== null &&
-    ["preparing", "queued", "starting", "running", "waiting"].includes(thread.runtime.status)
+    ["preparing", "queued", "starting", "running", "waiting", "idle"].includes(
+      thread.runtime.status,
+    )
   ) {
     return "working";
-  }
-  if (thread.runtime?.status === "idle") {
-    return "waiting";
   }
   if (thread.runtime?.status === "failed") {
     return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";

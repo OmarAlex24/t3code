@@ -1265,7 +1265,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 {statusLabel.label}
                 {settleDecision !== null ? null : status === "working" ? (
                   <ThreadListV2Duration
-                    startedAt={resolveThreadWorkingStartedAt(thread)}
+                    startedAt={
+                      thread.runtime?.status === "idle"
+                        ? (thread.latestRun?.completedAt ?? null)
+                        : resolveThreadWorkingStartedAt(thread)
+                    }
                     leadingSpace={statusLabel.label !== null}
                   />
                 ) : status === "waiting" ? (

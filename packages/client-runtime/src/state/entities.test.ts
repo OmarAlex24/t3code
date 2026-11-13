@@ -112,26 +112,33 @@ describe("V2 client presentation", () => {
   });
 
   it.each([
-    { kinds: ["command"], expected: "completed" },
-    { kinds: ["command", "subagent"], expected: "idle" },
-    { kinds: ["background_task"], expected: "idle" },
-  ] as const)("presents a completed shell with $kinds as $expected", ({ kinds, expected }) => {
-    const pendingBackgroundTasks = kinds.map((kind, index) => ({
-      taskId: `bg-${index}`,
-      kind,
-    }));
-    const shell = presentThreadShell(environmentId, {
-      ...v2ThreadShell,
-      latestRunId: RunId.make("run-completed"),
-      activeRunId: null,
-      status: "completed",
-      pendingBackgroundTasks,
-    });
+    { kinds: ["command"], wake: false, expected: "completed" },
+    { kinds: ["command", "subagent"], wake: false, expected: "idle" },
+    { kinds: ["background_task"], wake: false, expected: "idle" },
+    { kinds: ["monitor"], wake: false, expected: "completed" },
+    // A monitor wakes the agent per line; each wake run's end must not drop out of Working.
+    { kinds: ["monitor"], wake: true, expected: "idle" },
+  ] as const)(
+    "presents a completed shell with $kinds (wake $wake) as $expected",
+    ({ kinds, wake, expected }) => {
+      const pendingBackgroundTasks = kinds.map((kind, index) => ({
+        taskId: `bg-${index}`,
+        kind,
+      }));
+      const shell = presentThreadShell(environmentId, {
+        ...v2ThreadShell,
+        latestRunId: RunId.make("run-completed"),
+        activeRunId: null,
+        status: "completed",
+        latestRunBackgroundWake: wake,
+        pendingBackgroundTasks,
+      });
 
-    expect(shell.latestRun?.status).toBe("completed");
-    expect(shell.runtime).toMatchObject({ status: expected, activeRunId: null });
-    expect(shell.pendingBackgroundTasks).toEqual(pendingBackgroundTasks);
-  });
+      expect(shell.latestRun?.status).toBe("completed");
+      expect(shell.runtime).toMatchObject({ status: expected, activeRunId: null });
+      expect(shell.pendingBackgroundTasks).toEqual(pendingBackgroundTasks);
+    },
+  );
 
   it.each(["running", "waiting"] as const)(
     "preserves shell %s while only commands remain in the roster",
