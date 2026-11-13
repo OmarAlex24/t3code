@@ -320,12 +320,13 @@ export const sandboxChatPickPartner = (
 
 /**
  * The thread of each sandbox chat that lists, the sidebar and the chat view leave out, by key, with
- * the one that stands for it. The sandbox's own thread is the chat whenever it lists, running or
- * not (a send there resumes it); the mirror stands in only for a stopped one never listed here.
+ * the one that stands for it. The sandbox's own thread is the chat once it holds the conversation,
+ * running or not (a send there resumes it). Until then the mirror, which holds the launch's message,
+ * stands for it, and it stands in for a stopped one never listed here.
  */
 export const sandboxChatAliases = (
   sandboxes: ReadonlyArray<SandboxRecord>,
-  threads: ReadonlyArray<ThreadEntry>,
+  threads: ReadonlyArray<ThreadEntry & { readonly latestUserMessageAt: string | null }>,
   provisionerEnvironmentId: EnvironmentId | null,
 ): ReadonlyMap<string, ScopedThreadRef> => {
   const aliases = new Map<string, ScopedThreadRef>();
@@ -334,9 +335,15 @@ export const sandboxChatAliases = (
     provisionerEnvironmentId,
   )) {
     if (!listed(threads, mirror)) continue;
-    if (listed(threads, real)) {
+    const realThread = threads.find(
+      (thread) => thread.environmentId === real.environmentId && thread.id === real.threadId,
+    );
+    if (realThread?.latestUserMessageAt != null) {
       aliases.set(threadKey(mirror), real);
-    } else if (sandbox.state !== "running" && sandbox.state !== "provisioning") {
+    } else if (
+      realThread !== undefined ||
+      (sandbox.state !== "running" && sandbox.state !== "provisioning")
+    ) {
       aliases.set(threadKey(real), mirror);
     }
   }
