@@ -36,6 +36,7 @@ import {
   SandboxProviderError,
   SandboxProvidersResult,
   SandboxResolveSettleInput,
+  SandboxResolveSettleResult,
   SandboxResumeResult,
   SandboxSaveConfigInput,
   SandboxSaveConfigResult,
@@ -129,7 +130,7 @@ const WsSandboxesCheckWorkRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCheckWork, 
 
 const WsSandboxesResolveSettleRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesResolveSettle, {
   payload: SandboxResolveSettleInput,
-  success: SandboxDeleteResult,
+  success: SandboxResolveSettleResult,
   error: SandboxFailure,
 });
 

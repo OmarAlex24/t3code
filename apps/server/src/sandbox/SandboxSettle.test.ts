@@ -351,11 +351,47 @@ describe("SandboxSettle", () => {
         const service = yield* settle();
         yield* service.drain;
         expect(pendingOf(harness)).toBe("ask");
-        yield* service.resolve({ instanceId: "sandbox-1", choice: "keep" });
+        expect(yield* service.resolve({ instanceId: "sandbox-1", choice: "keep" })).toEqual({
+          warnings: [],
+          resolved: true,
+        });
         expect(harness.records[0]?.settlePending).toBeUndefined();
         expect(harness.records).toHaveLength(1);
-        yield* service.resolve({ instanceId: "sandbox-1", choice: "delete" });
+        harness.records = [record({ settlePending: { since: SETTLED_AT, reason: "work" } })];
+        expect(yield* service.resolve({ instanceId: "sandbox-1", choice: "delete" })).toEqual({
+          warnings: [],
+          resolved: true,
+        });
         expect(harness.deletes).toEqual(["sandbox-1"]);
+      }),
+    ),
+  );
+
+  it.effect("answers nothing once the chat is un-settled or no decision waits", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const service = yield* settle();
+        yield* service.drain;
+        // A stale card on another device answers after the user un-settled the chat here.
+        harness.settled = false;
+        expect(yield* service.resolve({ instanceId: "sandbox-1", choice: "delete" })).toEqual({
+          warnings: [],
+          resolved: false,
+        });
+        expect(yield* service.resolve({ instanceId: "sandbox-1", choice: "keep" })).toEqual({
+          warnings: [],
+          resolved: false,
+        });
+        expect(harness.deletes).toEqual([]);
+        expect(pendingOf(harness)).toBe("ask");
+        // Settled again with the question already answered: nothing waits on an answer.
+        harness.settled = true;
+        harness.records = [record()];
+        expect(yield* service.resolve({ instanceId: "sandbox-1", choice: "delete" })).toEqual({
+          warnings: [],
+          resolved: false,
+        });
+        expect(harness.deletes).toEqual([]);
       }),
     ),
   );

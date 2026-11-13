@@ -17,6 +17,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { SANDBOX_SETTLE_STALE_ANSWER } from "@t3tools/client-runtime/state/sandbox-settle";
 import {
   DEFAULT_SANDBOX_IDLE_MINUTES,
   type EnvironmentId,
@@ -733,6 +734,17 @@ function SandboxRow({
           }),
         );
       }
+      return;
+    }
+    if (result.value !== undefined && "resolved" in result.value && !result.value.resolved) {
+      setPending(false);
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: "Sandbox left as it is",
+          description: SANDBOX_SETTLE_STALE_ANSWER,
+        }),
+      );
       return;
     }
     // A deleted sandbox's connection has nothing left to reach, so it leaves this client too.
