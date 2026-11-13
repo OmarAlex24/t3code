@@ -24,9 +24,12 @@ import {
   parseTailscaleReport,
   RAILWAY_LOGIN_SCRUB,
   railwayLoginScript,
+  SANDBOX_AGENT_INSTRUCTIONS,
   SANDBOX_FILES_SKILL,
   SANDBOX_FILES_SKILL_NAME,
-  sandboxFilesSkillScript,
+  SANDBOX_INSTRUCTIONS_END,
+  SANDBOX_INSTRUCTIONS_START,
+  sandboxAgentGuidanceScript,
   sandboxKeepAliveScript,
   type SandboxScript,
   tailscaleScript,
@@ -360,7 +363,7 @@ describe("setupScriptScript", () => {
   );
 });
 
-describe("sandboxFilesSkillScript", () => {
+describe("sandboxAgentGuidanceScript", () => {
   it("names the skill so it can't replace one of the user's, and says when to load it", () => {
     expect(SANDBOX_FILES_SKILL_NAME).toBe("t3-sandbox-files");
     const frontmatter = /^---\n([\s\S]*?)\n---\n/u.exec(SANDBOX_FILES_SKILL)?.[1] ?? "";
@@ -371,27 +374,54 @@ describe("sandboxFilesSkillScript", () => {
     }
   });
 
-  it.live("writes the skill into Claude's folder, and on a resume only when it is missing", () =>
-    withHome((home) =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const file = `${home}/.claude/skills/t3-sandbox-files/SKILL.md`;
-        yield* runIn(home, sandboxFilesSkillScript("write"));
-        expect(yield* fs.readFileString(file)).toBe(SANDBOX_FILES_SKILL);
+  it.live(
+    "writes the skill and one marked block per agent, keeping and rewriting around the user's text",
+    () =>
+      withHome((home) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const block = `${SANDBOX_INSTRUCTIONS_START}\n${SANDBOX_AGENT_INSTRUCTIONS}${SANDBOX_INSTRUCTIONS_END}\n`;
+          const skill = `${home}/.claude/skills/t3-sandbox-files/SKILL.md`;
+          const claude = `${home}/.claude/CLAUDE.md`;
+          const codex = `${home}/.codex/AGENTS.md`;
+          const pi = `${home}/.pi/agent/AGENTS.md`;
+          yield* runIn(home, sandboxAgentGuidanceScript());
+          expect(yield* fs.readFileString(skill)).toBe(SANDBOX_FILES_SKILL);
+          for (const file of [claude, codex, pi])
+            expect(yield* fs.readFileString(file)).toBe(block);
 
-        // A copy already there stays as it is on a resume, and goes on a launch.
-        yield* fs.writeFileString(file, "edited");
-        yield* runIn(home, sandboxFilesSkillScript("if-missing"));
-        expect(yield* fs.readFileString(file)).toBe("edited");
-        yield* runIn(home, sandboxFilesSkillScript("write"));
-        expect(yield* fs.readFileString(file)).toBe(SANDBOX_FILES_SKILL);
+          // A launch copies the user's CLAUDE.md over the old one; the block goes after their text.
+          yield* fs.writeFileString(claude, "# Mine\n\nKeep this.");
+          yield* fs.writeFileString(skill, "edited");
+          yield* runIn(home, sandboxAgentGuidanceScript());
+          expect(yield* fs.readFileString(claude)).toBe(`# Mine\n\nKeep this.\n\n${block}`);
+          expect(yield* fs.readFileString(skill)).toBe(SANDBOX_FILES_SKILL);
 
-        yield* fs.remove(`${home}/.claude/skills`, { recursive: true });
-        yield* runIn(home, sandboxFilesSkillScript("if-missing"));
-        expect(yield* fs.readFileString(file)).toBe(SANDBOX_FILES_SKILL);
-        expect(yield* fs.exists(`${file}.t3-tmp`)).toBe(false);
-      }),
-    ),
+          // A rerun, or a copied CLAUDE.md that already holds an older block, keeps one block.
+          const edited = `# Mine\n\n${SANDBOX_INSTRUCTIONS_START}\nold text\n${SANDBOX_INSTRUCTIONS_END}\nAfter.\n`;
+          yield* fs.writeFileString(claude, edited);
+          yield* runIn(home, sandboxAgentGuidanceScript());
+          yield* runIn(home, sandboxAgentGuidanceScript());
+          expect(yield* fs.readFileString(claude)).toBe(`# Mine\n\n${block}After.\n`);
+
+          // The block joins the file each agent actually reads, never shadowing the user's.
+          yield* fs.remove(pi);
+          yield* fs.writeFileString(`${home}/.pi/agent/CLAUDE.md`, "pi rules\n");
+          yield* fs.writeFileString(`${home}/.codex/AGENTS.override.md`, "codex rules\n");
+          yield* runIn(home, sandboxAgentGuidanceScript());
+          expect(yield* fs.exists(pi)).toBe(false);
+          expect(yield* fs.readFileString(`${home}/.pi/agent/CLAUDE.md`)).toBe(
+            `pi rules\n\n${block}`,
+          );
+          expect(yield* fs.readFileString(`${home}/.codex/AGENTS.override.md`)).toBe(
+            `codex rules\n\n${block}`,
+          );
+          expect(yield* fs.readFileString(codex)).toBe(block);
+          for (const file of [skill, claude, codex]) {
+            expect(yield* fs.exists(`${file}.t3-tmp`)).toBe(false);
+          }
+        }),
+      ),
   );
 });
 

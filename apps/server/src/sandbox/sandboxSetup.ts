@@ -898,22 +898,40 @@ rm -rf "${KEEP_ALIVE_DIR}"`;
 /** The skill every sandbox's Claude gets from T3 Code, named so it never replaces one of the user's. */
 export const SANDBOX_FILES_SKILL_NAME = "t3-sandbox-files";
 
+const SANDBOX_LIFETIME =
+  "It stops when idle (emptying /tmp) and is deleted when its chat ends. Nothing on it outlives that.";
+
+/**
+ * What every agent on a sandbox always has in its global instructions. The skill is loaded only
+ * when Claude decides to, and no other provider gets it, so the facts that lose work live here.
+ */
+export const SANDBOX_AGENT_INSTRUCTIONS = `## This machine is a disposable sandbox
+- ${SANDBOX_LIFETIME}
+- Anything the user needs (handoffs, summaries, plans, findings) goes in your reply, never only in a file.
+- Deliver code by committing and pushing a branch. Uncommitted work is lost with the machine.
+- Don't commit scratch notes or handoff files, and don't cite local paths as deliverables.
+`;
+
+export const SANDBOX_INSTRUCTIONS_START = "<!-- t3code:sandbox-instructions:start -->";
+export const SANDBOX_INSTRUCTIONS_END = "<!-- t3code:sandbox-instructions:end -->";
+
 /**
  * Tells agents on a sandbox to keep what they need later out of `/tmp`, which a stop empties. The
  * description is what makes Claude load it, so it names every moment an agent reaches for `/tmp`.
  */
 export const SANDBOX_FILES_SKILL = `---
 name: ${SANDBOX_FILES_SKILL_NAME}
-description: Where to save files on this T3 Code sandbox, whose /tmp is wiped every time the sandbox stops. Use before writing anything that must still exist later (screenshots or images you embed in a reply, logs you will point the user to, downloads, PR or doc drafts, extra git worktrees, build artifacts), and whenever you would reach for /tmp or $TMPDIR.
+description: Where to save files on this T3 Code sandbox, whose /tmp is wiped every time the sandbox stops and which is deleted when its chat ends. Use before writing anything that must still exist later (screenshots or images you embed in a reply, logs you will point the user to, downloads, PR or doc drafts, extra git worktrees, build artifacts), and whenever you would reach for /tmp or $TMPDIR.
 ---
 
 # Files on a sandbox
 
-This machine is a T3 Code sandbox. It stops on its own: when its agents go idle, at its running limit, or when the user stops it. Resuming it boots the machine again, and the boot empties \`/tmp\`. Everything under \`$HOME\` survives, including the project under \`~/work\`, \`~/.t3\` and \`~/.claude\`.
+This machine is a T3 Code sandbox. ${SANDBOX_LIFETIME} It also stops at its running limit or when the user stops it. Resuming it boots the machine again, and the boot empties \`/tmp\`. Until the chat ends, everything under \`$HOME\` survives a stop, including the project under \`~/work\`, \`~/.t3\` and \`~/.claude\`.
 
 ## Rules
 
 - **Never put anything in \`/tmp\` that someone needs after your current command finishes.** Use a folder under \`$HOME\` instead: an existing work folder the user already uses (such as \`~/work\`), or \`~/scratch/<task>/\`.
+- **Deliverables never live only in a file**, not even under \`$HOME\`: it goes with the machine. Put what the user needs in your reply, and push code on a branch.
 - **Images you show the user:** save screenshots and generated images under \`$HOME\` before embedding them. An image embedded from \`/tmp\` breaks for the user after the next stop.
 - **Extra git worktrees:** create them under \`$HOME\`, for example \`~/scratch/worktrees/<name>\`, not in \`/tmp\`. A worktree in \`/tmp\` leaves stale git metadata behind; \`git worktree prune\` cleans it up.
 - **Logs and long outputs** you will cite later go to a file under \`$HOME\`, for example with \`tee ~/scratch/<task>/run.log\`.
@@ -922,18 +940,65 @@ This machine is a T3 Code sandbox. It stops on its own: when its agents go idle,
 - **Large downloads and build outputs** under \`~/scratch\` count against the sandbox's disk. Delete them when the task is done.
 `;
 
+// Each agent's global instructions folder, its file names in the order the agent picks one (the
+// first that exists is the one it reads), and the one to create. Pi: docs/configuration.md and
+// getAgentDir in @earendil-works/pi-coding-agent. Codex reads AGENTS.override.md over AGENTS.md.
+const AGENT_INSTRUCTION_FILES = [
+  { dir: "${CLAUDE_CONFIG_DIR:-$HOME/.claude}", names: ["CLAUDE.md"], create: "CLAUDE.md" },
+  {
+    dir: "${CODEX_HOME:-$HOME/.codex}",
+    names: ["AGENTS.override.md", "AGENTS.md"],
+    create: "AGENTS.md",
+  },
+  {
+    dir: "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}",
+    names: ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"],
+    create: "AGENTS.md",
+  },
+] as const;
+
 /**
- * Writes the built-in skill into Claude's skills folder: always at launch, so a template's older
- * copy goes, and on a resume only when it is missing, for sandboxes made before it existed. Exits
- * nonzero when it cannot write it.
+ * Writes T3 Code's skill into Claude's skills folder and replaces the marked block in Claude's,
+ * Codex's and Pi's global instructions, keeping the rest of each file. Runs on every launch, after
+ * the user's CLAUDE.md is copied, and on every resume. Tries every target, then exits nonzero when
+ * any failed.
  */
-export const sandboxFilesSkillScript = (mode: "write" | "if-missing") => `set -eu
-dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/${SANDBOX_FILES_SKILL_NAME}"
-${
-  mode === "if-missing"
-    ? `[ -f "$dir/SKILL.md" ] && exit 0
-`
-    : ""
-}mkdir -p "$dir"
-printf '%s' '${base64(SANDBOX_FILES_SKILL)}' | base64 -d >"$dir/SKILL.md.t3-tmp"
-mv "$dir/SKILL.md.t3-tmp" "$dir/SKILL.md"`;
+export const sandboxAgentGuidanceScript = () => `export PATH="$HOME/.local/bin:$PATH"
+failed=0
+skill="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/${SANDBOX_FILES_SKILL_NAME}"
+{ mkdir -p "$skill" &&
+  printf '%s' '${base64(SANDBOX_FILES_SKILL)}' | base64 -d >"$skill/SKILL.md.t3-tmp" &&
+  mv "$skill/SKILL.md.t3-tmp" "$skill/SKILL.md"; } || failed=1
+node -e '
+const fs = require("node:fs");
+const [block, ...targets] = process.argv.slice(1);
+const start = ${JSON.stringify(SANDBOX_INSTRUCTIONS_START)};
+const end = ${JSON.stringify(SANDBOX_INSTRUCTIONS_END)};
+const section = start + "\\n" + Buffer.from(block, "base64").toString("utf8") + end + "\\n";
+const isFile = (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } };
+let failed = false;
+for (let i = 0; i < targets.length; i += 3) {
+  const [dir, names, create] = targets.slice(i, i + 3);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const name = names.split(",").find((candidate) => isFile(dir + "/" + candidate)) ?? create;
+    const file = isFile(dir + "/" + name) ? fs.realpathSync(dir + "/" + name) : dir + "/" + name;
+    const text = isFile(file) ? fs.readFileSync(file, "utf8") : "";
+    const from = text.indexOf(start);
+    const to = from === -1 ? -1 : text.indexOf(end, from);
+    const next =
+      to === -1
+        ? (text === "" ? "" : text.replace(/\\n*$/u, "\\n\\n")) + section
+        : text.slice(0, from) + section + text.slice(to + end.length).replace(/^\\n/u, "");
+    if (next === text) continue;
+    fs.writeFileSync(file + ".t3-tmp", next);
+    fs.renameSync(file + ".t3-tmp", file);
+  } catch {
+    failed = true;
+  }
+}
+process.exit(failed ? 1 : 0);
+' '${base64(SANDBOX_AGENT_INSTRUCTIONS)}' ${AGENT_INSTRUCTION_FILES.map(
+  (target) => `"${target.dir}" ${target.names.join(",")} ${target.create}`,
+).join(" ")} || failed=1
+exit "$failed"`;
