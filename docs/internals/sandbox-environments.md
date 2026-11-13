@@ -575,10 +575,11 @@ sandbox, disk included, even when stopped, so it is set 24 hours past the runnin
 is the session timeout, capped by the plan (45 minutes on Hobby, a day on Pro), so a Hobby sandbox
 stops early and the sweep records it as stopped. Its stopped disk is kept for 30 days. Upstash and
 Celesto have no lifetime of their own, so the sweep's stop is the only limit; a Celesto sandbox
-bills until T3 stops it. Celesto keeps the root disk, home included, across stop and start for 30
-days. Its persistent home (`external_volume_enabled`) would also keep `/home/ohm` across a spot move
-(`restorable`, then `restoring`, which the sweep treats as starting), but the `coding-agent`
-template refuses it, so a moved sandbox may lose its T3 state. Upstash also pauses an idle box
+bills until T3 stops it. Celesto keeps the root disk across stop and start for 30 days. Its exec
+runs as root with `HOME=/root` on that 20 GB disk, so T3's `~/.t3` survives a stop and start. Its
+persistent home (`external_volume_enabled`, which the `coding-agent` template refuses) covers only
+`/home/ohm`, which T3 does not use. A spot move goes `restorable`, then `restoring`, which the sweep
+treats as starting. Upstash also pauses an idle box
 and wakes it on any visit to its URL, restarting T3 through the box's init command; the sweep
 records both.
 
