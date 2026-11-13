@@ -34,6 +34,7 @@ import {
   sandboxRowPhase,
   sandboxRowStates,
   sandboxRowThread,
+  sandboxSettleOutcome,
   sandboxesToPair,
   withSandboxHostMirrors,
 } from "./sandboxThreads";
@@ -532,5 +533,39 @@ describe("sandboxesToPair", () => {
     // One that answers as the host, or with no host to pair through.
     expect(sandboxesToPair([linked({ environmentId: HOST })], HOST, new Set())).toEqual([]);
     expect(sandboxesToPair([linked()], null, new Set())).toEqual([]);
+  });
+});
+
+describe("sandboxSettleOutcome", () => {
+  it("applies the config to a live sandbox, and still asks for a stopped one", () => {
+    const cases = [
+      ["running", undefined, "ask"],
+      ["running", "snapshot", "snapshot"],
+      ["running", "delete", "delete-later"],
+      ["error", "delete", "delete-later"],
+      ["stopped", undefined, "ask"],
+      ["stopped", "ask", "ask"],
+      // Already stopped, so keeping it is the outcome; its work cannot be checked, so a delete asks.
+      ["stopped", "snapshot", "kept"],
+      ["stopped", "delete", "confirm-delete"],
+    ] as const;
+    for (const [state, onSettle, outcome] of cases) {
+      expect(sandboxSettleOutcome(record({ state }), onSettle), `${state} ${onSettle}`).toBe(
+        outcome,
+      );
+    }
+  });
+
+  it("says a sandbox that is launching or resuming was left alone, and skips a gone one", () => {
+    expect(sandboxSettleOutcome(record({ state: "provisioning" }), "snapshot")).toBe("starting");
+    expect(
+      sandboxSettleOutcome(
+        record({ state: "stopped", resumingSince: "2026-11-13T00:00:00Z" }),
+        "delete",
+      ),
+    ).toBe("starting");
+    expect(sandboxSettleOutcome(record({ state: "expired" }), "delete")).toBe("none");
+    expect(sandboxSettleOutcome(record({ state: "deleted" }), "ask")).toBe("none");
+    expect(sandboxSettleOutcome(undefined, "ask")).toBe("none");
   });
 });

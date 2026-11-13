@@ -34,6 +34,7 @@ import {
   sandboxMirrorTitleUpdates,
   sandboxesToPair,
   type SandboxSettleUndo,
+  sandboxSettleOutcome,
   shortSandboxId,
 } from "~/state/sandboxThreads";
 import { serverEnvironment } from "~/state/server";
@@ -318,8 +319,23 @@ export function SandboxThreadCoordinator() {
     void configsQuery.refresh();
   };
 
+  const keptToast = (sandbox: SandboxRecord, title: string) => {
+    const days = providerOf(sandbox)?.diskRetentionDays;
+    toastManager.add(
+      stackedThreadToast({
+        type: "success",
+        title,
+        description: `${providerLabel(sandbox)} keeps its disk${days === undefined ? "" : ` for ${days} days`} and bills for it. Send a message in the chat to resume it.`,
+      }),
+    );
+  };
+
   const keepSnapshot = async (sandbox: SandboxRecord) => {
     if (provisionerEnvironmentId === null) return;
+    if (sandbox.state === "stopped") {
+      keptToast(sandbox, `Sandbox ${shortSandboxId(sandbox.sandboxId)} is already stopped`);
+      return;
+    }
     const result = await stopSandbox({
       environmentId: provisionerEnvironmentId,
       input: { instanceId: sandbox.instanceId },
@@ -329,14 +345,7 @@ export function SandboxThreadCoordinator() {
       if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not stop the sandbox");
       return;
     }
-    const days = providerOf(sandbox)?.diskRetentionDays;
-    toastManager.add(
-      stackedThreadToast({
-        type: "success",
-        title: `Stopped sandbox ${shortSandboxId(sandbox.sandboxId)}`,
-        description: `${providerLabel(sandbox)} keeps its disk${days === undefined ? "" : ` for ${days} days`} and bills for it. Send a message in the chat to resume it.`,
-      }),
-    );
+    keptToast(sandbox, `Stopped sandbox ${shortSandboxId(sandbox.sandboxId)}`);
   };
 
   // The sandbox's thread goes with the sandbox. A kept host thread, which shares its id, takes its
@@ -617,20 +626,40 @@ export function SandboxThreadCoordinator() {
 
   const onSettled = useStableCallback((threadRef: ScopedThreadRef, settle: SandboxSettleUndo) => {
     const sandbox = findSandbox(threadRef);
-    if (!isLive(sandbox)) return false;
-    const action = configOf(sandbox)?.onSettle ?? "ask";
-    if (action === "snapshot") void keepSnapshot(sandbox);
-    else if (action === "delete") {
-      scheduleSettleDelete(sandbox, threadRef, settle);
-      return true;
-    } else {
-      enqueue({
-        kind: "settle",
-        id: nextId.current++,
-        threadRef,
-        sandbox,
-        bridged: bridgedOf(sandbox),
-      });
+    if (sandbox === undefined) return false;
+    switch (sandboxSettleOutcome(sandbox, configOf(sandbox)?.onSettle)) {
+      case "snapshot":
+      case "kept":
+        void keepSnapshot(sandbox);
+        break;
+      case "delete-later":
+        scheduleSettleDelete(sandbox, threadRef, settle);
+        return true;
+      // Its work cannot be checked, so the delete always asks, and the settle keeps its own Undo.
+      case "confirm-delete":
+        void startDelete(sandbox, threadRef, "settle");
+        break;
+      case "ask":
+        enqueue({
+          kind: "settle",
+          id: nextId.current++,
+          threadRef,
+          sandbox,
+          bridged: bridgedOf(sandbox),
+        });
+        break;
+      case "starting":
+        toastManager.add(
+          stackedThreadToast({
+            type: "info",
+            title: `Sandbox ${shortSandboxId(sandbox.sandboxId)} is still starting`,
+            description:
+              "It was left as it is. Stop or delete it under Settings → Sandboxes once it runs.",
+          }),
+        );
+        break;
+      case "none":
+        break;
     }
     return false;
   });
@@ -806,8 +835,10 @@ function SandboxThreadPrompt({
             <AlertDialogTitle>Keep this chat&apos;s sandbox?</AlertDialogTitle>
             <AlertDialogDescription>
               {threadTitle === null ? "This chat" : `"${threadTitle}"`}{" "}
-              {prompt.bridged ? "runs on" : "lives on"} {providerLabel} sandbox {short}. A snapshot
-              stops the machine and keeps its disk, and sending a message resumes it.
+              {prompt.bridged ? "runs on" : "lives on"} {providerLabel} sandbox {short}.{" "}
+              {prompt.sandbox.state === "stopped"
+                ? "It is stopped, so its work can't be checked. A snapshot keeps its disk, and sending a message resumes it."
+                : "A snapshot stops the machine and keeps its disk, and sending a message resumes it."}
               {retentionDays === undefined
                 ? ` ${providerLabel} bills for the stopped disk.`
                 : ` ${providerLabel} keeps a stopped disk for ${retentionDays} days and bills for it.`}{" "}
