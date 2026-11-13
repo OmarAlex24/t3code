@@ -88,7 +88,7 @@ import { resolveThreadOpenRoute } from "../../lib/sideChatPane";
 import { useThreadSandbox } from "../../state/sandboxes";
 import { type SandboxMirrorAgent, sandboxMirrorLineage } from "../../state/sandboxThreads";
 import { SandboxMirrorAgentDialog } from "./SandboxMirrorAgentDialog";
-import { useConnectSandbox, useSandboxConnect } from "../sandbox/SandboxConnect";
+import { RESUME_WAIT_MS, useConnectSandbox, useSandboxConnect } from "../sandbox/SandboxConnect";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -366,6 +366,9 @@ function SandboxMirrorAgentRow(props: {
   const connectSandbox = useConnectSandbox();
   // Set by a click that connects first; the connect settles in the connection stores.
   const [pending, setPending] = useState(false);
+  // Pairing replaces the environment's connection, so its phase before this one is stale.
+  const [sawConnecting, setSawConnecting] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
   const [reading, setReading] = useState(false);
   const { agent } = props;
   // A stopped sandbox's agent may have stopped with it; only its last known status is here.
@@ -373,9 +376,16 @@ function SandboxMirrorAgentRow(props: {
   const status = stale ? null : agent.status;
   const failed = status === "failed";
   const title = relationshipThreadTitle({ title: agent.title ?? "Subagent", isSubagent: true });
-  const connectFailed =
+  const phase = environment?.connection.phase;
+  if (pending && !sawConnecting && phase === "connecting") setSawConnecting(true);
+  const pairingFailed =
     pending && connect !== null && !connect.connecting && connect.failure !== null;
-  const opening = pending && !connected && !connectFailed;
+  const connectionFailed =
+    pending &&
+    !connected &&
+    !pairingFailed &&
+    (timedOut || (sawConnecting && phase !== "connecting"));
+  const opening = pending && !connected && !pairingFailed && !connectionFailed;
   const openThread = (environmentId: EnvironmentId) =>
     void navigate({
       to: "/$environmentId/$threadId",
@@ -390,6 +400,13 @@ function SandboxMirrorAgentRow(props: {
     }
   }, [pending, connected, sandboxEnvironmentId]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- an interrupted connect leaves no phase change behind, so the wait ends on a timer
+  useEffect(() => {
+    if (!opening) return;
+    const timer = window.setTimeout(() => setTimedOut(true), RESUME_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [opening]);
+
   // An explicit click is the user asking to connect, even to a sandbox they disconnected from.
   const open = () => {
     if (connected && sandboxEnvironmentId !== null) {
@@ -402,6 +419,8 @@ function SandboxMirrorAgentRow(props: {
     }
     if (opening) return;
     setPending(true);
+    setSawConnecting(false);
+    setTimedOut(false);
     if (connect.connecting) return;
     void connectSandbox(
       { environmentId: sandboxEnvironmentId, threadId: props.mirrorRef.threadId },
@@ -465,7 +484,7 @@ function SandboxMirrorAgentRow(props: {
           />
         </TooltipPopup>
       </Tooltip>
-      {reading || connectFailed ? (
+      {reading || pairingFailed || connectionFailed ? (
         <SandboxMirrorAgentDialog
           environmentId={props.mirrorRef.environmentId}
           threadId={props.mirrorRef.threadId}
@@ -477,6 +496,12 @@ function SandboxMirrorAgentRow(props: {
               : {
                   ...connect,
                   connecting: opening || connect.connecting,
+                  failure: connectionFailed
+                    ? {
+                        title: "Could not connect to the sandbox",
+                        description: environment?.connection.error ?? "The sandbox did not answer.",
+                      }
+                    : connect.failure,
                   connect: () => {
                     setReading(true);
                     open();
