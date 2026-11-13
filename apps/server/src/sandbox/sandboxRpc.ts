@@ -1,4 +1,9 @@
-import { AuthOrchestrationReadScope, AuthSettingsWriteScope, WS_METHODS } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthSettingsWriteScope,
+  WS_METHODS,
+} from "@t3tools/contracts";
 
 // Creating or deleting a sandbox spends the saved provider key and changes billable machines, and a
 // launch's pairing code connects to one.
@@ -29,6 +34,10 @@ export const SANDBOX_RPC_REQUIRED_SCOPES = {
   [WS_METHODS.sandboxesLinkHostThread]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesConnectGithubApp]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesConnectRailway]: AuthSettingsWriteScope,
+  // A sandbox chat's own thread, read and picked for as its host mirror is.
+  [WS_METHODS.sandboxesSubscribeThreadMirror]: AuthOrchestrationReadScope,
+  [WS_METHODS.sandboxesReadMirrorChild]: AuthOrchestrationReadScope,
+  [WS_METHODS.sandboxesSetThreadModel]: AuthOrchestrationOperateScope,
 } as const;
 
 export const SANDBOX_RPC_AGGREGATES = {
@@ -58,4 +67,7 @@ export const SANDBOX_RPC_AGGREGATES = {
   [WS_METHODS.sandboxesLinkHostThread]: "environments",
   [WS_METHODS.sandboxesConnectGithubApp]: "environments",
   [WS_METHODS.sandboxesConnectRailway]: "environments",
+  [WS_METHODS.sandboxesSubscribeThreadMirror]: "orchestration",
+  [WS_METHODS.sandboxesReadMirrorChild]: "orchestration",
+  [WS_METHODS.sandboxesSetThreadModel]: "orchestration",
 } as const;

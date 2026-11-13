@@ -85,6 +85,7 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
 import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
 import * as SandboxSettle from "./sandbox/SandboxSettle.ts";
+import * as SandboxMirror from "./sandbox/SandboxMirror.ts";
 import { layerGithubAppManifestRoute } from "./sandbox/githubAppManifestRoute.ts";
 import * as DiyKit from "./diy/DiyKit.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
@@ -710,6 +711,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* service.start();
     }),
   ).pipe(Layer.provideMerge(SandboxSettle.layer)),
+  SandboxMirror.layer,
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
