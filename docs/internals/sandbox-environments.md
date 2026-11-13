@@ -368,7 +368,10 @@ without pairing with the sandbox.
   the message ends. What was on the thread before is never streamed, judged by when the sandbox
   last touched each item, not by membership in its first read or by ordinal:
   `getThreadProjection` returns a bounded window while `subscribeThread`'s snapshot is the whole
-  thread, and item ordinals restart with each provider thread.
+  thread, and item ordinals restart with each provider thread. Following a message the sandbox
+  already has (`attach`), an item begun before that message counts as sent up to what the first
+  read holds: after a steer, the host's cancelled turn already showed its start. Text it gained
+  between that cancel and the read is not shown.
 - **Modes.** The sandbox thread runs in the host thread's runtime and interaction modes. The host
   forwards a mode change on a `sandboxes` thread as soon as it happens (`SandboxThreadRemote`), and
   each new message re-checks them, so Supervised asks and other modes do not wait.

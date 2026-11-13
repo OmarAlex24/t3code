@@ -1490,6 +1490,36 @@ describe("mapping", () => {
     );
   });
 
+  it("following a steer, sends only what an answer begun before it adds after the read", () => {
+    const text = (id: string, value: string, startedMs: number, updatedMs: number) =>
+      ({
+        ...(assistant(id, value, startedMs, "run-1", updatedMs) as object),
+        startedAt: at(startedMs),
+      }) as never;
+    // The host showed "Hello wor" before its turn was cancelled for the steer.
+    const tracker = new TurnTracker(
+      "message-2" as MessageId,
+      Option.some(
+        projection(
+          [
+            text("item-before", "Hello wor", 1_000, 3_000),
+            userMessage("message-2", 2_000, "run-1", 2_000),
+            text("item-after", "Sure", 2_500, 2_500),
+          ],
+          [run("message-1" as MessageId, "running")],
+        ),
+      ),
+      true,
+    );
+    assert.deepStrictEqual(tracker.replay(), [
+      { _tag: "text", kind: "message", id: "item-after", text: "Sure" },
+    ]);
+    assert.deepStrictEqual(
+      tracker.apply(event("turn-item.updated", text("item-before", "Hello world", 1_000, 4_000))),
+      [{ _tag: "text", kind: "message", id: "item-before", text: "ld" }],
+    );
+  });
+
   it("updates a command once its input arrives, and names the command for the host", () => {
     const tracker = new TurnTracker("message-1" as MessageId, Option.none());
     const command = (input: string | undefined) =>
