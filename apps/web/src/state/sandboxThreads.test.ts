@@ -20,6 +20,7 @@ import {
   copiesToSandboxMirror,
   findThreadSandbox,
   isSandboxlessBridgeThread,
+  movesToSandboxChatAlias,
   sandboxChatAliases,
   sandboxChatAliasTarget,
   sandboxHostMirrors,
@@ -228,6 +229,20 @@ describe("sandboxChatAliases", () => {
     expect(aliases(record({ state: "stopped" }))).toEqual([]);
     expect(aliases(linked({ state: "deleted" }))).toEqual([]);
     expect([...sandboxChatAliases([linked()], both, null)]).toEqual([]);
+  });
+});
+
+describe("movesToSandboxChatAlias", () => {
+  const idle = { readingBack: false, sentThisVisit: false };
+
+  it("moves a chat the user only opened, once they are at its end", () => {
+    expect(movesToSandboxChatAlias(idle)).toBe(true);
+    expect(movesToSandboxChatAlias({ ...idle, readingBack: true })).toBe(false);
+  });
+
+  // The two threads keep different histories: moving would swap what the user reads for another.
+  it("never moves a chat the user sent in, though the send scrolls it to its end", () => {
+    expect(movesToSandboxChatAlias({ ...idle, sentThisVisit: true })).toBe(false);
   });
 });
 
