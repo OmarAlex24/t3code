@@ -126,7 +126,7 @@ import {
   RAILWAY_LOGIN_SCRUB,
   railwayLoginScript,
   parseSetupScriptReport,
-  sandboxFilesSkillScript,
+  sandboxAgentGuidanceScript,
   sandboxKeepAliveScript,
   setupScriptScript,
   TAILSCALE_PROXY_URL,
@@ -495,8 +495,8 @@ const MAPLE_KEY_SECONDS = 30 * 24 * 60 * 60;
 const SUB_SANDBOX_HELPER_WARNING =
   "T3 Code's sub-sandbox helper could not be added, so agents on this sandbox cannot ask this computer for a sandbox of their own.";
 
-const SANDBOX_FILES_SKILL_WARNING =
-  "T3 Code's t3-sandbox-files skill could not be added, so agents on this sandbox may keep files in /tmp, which a stop empties.";
+const SANDBOX_AGENT_GUIDANCE_WARNING =
+  "T3 Code's sandbox instructions could not be written, so agents on this sandbox may not know that a stop empties /tmp and the sandbox is deleted when its chat ends.";
 // A sandbox's GitHub token is replaced this long before it expires.
 const GITHUB_TOKEN_REFRESH_MS = 20 * 60 * 1000;
 // A keep-alive key outlives any one running stretch and is replaced on a resume once it is close
@@ -3001,12 +3001,12 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       steps += 1;
       yield* copyClaudeFiles(machine, { claudeMd: config.claudeMd === true, skills }, fail);
     }
-    // T3 Code's own skill goes on every sandbox, after the user's so a template's copy is replaced.
-    // It is not something the config asked for, so only a failure shows in the step.
-    const skillWritten = yield* machine.run(sandboxFilesSkillScript("write"), 30).pipe(Effect.exit);
-    if (Exit.isFailure(skillWritten)) {
+    // T3 Code's skill and instructions block go on every sandbox, after the user's CLAUDE.md and
+    // skills so the copy keeps the block. The config did not ask for them: only a failure shows.
+    const guidanceWritten = yield* machine.run(sandboxAgentGuidanceScript(), 30).pipe(Effect.exit);
+    if (Exit.isFailure(guidanceWritten)) {
       steps += 1;
-      yield* fail(SANDBOX_FILES_SKILL_WARNING);
+      yield* fail(SANDBOX_AGENT_GUIDANCE_WARNING);
     }
     // A chat's agents can ask this host for sandboxes of their own; a subagent's sandbox has no
     // chat on this host to hold their tasks, so it never gets the helper. Only a failure shows.
@@ -4082,18 +4082,18 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         };
       };
     }
-    // A sandbox made before T3 Code's agent skill existed gets it before T3 starts, so the first
-    // Claude session after the resume already sees it; one that has it keeps its copy.
-    const skill = yield* onHttp(
+    // Every resume rewrites T3 Code's skill and instructions block before T3 starts, so a sandbox
+    // made before them, or with older text, has the current ones by the first agent session.
+    const guidance = yield* onHttp(
       driver.execute({
         config,
         sandboxId: record.sandboxId,
-        command: sandboxFilesSkillScript("if-missing"),
-        timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.agentSkill,
+        command: sandboxAgentGuidanceScript(),
+        timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.agentGuidance,
       }),
     ).pipe(
       Effect.as<string | null>(null),
-      Effect.orElseSucceed(() => SANDBOX_FILES_SKILL_WARNING),
+      Effect.orElseSucceed(() => SANDBOX_AGENT_GUIDANCE_WARNING),
     );
     // Every resume rewrites the sub-sandbox helper, so one made before it existed gets it and an
     // older copy is replaced, again before T3 starts. Only a chat's sandbox has it.
@@ -4190,7 +4190,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     const warnings = [
       rejoined.warning,
       kept.warning,
-      skill,
+      guidance,
       helper,
       github.warning,
       bridged.warning,
