@@ -59,6 +59,7 @@ describe("GitHub App manifest page", () => {
         pull_requests: "write",
         metadata: "read",
         workflows: "write",
+        issues: "write",
       },
     });
     expect(body).toContain('<button type="submit">Continue to GitHub</button>');
