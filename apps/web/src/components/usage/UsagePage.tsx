@@ -39,7 +39,7 @@ import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { isModelPickerOpen } from "../../modelPickerVisibility";
 import { shortcutLabelForCommand } from "../../keybindings";
 import { useSandboxEnvironmentIds, withoutSandboxes } from "../../state/sandboxes";
-import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
+import { useUsage, useUsageSandboxShare, type EnvironmentUsageStatus } from "../../state/usage";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
   enumerateDays,
@@ -82,6 +82,7 @@ import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { UsageProviderChart } from "./UsageProviderChart";
 import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
+import { UsageSandboxShare } from "./UsageSandboxShare";
 import { UsageShareBar } from "./UsageShareBar";
 import {
   costTypeSegments,
@@ -618,6 +619,7 @@ function UsageOverview({
   readonly onSelectModel: (key: string) => void;
 }) {
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
+  const sandboxShare = useUsageSandboxShare(selectedEnvironments, shownWindow.timeZone);
   const shownHourly = shownWindow.resolution === "hour";
   const loading = usageLoading(showingKept, selectedEnvironments, refreshingUsage, hiddenProviders);
   // Copy the primitive; JSX reads of loading.partial would merge all derivations into one compiler cache
@@ -849,6 +851,8 @@ function UsageOverview({
           )}
         </section>
       ) : null}
+
+      {sandboxShare?.hasSandboxActivity ? <UsageSandboxShare summary={sandboxShare} /> : null}
 
       <section className="flex flex-col gap-3">
         <div className="flex items-center justify-between gap-3">
