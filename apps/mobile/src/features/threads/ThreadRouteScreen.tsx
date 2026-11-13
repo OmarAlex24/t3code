@@ -129,6 +129,7 @@ import {
 } from "./thread-inspector-preview";
 import { useStartSideChat } from "./useStartSideChat";
 import { useThreadStatusAnnouncements } from "./useThreadStatusAnnouncements";
+import { sandboxMirrorPicker, useSandboxMirror } from "../../state/sandbox-mirror";
 import type { ThreadInspectorMode, ThreadInspectorTarget } from "./thread-inspector-navigation";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 
@@ -519,10 +520,17 @@ function ThreadRouteContent(
   const routeConnectionState =
     routeEnvironmentRuntime?.connectionState ?? (environmentId ? "available" : connectionState);
   const routeConnectionError = routeEnvironmentRuntime?.connectionError ?? null;
+  // A sandbox chat's mirror picks among the sandbox's own models, read through the host.
+  const sandboxMirror = useSandboxMirror(selectedThreadDetailRef, selectedThread);
+  const mirrorPicker = sandboxMirrorPicker(
+    sandboxMirror,
+    routeEnvironmentRuntime?.serverConfig ?? null,
+  );
   const selectedThreadWithDraftSettings = selectedThread
     ? {
         ...selectedThread,
-        modelSelection: composer.modelSelection ?? selectedThread.modelSelection,
+        modelSelection:
+          composer.modelSelection ?? mirrorPicker.modelSelection ?? selectedThread.modelSelection,
         runtimeMode: composer.runtimeMode ?? selectedThread.runtimeMode,
         interactionMode: composer.interactionMode ?? selectedThread.interactionMode,
       }
@@ -1003,7 +1011,7 @@ function ThreadRouteContent(
     );
   }
 
-  const serverConfig = routeEnvironmentRuntime?.serverConfig ?? null;
+  const serverConfig = mirrorPicker.config;
   const renderThreadRouteBody = () => (
     <>
       <GitActionProgressOverlay

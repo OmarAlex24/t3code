@@ -12,7 +12,6 @@ import {
   type SandboxRecord,
   type SandboxSetupSnapshot,
   type ScopedThreadRef,
-  type ServerProvider,
   type ThreadId,
 } from "@t3tools/contracts";
 
@@ -197,30 +196,6 @@ export const sandboxChatOwnThread = (
   mirrors: ReadonlyMap<string, ScopedThreadRef>,
   threadRef: ScopedThreadRef,
 ): ScopedThreadRef => mirrors.get(threadKey(threadRef)) ?? threadRef;
-
-/**
- * What the host mirror's model picker shows of a sandbox chat whose own thread lists: the
- * sandbox's provider and selection, under the bridge's instance, which a send on the mirror carries
- * and the bridge hands to the sandbox. The host's bridge lists one set of models and options for
- * every sandbox, so its own entry would show another chat's. Null while the provider is unknown.
- */
-export const sandboxMirrorModelSource = (
-  sandboxSelection: ModelSelection,
-  sandboxProviders: ReadonlyArray<ServerProvider>,
-): {
-  readonly providers: ReadonlyArray<ServerProvider>;
-  readonly modelSelection: ModelSelection;
-} | null => {
-  const provider = sandboxProviders.find(
-    (candidate) => candidate.instanceId === sandboxSelection.instanceId,
-  );
-  return provider === undefined
-    ? null
-    : {
-        providers: [{ ...provider, instanceId: bridgeInstanceId }],
-        modelSelection: { ...sandboxSelection, instanceId: bridgeInstanceId } as ModelSelection,
-      };
-};
 
 /**
  * Where a model pick on one thread of a sandbox chat also goes, so the two agree: the sandbox's

@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
+import { sandboxMirrorModelSource } from "@t3tools/client-runtime/state/sandbox-mirror";
 import {
   type EnvironmentId,
   type ProjectId,
@@ -20,7 +21,6 @@ import {
   sandboxChatAliases,
   sandboxChatOwnThread,
   sandboxHostMirrors,
-  sandboxMirrorModelSource,
   sandboxRowStates,
   type SandboxRowState,
 } from "./sandboxThreads";
@@ -214,10 +214,6 @@ export function useSandboxChatAliases(): ReadonlyMap<string, ScopedThreadRef> {
   return sandboxChatAliases(sandboxes, threads, provisionerEnvironmentId);
 }
 
-/**
- * The sandbox's provider and selection for the model picker on its chat's host mirror; see
- * `sandboxMirrorModelSource`. Null for any other thread, and while the sandbox's thread is unlisted.
- */
 /** The sandbox's own thread for its chat's host mirror; see `sandboxChatOwnThread`. */
 export function useSandboxChatOwnThread(threadRef: ScopedThreadRef): ScopedThreadRef {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
@@ -229,6 +225,10 @@ export function useSandboxChatOwnThread(threadRef: ScopedThreadRef): ScopedThrea
   );
 }
 
+/**
+ * The sandbox's provider and selection for the model picker on its chat's host mirror; see
+ * `sandboxMirrorModelSource`. Null for any other thread, and while the sandbox's thread is unlisted.
+ */
 export function useSandboxMirrorModelSource(threadRef: ScopedThreadRef | null) {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const threads = useQuietThreadShells();
