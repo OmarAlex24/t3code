@@ -370,6 +370,13 @@ without pairing with the sandbox.
 - **Modes.** The sandbox thread runs in the host thread's runtime and interaction modes. The host
   forwards a mode change on a `sandboxes` thread as soon as it happens (`SandboxThreadRemote`), and
   each new message re-checks them, so Supervised asks and other modes do not wait.
+- **Models.** The bridge offers the models and options of the sandbox thread's provider
+  (`sandboxConfigOptions`) and hands a pick on the host thread to the sandbox with the next message
+  (`sandboxSelectionFor`). The host keeps one model list for the `sandboxes` instance, whichever
+  session reported last, so a client paired with the sandbox shows the sandbox's own provider and
+  selection on the mirror instead (`sandboxMirrorModelSource`), and a pick on either thread is set
+  on both (`sandboxChatPickPartner`); otherwise the bridge would hand the sandbox the mirror's
+  older pick. The phone, never paired with the sandbox, shows the bridge's list.
 - **Approvals and questions.** Nothing the sandbox asks is ever left unanswerable. On a Supervised
   host thread a pending approval becomes `session/request_permission` with an `edit` or `execute`
   tool kind (never a read kind the host's policy would allow on its own); on any other mode, whose
