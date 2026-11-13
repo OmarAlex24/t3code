@@ -580,9 +580,25 @@ export function SandboxThreadCoordinator() {
         input: { threadId: mirror.threadId },
       });
     }
+    const short = shortSandboxId(sandbox.sandboxId);
+    // Only the host decides, and it follows only its own thread of the chat.
+    if (mirror === null && !isHostThreadRef(sandbox, threadRef)) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: `Sandbox ${short} is left as it is`,
+          description:
+            "This chat has no copy on this computer, so settling it does nothing to its sandbox. Delete it from Settings → Sandboxes when you are done.",
+          actionProps: {
+            children: "Open Sandboxes",
+            onClick: () => void navigate({ to: "/settings/connections", hash: "sandboxes" }),
+          },
+        }),
+      );
+      return false;
+    }
     if (configOf(sandbox)?.onSettle !== "delete" || sandbox.state !== "running") return false;
     // Says what the host will do, with the settle's Undo, which keeps everything.
-    const short = shortSandboxId(sandbox.sandboxId);
     toastManager.add(
       stackedThreadToast({
         type: "warning",

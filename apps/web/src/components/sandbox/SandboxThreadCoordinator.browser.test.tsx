@@ -379,7 +379,7 @@ describe("SandboxThreadCoordinator", () => {
   });
 
   it("says a remembered delete is coming, with the settle's Undo", async () => {
-    setup("delete");
+    setup("delete", undefined, { bridged: true });
     using toast = vi.spyOn(toastManager, "add");
     await using _screen = await render(<SandboxThreadCoordinator />);
     using _timers = fakeTimers();
@@ -399,7 +399,7 @@ describe("SandboxThreadCoordinator", () => {
   });
 
   it("ends the settle's Undo with the notice", async () => {
-    setup("delete");
+    setup("delete", undefined, { bridged: true });
     await using _screen = await render(<SandboxThreadCoordinator />);
     using _timers = fakeTimers();
 
@@ -410,6 +410,23 @@ describe("SandboxThreadCoordinator", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(settle.claim.isCurrent()).toBe(false);
     expect(settle.undo).not.toHaveBeenCalled();
+  });
+
+  it("promises nothing for a chat the host does not mirror, and points to Settings", async () => {
+    setup("delete");
+    using toast = vi.spyOn(toastManager, "add");
+    await using _screen = await render(<SandboxThreadCoordinator />);
+
+    // The plain Settled notice, with its own Undo, stays the caller's.
+    expect(notifySandboxThreadSettled(threadRef, settleUndo(threadRef))).toBe(false);
+    const titles = toast.mock.calls.map(([options]) => options.title);
+    expect(titles).not.toContain("Settled · sandbox bx_46wr will be deleted in 10 s");
+    expect(toast).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        title: "Sandbox bx_46wr is left as it is",
+        actionProps: expect.objectContaining({ children: "Open Sandboxes" }),
+      }),
+    );
   });
 
   it("names the sandbox when its thread is deleted, and deletes both on confirm", async () => {
