@@ -191,6 +191,7 @@ const hostProjects = (
             : Option.some({
                 projectId,
                 title: "hello",
+                hasCustomTitle: false,
                 workspaceRoot: projects[projectId]!,
                 defaultModelSelection: null,
                 defaultThreadEnvMode: null,
