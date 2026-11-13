@@ -180,6 +180,15 @@ export function createSandboxEnvironmentAtoms<R, E>(
       label: "environment-data:sandboxes:pair-launch",
       tag: WS_METHODS.sandboxesPairLaunch,
     }),
+    sandboxesConnectThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandboxes:connect-thread",
+      tag: WS_METHODS.sandboxesConnectThread,
+      // A stopped sandbox resumes first, which changes its record.
+      onSuccess: ({ environmentId }, registry) =>
+        Effect.sync(() =>
+          registry.update(sandboxesListRevisionAtom(environmentId), (revision) => revision + 1),
+        ),
+    }),
     sandboxesConnectGithubApp: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandboxes:connect-github-app",
       tag: WS_METHODS.sandboxesConnectGithubApp,

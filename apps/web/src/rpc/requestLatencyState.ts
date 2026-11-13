@@ -37,6 +37,7 @@ const untrackedRpcAckMethods = new Set<string>([
   WS_METHODS.sandboxesResume,
   WS_METHODS.sandboxesCreate,
   WS_METHODS.sandboxesPairLaunch,
+  WS_METHODS.sandboxesConnectThread,
 ]);
 // Calls that wait on installs, background work, or commands on a sandbox.
 const longRunningRpcAckMethods = new Set<string>([

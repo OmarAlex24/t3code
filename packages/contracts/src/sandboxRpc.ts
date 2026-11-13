@@ -80,6 +80,7 @@ export const SANDBOX_WS_METHODS = {
   sandboxesCancelLaunch: "sandboxes.cancelLaunch",
   sandboxesRetryLaunch: "sandboxes.retryLaunch",
   sandboxesPairLaunch: "sandboxes.pairLaunch",
+  sandboxesConnectThread: "sandboxes.connectThread",
   sandboxesCheckTailscale: "sandboxes.checkTailscale",
   sandboxesLinkHostThread: "sandboxes.linkHostThread",
   sandboxesConnectGithubApp: "sandboxes.connectGithubApp",
@@ -230,6 +231,13 @@ const WsSandboxesPairLaunchRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesPairLaunch
   error: SandboxFailure,
 });
 
+// Pairs the caller with a chat's sandbox, resuming it first when it is stopped.
+const WsSandboxesConnectThreadRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesConnectThread, {
+  payload: SandboxLaunchThreadInput,
+  success: SandboxLaunchPairResult,
+  error: SandboxFailure,
+});
+
 // The secret only signs in; nothing is saved, so a wrong one changes nothing.
 const WsSandboxesCheckTailscaleRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesCheckTailscale, {
   payload: SandboxTailscaleCheckInput,
@@ -303,6 +311,7 @@ export const SandboxRpcs = [
   WsSandboxesCancelLaunchRpc,
   WsSandboxesRetryLaunchRpc,
   WsSandboxesPairLaunchRpc,
+  WsSandboxesConnectThreadRpc,
   WsSandboxesCheckTailscaleRpc,
   WsSandboxesLinkHostThreadRpc,
   WsSandboxesConnectGithubAppRpc,
@@ -329,6 +338,7 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesCancelLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesRetryLaunch]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesPairLaunch]: AuthSettingsWriteScope,
+  [SANDBOX_WS_METHODS.sandboxesConnectThread]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesCheckTailscale]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesLinkHostThread]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesConnectGithubApp]: AuthSettingsWriteScope,
