@@ -1,7 +1,11 @@
 import * as Rpc from "effect/rpc/Rpc";
 import * as Schema from "effect/Schema";
 
-import { AuthSettingsWriteScope, EnvironmentAuthorizationError } from "./auth.ts";
+import {
+  AuthOrchestrationOperateScope,
+  AuthSettingsWriteScope,
+  EnvironmentAuthorizationError,
+} from "./auth.ts";
 import { NonNegativeInt } from "./baseSchemas.ts";
 import {
   SandboxCheckWorkResult,
@@ -43,6 +47,14 @@ import {
   SandboxTemplatesInput,
   SandboxTemplatesResult,
 } from "./sandbox.ts";
+import {
+  SandboxMirrorChild,
+  SandboxMirrorChildInput,
+  SandboxSetThreadModelInput,
+  SandboxSetThreadModelResult,
+  SandboxThreadMirror,
+  SandboxThreadMirrorInput,
+} from "./sandboxMirror.ts";
 
 export const SANDBOX_WS_METHODS = {
   sandboxesProviders: "sandboxes.providers",
@@ -71,6 +83,9 @@ export const SANDBOX_WS_METHODS = {
   sandboxesLinkHostThread: "sandboxes.linkHostThread",
   sandboxesConnectGithubApp: "sandboxes.connectGithubApp",
   sandboxesConnectRailway: "sandboxes.connectRailway",
+  sandboxesSubscribeThreadMirror: "sandboxes.subscribeThreadMirror",
+  sandboxesReadMirrorChild: "sandboxes.readMirrorChild",
+  sandboxesSetThreadModel: "sandboxes.setThreadModel",
 } as const;
 
 const SandboxFailure = Schema.Union([SandboxProviderError, EnvironmentAuthorizationError]);
@@ -242,6 +257,28 @@ const WsSandboxesConnectRailwayRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesConnec
   error: SandboxFailure,
 });
 
+// A sandbox chat's own thread, read and changed through the host's bridge link for clients that
+// never pair with the sandbox.
+const WsSandboxesSubscribeThreadMirrorRpc = Rpc.make(
+  SANDBOX_WS_METHODS.sandboxesSubscribeThreadMirror,
+  {
+    payload: SandboxThreadMirrorInput,
+    success: SandboxThreadMirror,
+    error: EnvironmentAuthorizationError,
+    stream: true,
+  },
+);
+const WsSandboxesReadMirrorChildRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesReadMirrorChild, {
+  payload: SandboxMirrorChildInput,
+  success: SandboxMirrorChild,
+  error: SandboxFailure,
+});
+const WsSandboxesSetThreadModelRpc = Rpc.make(SANDBOX_WS_METHODS.sandboxesSetThreadModel, {
+  payload: SandboxSetThreadModelInput,
+  success: SandboxSetThreadModelResult,
+  error: SandboxFailure,
+});
+
 export const SandboxRpcs = [
   WsSandboxesProvidersRpc,
   WsSandboxesEnvironmentsRpc,
@@ -269,6 +306,9 @@ export const SandboxRpcs = [
   WsSandboxesLinkHostThreadRpc,
   WsSandboxesConnectGithubAppRpc,
   WsSandboxesConnectRailwayRpc,
+  WsSandboxesSubscribeThreadMirrorRpc,
+  WsSandboxesReadMirrorChildRpc,
+  WsSandboxesSetThreadModelRpc,
 ] as const;
 
 // Each of these spends the saved provider key, changes billable machines, or hands out a pairing
@@ -292,4 +332,6 @@ export const SANDBOX_CLIENT_GUARDED_RPC_SCOPES = {
   [SANDBOX_WS_METHODS.sandboxesLinkHostThread]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesConnectGithubApp]: AuthSettingsWriteScope,
   [SANDBOX_WS_METHODS.sandboxesConnectRailway]: AuthSettingsWriteScope,
+  // The same grant as changing any thread's model.
+  [SANDBOX_WS_METHODS.sandboxesSetThreadModel]: AuthOrchestrationOperateScope,
 } as const;
