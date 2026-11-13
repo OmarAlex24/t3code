@@ -26,6 +26,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
@@ -217,6 +218,7 @@ interface FakeSandbox {
   readonly commands: Array<OrchestrationV2Command>;
   readonly launches: Array<OrchestrationV2ThreadLaunchInput>;
   readonly uploads: Array<unknown>;
+  readonly secretAnswers: Array<unknown>;
   readonly push: (item: OrchestrationV2ThreadStreamItem) => Effect.Effect<void>;
 }
 
@@ -235,10 +237,12 @@ const makeFakeSandbox = (options: {
     const commands: Array<OrchestrationV2Command> = [];
     const launches: Array<OrchestrationV2ThreadLaunchInput> = [];
     const uploads: Array<unknown> = [];
+    const secretAnswers: Array<unknown> = [];
     const fake: FakeSandbox = {
       commands,
       launches,
       uploads,
+      secretAnswers,
       push: (item) => Queue.offer(stream, item).pipe(Effect.asVoid),
       session: {
         threadStop: options.threadStop ?? true,
@@ -272,6 +276,11 @@ const makeFakeSandbox = (options: {
             })) as never;
           }),
         subscribe: () => Stream.fromQueue(stream),
+        answerSecret: (input) =>
+          Effect.suspend(() => {
+            secretAnswers.push(input);
+            return options.react?.({ type: "secret.answer" }, fake) ?? Effect.void;
+          }),
       },
     };
     return fake;
@@ -327,6 +336,7 @@ const withBridge = <A, E>(
     readonly hostModel?: ModelSelection;
     readonly connect?: SandboxBridgePorts["connect"];
     readonly findResumeFailure?: SandboxBridgePorts["findResumeFailure"];
+    readonly requestSecret?: SandboxBridgePorts["requestSecret"];
     /** Null waits as long as the bridge does by default, spaced as it does by default. */
     readonly reconnectWindow?: null;
     readonly permission?: (
@@ -359,6 +369,7 @@ const withBridge = <A, E>(
       ...(options.findResumeFailure === undefined
         ? {}
         : { findResumeFailure: options.findResumeFailure }),
+      ...(options.requestSecret === undefined ? {} : { requestSecret: options.requestSecret }),
       ...(options.reconnectWindow === null
         ? {}
         : { reconnectWindow: "40 millis", reconnectSpacing: "10 millis" }),
@@ -912,6 +923,75 @@ describe("forwarding a turn", () => {
       ] as never,
     );
   });
+
+  it.effect(
+    "asks the host for a secret the sandbox needs and hands the answer to the sandbox",
+    () =>
+      Effect.gen(function* () {
+        const secretRequest = {
+          id: "item-secret-1",
+          type: "secret_request",
+          label: "GitHub token",
+          reason: "To push the branch.",
+          url: "https://github.com/settings/tokens",
+          secretStatus: "pending",
+          status: "waiting",
+          runId: "run-1",
+          ordinal: 5,
+          updatedAt: at(),
+        } as never;
+        const fake = yield* makeFakeSandbox({
+          react: (command, sandbox) =>
+            command.type === "launch"
+              ? Effect.forEach(
+                  [
+                    event("run.created", run(command.messageId!, "running")),
+                    event("turn-item.updated", secretRequest),
+                  ],
+                  sandbox.push,
+                  { discard: true },
+                )
+              : command.type === "secret.answer"
+                ? sandbox.push(event("run.updated", run(launchedMessageId(sandbox), "completed")))
+                : Effect.void,
+        });
+        const asked: Array<unknown> = [];
+        yield* withBridge(
+          {
+            fake,
+            requestSecret: (_mcp, request) =>
+              Effect.sync(() => {
+                asked.push(request);
+                return { status: "saved", value: Redacted.make("ghp_secret-value") } as const;
+              }),
+          },
+          ({ acp, updates }) =>
+            Effect.gen(function* () {
+              const session = yield* openThread(acp);
+              const result = yield* say(acp, session.sessionId, "Push it");
+              assert.strictEqual(result.stopReason, "end_turn");
+              assert.deepStrictEqual(asked, [
+                {
+                  clientRequestId: "item-secret-1",
+                  label: "GitHub token",
+                  reason: "To push the branch.",
+                  url: "https://github.com/settings/tokens",
+                },
+              ]);
+              assert.deepStrictEqual(fake.secretAnswers, [
+                {
+                  threadId,
+                  turnItemId: "item-secret-1",
+                  answer: { type: "save", secret: "ghp_secret-value" },
+                },
+              ]);
+              // The value goes to the sandbox alone, never into what the host shows or keeps.
+              assert.notInclude(JSON.stringify(updates), "ghp_secret-value");
+              assert.deepStrictEqual(fake.commands, []);
+            }),
+        );
+      }),
+  );
 
   it.effect("closes the host's request when the approval is answered on the sandbox", () =>
     Effect.gen(function* () {

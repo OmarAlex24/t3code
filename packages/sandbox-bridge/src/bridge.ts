@@ -32,6 +32,8 @@ import {
   SANDBOX_BRIDGE_STEER_CANCEL,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
   SANDBOX_RESUME_WAIT_SECONDS,
+  type SecretRequestAnswerInput,
+  secretRequestPageUrl,
   type ServerProvider,
   ThreadId,
   type UploadChatAttachment,
@@ -45,6 +47,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -99,7 +102,23 @@ export interface SandboxSession {
   readonly subscribe: (
     threadId: ThreadId,
   ) => Stream.Stream<OrchestrationV2ThreadStreamItem, SandboxBridgeError>;
+  readonly answerSecret: (
+    input: SecretRequestAnswerInput,
+  ) => Effect.Effect<void, SandboxBridgeError>;
 }
+
+/** A secret the sandbox's agent asked for, put to the user on the host thread. */
+export interface HostSecretRequest {
+  readonly clientRequestId: string;
+  readonly label: string;
+  readonly reason: string;
+  readonly url?: string;
+  readonly placeholder?: string;
+}
+
+export type HostSecretAnswer =
+  | { readonly status: "saved"; readonly value: Redacted.Redacted<string> }
+  | { readonly status: "declined" | "cancelled" | "timed_out" };
 
 export interface SandboxBridgePorts {
   readonly readHostThread: (mcp: HostMcp) => Effect.Effect<HostThread, SandboxBridgeError>;
@@ -119,6 +138,14 @@ export interface SandboxBridgePorts {
   readonly findResumeFailure?: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<SandboxBridgeResumeFailure>, SandboxBridgeError>;
+  /**
+   * Asks with the host's own secret card on the host thread, which keeps only the request's status;
+   * interrupting the ask closes the card.
+   */
+  readonly requestSecret?: (
+    mcp: HostMcp,
+    request: HostSecretRequest,
+  ) => Effect.Effect<HostSecretAnswer, SandboxBridgeError>;
 }
 
 export const PROBE_CLIENT_NAME = "t3-code-provider-test";
@@ -607,6 +634,7 @@ type ToolItem = Extract<
 >;
 type ApprovalItem = Extract<OrchestrationV2TurnItem, { readonly type: "approval_request" }>;
 type QuestionItem = Extract<OrchestrationV2TurnItem, { readonly type: "user_input_request" }>;
+type SecretItem = Extract<OrchestrationV2TurnItem, { readonly type: "secret_request" }>;
 type UserMessageItem = Extract<OrchestrationV2TurnItem, { readonly type: "user_message" }>;
 
 const isToolItem = (item: OrchestrationV2TurnItem): item is ToolItem =>
@@ -692,7 +720,8 @@ export type TurnAction =
       readonly command?: string;
     }
   | { readonly _tag: "approval"; readonly item: ApprovalItem }
-  | { readonly _tag: "question"; readonly item: QuestionItem };
+  | { readonly _tag: "question"; readonly item: QuestionItem }
+  | { readonly _tag: "secret"; readonly item: SecretItem };
 
 /**
  * Follows a sandbox thread for one host turn, until the run carrying the message ends. Text and
@@ -799,8 +828,8 @@ export class TurnTracker {
     this.handled.add(requestId);
   }
 
-  /** Completes once the request is no longer waiting on the sandbox, whoever answered it. */
-  answered(requestId: RuntimeRequestId): Deferred.Deferred<void> {
+  /** Completes once the request (or secret card) no longer waits on the sandbox, whoever answered it. */
+  answered(requestId: string): Deferred.Deferred<void> {
     let settled = this.settledRequests.get(requestId);
     if (settled === undefined) {
       settled = Deferred.makeUnsafe<void>();
@@ -812,6 +841,8 @@ export class TurnTracker {
 
   private stillWaiting(requestId: string): boolean {
     if (this.done) return false;
+    const card = this.items.get(requestId);
+    if (card?.type === "secret_request") return card.secretStatus === "pending";
     const request = this.requests.get(requestId);
     if (request !== undefined) return request.status === "pending";
     for (const item of this.items.values()) {
@@ -909,6 +940,13 @@ export class TurnTracker {
       ) {
         this.handled.add(item.requestId);
         actions.push({ _tag: "question", item });
+      } else if (
+        item.type === "secret_request" &&
+        item.secretStatus === "pending" &&
+        !this.handled.has(item.id)
+      ) {
+        this.handled.add(item.id);
+        actions.push({ _tag: "secret", item });
       }
     }
     return actions;
@@ -1552,6 +1590,42 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       }
     });
 
+    // The host's own card asks, so the value reaches only the sandbox: never this thread's history.
+    const forwardSecret = Effect.fn("SandboxBridge.forwardSecret")(function* (item: SecretItem) {
+      const ask = ports.requestSecret;
+      if (session.mcp === null || ask === undefined) return;
+      const url = item.url === undefined ? null : secretRequestPageUrl(item.url);
+      const answer = yield* ask(session.mcp, {
+        clientRequestId: item.id,
+        label: item.label,
+        reason: item.reason.trim() || `Sandbox ${sandboxName}'s agent needs it.`,
+        ...(url === null ? {} : { url: url.href }),
+        ...(item.placeholder === undefined ? {} : { placeholder: item.placeholder }),
+      }).pipe(
+        Effect.asSome,
+        Effect.raceFirst(
+          Deferred.await(tracker.answered(item.id)).pipe(
+            Effect.as(Option.none<HostSecretAnswer>()),
+          ),
+        ),
+        Effect.orElseSucceed(() => Option.none<HostSecretAnswer>()),
+      );
+      if (Option.isNone(answer)) return;
+      const reply = answer.value;
+      if (reply.status !== "saved" && reply.status !== "declined") return;
+      // Ignored, not reported: a failure here must never carry the value into a message or log.
+      yield* sandbox
+        .answerSecret({
+          threadId,
+          turnItemId: item.id,
+          answer:
+            reply.status === "saved"
+              ? { type: "save", secret: Redacted.value(reply.value) }
+              : { type: "decline" },
+        })
+        .pipe(Effect.ignore);
+    });
+
     const perform = (action: TurnAction) => {
       switch (action._tag) {
         case "text":
@@ -1569,6 +1643,8 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
           return forwardApproval(action.item);
         case "question":
           return forwardQuestion(action.item);
+        case "secret":
+          return forwardSecret(action.item);
       }
     };
 

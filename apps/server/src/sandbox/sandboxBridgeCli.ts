@@ -9,6 +9,9 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ModelSelection, ProviderInteractionMode, RuntimeMode, ThreadId } from "@t3tools/contracts";
 import {
   connectSandbox,
+  type HostMcp,
+  type HostSecretAnswer,
+  type HostSecretRequest,
   runSandboxBridge,
   SandboxBridgeError,
   type SandboxBridgePorts,
@@ -22,8 +25,10 @@ import {
 } from "@t3tools/sandbox-bridge/link";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient } from "effect/http";
 import * as AcpAgent from "effect-acp/agent";
@@ -41,11 +46,29 @@ const HostThreadConfiguration = Schema.Struct({
 const decodeHostThread = Schema.decodeUnknownEffect(
   Schema.Struct({ structuredContent: HostThreadConfiguration }),
 );
+// `request_secret` with `delivery: "file"`; only the status and the file matter here.
+const decodeSecretResult = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    structuredContent: Schema.Struct({
+      status: Schema.Literals(["saved", "declined", "cancelled", "timed_out"]),
+      file: Schema.optional(Schema.String),
+    }),
+  }),
+);
+// Below fetch's five-minute wait for response headers, which the blocking call sends only at the end.
+const SECRET_CARD_TIMEOUT_MS = 280_000;
 const decodeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
 const decodeResumeFailure = Schema.decodeEffect(SandboxBridgeResumeFailureJson);
 
 const program = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const fileSystem = yield* FileSystem.FileSystem;
+  // A file request hands back an owner-only file; the bridge takes the value and removes it.
+  const takeSecretFile = (file: string) =>
+    fileSystem.readFileString(file).pipe(
+      Effect.ensuring(fileSystem.remove(file, { force: true }).pipe(Effect.ignore)),
+      Effect.map((value) => ({ status: "saved" as const, value: Redacted.make(value) })),
+    );
   const ports: SandboxBridgePorts = {
     // The host's thread-scoped MCP credential answers for exactly the thread this process serves.
     readHostThread: (mcp) =>
@@ -92,6 +115,34 @@ const program = Effect.gen(function* () {
         ),
       ),
     connect: (link) => connectSandbox(link).pipe(Effect.provide(FetchHttpClient.layer)),
+    requestSecret: Effect.fn("SandboxBridge.requestSecret")(
+      function* (mcp: HostMcp, request: HostSecretRequest) {
+        const answer = yield* mcpToolSession({ ...mcp, clientName: "t3-sandbox-bridge" }).pipe(
+          Effect.flatMap((session) =>
+            session.call("request_secret", {
+              ...request,
+              delivery: "file",
+              timeoutMs: SECRET_CARD_TIMEOUT_MS,
+            }),
+          ),
+          Effect.scoped,
+          Effect.flatMap(decodeSecretResult),
+        );
+        const { status, file } = answer.structuredContent;
+        const unsaved: HostSecretAnswer | undefined = status === "saved" ? undefined : { status };
+        if (unsaved !== undefined) return unsaved;
+        if (file === undefined) {
+          return yield* new SandboxBridgeError({
+            message: "The host kept no file for the secret.",
+          });
+        }
+        return yield* takeSecretFile(file);
+      },
+      // No cause: nothing about the answer leaves this function but the value itself.
+      Effect.mapError(
+        () => new SandboxBridgeError({ message: "Could not ask for the sandbox's secret." }),
+      ),
+    ),
   };
   return yield* runSandboxBridge(ports);
 });

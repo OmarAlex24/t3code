@@ -121,5 +121,12 @@ export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function
       client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({ threadId }).pipe(
         Stream.mapError(failed("Lost the sandbox's thread stream.")),
       ),
+    // No cause: an encoding failure could quote the value it carried.
+    answerSecret: (input) =>
+      client[WS_METHODS.secretsAnswerRequest](input).pipe(
+        Effect.mapError(
+          () => new SandboxBridgeError({ message: "The sandbox did not take the secret." }),
+        ),
+      ),
   } satisfies SandboxSession;
 });
