@@ -172,9 +172,9 @@ or automatic settling.
   device; the first answer can take a few minutes. Un-settling the thread resumes it too.
 - **Delete without asking** waits 10 seconds after the settle; **Undo**, or un-settling the
   thread another way, keeps the sandbox. Then it checks the clone for uncommitted files and commits
-  not on a remote. With nothing to lose, it deletes the sandbox. With work to lose, when the
-  sandbox does not answer within about 10 seconds, or when it is stopped, it asks as **Ask me**
-  does. Copied env files count as uncommitted when the repository does not ignore them.
+  not on a remote. With nothing to lose, it deletes the sandbox. While the chat's agents or tasks
+  still run, with work to lose, when the sandbox does not answer within about 10 seconds, or when
+  it is stopped, it asks as **Ask me** does. Copied env files count as uncommitted when the repository does not ignore them.
 
 A thread the sandbox settles on its own, and a thread stored only on its sandbox, leave the
 sandbox as it is. Deleting a sandbox thread asks first, names the sandbox ("Also deletes sandbox bx_46wr on
