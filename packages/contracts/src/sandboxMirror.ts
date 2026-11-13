@@ -11,18 +11,22 @@ import { ServerProvider } from "./server.ts";
 import { ThreadPullRequestLink } from "./threadPullRequest.ts";
 
 /** A sandbox chat's host mirror thread; the sandbox's own thread has the same id. */
-export const SandboxThreadMirrorInput = Schema.Struct({ threadId: ThreadId });
+export const SandboxThreadMirrorInput = Schema.Struct({
+  threadId: ThreadId,
+  /** The client keeps the last provider it got, so a view whose provider did not change omits it. */
+  providerOnChange: Schema.optionalKey(Schema.Boolean),
+});
 export type SandboxThreadMirrorInput = typeof SandboxThreadMirrorInput.Type;
 
 /**
  * A sandbox chat's own thread as the host reads it for its clients: provider (with the picker's
  * models), selection, agents, branch and visible linked pull requests (without their watches).
- * `runs` holds only the runs the agents' turn is told from. While the sandbox is stopped or not
- * answering, `available` is false and the rest is what the host last read.
+ * `runs` holds only the runs the agents' turn is told from. `available` is false while the sandbox
+ * does not answer. `provider` is absent only after `providerOnChange`, for the one sent before.
  */
 export const SandboxThreadMirror = Schema.Struct({
   available: Schema.Boolean,
-  provider: Schema.NullOr(ServerProvider),
+  provider: Schema.optionalKey(Schema.NullOr(ServerProvider)),
   modelSelection: Schema.NullOr(ModelSelection),
   runs: Schema.Array(OrchestrationV2Run),
   subagents: Schema.Array(OrchestrationV2Subagent),

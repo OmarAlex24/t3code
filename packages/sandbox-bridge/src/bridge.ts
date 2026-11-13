@@ -47,9 +47,11 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as RcMap from "effect/RcMap";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
+import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as AcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
@@ -85,7 +87,7 @@ export interface HostMcp {
   readonly authorization: string;
 }
 
-/** One open connection to a sandbox's T3 server, scoped to a single prompt. */
+/** One open connection to a sandbox's T3 server, which a session's turns share. */
 export interface SandboxSession {
   readonly threadStop: boolean;
   readonly defaultModelSelection: ModelSelection | null;
@@ -105,6 +107,7 @@ export interface SandboxSession {
     readonly messageId: MessageId;
     readonly attachments: ReadonlyArray<UploadChatAttachment>;
   }) => Effect.Effect<ReadonlyArray<ChatAttachment>, SandboxBridgeError>;
+  /** Opens with a snapshot, or ends at once with nothing when the sandbox has no such thread. */
   readonly subscribe: (
     threadId: ThreadId,
   ) => Stream.Stream<OrchestrationV2ThreadStreamItem, SandboxBridgeError>;
@@ -175,6 +178,8 @@ const MODEL_OPTION_VALUE = SANDBOX_BRIDGE_MODEL;
 const CATALOG_READ_TIMEOUT = "5 seconds";
 // The reply waits for an image's copy; past this it goes out with the sandbox's path.
 const IMAGE_COPY_TIMEOUT = "10 seconds";
+// A session's connection outlives its turn this long, so a follow-up skips the ticket and handshake.
+const CONNECTION_IDLE_TTL = "5 minutes";
 
 /** Sandbox chats are made only where the sandbox configs live; other clients continue them. */
 export const NOT_LINKED_MESSAGE =
@@ -439,6 +444,15 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set
 
 const isTerminalRun = (run: OrchestrationV2Run) => TERMINAL_RUN_STATUSES.has(run.status);
 
+/** Whether `modeSyncCommands` leaves a move to full access for after the sandbox's run ends. */
+export const holdsRuntimeMode = (
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  modes: { readonly runtimeMode: RuntimeMode },
+) =>
+  modes.runtimeMode === "full-access" &&
+  projection.thread.runtimeMode !== modes.runtimeMode &&
+  projection.runs.some((run) => !isTerminalRun(run));
+
 /**
  * Puts a sandbox's thread in the host thread's modes. Full access grants its waiting approvals
  * (not questions) now, but its runtime mode waits for the run to end: a sandbox cuts its agent's
@@ -450,10 +464,8 @@ export const modeSyncCommands = (
   commandId: () => CommandId,
 ): ReadonlyArray<OrchestrationV2Command> => {
   const threadId = projection.thread.id;
-  const holdRuntimeMode =
-    modes.runtimeMode === "full-access" && projection.runs.some((run) => !isTerminalRun(run));
   return [
-    ...(projection.thread.runtimeMode === modes.runtimeMode || holdRuntimeMode
+    ...(projection.thread.runtimeMode === modes.runtimeMode || holdsRuntimeMode(projection, modes)
       ? []
       : [
           {
@@ -747,7 +759,7 @@ export type TurnAction =
 /**
  * Follows a sandbox thread for one host turn, until the run carrying the message ends. Text and
  * tools last touched before the turn began (the newest `baseline` item, or the message when
- * `replay`) count as sent: the first read is a window while the stream's snapshot is the whole thread.
+ * `replay`) count as sent: the first read is a window, and a later snapshot may hold what it left out.
  * When `replay`, items begun before the message count as sent up to what the baseline holds.
  */
 export class TurnTracker {
@@ -984,9 +996,12 @@ export class TurnTracker {
   }
 }
 
-/** Where a host turn picks up on the sandbox: a message already there, or a new one to send. */
+/**
+ * Where a host turn picks up on the sandbox: a message already there, or a new one to send. An
+ * attach replays what the sandbox already did for the message, unless it is still only queued.
+ */
 export type TurnTarget =
-  | { readonly _tag: "attach"; readonly messageId: MessageId }
+  | { readonly _tag: "attach"; readonly messageId: MessageId; readonly replay: boolean }
   | { readonly _tag: "send"; readonly messageId: MessageId | null }
   | { readonly _tag: "nothing" };
 
@@ -1014,13 +1029,19 @@ export const turnTargetOf = (
     );
     return latest === undefined
       ? { _tag: "nothing" }
-      : { _tag: "attach", messageId: latest.messageId };
+      : { _tag: "attach", messageId: latest.messageId, replay: true };
   }
-  const existing =
-    message === null ? undefined : messages.find((item) => item.messageId === message.messageId);
-  return existing === undefined
-    ? { _tag: "send", messageId: message?.messageId ?? null }
-    : { _tag: "attach", messageId: existing.messageId };
+  if (message === null) return { _tag: "send", messageId: null };
+  if (messages.some((item) => item.messageId === message.messageId)) {
+    return { _tag: "attach", messageId: message.messageId, replay: true };
+  }
+  // A message queued behind a working run has its run before its item.
+  const queued = Option.isSome(before)
+    ? before.value.runs.some((run) => run.userMessageId === message.messageId)
+    : false;
+  return queued
+    ? { _tag: "attach", messageId: message.messageId, replay: false }
+    : { _tag: "send", messageId: message.messageId };
 };
 /** The MCP credential the host put in a session's `mcpServers`, over stdio or HTTP. */
 export const hostMcpOf = (
@@ -1074,7 +1095,19 @@ interface BridgeSession {
   configOptions: ReadonlyArray<AcpSchema.SessionConfigOption>;
   /** A host thread with no sandbox link: its sandbox was deleted. */
   readonly sandboxGone?: boolean;
+  /** The sandbox the last turn reached, whose connection a failed turn drops. */
+  link?: SandboxBridgeLink;
 }
+
+type ThreadSnapshot = Extract<OrchestrationV2ThreadStreamItem, { readonly kind: "snapshot" }>;
+
+/** A turn's subscription to the sandbox thread: its snapshot, then whatever follows it. */
+interface FollowedThread {
+  readonly snapshot: Option.Option<ThreadSnapshot>;
+  readonly rest: Stream.Stream<OrchestrationV2ThreadStreamItem, SandboxBridgeError>;
+}
+
+const linkKey = (link: SandboxBridgeLink) => `${link.httpBaseUrl}\u0000${link.token}`;
 
 const END_OF_TURN = { _tag: "end" } as const;
 
@@ -1090,6 +1123,26 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
   const sessions = new Map<string, BridgeSession>();
   let clientName: string | undefined;
   const newId = random.uuidV4().pipe(Effect.orDie);
+
+  // One connection per sandbox address, shared by the session's model read and its turns. A
+  // resumed sandbox has a new address, so its link names a new connection.
+  const linksByKey = new Map<string, SandboxBridgeLink>();
+  const connections = yield* RcMap.make({
+    lookup: (key: string) => {
+      const link = linksByKey.get(key);
+      return link === undefined ? Effect.die(`No sandbox link for ${key}`) : ports.connect(link);
+    },
+    idleTimeToLive: CONNECTION_IDLE_TTL,
+  });
+  // A failed connect is never kept, so the next attempt connects again.
+  const reachSandbox = (link: SandboxBridgeLink) => {
+    const key = linkKey(link);
+    linksByKey.set(key, link);
+    return RcMap.get(connections, key).pipe(
+      Effect.tapError(() => RcMap.invalidate(connections, key)),
+    );
+  };
+  const dropSandbox = (link: SandboxBridgeLink) => RcMap.invalidate(connections, linkKey(link));
 
   const update = (sessionId: string, value: AcpSchema.SessionUpdate) =>
     agent.client.sessionUpdate({ sessionId, update: value });
@@ -1126,7 +1179,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     function* (threadId: ThreadId) {
       const link = yield* ports.findLink(threadId);
       if (Option.isNone(link)) return [];
-      const sandbox = yield* ports.connect(link.value);
+      const sandbox = yield* reachSandbox(link.value);
       const thread = yield* sandbox.projection(threadId);
       const selection = Option.match(thread, {
         onNone: () => sandbox.defaultModelSelection,
@@ -1254,6 +1307,12 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       session.cancel = cancel;
       const stopReason = yield* runTurn(request, session, cancel).pipe(
         Effect.scoped,
+        // The next turn connects again rather than trust a connection that just failed.
+        Effect.tapError((error) =>
+          error._tag === "SandboxBridgeError" && session.link !== undefined
+            ? dropSandbox(session.link)
+            : Effect.void,
+        ),
         Effect.catchTags({
           SandboxBridgeError: (error) =>
             sayOnce(
@@ -1298,12 +1357,29 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       Effect.orElseSucceed(() => Option.none<SandboxBridgeResumeFailure>()),
     );
 
+  // Subscribed before the turn sends anything, so its snapshot is the turn's baseline and no
+  // event falls between the two.
+  const followThread = Effect.fn("SandboxBridge.followThread")(function* (
+    sandbox: SandboxSession,
+    threadId: ThreadId,
+  ) {
+    const [first, rest] = yield* Stream.peel(sandbox.subscribe(threadId), Sink.head());
+    return {
+      snapshot: Option.filter(first, (item): item is ThreadSnapshot => item.kind === "snapshot"),
+      rest,
+    } satisfies FollowedThread;
+  });
+
   const connectWithRetry = Effect.fn("SandboxBridge.connect")(function* (
     sessionId: string,
     threadId: ThreadId,
     message: PromptMessage | null,
   ): Effect.fn.Return<
-    Option.Option<{ readonly link: SandboxBridgeLink; readonly sandbox: SandboxSession }>,
+    Option.Option<{
+      readonly link: SandboxBridgeLink;
+      readonly sandbox: SandboxSession;
+      readonly thread: FollowedThread;
+    }>,
     SandboxBridgeError | AcpError.AcpError,
     Scope.Scope
   > {
@@ -1322,10 +1398,19 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       const link = yield* ports.findLink(threadId);
       if (Option.isNone(link)) return Option.none();
       lastLink = link.value;
-      const connected = yield* ports.connect(link.value).pipe(Effect.option);
+      // A connection kept from earlier may have dropped since; that one is replaced at once.
+      const reused = yield* RcMap.has(connections, linkKey(link.value));
+      const connected = yield* reachSandbox(link.value).pipe(Effect.option);
       if (Option.isSome(connected)) {
-        return Option.some({ link: link.value, sandbox: connected.value });
+        const read = followThread(connected.value, threadId).pipe(
+          Effect.tapError(() => dropSandbox(link.value)),
+        );
+        const thread = reused ? yield* Effect.option(read) : Option.some(yield* read);
+        if (Option.isNone(thread)) continue;
+        yield* Effect.annotateCurrentSpan({ "sandbox.connection_reused": reused });
+        return Option.some({ link: link.value, sandbox: connected.value, thread: thread.value });
       }
+      if (reused) continue;
       const failure = yield* resumeFailureFor(threadId, message, turnStartedAt);
       if (Option.isSome(failure)) {
         yield* sayOnce(sessionId, "message", resumeFailedMessage(link.value, failure.value.reason));
@@ -1357,6 +1442,11 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       );
       return "end_turn";
     }
+    const readHost = session.mcp
+      ? ports.readHostThread(session.mcp).pipe(Effect.option)
+      : Effect.succeedNone;
+    // The host thread's modes and pick, read while the sandbox connects.
+    const hostAtStart = yield* Effect.forkScoped(readHost);
     const connected = yield* connectWithRetry(
       sessionId,
       threadId,
@@ -1369,12 +1459,10 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       }
       return "end_turn";
     }
-    const { link, sandbox } = connected.value;
+    const { link, sandbox, thread } = connected.value;
+    session.link = link;
     const sandboxName = link.sandboxId || link.label;
-    const readHost = session.mcp
-      ? ports.readHostThread(session.mcp).pipe(Effect.option)
-      : Effect.succeedNone;
-    const before = yield* sandbox.projection(threadId);
+    const before = Option.map(thread.snapshot, (snapshot) => snapshot.projection);
     const content = promptContent(request.prompt);
     const target = turnTargetOf(before, promptMessageOf(request._meta), content.text);
     if (target._tag === "nothing") return "end_turn";
@@ -1387,14 +1475,22 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       onSome: (projection) => projection.thread.modelSelection,
     });
     if (target._tag === "attach") {
-      tracker = new TurnTracker(target.messageId, before, true);
+      tracker = new TurnTracker(target.messageId, before, target.replay);
     } else {
       if (content.skipped.length > 0) {
         yield* sayOnce(sessionId, "message", skippedAttachmentsMessage(content.skipped));
       }
       if (content.text === "" && content.images.length === 0) return "end_turn";
       const messageId = target.messageId ?? MessageId.make(yield* newId);
-      const host = yield* readHost;
+      const [host, attachments] = yield* Effect.all(
+        [
+          Fiber.join(hostAtStart),
+          content.images.length === 0
+            ? Effect.succeed([])
+            : sandbox.persistAttachments({ threadId, messageId, attachments: content.images }),
+        ],
+        { concurrency: "unbounded" },
+      );
       const runtimeMode = Option.match(host, {
         onNone: (): RuntimeMode => "approval-required",
         onSome: (thread) => thread.runtimeMode,
@@ -1403,14 +1499,6 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         onNone: (): ProviderInteractionMode => "default",
         onSome: (thread) => thread.interactionMode,
       });
-      const attachments =
-        content.images.length === 0
-          ? []
-          : yield* sandbox.persistAttachments({
-              threadId,
-              messageId,
-              attachments: content.images,
-            });
       const commandId = CommandId.make(yield* newId);
       // A model picked on the host (the phone's picker) goes with the message; none keeps the
       // sandbox's, such as one picked on the computer and already sent from there.
@@ -1459,11 +1547,14 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
           const commands = modeSyncCommands(before.value, { runtimeMode, interactionMode }, () =>
             CommandId.make(`${id}:${count++}`),
           );
-          for (const command of commands) {
-            yield* command.type === "runtime-request.respond"
-              ? respondQuietly(command)
-              : sandbox.dispatch(command);
-          }
+          yield* Effect.forEach(
+            commands,
+            (command) =>
+              command.type === "runtime-request.respond"
+                ? respondQuietly(command)
+                : sandbox.dispatch(command),
+            { concurrency: "unbounded", discard: true },
+          );
         }
         yield* dispatchMessage;
       }
@@ -1749,17 +1840,27 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     // The stream keeps reading while an approval waits on the host, so an answer given on the
     // computer reaches it; actions run one at a time, in order.
     const actions = yield* Queue.unbounded<TurnAction | typeof END_OF_TURN>();
-    yield* Queue.offerAll(actions, target._tag === "attach" ? tracker.replay() : []);
+    // The snapshot owes the host what it holds from the message on, or, for a message just sent,
+    // only the requests already waiting.
+    yield* Queue.offerAll(
+      actions,
+      target._tag === "attach" && target.replay
+        ? tracker.replay()
+        : Option.match(thread.snapshot, {
+            onNone: () => [],
+            onSome: (item) => tracker.apply(item),
+          }),
+    );
+    // A thread the turn made has no subscription yet.
+    const live = Option.isSome(thread.snapshot) ? thread.rest : sandbox.subscribe(threadId);
     const reader = yield* (
       tracker.done
         ? Effect.void
-        : sandbox
-            .subscribe(threadId)
-            .pipe(
-              Stream.runForEachWhile((item) =>
-                Queue.offerAll(actions, tracker.apply(item)).pipe(Effect.map(() => !tracker.done)),
-              ),
-            )
+        : live.pipe(
+            Stream.runForEachWhile((item) =>
+              Queue.offerAll(actions, tracker.apply(item)).pipe(Effect.map(() => !tracker.done)),
+            ),
+          )
     ).pipe(Effect.ensuring(Queue.offer(actions, END_OF_TURN)), Effect.forkScoped);
     const performAll = Effect.gen(function* () {
       while (true) {
@@ -1809,4 +1910,4 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
   });
 
   return yield* Effect.never;
-});
+}, Effect.scoped);

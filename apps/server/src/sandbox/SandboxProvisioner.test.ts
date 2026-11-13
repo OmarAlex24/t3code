@@ -6078,12 +6078,20 @@ describe("SandboxProvisioner per-thread launches", () => {
           resumingSince: "1970-01-01T00:00:42.000Z",
         });
         expect(revisions).toEqual([1]);
+        // A client that subscribes now has just read the list: it hears of the next change only.
+        const late = yield* provisioner.listChanges.pipe(
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
 
         yield* Deferred.succeed(until, undefined);
         yield* Fiber.join(resuming);
         expect(repository.records.get("resumed")?.state).toBe("running");
         expect(repository.records.get("resumed")?.resumingSince).toBeUndefined();
         expect(revisions).toEqual([1, 2]);
+        expect(Array.from(yield* Fiber.join(late))).toEqual([2]);
         yield* Fiber.interrupt(watching);
       }).pipe(
         Effect.provide(

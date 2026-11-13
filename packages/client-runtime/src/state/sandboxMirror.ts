@@ -13,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -233,16 +234,29 @@ const parseMirrorKey = (key: string): MirrorTarget => {
 export function createSandboxMirrorEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
-  // The host holds a connection to the sandbox per subscriber, so it closes soon after the thread.
+  // The host holds its sandbox connection while any client follows, so this closes soon after.
   const sandboxesThreadMirror = createEnvironmentRpcSubscriptionAtomFamily(runtime, {
     label: "environment-data:sandboxes:thread-mirror",
     tag: WS_METHODS.sandboxesSubscribeThreadMirror,
     idleTtlMs: 10_000,
+    // With `providerOnChange`, a view without a provider keeps the one before it.
+    transform: (stream) =>
+      stream.pipe(
+        Stream.mapAccum(
+          () => null as ServerProvider | null,
+          (provider, view) => {
+            const full = view.provider === undefined ? { ...view, provider } : view;
+            return [full.provider ?? null, [full]] as const;
+          },
+        ),
+      ),
   });
   const mirrorValueAtom = Atom.family((key: string) => {
     const { environmentId, threadId } = parseMirrorKey(key);
     return Atom.make((get) => {
-      const result = get(sandboxesThreadMirror({ environmentId, input: { threadId } }));
+      const result = get(
+        sandboxesThreadMirror({ environmentId, input: { threadId, providerOnChange: true } }),
+      );
       return AsyncResult.isSuccess(result) ? result.value : null;
     }).pipe(Atom.withLabel(`environment-data:sandboxes:thread-mirror-value:${key}`));
   });

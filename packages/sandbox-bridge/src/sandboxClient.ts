@@ -5,12 +5,24 @@
  */
 import {
   AuthWebSocketTicketResult,
+  type CheckpointId,
+  type MessageId,
+  type NodeId,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_V2_WS_METHODS,
+  type OrchestrationV2Checkpoint,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadStreamItem,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
+import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
+import {
+  type DedupedBodySource,
+  restoreSubagentBodies,
+  restoreTurnItemBodies,
+} from "@t3tools/shared/orchestrationV2DedupedBodies";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -30,6 +42,63 @@ const OPEN_TIMEOUT = "15 seconds";
 const PING_TIMEOUT = "15 seconds";
 
 const failed = (message: string) => (cause: unknown) => new SandboxBridgeError({ message, cause });
+
+// Twice what the server's deduper remembers, so every body it blanks is still held here.
+const RESTORE_MEMORY = 64;
+
+const remember = <K, V>(memory: Map<K, V>, key: K, value: V) => {
+  memory.delete(key);
+  memory.set(key, value);
+  if (memory.size > RESTORE_MEMORY) memory.delete(memory.keys().next().value as K);
+};
+
+/**
+ * Undoes a compact subscription, per stream: the snapshot's omitted rows and bodies, and each live
+ * item's body the server blanked because a record it sent just before carries it.
+ */
+const makeStreamRestorer = () => {
+  const messageText = new Map<MessageId, string>();
+  const checkpointFiles = new Map<CheckpointId, OrchestrationV2Checkpoint["files"]>();
+  const subagents = new Map<NodeId, OrchestrationV2Subagent>();
+  const source: DedupedBodySource = {
+    messageText: (id) => messageText.get(id),
+    checkpointFiles: (id) => checkpointFiles.get(id),
+    subagent: (id) => subagents.get(id),
+  };
+  return (item: OrchestrationV2ThreadStreamItem): OrchestrationV2ThreadStreamItem => {
+    if (item.kind === "snapshot") {
+      const { turnItemsOmitLocalVisible: _omitted, ...rest } = item;
+      const projection = boundedSnapshotProjection(item);
+      for (const message of projection.messages) remember(messageText, message.id, message.text);
+      for (const checkpoint of projection.checkpoints) {
+        remember(checkpointFiles, checkpoint.id, checkpoint.files);
+      }
+      for (const subagent of projection.subagents) remember(subagents, subagent.id, subagent);
+      return { ...rest, projection };
+    }
+    if (item.kind !== "event") return item;
+    const event = item.event;
+    switch (event.type) {
+      case "message.updated":
+        remember(messageText, event.payload.id, event.payload.text);
+        return item;
+      case "checkpoint.captured":
+        remember(checkpointFiles, event.payload.id, event.payload.files);
+        return item;
+      case "subagent.updated": {
+        const payload = restoreSubagentBodies(event.payload, subagents.get(event.payload.id));
+        remember(subagents, payload.id, payload);
+        return payload === event.payload ? item : { ...item, event: { ...event, payload } };
+      }
+      case "turn-item.updated": {
+        const payload = restoreTurnItemBodies(event.payload, source);
+        return payload === event.payload ? item : { ...item, event: { ...event, payload } };
+      }
+      default:
+        return item;
+    }
+  };
+};
 
 /**
  * Mirrors the clients: a bare origin serves RPC at `/ws`, and the socket names the orchestration
@@ -119,10 +188,29 @@ export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function
         Effect.map((result) => result.attachments),
         Effect.mapError(failed("The sandbox did not accept the images.")),
       ),
+    // Compact, then restored here, so the bridge and the mirror read whole items.
     subscribe: (threadId) =>
-      client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({ threadId }).pipe(
-        Stream.mapError(failed("Lost the sandbox's thread stream.")),
-      ),
+      Stream.suspend(() => {
+        const restore = makeStreamRestorer();
+        let started = false;
+        return client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({
+          threadId,
+          acceptBoundedSnapshot: true,
+          acceptCompactTurnItems: true,
+          acceptDedupedBodies: true,
+        }).pipe(
+          Stream.map((item) => {
+            started = true;
+            return restore(item);
+          }),
+          // The sandbox reports a missing thread as this error, before any item.
+          Stream.catchIf(
+            (error) => !started && error._tag === "OrchestrationV2GetThreadProjectionError",
+            () => Stream.empty,
+          ),
+          Stream.mapError(failed("Lost the sandbox's thread stream.")),
+        );
+      }),
     // No cause: an encoding failure could quote the value it carried.
     answerSecret: (input) =>
       client[WS_METHODS.secretsAnswerRequest](input).pipe(
