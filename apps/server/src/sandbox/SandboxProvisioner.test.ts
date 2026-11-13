@@ -6357,6 +6357,36 @@ describe("SandboxProvisioner per-thread launches", () => {
     );
   });
 
+  it.effect("connects a client to a chat's sandbox, resuming a stopped one first", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    return Effect.gen(function* () {
+      const { provisioner, instanceId } = yield* launchedThread;
+      yield* provisioner.stop({ instanceId });
+      // A launch's pairing waits for a running sandbox; asking to connect starts it.
+      expect((yield* provisioner.pairLaunch({ threadId }).pipe(Effect.flip)).detail).toBe(
+        "This sandbox is not ready to connect yet.",
+      );
+      const connected = yield* provisioner.connectThread({ threadId });
+      const record = repository.records.get(instanceId);
+      expect(record?.state).toBe("running");
+      expect(connected).toEqual({
+        environmentId: testEnvironmentId,
+        httpBaseUrl: record?.httpBaseUrl,
+        pairingCode: pairToken,
+        projectId: "project-remote",
+      });
+
+      const none = yield* provisioner
+        .connectThread({ threadId: ThreadId.make("thread-without-sandbox") })
+        .pipe(Effect.flip);
+      expect(none.detail).toBe("This chat has no sandbox to connect to.");
+    }).pipe(
+      Effect.provide(provisionerLayer({}, repository.layer, { configs: memoryConfigs().layer })),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
   it.effect("removes the bridge's credential with its sandbox", () => {
     const fake = boatFake();
     const repository = memoryRepository();
