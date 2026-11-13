@@ -165,7 +165,8 @@ or automatic settling.
 - **Ask me** (the default) asks: **Keep snapshot** or **Delete sandbox…**. The question waits on
   the sandbox under **Settings → Sandboxes** (**Keep** or **Delete…**) and on the chat's row
   ("Keep sandbox?"), and pops up on a computer that has the app open. Tick **Remember for** the
-  config's name to make that choice the config's setting. Un-settling the chat drops the question.
+  config's name to make that choice the config's setting. Keep, from any device, stops a running
+  sandbox and keeps its disk. Un-settling the chat drops the question.
 - **Keep a snapshot** stops the sandbox and keeps its disk. The provider bills for the stopped disk
   (Boat keeps it for 14 days). Sending a message in the thread resumes the sandbox, from any
   device; the first answer can take a few minutes. Un-settling the thread resumes it too.

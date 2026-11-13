@@ -624,14 +624,15 @@ memory, so `SandboxSettle.reconcile`, at start and each minute, applies `onSettl
 settled chat whose live sandbox has no `settlePending` and a different `settleHandled`: a restart
 mid-wait still deletes, while a kept, pending, or snapshotted settle stays as it is. A failed
 settle is retried the same way. `sandboxes.resolveSettle` answers a pending decision: `delete`
-runs the normal delete, `keep` clears it. It answers only a decision still pending on a chat still
+runs the normal delete, `keep` stops a running sandbox and clears it, the same from every client
+(a failed stop leaves the decision pending). It answers only a decision still pending on a chat still
 settled, and otherwise changes nothing and returns `resolved: false`, so a stale card on another
 device or a click in flight cannot delete the sandbox of a chat the user un-settled.
 
 Clients show the decision, they do not make it. `SandboxThreadCoordinator` opens its settle prompt
 for a `settlePending` recorded while the app runs (older ones wait in Settings → Sandboxes, with
-Keep and Delete…, and on the chat's row as "Keep sandbox?"); Keep snapshot stops a running
-sandbox, then resolves `keep`, and Delete goes through the delete confirmation and its work check,
+Keep and Delete…, and on the chat's row as "Keep sandbox?"); Keep snapshot resolves `keep`, and
+Delete goes through the delete confirmation and its work check,
 then resolves `delete`. A remembered delete on a running sandbox only shows a 10-second notice
 with the settle's Undo. A settle of the sandbox's own thread happens on the sandbox's server, which
 this host never hears from, so the client also settles the host mirror (`onSettled`), and an

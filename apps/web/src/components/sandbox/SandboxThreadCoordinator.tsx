@@ -143,7 +143,6 @@ export function SandboxThreadCoordinator() {
           input: undefined,
         }),
   );
-  const stopSandbox = useAtomCommand(serverEnvironment.sandboxesStop, { reportFailure: false });
   const resumeSandbox = useAtomCommand(serverEnvironment.sandboxesResume, {
     reportFailure: false,
   });
@@ -333,25 +332,15 @@ export function SandboxThreadCoordinator() {
       }),
     );
 
-  // The answer to a settle the host asked about: stop the machine if it runs, and keep it.
+  // The answer to a settle the host asked about; the host stops the machine if it runs.
   const keepSettled = async (sandbox: SandboxRecord) => {
     if (provisionerEnvironmentId === null) return;
-    if (sandbox.state === "running") {
-      const result = await stopSandbox({
-        environmentId: provisionerEnvironmentId,
-        input: { instanceId: sandbox.instanceId },
-      });
-      if (result._tag === "Failure") {
-        void list.refresh();
-        if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not stop the sandbox");
-        return;
-      }
-    }
     const kept = await resolveSettle({
       environmentId: provisionerEnvironmentId,
       input: { instanceId: sandbox.instanceId, choice: "keep" },
     });
     if (kept._tag === "Failure") {
+      void list.refresh();
       if (!isAtomCommandInterrupted(kept)) failureToast(kept, "Could not keep the sandbox");
       return;
     }
