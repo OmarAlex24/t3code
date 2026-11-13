@@ -35,6 +35,7 @@ import {
   type UploadChatAttachment,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Duration from "effect/Duration";
@@ -692,9 +693,9 @@ export type TurnAction =
   | { readonly _tag: "question"; readonly item: QuestionItem };
 
 /**
- * Follows a sandbox thread for one host turn. Text already on the sandbox before `replayFrom`
- * (everything, when unset) counts as sent, so a thread's history is never replayed; anything newer
- * on any run is streamed, and the turn ends when the run carrying the message ends.
+ * Follows a sandbox thread for one host turn, until the run carrying the message ends. Text and
+ * tools last touched before the turn began (the newest `baseline` item, or the message when
+ * `replay`) count as sent: the first read is a window while the stream's snapshot is the whole thread.
  */
 export class TurnTracker {
   private readonly runs = new Map<string, OrchestrationV2Run>();
@@ -706,31 +707,33 @@ export class TurnTracker {
   private readonly handled = new Set<string>();
   private readonly settledRequests = new Map<string, Deferred.Deferred<void>>();
   private readonly messageId: MessageId;
+  private readonly since: number | undefined;
 
   constructor(
     messageId: MessageId,
     baseline: Option.Option<OrchestrationV2ThreadProjection>,
-    replayFrom?: number,
+    replay = false,
   ) {
     this.messageId = messageId;
+    let since: number | undefined;
     if (Option.isSome(baseline)) {
       for (const run of baseline.value.runs) this.runs.set(run.id, run);
       for (const request of baseline.value.runtimeRequests) this.requests.set(request.id, request);
       for (const item of baseline.value.turnItems) {
         this.items.set(item.id, item);
-        if (replayFrom !== undefined && item.ordinal >= replayFrom) continue;
-        if (item.type === "assistant_message" || item.type === "reasoning") {
-          this.sent.set(item.id, item.text.length);
-        } else if (item.type === "proposed_plan") {
-          this.sent.set(item.id, item.markdown.length);
-        } else if (isToolItem(item)) {
-          this.toolSent.set(item.id, toolSentKey(item));
-        }
+        if (replay) continue;
+        this.markSent(item);
+        since = Math.max(since ?? 0, DateTime.toEpochMillis(item.updatedAt));
       }
     }
+    const message = replay ? this.userMessage : undefined;
+    this.since =
+      message === undefined
+        ? since
+        : DateTime.toEpochMillis(message.startedAt ?? message.updatedAt);
   }
 
-  /** The actions the baseline owes the host: whatever it holds from `replayFrom` on. */
+  /** The actions the baseline owes the host: whatever it holds from the message on. */
   replay(): ReadonlyArray<TurnAction> {
     return this.actionsFor([...this.items.values()]);
   }
@@ -829,6 +832,30 @@ export class TurnTracker {
     }
   }
 
+  private markSent(item: OrchestrationV2TurnItem): void {
+    if (item.type === "assistant_message" || item.type === "reasoning") {
+      this.sent.set(item.id, item.text.length);
+    } else if (item.type === "proposed_plan") {
+      this.sent.set(item.id, item.markdown.length);
+    } else if (isToolItem(item)) {
+      this.toolSent.set(item.id, toolSentKey(item));
+    }
+  }
+
+  /** Text or a tool this turn has not seen whose last change predates it. */
+  private isHistory(item: OrchestrationV2TurnItem): boolean {
+    return (
+      this.since !== undefined &&
+      (item.type === "assistant_message" ||
+        item.type === "reasoning" ||
+        item.type === "proposed_plan" ||
+        isToolItem(item)) &&
+      !this.sent.has(item.id) &&
+      !this.toolSent.has(item.id) &&
+      DateTime.toEpochMillis(item.updatedAt) < this.since
+    );
+  }
+
   private isPending(requestId: RuntimeRequestId, status: OrchestrationV2TurnItem["status"]) {
     if (this.handled.has(requestId)) return false;
     const request = this.requests.get(requestId);
@@ -839,6 +866,10 @@ export class TurnTracker {
   private actionsFor(items: ReadonlyArray<OrchestrationV2TurnItem>): ReadonlyArray<TurnAction> {
     const actions: Array<TurnAction> = [];
     for (const item of [...items].sort((a, b) => a.ordinal - b.ordinal)) {
+      if (this.isHistory(item)) {
+        this.markSent(item);
+        continue;
+      }
       if (
         item.type === "assistant_message" ||
         item.type === "reasoning" ||
@@ -884,7 +915,7 @@ export class TurnTracker {
 
 /** Where a host turn picks up on the sandbox: a message already there, or a new one to send. */
 export type TurnTarget =
-  | { readonly _tag: "attach"; readonly messageId: MessageId; readonly replayFrom: number }
+  | { readonly _tag: "attach"; readonly messageId: MessageId }
   | { readonly _tag: "send"; readonly messageId: MessageId | null }
   | { readonly _tag: "nothing" };
 
@@ -912,13 +943,13 @@ export const turnTargetOf = (
     );
     return latest === undefined
       ? { _tag: "nothing" }
-      : { _tag: "attach", messageId: latest.messageId, replayFrom: latest.ordinal };
+      : { _tag: "attach", messageId: latest.messageId };
   }
   const existing =
     message === null ? undefined : messages.find((item) => item.messageId === message.messageId);
   return existing === undefined
     ? { _tag: "send", messageId: message?.messageId ?? null }
-    : { _tag: "attach", messageId: existing.messageId, replayFrom: existing.ordinal };
+    : { _tag: "attach", messageId: existing.messageId };
 };
 /** The MCP credential the host put in a session's `mcpServers`, over stdio or HTTP. */
 export const hostMcpOf = (
@@ -1277,7 +1308,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       onSome: (projection) => projection.thread.modelSelection,
     });
     if (target._tag === "attach") {
-      tracker = new TurnTracker(target.messageId, before, target.replayFrom);
+      tracker = new TurnTracker(target.messageId, before, true);
     } else {
       if (content.skipped.length > 0) {
         yield* sayOnce(sessionId, "message", skippedAttachmentsMessage(content.skipped));
