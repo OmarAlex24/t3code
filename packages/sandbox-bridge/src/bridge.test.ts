@@ -17,6 +17,7 @@ import type * as Cause from "effect/Cause";
 import type * as Scope from "effect/Scope";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -132,10 +133,20 @@ const crossedStdio = Effect.gen(function* () {
 });
 
 // Entities the bridge only reads a few fields of; the rest of each schema does not matter here.
-const run = (messageId: MessageId, status: string, id = "run-1") =>
-  ({ id, threadId, userMessageId: messageId, status }) as never;
-const assistant = (id: string, text: string, ordinal: number) =>
-  ({ id, type: "assistant_message", text, status: "running", ordinal }) as never;
+const run = (messageId: MessageId, status: string, id = "run-1", ordinal = 1) =>
+  ({ id, threadId, userMessageId: messageId, status, ordinal }) as never;
+// When the sandbox last touched an item, in ms; fixtures default to one shared instant.
+const at = (ms = 1_000) => DateTime.makeUnsafe(ms);
+const assistant = (id: string, text: string, ordinal: number, runId = "run-1", ms?: number) =>
+  ({
+    id,
+    type: "assistant_message",
+    text,
+    status: "running",
+    ordinal,
+    runId,
+    updatedAt: at(ms),
+  }) as never;
 const approval = (requestId: string, requestKind: string, ordinal = 5) =>
   ({
     id: `item-${requestId}`,
@@ -146,6 +157,7 @@ const approval = (requestId: string, requestKind: string, ordinal = 5) =>
     prompt: "rm -rf build",
     status: "waiting",
     ordinal,
+    updatedAt: at(),
   }) as never;
 const question = (requestId: string) =>
   ({
@@ -154,6 +166,7 @@ const question = (requestId: string) =>
     requestId,
     status: "waiting",
     ordinal: 6,
+    updatedAt: at(),
     questions: [
       {
         id: "color",
@@ -180,7 +193,12 @@ const projection = (
     runs,
     runtimeRequests: [],
   }) as unknown as OrchestrationV2ThreadProjection;
-const userMessage = (messageId: string, ordinal: number, runId: string | null = null) =>
+const userMessage = (
+  messageId: string,
+  ordinal: number,
+  runId: string | null = null,
+  ms?: number,
+) =>
   ({
     id: `item-${messageId}`,
     type: "user_message",
@@ -188,6 +206,8 @@ const userMessage = (messageId: string, ordinal: number, runId: string | null = 
     runId,
     status: "completed",
     ordinal,
+    startedAt: at(ms),
+    updatedAt: at(ms),
   }) as never;
 
 interface FakeSandbox {
@@ -595,8 +615,9 @@ describe("forwarding a turn", () => {
 
   it.effect("sends to an existing sandbox thread without replaying its history", () =>
     Effect.gen(function* () {
+      const earlierRun = run("msg-0" as MessageId, "completed", "run-1", 1);
       const fake = yield* makeFakeSandbox({
-        existing: projection([assistant("old", "Earlier answer", 1)]),
+        existing: projection([assistant("old", "Earlier answer", 101)], [earlierRun]),
         react: (command, sandbox) =>
           command.type === "message.dispatch"
             ? Effect.forEach(
@@ -604,11 +625,11 @@ describe("forwarding a turn", () => {
                   {
                     kind: "snapshot",
                     snapshotSequence: 1,
-                    projection: projection([assistant("old", "Earlier answer", 1)]),
+                    projection: projection([assistant("old", "Earlier answer", 101)], [earlierRun]),
                   } as never,
-                  event("run.created", run(command.messageId!, "running", "run-2")),
-                  event("turn-item.updated", assistant("new", "Next answer", 3)),
-                  event("run.updated", run(command.messageId!, "completed", "run-2")),
+                  event("run.created", run(command.messageId!, "running", "run-2", 2)),
+                  event("turn-item.updated", assistant("new", "Next answer", 201, "run-2")),
+                  event("run.updated", run(command.messageId!, "completed", "run-2", 2)),
                 ],
                 sandbox.push,
                 { discard: true },
@@ -628,6 +649,64 @@ describe("forwarding a turn", () => {
         }),
       );
     }),
+  );
+
+  it.effect(
+    "streams only what follows the message, though the sandbox's first read is a window",
+    () =>
+      Effect.gen(function* () {
+        // Three runs on the sandbox; the third is still working when the message steers into it.
+        const history = [
+          userMessage("msg-1", 100, "run-1", 1_000),
+          assistant("a1", "First answer", 101, "run-1", 1_001),
+          userMessage("msg-2", 102, "run-2", 1_002),
+          assistant("a2", "Second answer", 201, "run-2", 1_003),
+          userMessage("msg-3", 202, "run-3", 1_004),
+          assistant("a3", "Third answer", 301, "run-3", 1_005),
+          assistant("a3b", "still going", 302, "run-3", 1_006),
+        ];
+        const runs = [
+          run("msg-1" as MessageId, "completed", "run-1", 1),
+          run("msg-2" as MessageId, "completed", "run-2", 2),
+          run("msg-3" as MessageId, "running", "run-3", 3),
+        ];
+        const fake = yield* makeFakeSandbox({
+          // `getThreadProjection` bounds its rows; the stream's snapshot is the whole thread.
+          existing: projection(history.slice(-1), runs),
+          react: (command, sandbox) =>
+            command.type === "message.dispatch"
+              ? Effect.forEach(
+                  [
+                    {
+                      kind: "snapshot",
+                      snapshotSequence: 1,
+                      projection: projection(
+                        [...history, userMessage(command.messageId!, 303, "run-3", 1_007)],
+                        runs,
+                      ),
+                    } as never,
+                    event(
+                      "turn-item.updated",
+                      assistant("a4", "Steered answer", 304, "run-3", 1_008),
+                    ),
+                    event("run.updated", run("msg-3" as MessageId, "completed", "run-3", 3)),
+                  ],
+                  sandbox.push,
+                  { discard: true },
+                )
+              : Effect.void,
+        });
+        yield* withBridge({ fake }, ({ acp, updates }) =>
+          Effect.gen(function* () {
+            const session = yield* openThread(acp);
+            const result = yield* say(acp, session.sessionId, "Also check the tests", {
+              messageId: "msg-steer",
+            });
+            assert.strictEqual(result.stopReason, "end_turn");
+            assert.deepStrictEqual(messages(updates), ["Steered answer"]);
+          }),
+        );
+      }),
   );
 
   it.effect("asks for a sandbox approval with a non-read kind and answers with the choice", () =>
@@ -872,11 +951,15 @@ describe("forwarding a turn", () => {
       // Sent on the computer: the sandbox has the message and part of its answer already.
       const existing = projection(
         [
-          assistant("old", "Earlier answer", 1),
-          userMessage("msg-desk", 2, "run-desk"),
-          assistant("partial", "Half", 3),
+          userMessage("msg-0", 100, "run-0", 1_000),
+          assistant("old", "Earlier answer", 101, "run-0", 1_001),
+          userMessage("msg-desk", 102, "run-desk", 1_002),
+          assistant("partial", "Half", 201, "run-desk", 1_003),
         ],
-        [run("msg-desk" as MessageId, "running", "run-desk")],
+        [
+          run("msg-0" as MessageId, "completed", "run-0", 1),
+          run("msg-desk" as MessageId, "running", "run-desk", 2),
+        ],
       );
       const fake = yield* makeFakeSandbox({ existing });
       yield* withBridge({ fake }, ({ acp, updates }) =>
@@ -886,9 +969,11 @@ describe("forwarding a turn", () => {
             messageId: "msg-desk",
             creationSource: "web",
           }).pipe(Effect.forkScoped);
-          yield* fake.push(event("turn-item.updated", assistant("partial", "Half done", 3)));
           yield* fake.push(
-            event("run.updated", run("msg-desk" as MessageId, "completed", "run-desk")),
+            event("turn-item.updated", assistant("partial", "Half done", 201, "run-desk", 1_004)),
+          );
+          yield* fake.push(
+            event("run.updated", run("msg-desk" as MessageId, "completed", "run-desk", 2)),
           );
           const result = yield* Fiber.join(prompt);
           assert.strictEqual(result.stopReason, "end_turn");
