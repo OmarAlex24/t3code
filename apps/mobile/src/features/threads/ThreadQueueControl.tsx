@@ -37,7 +37,11 @@ import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { assetImageSource } from "../../lib/assetImageSource";
 import { beginQueuedRunEdit, useQueuedRunEdit } from "../../state/queued-run-edit";
-import { environmentThreadDetails, threadEnvironment } from "../../state/threads";
+import {
+  environmentThreadDetails,
+  sandboxStartQueue,
+  threadEnvironment,
+} from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
   REMOVE_QUEUED_MESSAGE_ACCESSIBILITY_LABEL,
@@ -134,8 +138,14 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
   const editBlockedReason = queuedRunEditBlockedReason({
     openQuestionCount: pendingRequests?.userInputs.length ?? 0,
   });
+  // Already started on the host, where it waits for its sandbox: it is stopped, not cancelled,
+  // and nothing can be sent ahead of it.
+  const sandboxStartRunId = useAtomValue(sandboxStartQueue.sandboxStartRunId(target));
+  const canSendNow = sandboxStartRunId === null && workflow?.canSendNow === true;
+  const canPromoteToSteer = sandboxStartRunId === null && workflow?.canPromoteToSteer === true;
   const promote = useAtomCommand(threadEnvironment.promoteQueuedRun, "promote queued message");
   const cancel = useAtomCommand(threadEnvironment.cancelQueuedRun, "remove queued message");
+  const interrupt = useAtomCommand(threadEnvironment.interruptTurn, "stop queued message");
   const resume = useAtomCommand(threadEnvironment.resumeThreadQueue, "resume queue");
   const resumeHeldQueue = useAtomCommand(threadEnvironment.resumeThreadQueue, {
     label: "resume queue",
@@ -161,7 +171,7 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
     const index = queuedRuns.findIndex(({ run }) => run.id === runId);
     if (index < 0) return;
     if (action === "edit") {
-      if (editBlockedReason !== null) return;
+      if (editBlockedReason !== null || runId === sandboxStartRunId) return;
       const entry = queuedRuns[index]!;
       void Haptics.selectionAsync();
       beginQueuedRunEdit(
@@ -190,10 +200,11 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
     setBusyRunId(runId);
     void Haptics.selectionAsync();
     if (action === "remove") {
-      await cancel(buildCancelQueuedRunCommand({ ...target, runId }));
-    } else if (workflow?.canSendNow) {
+      const command = buildCancelQueuedRunCommand({ ...target, runId });
+      await (runId === sandboxStartRunId ? interrupt(command) : cancel(command));
+    } else if (canSendNow) {
       await resume({ ...target, input: { threadId: target.threadId, runId } });
-    } else if (workflow?.activeRun && workflow.canPromoteToSteer) {
+    } else if (workflow?.activeRun && canPromoteToSteer) {
       await promote({
         ...target,
         input: {
@@ -257,10 +268,10 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
           busy: busyRunId !== null,
           // A fresh message starts its own turn: it may skip compaction, but not steer into a turn.
           canPromoteToSteer:
-            (workflow?.canPromoteToSteer ?? false) &&
+            canPromoteToSteer &&
             (run.freshContext !== true || workflow?.promoteSkipsCompaction === true),
-          canSendNow: workflow?.canSendNow ?? false,
-          editBlocked: editBlockedReason !== null,
+          canSendNow,
+          editBlocked: editBlockedReason !== null || run.id === sandboxStartRunId,
           isEditing: editing?.runId === run.id,
           isGuestMessage: context?.guest !== undefined,
           text,
@@ -280,7 +291,7 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
                   shouldOpenOnLongPress
                   style={{ flex: 1 }}
                   actions={[
-                    ...(workflow?.canPromoteToSteer || workflow?.canSendNow
+                    ...(canPromoteToSteer || canSendNow
                       ? [
                           {
                             id: "steer",
@@ -349,7 +360,7 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
                     ) : null}
                   </Pressable>
                 </Menu>
-                {workflow?.canPromoteToSteer || workflow?.canSendNow ? (
+                {canPromoteToSteer || canSendNow ? (
                   // Outside the edit row and full row height, so a near miss never opens the editor.
                   <Pressable
                     accessibilityRole="button"

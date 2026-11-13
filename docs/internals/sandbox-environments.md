@@ -480,9 +480,12 @@ without pairing with the sandbox.
   status, scripts, open-in, files or terminal in the web app.
 - **Stopped sandbox.** A run starting on a `sandboxes` thread whose sandbox is stopped makes the
   host resume it. Meanwhile the bridge retries for `SANDBOX_RESUME_WAIT_SECONDS` (16 minutes:
-  every step of a resume at its limit, `SANDBOX_RESUME_STEP_SECONDS`, plus a minute), showing
-  "Starting sandbox bx_…", then says the sandbox is not answering. Messages sent meanwhile queue
-  behind that run on the host, so they go out after it whether or not a client stays open.
+  every step of a resume at its limit, `SANDBOX_RESUME_STEP_SECONDS`, plus a minute), then says
+  the sandbox is not answering. Messages sent meanwhile queue behind that run on the host, so they
+  go out after it whether or not a client stays open. Until the host lists the sandbox running,
+  web and mobile show that run as the first queued message, without its items
+  (`createSandboxStartQueueAtoms` in client-runtime). Removing it stops the run, and the
+  composer queues the next message rather than steering it.
 
 ## Sub-sandboxes
 

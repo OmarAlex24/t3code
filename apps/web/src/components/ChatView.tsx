@@ -270,7 +270,7 @@ import { useEnvironmentQueryRefresh } from "../state/query";
 import { useEnvironmentScope } from "~/state/session";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "../state/server";
 import { hostEnvironmentIdAtom } from "../state/primaryEnvironment";
-import { threadEnvironment } from "../state/threads";
+import { threadEnvironment, useSandboxStartRunId } from "../state/threads";
 import {
   resolveProviderSkillsForCwd,
   resolveProvidersForCwd,
@@ -1067,6 +1067,9 @@ export default function ChatView(props: ChatViewProps) {
     activeSandboxStopped && !activeSandboxOnHost && (activeSandbox?.resumingSince ?? null) === null;
   // Per thread, since this view moves from thread to thread: each waits on its own sandbox.
   const sandboxResendPending = useSandboxResendPending(activeThreadKey);
+  // A message on the host's mirror waits at the bridge while its sandbox starts, so it reads as
+  // queued and the next one queues behind it rather than steering it.
+  const sandboxStartRunId = useSandboxStartRunId(activeThreadRef);
   const activeEnvironmentServerBrowser = useEnvironmentSupportsServerBrowser(
     activeThreadRef?.environmentId ?? null,
   );
@@ -1646,7 +1649,8 @@ export default function ChatView(props: ChatViewProps) {
     runlessWorkStartedAt;
   const activeRunPreparing = activeActivityRun?.status === "preparing";
   const sendQueuesBehindSetup =
-    isServerThread && (activeRunPreparing || activeActivityRun?.status === "starting");
+    isServerThread &&
+    (activeRunPreparing || activeActivityRun?.status === "starting" || sandboxStartRunId !== null);
   const [setupQueueSendThreadKey, setSetupQueueSendThreadKey] = useState<string | null>(null);
   const downloadFileAttachment = async (attachment: ChatFileAttachment) => {
     const connection = readPreparedConnection(environmentId);
