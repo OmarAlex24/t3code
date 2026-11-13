@@ -3,9 +3,8 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { PlugZapIcon } from "lucide-react";
-import { useState } from "react";
 
 import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
 import { useEnvironment } from "~/state/environments";
@@ -19,6 +18,8 @@ import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
+const CONNECT_FAILED = "Could not connect to the sandbox";
+
 export interface SandboxConnect {
   /** What a surface that needs the sandbox says while this client is not connected to it. */
   readonly reason: string;
@@ -27,44 +28,36 @@ export interface SandboxConnect {
   /** This client's grant on the host lets it ask for a connection. */
   readonly allowed: boolean;
   readonly connecting: boolean;
+  /** Why the last connect, the user's or this app's own, failed. */
+  readonly failure: { readonly title: string; readonly description: string } | null;
   readonly connect: () => void;
 }
 
 /**
- * Connecting this client to a sandbox chat's sandbox from the chat's host mirror. Once connected,
- * the sandbox's own thread lists and the chat moves to it (`sandboxChatAliases`). Null for any
- * thread that is not such a mirror, and once connected.
+ * Pairs this client with a chat's sandbox through the host and saves it at the sandbox's current
+ * address, recording the attempt for the chat's connect action. `resume` starts a stopped sandbox
+ * first. Resolves to the failure, or null once connected or interrupted.
  */
-export function useSandboxConnect(threadRef: ScopedThreadRef | null): SandboxConnect | null {
+export function useConnectSandbox() {
   const hostEnvironmentId = useSandboxProvisionerEnvironmentId();
-  const sandbox = useThreadSandbox(threadRef);
-  const environment = useEnvironment(sandbox?.environmentId ?? null);
-  const phase = environment?.connection.phase;
-  const allowed = useAtomValue(
-    serverEnvironment.sandboxesConnectThread.permissionAtom(hostEnvironmentId),
-  );
   const connectThread = useAtomCommand(serverEnvironment.sandboxesConnectThread, {
+    reportFailure: false,
+  });
+  const pairLaunch = useAtomCommand(serverEnvironment.sandboxesPairLaunch, {
     reportFailure: false,
   });
   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
   const markConnected = useSandboxConnectionsStore((state) => state.markConnected);
-  const [requesting, setRequesting] = useState(false);
+  const setAttempt = useSandboxConnectionsStore((state) => state.setAttempt);
 
-  const offer =
-    threadRef === null ? null : sandboxConnectOffer(sandbox, threadRef, phase === "connected");
-  if (offer === null || threadRef === null || hostEnvironmentId === null) return null;
-
-  const fail = (error: unknown) => {
-    const failure = describeSandboxFailure(error, "Could not connect to the sandbox");
-    toastManager.add(
-      stackedThreadToast({ type: "error", title: failure.title, description: failure.description }),
-    );
-  };
-
-  const request = async (): Promise<unknown> => {
-    const paired = await connectThread({
-      environmentId: hostEnvironmentId,
-      input: { threadId: threadRef.threadId },
+  const request = async (
+    host: EnvironmentId,
+    threadId: ThreadId,
+    resume: boolean,
+  ): Promise<unknown> => {
+    const paired = await (resume ? connectThread : pairLaunch)({
+      environmentId: host,
+      input: { threadId },
     });
     if (paired._tag === "Failure") {
       return isAtomCommandInterrupted(paired) ? null : squashAtomCommandFailure(paired);
@@ -82,12 +75,64 @@ export function useSandboxConnect(threadRef: ScopedThreadRef | null): SandboxCon
     return null;
   };
 
+  return async (
+    sandbox: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId },
+    resume: boolean,
+  ): Promise<unknown> => {
+    if (hostEnvironmentId === null) return null;
+    setAttempt(sandbox.environmentId, { connecting: true, failure: null });
+    const failure = await request(hostEnvironmentId, sandbox.threadId, resume);
+    setAttempt(sandbox.environmentId, failure === null ? null : { connecting: false, failure });
+    return failure;
+  };
+}
+
+/**
+ * Connecting this client to a sandbox chat's sandbox from the chat's host mirror. Once connected,
+ * the sandbox's own thread lists and the chat moves to it (`sandboxChatAliases`). Null for any
+ * thread that is not such a mirror, and once connected.
+ */
+export function useSandboxConnect(threadRef: ScopedThreadRef | null): SandboxConnect | null {
+  const hostEnvironmentId = useSandboxProvisionerEnvironmentId();
+  const sandbox = useThreadSandbox(threadRef);
+  const sandboxEnvironmentId = sandbox?.environmentId ?? null;
+  const environment = useEnvironment(sandboxEnvironmentId);
+  const phase = environment?.connection.phase;
+  const allowed = useAtomValue(
+    serverEnvironment.sandboxesConnectThread.permissionAtom(hostEnvironmentId),
+  );
+  const connectSandbox = useConnectSandbox();
+  const attempt = useSandboxConnectionsStore((state) =>
+    sandboxEnvironmentId === null ? undefined : state.attempts.get(sandboxEnvironmentId),
+  );
+
+  const offer =
+    threadRef === null ? null : sandboxConnectOffer(sandbox, threadRef, phase === "connected");
+  if (
+    offer === null ||
+    threadRef === null ||
+    hostEnvironmentId === null ||
+    sandboxEnvironmentId === null
+  ) {
+    return null;
+  }
+
+  const connecting = attempt?.connecting === true || phase === "connecting";
   const connect = async () => {
-    if (requesting) return;
-    setRequesting(true);
-    const error = await request();
-    setRequesting(false);
-    if (error !== null) fail(error);
+    if (connecting) return;
+    const failure = await connectSandbox(
+      { environmentId: sandboxEnvironmentId, threadId: threadRef.threadId },
+      true,
+    );
+    if (failure === null) return;
+    const described = describeSandboxFailure(failure, CONNECT_FAILED);
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: described.title,
+        description: described.description,
+      }),
+    );
   };
 
   return {
@@ -96,7 +141,11 @@ export function useSandboxConnect(threadRef: ScopedThreadRef | null): SandboxCon
       : "Needs a connection to this chat's sandbox, which this device is not allowed to make.",
     resumes: offer.resumes,
     allowed,
-    connecting: requesting || phase === "connecting",
+    connecting,
+    failure:
+      attempt === undefined || attempt.connecting
+        ? null
+        : describeSandboxFailure(attempt.failure, CONNECT_FAILED),
     connect: () => void connect(),
   };
 }
@@ -116,6 +165,11 @@ export function SandboxConnectAction(props: { readonly state: SandboxConnect }) 
           ? "The sandbox is stopped, so this starts it first."
           : "Opens its terminal, files, diff and previews here."}
       </p>
+      {state.failure === null ? null : (
+        <p className="text-center text-destructive text-xs">
+          {state.failure.title}: {state.failure.description}
+        </p>
+      )}
     </div>
   );
 }

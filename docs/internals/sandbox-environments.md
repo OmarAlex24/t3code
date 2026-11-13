@@ -497,8 +497,12 @@ without pairing with the sandbox.
   `expectedEnvironmentId`, so a saved one takes the sandbox's current address. The alias above then
   moves the chat to the sandbox's thread. The phone never pairs with a sandbox, so it says these
   are available from a computer connected to the sandbox.
-- **Pairing on its own.** `SandboxThreadCoordinator` pairs every linked, running sandbox it has
-  not registered, silently and at most every two minutes. Settings → Sandboxes connects and
+- **Pairing on its own.** When the routed chat's linked sandbox is running and this client is not
+  connected to it, `SandboxThreadCoordinator` takes the same path through `pairLaunch`, which never
+  resumes, at most every two minutes per sandbox. A saved environment counts as unconnected, since a
+  resumed sandbox can answer at a new address. The grant is read from the command's reactive
+  `permissionAtom`: a remote host's session loads after the coordinator mounts. A failure is logged
+  and shown under the chat's connect action, not toasted. Settings → Sandboxes connects and
   disconnects a mirrored chat's sandbox by hand; a disconnect is remembered per device
   (`sandboxConnections.ts`), so the coordinator leaves that sandbox alone until it connects again.
 - **Stopped sandbox.** A run starting on a `sandboxes` thread whose sandbox is stopped makes the

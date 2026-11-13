@@ -123,27 +123,45 @@ export const sandboxRowStates = (
 };
 
 /**
- * Linked sandboxes this app is not paired with yet. The host's launch ends with its own bridge, so
- * each app pairs on its own afterwards, whether or not the chat is open; meanwhile the host thread
- * is the chat. A stopped sandbox waits until it runs again.
+ * The open chat's linked, running sandbox when this app should connect to it on its own: not
+ * connected or connecting, and not one the user disconnected from. A saved one still counts, since
+ * a resumed sandbox can answer at a new address. A stopped one waits for the user's connect or send.
  */
-export const sandboxesToPair = (
+export const sandboxToPair = (
   sandboxes: ReadonlyArray<SandboxRecord>,
+  openThreadRef: ScopedThreadRef | null,
   provisionerEnvironmentId: EnvironmentId | null,
-  pairedEnvironmentIds: ReadonlySet<EnvironmentId>,
-): ReadonlyArray<SandboxRecord> =>
-  provisionerEnvironmentId === null
-    ? []
-    : sandboxes.filter(
-        (sandbox) =>
-          sandbox.state === "running" &&
-          sandbox.threadId !== undefined &&
-          sandbox.hostProjectId !== undefined &&
-          sandbox.bridge !== undefined &&
-          sandbox.environmentId !== null &&
-          sandbox.environmentId !== provisionerEnvironmentId &&
-          !pairedEnvironmentIds.has(sandbox.environmentId),
-      );
+  environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly connection: { readonly phase: string };
+  }>,
+  disconnected: ReadonlyArray<EnvironmentId>,
+): {
+  readonly instanceId: string;
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+} | null => {
+  if (openThreadRef === null || provisionerEnvironmentId === null) return null;
+  const sandbox = findThreadSandbox(sandboxes, openThreadRef, provisionerEnvironmentId);
+  if (
+    sandbox === undefined ||
+    sandbox.state !== "running" ||
+    sandbox.threadId === undefined ||
+    sandbox.hostProjectId === undefined ||
+    sandbox.bridge === undefined ||
+    sandbox.environmentId === null ||
+    sandbox.environmentId === provisionerEnvironmentId ||
+    disconnected.includes(sandbox.environmentId)
+  ) {
+    return null;
+  }
+  const { environmentId } = sandbox;
+  const phase = environments.find((environment) => environment.environmentId === environmentId)
+    ?.connection.phase;
+  return phase === "connected" || phase === "connecting"
+    ? null
+    : { instanceId: sandbox.instanceId, environmentId, threadId: sandbox.threadId };
+};
 
 /**
  * Whether a sandbox chat's host mirror can offer to connect this client to its sandbox. The mirror
