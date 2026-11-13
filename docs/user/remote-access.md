@@ -258,13 +258,14 @@ app, which T3 Code renews while the sandbox runs and revokes when you delete it.
   change with its next token, at most about 40 minutes later; a resumed sandbox gets a new token
   as it starts. Because every sandbox reaches every repository on that list, keep it to the
   repositories you want agents to push to.
-- The app asks to write contents, pull requests and workflows, and to read checks, statuses and
-  actions. Without Workflows, GitHub refuses a push that changes `.github/workflows/`. An app
-  created before T3 Code asked for it lacks it: open the app's settings on GitHub
+- The app asks to write contents, pull requests, issues and workflows, and to read checks,
+  statuses and actions. Without Workflows, GitHub refuses a push that changes
+  `.github/workflows/`; without Issues, an agent cannot open or comment on issues. An app created
+  before T3 Code asked for one of these lacks it: open the app's settings on GitHub
   (**Settings → Developer settings → GitHub Apps → Edit**), set **Permissions → Repository
-  permissions → Workflows** to **Read and write**, and save. GitHub then asks each installation to
-  approve the change; until you accept it under **Installed GitHub Apps → Configure**, tokens keep
-  the old permissions.
+  permissions → Workflows** and **Issues** to **Read and write**, and save. GitHub then asks each
+  installation to approve the change; until you accept it under **Installed GitHub Apps →
+  Configure**, tokens keep the old permissions.
 
 ### Let the agent use Boat
 

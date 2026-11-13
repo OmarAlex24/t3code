@@ -264,8 +264,8 @@ server except into the sandbox.
   resume renews it at once) with the known installation id, writes it with the login script, then
   revokes the old one. The manifest
   asks for `workflows: "write"` because GitHub refuses a push that touches `.github/workflows/`
-  without it; an app made from an older manifest needs it added on GitHub and approved by each
-  installation.
+  without it, and for `issues: "write"` so an agent can open and comment on issues. An app made
+  from an older manifest needs each added on GitHub and approved by each installation.
 - **A Railway token belongs to one sandbox.** The saved workspace token mints
   `t3-sandbox-<sandboxId>` in its workspace ([`railwayApi.ts`](../../apps/server/src/sandbox/railwayApi.ts)).
   Railway returns only the token's value, so every revoke lists the workspace's tokens and deletes
