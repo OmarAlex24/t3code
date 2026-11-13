@@ -8,10 +8,13 @@ import {
   type SandboxSettleAction,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { describe, expect } from "vite-plus/test";
@@ -47,9 +50,13 @@ interface Harness {
   checks: number;
   listChanges: Queue.Queue<number>;
   lifecycle: Queue.Queue<SandboxLaunchLifecycle>;
+  /** Ends this server's settle service, as a host restart does, and starts a new one. */
+  restart: () => Effect.Effect<SandboxSettle.SandboxSettle["Service"]>;
 }
 
-const settleEvent = (settledAt = "2026-11-13T10:00:00.000Z") =>
+const SETTLED_AT = "2026-11-13T10:00:00.000Z";
+
+const settleEvent = (settledAt = SETTLED_AT) =>
   ({
     type: "thread.settled",
     threadId,
@@ -81,6 +88,7 @@ const withHarness = <A, E>(
       checks: 0,
       listChanges: yield* Queue.unbounded<number>(),
       lifecycle: yield* Queue.unbounded<SandboxLaunchLifecycle>(),
+      restart: () => Effect.die("not booted"),
     };
     const update = (instanceId: string, change: (current: SandboxRecord) => SandboxRecord) => {
       harness.records = harness.records.map((current) =>
@@ -116,11 +124,13 @@ const withHarness = <A, E>(
           );
           return { warnings: [] };
         }),
-      setSettlePending: (instanceId, pending) =>
+      setSettlePending: (instanceId, pending, handled) =>
         Effect.sync(() => {
-          update(instanceId, ({ settlePending: _settlePending, ...rest }) =>
-            pending === undefined ? rest : { ...rest, settlePending: pending },
-          );
+          update(instanceId, ({ settlePending: _settlePending, ...rest }) => ({
+            ...rest,
+            ...(pending === undefined ? {} : { settlePending: pending }),
+            ...(handled === undefined ? {} : { settleHandled: handled }),
+          }));
           return true;
         }),
       listChanges: Stream.fromQueue(harness.listChanges),
@@ -132,6 +142,7 @@ const withHarness = <A, E>(
         Effect.sync(() => ({
           id: threadId,
           settledOverride: harness.settled ? "settled" : "active",
+          settledAt: harness.settled ? DateTime.makeUnsafe(SETTLED_AT) : null,
         })),
     } as unknown as Orchestrator.OrchestratorV2["Service"];
     const layer = SandboxSettle.layer.pipe(
@@ -145,7 +156,23 @@ const withHarness = <A, E>(
         ),
       ),
     );
-    return yield* body(harness).pipe(Effect.provide(layer));
+    let scope = yield* Scope.make();
+    const boot = Layer.buildWithScope(layer, scope).pipe(
+      Effect.map((context) => Context.get(context, SandboxSettle.SandboxSettle)),
+    );
+    const first = yield* boot;
+    harness.restart = () =>
+      Effect.gen(function* () {
+        yield* Scope.close(scope, Exit.void);
+        scope = yield* Scope.make();
+        return yield* Layer.buildWithScope(layer, scope).pipe(
+          Effect.map((context) => Context.get(context, SandboxSettle.SandboxSettle)),
+        );
+      });
+    return yield* body(harness).pipe(
+      Effect.provideService(SandboxSettle.SandboxSettle, first),
+      Effect.ensuring(Effect.suspend(() => Scope.close(scope, Exit.void))),
+    );
   });
 
 const settle = (event = settleEvent()) =>
@@ -332,4 +359,85 @@ describe("SandboxSettle", () => {
       }),
     ),
   );
+
+  describe("after a host restart", () => {
+    it.effect("still deletes a sandbox whose undo window the restart cut short", () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          harness.onSettle = "delete";
+          yield* settle();
+          yield* TestClock.adjust("5 seconds");
+          const service = yield* harness.restart();
+          yield* service.reconcile;
+          yield* TestClock.adjust("9 seconds");
+          expect(harness.deletes).toEqual([]);
+          yield* TestClock.adjust("1 second");
+          yield* service.drain;
+          expect(harness.checks).toBe(1);
+          expect(harness.deletes).toEqual(["sandbox-1"]);
+        }),
+      ),
+    );
+
+    it.effect("does not ask again about a settle already answered with Keep", () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const before = yield* settle();
+          yield* before.drain;
+          yield* before.resolve({ instanceId: "sandbox-1", choice: "keep" });
+          const service = yield* harness.restart();
+          yield* service.reconcile;
+          yield* service.drain;
+          expect(harness.records[0]?.settlePending).toBeUndefined();
+        }),
+      ),
+    );
+
+    it.effect("does not stop again a snapshot the user resumed", () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          harness.onSettle = "snapshot";
+          const before = yield* settle();
+          yield* before.drain;
+          expect(harness.stops).toEqual(["sandbox-1"]);
+          harness.records = harness.records.map((current) => ({ ...current, state: "running" }));
+          const service = yield* harness.restart();
+          yield* service.reconcile;
+          yield* service.drain;
+          expect(harness.stops).toEqual(["sandbox-1"]);
+        }),
+      ),
+    );
+
+    it.effect("leaves a pending decision as it is", () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const pending = { since: "2026-11-13T09:00:00.000Z", reason: "work" } as const;
+          harness.records = [record({ settlePending: pending })];
+          const service = yield* harness.restart();
+          yield* service.reconcile;
+          yield* service.drain;
+          expect(harness.records[0]?.settlePending).toEqual(pending);
+          expect(harness.checks).toBe(0);
+        }),
+      ),
+    );
+
+    it.effect("applies a settle the host never saw, but not one already un-settled", () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          harness.onSettle = "snapshot";
+          harness.settled = false;
+          const service = yield* SandboxSettle.SandboxSettle;
+          yield* service.reconcile;
+          yield* service.drain;
+          expect(harness.stops).toEqual([]);
+          harness.settled = true;
+          yield* service.reconcile;
+          yield* service.drain;
+          expect(harness.stops).toEqual(["sandbox-1"]);
+        }),
+      ),
+    );
+  });
 });

@@ -447,6 +447,11 @@ export const SandboxRecord = Schema.Struct({
   settlePending: Schema.optionalKey(
     Schema.Struct({ since: TrimmedString, reason: Schema.Literals(["ask", "work"]) }),
   ),
+  /**
+   * The chat settle (the thread's `settledAt`) whose `onSettle` the host has applied, so a host
+   * restart applies a settle it missed and never one already decided, kept, or snapshotted.
+   */
+  settleHandled: Schema.optionalKey(TrimmedString),
   credentialEnvironment: Schema.optionalKey(TrimmedString),
   /** The template the sandbox started from, for display. */
   template: Schema.optionalKey(TrimmedString),

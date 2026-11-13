@@ -11,6 +11,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
+import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -24,6 +25,10 @@ const SETTLE_DELETE_DELAY = "10 seconds";
 const isStarting = (record: SandboxRecord) =>
   record.state === "provisioning" || record.resumingSince !== undefined;
 
+/** Names one settle of a thread: its `settledAt`, which settling it again keeps. */
+const settleOf = (settledAt: DateTime.Utc | null) =>
+  settledAt === null ? "unknown" : DateTime.formatIso(settledAt);
+
 /**
  * Applies a sandbox config's `onSettle` when its chat's thread on this host settles, whichever
  * client, agent, or sweep settled it. What it cannot do alone waits on the record as
@@ -34,6 +39,11 @@ export class SandboxSettle extends Context.Service<
   {
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
     readonly handle: (event: OrchestrationV2DomainEvent) => Effect.Effect<void>;
+    /**
+     * Applies the settles this host missed, such as one a restart cut short: a settled chat whose
+     * sandbox is alive, with no decision pending and no record of that settle being applied.
+     */
+    readonly reconcile: Effect.Effect<void>;
     readonly resolve: (
       input: SandboxResolveSettleInput,
     ) => Effect.Effect<SandboxDeleteResult, SandboxProviderError>;
@@ -48,7 +58,7 @@ const make = Effect.gen(function* () {
   // Keyed by instance: an un-settle, a newer settle, or the user's answer replaces what waits.
   const inHand = yield* FiberMap.make<string, void, never>();
   // The settle each thread was last handled for. Settling a settled chat again keeps its time.
-  const handledSettles = new Map<ThreadId, number>();
+  const handledSettles = new Map<ThreadId, string>();
 
   const recordOf = (instanceId: string) =>
     provisioner.list.pipe(
@@ -85,27 +95,32 @@ const make = Effect.gen(function* () {
     return found._tag === "Some" ? found.value : undefined;
   });
 
-  const ask = (record: SandboxRecord, reason: "ask" | "work") =>
+  // Each outcome but a delete marks the settle applied, in the write that records it.
+  const ask = (record: SandboxRecord, reason: "ask" | "work", settle: string) =>
     DateTime.now.pipe(
       Effect.flatMap((now) =>
-        provisioner.setSettlePending(record.instanceId, {
-          since: DateTime.formatIso(now),
-          reason,
-        }),
+        provisioner.setSettlePending(
+          record.instanceId,
+          { since: DateTime.formatIso(now), reason },
+          settle,
+        ),
       ),
     );
+  const applied = (record: SandboxRecord, settle: string) =>
+    provisioner.setSettlePending(record.instanceId, undefined, settle);
 
   const deleteWhenClean = Effect.fn("SandboxSettle.deleteWhenClean")(function* (
     record: SandboxRecord,
     threadId: ThreadId,
+    settle: string,
   ) {
     yield* Effect.sleep(SETTLE_DELETE_DELAY);
     if (!(yield* stillSettled(threadId))) return;
     const current = yield* recordOf(record.instanceId);
     if (current === undefined) return;
-    if (current.state !== "running") return yield* ask(current, "work");
+    if (current.state !== "running") return yield* ask(current, "work", settle);
     const work = yield* provisioner.checkWork({ instanceId: current.instanceId });
-    if (work.status !== "clean") return yield* ask(current, "work");
+    if (work.status !== "clean") return yield* ask(current, "work", settle);
     // The check takes seconds; an un-settle meanwhile still keeps the sandbox.
     if (!(yield* stillSettled(threadId))) return;
     yield* provisioner.delete({
@@ -116,7 +131,7 @@ const make = Effect.gen(function* () {
   });
 
   const applyOnSettle = Effect.fn("SandboxSettle.applyOnSettle")(
-    function* (instanceId: string, threadId: ThreadId) {
+    function* (instanceId: string, threadId: ThreadId, settle: string) {
       const record = yield* afterStarting(instanceId);
       if (record === undefined || !(yield* stillSettled(threadId))) return;
       const { configs } = yield* provisioner.configs;
@@ -127,19 +142,22 @@ const make = Effect.gen(function* () {
           break;
         case "stopped":
           // Already what a snapshot keeps; a stopped machine's work cannot be checked.
-          if (action === "snapshot") return;
-          return yield* ask(record, action === "delete" ? "work" : "ask");
+          if (action === "snapshot") return yield* applied(record, settle);
+          return yield* ask(record, action === "delete" ? "work" : "ask", settle);
         default:
           return;
       }
-      if (action === "ask") return yield* ask(record, "ask");
+      if (action === "ask") return yield* ask(record, "ask", settle);
       if (action === "snapshot") {
-        return yield* provisioner
-          .stop({ instanceId: record.instanceId })
-          .pipe(Effect.catch(() => ask(record, "ask")));
+        return yield* provisioner.stop({ instanceId: record.instanceId }).pipe(
+          Effect.andThen(applied(record, settle)),
+          Effect.catch(() => ask(record, "ask", settle)),
+        );
       }
-      if (record.state !== "running") return yield* ask(record, "work");
-      yield* deleteWhenClean(record, threadId).pipe(Effect.catch(() => ask(record, "work")));
+      if (record.state !== "running") return yield* ask(record, "work", settle);
+      yield* deleteWhenClean(record, threadId, settle).pipe(
+        Effect.catch(() => ask(record, "work", settle)),
+      );
     },
     (effect, instanceId) =>
       effect.pipe(
@@ -162,16 +180,15 @@ const make = Effect.gen(function* () {
     function* (event) {
       switch (event.type) {
         case "thread.settled": {
-          const settledAt =
-            event.payload.settledAt === null ? 0 : DateTime.toEpochMillis(event.payload.settledAt);
-          if (handledSettles.get(event.threadId) === settledAt) return;
-          handledSettles.set(event.threadId, settledAt);
+          const settle = settleOf(event.payload.settledAt);
+          if (handledSettles.get(event.threadId) === settle) return;
+          handledSettles.set(event.threadId, settle);
           const record = yield* chatSandbox(event.threadId);
           if (record === undefined) return;
           yield* FiberMap.run(
             inHand,
             record.instanceId,
-            applyOnSettle(record.instanceId, event.threadId),
+            applyOnSettle(record.instanceId, event.threadId, settle),
           );
           return;
         }
@@ -211,16 +228,54 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const reconcile: SandboxSettle["Service"]["reconcile"] = Effect.gen(function* () {
+    const { sandboxes } = yield* provisioner.list;
+    for (const record of sandboxes) {
+      const threadId = record.threadId;
+      if (threadId === undefined || record.settlePending !== undefined) continue;
+      if (record.state === "deleted" || record.state === "expired") continue;
+      if (yield* FiberMap.has(inHand, record.instanceId)) continue;
+      const shell = yield* orchestrator.getThreadShell(threadId);
+      if (shell?.settledOverride !== "settled") continue;
+      const settle = settleOf(shell.settledAt);
+      if (record.settleHandled === settle) continue;
+      handledSettles.set(threadId, settle);
+      yield* FiberMap.run(
+        inHand,
+        record.instanceId,
+        applyOnSettle(record.instanceId, threadId, settle),
+      );
+    }
+  }).pipe(
+    Effect.withSpan("SandboxSettle.reconcile"),
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Could not reconcile sandbox chats' settles", { cause }),
+    ),
+  );
+
+  // The minute's reconcile, like the provisioner's sweep, also retries a settle that failed.
   const start: SandboxSettle["Service"]["start"] = () =>
     forkParked(
-      Stream.runForEach(orchestrator.streamDomainEvents, handle).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("sandbox settle event stream failed", { cause }),
-        ),
+      Effect.all(
+        [
+          Stream.runForEach(orchestrator.streamDomainEvents, handle).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("sandbox settle event stream failed", { cause }),
+            ),
+          ),
+          reconcile.pipe(Effect.repeat(Schedule.spaced("1 minute"))),
+        ],
+        { concurrency: "unbounded", discard: true },
       ),
     );
 
-  return SandboxSettle.of({ start, handle, resolve, drain: FiberMap.awaitEmpty(inHand) });
+  return SandboxSettle.of({
+    start,
+    handle,
+    reconcile,
+    resolve,
+    drain: FiberMap.awaitEmpty(inHand),
+  });
 });
 
 export const layer = Layer.effect(SandboxSettle, make);

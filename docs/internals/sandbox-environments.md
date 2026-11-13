@@ -610,9 +610,13 @@ matched by thread id) and applies the config's `onSettle` (`ask` when unset):
 
 An un-settle (`thread.unsettled`, or `thread.pinned` off a settled thread) interrupts the wait and
 clears `settlePending`. Each thread's settle is decided once: settling a settled thread keeps its
-`settledAt`, which the service remembers. The wait lives in memory, so a restart during it deletes
-nothing and records nothing. `sandboxes.resolveSettle` answers a pending decision: `delete` runs
-the normal delete, `keep` clears it.
+`settledAt`, and the record's `settleHandled` holds the `settledAt` whose outcome was applied,
+written with that outcome (the stop's follow-up write, or `settlePending`). The wait lives in
+memory, so `SandboxSettle.reconcile`, at start and each minute, applies `onSettle` again for a
+settled chat whose live sandbox has no `settlePending` and a different `settleHandled`: a restart
+mid-wait still deletes, while a kept, pending, or snapshotted settle stays as it is. A failed
+settle is retried the same way. `sandboxes.resolveSettle` answers a pending decision: `delete`
+runs the normal delete, `keep` clears it.
 
 Clients show the decision, they do not make it. `SandboxThreadCoordinator` opens its settle prompt
 for a `settlePending` recorded while the app runs (older ones wait in Settings → Sandboxes, with

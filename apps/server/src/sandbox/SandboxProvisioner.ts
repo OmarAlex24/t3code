@@ -618,10 +618,14 @@ export class SandboxProvisioner extends Context.Service<
     readonly checkWork: (
       input: SandboxLifecycleInput,
     ) => Effect.Effect<SandboxCheckWorkResult, SandboxProviderError>;
-    /** Records or clears the decision a settled chat waits on; false when the record is gone. */
+    /**
+     * Records or clears the decision a settled chat waits on, and with `handled` marks that settle
+     * applied in the same write; false when the record is gone.
+     */
     readonly setSettlePending: (
       instanceId: string,
       pending: SandboxRecord["settlePending"],
+      handled?: string,
     ) => Effect.Effect<boolean>;
     /**
      * Runs one of T3 Code's own scripts on a running sandbox through its provider, as the poll for
@@ -3842,15 +3846,22 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
 
   const setSettlePending: SandboxProvisioner["Service"]["setSettlePending"] = Effect.fn(
     "SandboxProvisioner.setSettlePending",
-  )(function* (instanceId, pending) {
+  )(function* (instanceId, pending, handled) {
     const stored = yield* records.get(instanceId);
     if (Option.isNone(stored)) return false;
-    if (pending === undefined && stored.value.settlePending === undefined) return true;
+    if (
+      pending === undefined &&
+      stored.value.settlePending === undefined &&
+      (handled === undefined || stored.value.settleHandled === handled)
+    ) {
+      return true;
+    }
     const { settlePending: _settlePending, ...rest } = stored.value;
     // A new `updatedAt` makes a sweep that read the record earlier skip its write.
     yield* records.put({
       ...rest,
       ...(pending === undefined ? {} : { settlePending: pending }),
+      ...(handled === undefined ? {} : { settleHandled: handled }),
       updatedAt: yield* nowIso,
     });
     yield* listChanged;
