@@ -10,7 +10,6 @@ import {
   type SandboxProviderInfo,
   type SandboxProviderKind,
   type SandboxRecord,
-  type SandboxSettleAction,
   type SandboxSetupSnapshot,
   type ScopedThreadRef,
   type ServerProvider,
@@ -52,6 +51,8 @@ export interface SandboxRowState {
   readonly resumingSince: string | null;
   /** The row is the host thread the bridge drives, standing for the sandbox's own thread. */
   readonly onHost: boolean;
+  /** The chat was settled and the host waits for the user to keep or delete the sandbox. */
+  readonly settlePending: boolean;
 }
 
 /**
@@ -102,6 +103,7 @@ export const sandboxRowStates = (
       state: sandbox.state,
       resumingSince: sandbox.resumingSince ?? null,
       onHost: false,
+      settlePending: sandbox.settlePending !== undefined,
     };
     // One that answers as the host would claim every host thread.
     if (sandbox.environmentId !== null && sandbox.environmentId !== provisionerEnvironmentId) {
@@ -478,37 +480,22 @@ export interface SandboxSettleUndo {
 }
 
 /**
- * What a settle does to the thread's sandbox. A live one gets the config's `onSettle`; a remembered
- * delete waits with Undo first (`delete-later`). A stopped one's work cannot be checked, so a
- * delete always asks (`confirm-delete`), and a snapshot is already what it is (`kept`). One that is
- * launching or resuming is left alone (`starting`); an expired or deleted one has nothing to keep.
+ * The settle decisions to ask about now: ones the host recorded since this app first read the
+ * list, not asked before. Older ones wait in Settings and on their chat's row.
  */
-export type SandboxSettleOutcome =
-  | "ask"
-  | "snapshot"
-  | "delete-later"
-  | "kept"
-  | "confirm-delete"
-  | "starting"
-  | "none";
+export const newSettleDecisions = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  seen: ReadonlySet<string> | null,
+): ReadonlyArray<{ readonly key: string; readonly sandbox: SandboxRecord }> =>
+  sandboxes.flatMap((sandbox) => {
+    if (sandbox.settlePending === undefined) return [];
+    const key = `${sandbox.instanceId}:${sandbox.settlePending.since}`;
+    return seen === null || seen.has(key) ? [] : [{ key, sandbox }];
+  });
 
-export const sandboxSettleOutcome = (
-  sandbox: SandboxRecord | undefined,
-  onSettle: SandboxSettleAction | undefined,
-): SandboxSettleOutcome => {
-  if (sandbox === undefined) return "none";
-  if (sandbox.state === "provisioning" || sandbox.resumingSince !== undefined) return "starting";
-  const action = onSettle ?? "ask";
-  switch (sandbox.state) {
-    case "running":
-    case "error":
-      return action === "delete" ? "delete-later" : action;
-    case "stopped":
-      return action === "delete" ? "confirm-delete" : action === "snapshot" ? "kept" : "ask";
-    default:
-      return "none";
-  }
-};
+/** Every settle decision in the list, as `newSettleDecisions` keys them. */
+export const settleDecisionKeys = (sandboxes: ReadonlyArray<SandboxRecord>): Set<string> =>
+  new Set(newSettleDecisions(sandboxes, new Set()).map(({ key }) => key));
 
 /**
  * What the thread actions ask of the one mounted sandbox coordinator. A legacy thread lives on its
@@ -520,10 +507,13 @@ export interface SandboxThreadHandlers {
   /** The state of the thread's sandbox; undefined for a thread with no sandbox. */
   readonly sandboxState: (threadRef: ScopedThreadRef) => SandboxRecord["state"] | undefined;
   /**
-   * After a settle: stops, deletes, or asks, as the thread's config says. True when it shows the
-   * settle's Undo itself, as a delayed delete does.
+   * After a settle. The host applies the config's `onSettle` to its own thread of the chat, so a
+   * settle of the sandbox's thread settles that one too. True when it shows the settle's Undo
+   * itself, as the notice of a remembered delete does.
    */
   readonly onSettled: (threadRef: ScopedThreadRef, settle: SandboxSettleUndo) => boolean;
+  /** After an un-settle or a settle's Undo: the host's thread of the chat follows. */
+  readonly onUnsettled: (threadRef: ScopedThreadRef) => void;
   /** Resumes a stopped sandbox and waits for its server; false when it could not. */
   readonly ensureRunning: (threadRef: ScopedThreadRef) => Promise<boolean>;
   /** Confirms, deletes the thread while its server answers, then deletes the sandbox. */
@@ -549,6 +539,9 @@ export const isSandboxThread = (threadRef: ScopedThreadRef) =>
 
 export const notifySandboxThreadSettled = (threadRef: ScopedThreadRef, settle: SandboxSettleUndo) =>
   handlers?.onSettled(threadRef, settle) === true;
+
+export const notifySandboxThreadUnsettled = (threadRef: ScopedThreadRef) =>
+  handlers?.onUnsettled(threadRef);
 
 /** True when the thread has no sandbox, or its sandbox runs again. */
 export const ensureSandboxThreadRunning = async (threadRef: ScopedThreadRef) =>

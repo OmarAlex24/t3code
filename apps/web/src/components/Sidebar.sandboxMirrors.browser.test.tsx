@@ -557,6 +557,7 @@ describe("sandbox chats in the sidebar", () => {
         isSandboxThread: (ref) => ref.environmentId === LEGACY_SANDBOX,
         sandboxState: (ref) => (ref.environmentId === LEGACY_SANDBOX ? "deleted" : undefined),
         onSettled: () => false,
+        onUnsettled: () => {},
         ensureRunning: async () => true,
         deleteThreadAndSandbox: async () => {},
         deleteSandbox,
