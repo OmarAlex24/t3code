@@ -61,32 +61,33 @@ export function useSandboxConnect(threadRef: ScopedThreadRef | null): SandboxCon
     );
   };
 
+  const request = async (): Promise<unknown> => {
+    const paired = await connectThread({
+      environmentId: hostEnvironmentId,
+      input: { threadId: threadRef.threadId },
+    });
+    if (paired._tag === "Failure") {
+      return isAtomCommandInterrupted(paired) ? null : squashAtomCommandFailure(paired);
+    }
+    // The expected id lets a saved environment take the sandbox's current address.
+    const registered = await connectPairing({
+      host: paired.value.httpBaseUrl,
+      pairingCode: paired.value.pairingCode,
+      expectedEnvironmentId: paired.value.environmentId,
+    });
+    if (registered._tag === "Failure") {
+      return isAtomCommandInterrupted(registered) ? null : squashAtomCommandFailure(registered);
+    }
+    markConnected(paired.value.environmentId);
+    return null;
+  };
+
   const connect = async () => {
     if (requesting) return;
     setRequesting(true);
-    try {
-      const paired = await connectThread({
-        environmentId: hostEnvironmentId,
-        input: { threadId: threadRef.threadId },
-      });
-      if (paired._tag === "Failure") {
-        if (!isAtomCommandInterrupted(paired)) fail(squashAtomCommandFailure(paired));
-        return;
-      }
-      // The expected id lets a saved environment take the sandbox's current address.
-      const registered = await connectPairing({
-        host: paired.value.httpBaseUrl,
-        pairingCode: paired.value.pairingCode,
-        expectedEnvironmentId: paired.value.environmentId,
-      });
-      if (registered._tag === "Failure") {
-        if (!isAtomCommandInterrupted(registered)) fail(squashAtomCommandFailure(registered));
-        return;
-      }
-      markConnected(paired.value.environmentId);
-    } finally {
-      setRequesting(false);
-    }
+    const error = await request();
+    setRequesting(false);
+    if (error !== null) fail(error);
   };
 
   return {
