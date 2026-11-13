@@ -57,6 +57,14 @@ saved totals first, then updates them when Cursor's API responds.
 If recent work is missing or a new model shows no cost, refresh to rescan session history and
 update model pricing.
 
+## Compare local and sandbox chats
+
+Once you have run a chat on a sandbox, **Usage** adds **Local vs sandboxes**: the share of this
+week's turns that ran on sandboxes, the change from last week, and the last eight weeks side by
+side. It always covers those eight weeks, whatever period you pick. A sandbox chat counts once,
+whether you follow it on this computer or on the sandbox; a chat that moved to a sandbox counts on
+the side its latest turn of the week ran. The host that starts your sandboxes must be selected.
+
 ## Set custom model prices
 
 On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,
