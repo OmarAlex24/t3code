@@ -1506,8 +1506,10 @@ describe("forwarding a turn", () => {
               messageId: "message-1",
             }).pipe(Effect.forkScoped);
             yield* Deferred.await(refused);
+            const before = attempts;
             yield* TestClock.adjust("30 seconds");
-            assert.isTrue(attempts > 2);
+            // Tried every two seconds, so a turn goes out soon after its sandbox answers.
+            assert.strictEqual(attempts - before, 15);
             assert.isUndefined(prompt.pollUnsafe());
 
             failure = Option.some({
