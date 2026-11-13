@@ -4012,7 +4012,7 @@ describe("SandboxProvisioner", () => {
       const serveLine = (provider: string) =>
         startOf(provider)
           .split("\n")
-          .find((line) => line.trimStart().startsWith("nohup "));
+          .find((line) => line.trimStart().startsWith("nohup ") && line.includes(" serve"));
       // Daytona's preview proxy answers CORS, so the server must not add a second origin header,
       // and the service unit cannot carry that variable.
       expect(serveLine("daytona")).toContain("env T3CODE_PROXY_HANDLES_CORS='true' t3 serve");
@@ -5770,7 +5770,7 @@ describe("SandboxProvisioner per-thread launches", () => {
           (entry) => entry.url === `https://boat.dev/api/v1/sandboxes/${boatSandboxId}`,
         )?.body,
       ).toEqual({ ttlSeconds: 35 * 60 });
-      expect(fake.commands.find((command) => command.includes("T3_KEEPALIVE_LOOP"))).toContain(
+      expect(fake.commands.find((command) => command.includes("T3_KEEPALIVE_CONFIG"))).toContain(
         `EXTEND_URL='\\''https://boat.dev/api/v1/sandboxes/${boatSandboxId}'\\''`,
       );
     }).pipe(
@@ -5879,7 +5879,9 @@ describe("SandboxProvisioner per-thread launches", () => {
         expect(fake.requests).toContain("DELETE https://boat.dev/api/v1/api-keys/apk_keepalive1");
         expect(fake.keys.size).toBe(0);
         expect(repository.records.get(instanceId)?.keepAliveKey).toBeUndefined();
-        expect(fake.commands.some((command) => command.includes("T3_KEEPALIVE_LOOP"))).toBe(false);
+        expect(fake.commands.some((command) => command.includes("T3_KEEPALIVE_CONFIG"))).toBe(
+          false,
+        );
         // Boat's auto-stop stays at the running limit, which the sweep enforces as before.
         expect(fake.requests.some((request) => request.startsWith("PATCH"))).toBe(false);
       }).pipe(
@@ -5928,7 +5930,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         // starts, and only then moves to its config's idle window.
         expect(resumeBodies()).toEqual([{ ttlSeconds: 480 * 60 }]);
         const installed = fake.commands.findIndex((command) =>
-          command.includes("T3_KEEPALIVE_LOOP"),
+          command.includes("T3_KEEPALIVE_CONFIG"),
         );
         const started = fake.commands.findIndex((command) => command.includes("t3 serve"));
         expect(installed).toBeGreaterThanOrEqual(0);
@@ -5985,7 +5987,7 @@ describe("SandboxProvisioner per-thread launches", () => {
     Effect.gen(function* () {
       const until = yield* Deferred.make<void>();
       const reached = yield* Deferred.make<void>();
-      const fake = boatFake({ holding: { text: "T3_KEEPALIVE_LOOP", until, reached } });
+      const fake = boatFake({ holding: { text: "T3_KEEPALIVE_CONFIG", until, reached } });
       const older: SandboxRecord = {
         instanceId: "older",
         environmentId: testEnvironmentId,
