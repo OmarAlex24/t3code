@@ -8,6 +8,7 @@ import {
   CloudIcon,
   ExternalLinkIcon,
   PlayIcon,
+  PlugZapIcon,
   SquareIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -29,6 +30,7 @@ import {
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
+import { useSandboxConnect } from "../sandbox/SandboxConnect";
 import { SandboxProviderLogo } from "../settings/SandboxProviderLogo";
 import { describeSandboxFailure } from "../settings/SandboxStartLimits";
 import { Button } from "../ui/button";
@@ -83,6 +85,8 @@ export function SandboxThreadMenu({ threadRef }: { readonly threadRef: ScopedThr
   const navigate = useNavigate();
   const minute = useNowMinute();
   const [pending, setPending] = useState(false);
+  // Its own thread opens here only once this app is connected to the sandbox.
+  const connection = useSandboxConnect(threadRef);
   const sandbox = findThreadSandbox(
     list.data?.sandboxes ?? [],
     threadRef,
@@ -181,7 +185,13 @@ export function SandboxThreadMenu({ threadRef }: { readonly threadRef: ScopedThr
               Resume
             </MenuItem>
           ) : null}
-          {sandboxThreadEnvironmentId === null ? null : (
+          {connection !== null && connection.allowed ? (
+            <MenuItem disabled={connection.connecting} onClick={connection.connect}>
+              <PlugZapIcon aria-hidden className="size-3.5" />
+              Connect to the sandbox
+            </MenuItem>
+          ) : null}
+          {sandboxThreadEnvironmentId === null || connection !== null ? null : (
             <MenuItem
               onClick={() =>
                 void navigate({
