@@ -205,6 +205,7 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import {
   useSandboxChatAliases,
+  useSandboxMirrorModelSource,
   useSandboxlessBridgeThread,
   useThreadSandbox,
 } from "../state/sandboxes";
@@ -1391,12 +1392,16 @@ export default function ChatView(props: ChatViewProps) {
           worktreePath: activeThread?.worktreePath ?? null,
         })
       : null;
-  const providerStatuses = resolveProvidersForCwd(
-    (providerEnvironmentId === undefined
-      ? undefined
-      : providersByEnvironment.get(providerEnvironmentId)) ?? EMPTY_PROVIDERS,
-    gitCwd,
-  );
+  // On a sandbox chat's host mirror, the sandbox's own provider and selection, not the bridge's.
+  const sandboxMirrorModelSource = useSandboxMirrorModelSource(activeThreadRef);
+  const providerStatuses =
+    sandboxMirrorModelSource?.providers ??
+    resolveProvidersForCwd(
+      (providerEnvironmentId === undefined
+        ? undefined
+        : providersByEnvironment.get(providerEnvironmentId)) ?? EMPTY_PROVIDERS,
+      gitCwd,
+    );
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
     activeThread?.modelSelection.instanceId ??
@@ -4031,7 +4036,10 @@ export default function ChatView(props: ChatViewProps) {
                                 activeProjectDefaultModelSelection={
                                   activeProjectDefaultModelSelection
                                 }
-                                activeThreadModelSelection={activeThread?.modelSelection}
+                                activeThreadModelSelection={
+                                  sandboxMirrorModelSource?.modelSelection ??
+                                  activeThread?.modelSelection
+                                }
                                 activeProjectId={activeProject?.id ?? null}
                                 projectName={activeProject?.title}
                                 compactThreadUnavailable={compactThreadUnavailable}

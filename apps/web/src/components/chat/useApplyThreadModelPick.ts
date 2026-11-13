@@ -7,16 +7,29 @@ import {
 import { useContext } from "react";
 
 import { type ComposerThreadTarget, useComposerDraftStore } from "../../composerDraftStore";
+import { useQuietThreadShells } from "../../state/entities";
+import { useSandboxProvisionerEnvironmentId, useSandboxRecords } from "../../state/sandboxes";
+import { sandboxChatPickPartner, sandboxHostMirrors } from "../../state/sandboxThreads";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
-/** Sets an existing thread's composer pick on the thread, so any next turn runs on it. */
+/**
+ * Sets an existing thread's composer pick on the thread, so any next turn runs on it. A sandbox
+ * chat's other thread takes it too (see `sandboxChatPickPartner`).
+ */
 export function useApplyThreadModelPick() {
   const registry = useContext(RegistryContext);
   const setModelSelection = useOrchestrationCommand(threadEnvironment.setModelSelection, {
     label: "change model",
   });
+  // A stopped sandbox's thread takes the pick from the bridge with the next message instead.
+  const setPartnerModelSelection = useOrchestrationCommand(threadEnvironment.setModelSelection, {
+    reportFailure: false,
+  });
+  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
+  const sandboxes = useSandboxRecords();
+  const threads = useQuietThreadShells();
   return async (target: ComposerThreadTarget) => {
     if (typeof target === "string") return;
     const store = useComposerDraftStore.getState();
@@ -28,11 +41,26 @@ export function useApplyThreadModelPick() {
     // Another instance replaces the live session, which may hold an open question; that pick
     // still waits for a sent message.
     if (pick.instanceId !== thread.modelSelection.instanceId) return;
-    const result = await setModelSelection({
-      environmentId: target.environmentId,
-      input: { threadId: target.threadId, modelSelection: pick },
-    });
-    if (result._tag === "Success") {
+    const partner = sandboxChatPickPartner(
+      sandboxHostMirrors(sandboxes, threads, provisionerEnvironmentId),
+      threads,
+      target,
+      pick,
+    );
+    const [result, partnerResult] = await Promise.all([
+      setModelSelection({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, modelSelection: pick },
+      }),
+      partner === null
+        ? null
+        : setPartnerModelSelection({
+            environmentId: partner.ref.environmentId,
+            input: { threadId: partner.ref.threadId, modelSelection: partner.modelSelection },
+          }),
+    ]);
+    // Until both threads have it, the composer keeps showing the pick and sends it.
+    if (result._tag === "Success" && partnerResult?._tag !== "Failure") {
       useComposerDraftStore.getState().releaseModelSelection(target, pick);
     } else if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
