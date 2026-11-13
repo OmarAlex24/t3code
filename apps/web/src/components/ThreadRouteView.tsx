@@ -9,7 +9,10 @@ import { useEffect, useState } from "react";
 
 import ChatView from "./ChatView";
 import { BackgroundThreadContext } from "./chat/backgroundThread";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
+import { WorkspacePageHeader } from "./WorkspacePageHeader";
+import { isElectron } from "../env";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import {
@@ -18,12 +21,13 @@ import {
   useQuietThreadShell,
 } from "../state/entities";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { useEnvironmentShellStatus } from "../state/shell";
+import { useEnvironmentShellHasSnapshot, useEnvironmentShellStatus } from "../state/shell";
 import { environmentThreadShells, threadFamilies, useEnvironmentThread } from "../state/threads";
 import {
   buildThreadRouteParams,
   isThreadRouteSnapshotAuthoritative,
   resolveThreadRouteRenderState,
+  type ThreadRouteRenderState,
   type ThreadRouteTarget,
 } from "../threadRoutes";
 
@@ -71,6 +75,7 @@ export function ThreadRouteView({
   const shellStatus = useEnvironmentShellStatus(serverThreadRef?.environmentId ?? null);
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
   const bootstrapComplete = isThreadRouteSnapshotAuthoritative(shellStatus);
+  const shellHasSnapshot = useEnvironmentShellHasSnapshot(serverThreadRef?.environmentId ?? null);
   const draftThread = useComposerDraftStore((store) =>
     serverThreadRef ? store.getDraftThreadByRef(serverThreadRef) : null,
   );
@@ -133,6 +138,7 @@ export function ThreadRouteView({
     );
   const renderState = resolveThreadRouteRenderState({
     bootstrapComplete,
+    shellHasSnapshot,
     serverThreadExists: serverThreadShell !== null,
     serverThreadDeleted: serverThreadShell?.deletedAt != null,
     unlistedThreadDetail,
@@ -231,6 +237,41 @@ export function ThreadRouteView({
     >
       <BackgroundThreadContext value={background}>{view}</BackgroundThreadContext>
       {background ? null : redirect}
+      {target.kind === "server" && view === null && redirect === null ? (
+        <ThreadRouteNotice
+          renderState={renderState}
+          waitingForEnvironment={!bootstrapComplete}
+          error={Option.getOrNull(unlistedThreadDetail.error)}
+        />
+      ) : null}
     </SidebarInset>
+  );
+}
+
+/** Stands in for a server thread the route cannot show yet, so the pane is never blank. */
+function ThreadRouteNotice(props: {
+  readonly renderState: ThreadRouteRenderState;
+  readonly waitingForEnvironment: boolean;
+  readonly error: string | null;
+}) {
+  const [title, description] =
+    props.renderState === "missing"
+      ? ["Thread not found", "It may have been deleted or archived."]
+      : props.error !== null
+        ? ["Couldn’t open this thread", props.error]
+        : [
+            "Opening thread…",
+            props.waitingForEnvironment ? "Waiting for its environment to connect." : null,
+          ];
+  return (
+    <>
+      {isElectron ? <WorkspacePageHeader electron /> : null}
+      <Empty className="flex-1">
+        <EmptyHeader className="max-w-md">
+          <EmptyTitle>{title}</EmptyTitle>
+          {description === null ? null : <EmptyDescription>{description}</EmptyDescription>}
+        </EmptyHeader>
+      </Empty>
+    </>
   );
 }
