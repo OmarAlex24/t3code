@@ -373,10 +373,21 @@ without pairing with the sandbox.
 - **Models.** The bridge offers the models and options of the sandbox thread's provider
   (`sandboxConfigOptions`) and hands a pick on the host thread to the sandbox with the next message
   (`sandboxSelectionFor`). The host keeps one model list for the `sandboxes` instance, whichever
-  session reported last, so a client paired with the sandbox shows the sandbox's own provider and
-  selection on the mirror instead (`sandboxMirrorModelSource`), and a pick on either thread is set
-  on both (`sandboxChatPickPartner`); otherwise the bridge would hand the sandbox the mirror's
-  older pick. The phone, never paired with the sandbox, shows the bridge's list.
+  session reported last, so no client's mirror picker reads it: each shows the sandbox's own
+  provider and selection under the bridge's instance (`sandboxMirrorModelSource` in client-runtime),
+  and a pick is set on both threads, since otherwise the bridge would hand the sandbox the mirror's
+  older pick. The computer, paired with the sandbox, reads its thread and providers directly and
+  sets the pick on both (`sandboxChatPickPartner`). The phone never pairs with a sandbox, so the
+  host serves it ([`SandboxMirror.ts`](../../apps/server/src/sandbox/SandboxMirror.ts)) through
+  the bridge's link and bearer: `sandboxes.subscribeThreadMirror` (orchestration read) follows the
+  sandbox's own `subscribeThread` and sends the thread's provider, selection, agents and the runs
+  their turn is told from, only when one of those changes; `sandboxes.setThreadModel`
+  (orchestration operate) sets a pick on the sandbox thread's provider and on the mirror, or on
+  the mirror alone while the sandbox is stopped, for the bridge to hand over. A stopped or
+  unreachable sandbox shows as `available: false` with what the host last read (kept in memory, so
+  a host restart forgets it), retried every 20 seconds while a client follows it. The computer stays
+  on its paired path: its lineage panel navigates into, stops and merges the sandbox's child
+  threads, which a read through the host cannot offer.
 - **Approvals and questions.** Nothing the sandbox asks is ever left unanswerable. On a Supervised
   host thread a pending approval becomes `session/request_permission` with an `edit` or `execute`
   tool kind (never a read kind the host's policy would allow on its own); on any other mode, whose
@@ -441,7 +452,9 @@ without pairing with the sandbox.
   under them. It carries an unsent draft across (`moveComposerPromptAndImages`). A chat with no
   mirror listed keeps its sandbox's thread and the client-side resume path (`sandboxResendPending`).
   The mirror has none of the chat's agents or tasks, so its details panel lists the lineage of the
-  sandbox's thread (`sandboxChatOwnThread`). `sandboxHostMirrors` pairs the two threads when both are listed,
+  sandbox's thread (`sandboxChatOwnThread`), and the phone's Agents sheet lists them from
+  `sandboxes.subscribeThreadMirror`, opening an agent's messages read-only through
+  `sandboxes.readMirrorChild`, which reads again when the host reports that agent changed. `sandboxHostMirrors` pairs the two threads when both are listed,
   and the mirror takes the sandbox thread's title. Each
   message the composer sends on a linked sandbox thread (not on the mirror) is copied to the mirror with the same
   message id and `dispatchMode: "queue"`

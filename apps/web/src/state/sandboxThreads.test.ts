@@ -29,7 +29,6 @@ import {
   sandboxChatOwnThread,
   sandboxChatPickPartner,
   sandboxHostMirrors,
-  sandboxMirrorModelSource,
   sandboxMirrorOf,
   sandboxMirrorTitleUpdates,
   sandboxRowPhase,
@@ -446,31 +445,6 @@ describe("the sandbox bridge as an internal provider instance", () => {
     expect(
       resolveProjectDefaultProviderModelSelection(providers, settings as never, projectId),
     ).toEqual({ instanceId: "claudeAgent", model: "opus" });
-  });
-});
-
-describe("sandboxMirrorModelSource", () => {
-  const sandboxClaude = {
-    instanceId: "claudeAgent",
-    driver: "claudeAgent",
-    enabled: true,
-    installed: true,
-    status: "ready",
-    models: [{ slug: "claude-opus-5-5", name: "Opus 5.5", isCustom: false, capabilities: null }],
-  } as unknown as ServerProvider;
-  const running = selection("claudeAgent", "claude-opus-5-5", [{ id: "effort", value: "xhigh" }]);
-
-  // The host's bridge lists one set of models and options for every sandbox, so its picker read
-  // "Sandboxes" with another chat's effort.
-  it("shows the sandbox's own provider and selection, under the bridge the mirror sends on", () => {
-    expect(sandboxMirrorModelSource(running, [sandboxClaude])).toEqual({
-      providers: [{ ...sandboxClaude, instanceId: "sandboxes" }],
-      modelSelection: { ...running, instanceId: ProviderInstanceId.make("sandboxes") },
-    });
-  });
-
-  it("leaves the bridge's list while the sandbox's provider is unknown here", () => {
-    expect(sandboxMirrorModelSource(running, [])).toBeNull();
   });
 });
 
