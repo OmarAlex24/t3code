@@ -716,6 +716,13 @@ export class SandboxProvisioner extends Context.Service<
     /** Stops sandboxes past their running limit and syncs every other record with its provider. */
     readonly sweep: Effect.Effect<void>;
     /**
+     * Reads one sandbox's state from its provider now instead of at the next sweep, and saves it
+     * when it changed. A resume in flight, or a provider that cannot say, keeps the record's state.
+     */
+    readonly refreshState: (
+      instanceId: string,
+    ) => Effect.Effect<SandboxRecord["state"], SandboxProviderError>;
+    /**
      * Readies the host's sandbox bridge for a launched thread: keeps (or mints) the bearer it uses
      * on the sandbox and records the host project the thread is served from.
      */
@@ -4112,14 +4119,92 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         ttlMinutes: wasKeptAlive ? idleTtl : runningTtl,
       }),
     );
-    // What the record says of keep-alive from here, so an error state does not lose a new key.
-    let withKeepAlive = (next: SandboxRecord): SandboxRecord => next;
     const httpBaseUrl =
       record.access === "tailnet" ? record.httpBaseUrl : (resumed.publicUrl ?? record.httpBaseUrl);
+    const rejoined = yield* onHttp(
+      rejoinTailnet(record, (script, timeoutSeconds) =>
+        driver.execute({
+          config,
+          sandboxId: record.sandboxId,
+          timeoutSeconds,
+          ...asScript(script),
+        }),
+      ),
+    );
+    // Each writes its own files and none reads another's. The keep-alive key, guidance and helper
+    // must land before T3 starts (its loop and first agent session read them); the GitHub token
+    // only before an agent runs, so it goes here rather than on the path after T3 is up.
+    const [kept, guidance, helper, github] = yield* Effect.all(
+      [
+        keepAliveSettings === undefined || idleTtl === undefined
+          ? Effect.succeed({ keepAliveKey: record.keepAliveKey, warning: null })
+          : resumeKeepAlive(driver, config, record, idleTtl),
+        // Every resume rewrites T3 Code's skill and instructions block, so a sandbox made before
+        // them, or with older text, has the current ones by the first agent session.
+        onHttp(
+          driver.execute({
+            config,
+            sandboxId: record.sandboxId,
+            command: sandboxAgentGuidanceScript(),
+            timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.agentGuidance,
+          }),
+        ).pipe(
+          Effect.as<string | null>(null),
+          Effect.orElseSucceed(() => SANDBOX_AGENT_GUIDANCE_WARNING),
+        ),
+        // Every resume rewrites the sub-sandbox helper, so one made before it existed gets it and
+        // an older copy is replaced. Only a chat's sandbox has it.
+        record.threadId === undefined || record.parentThreadId !== undefined
+          ? Effect.succeed<string | null>(null)
+          : onHttp(
+              driver.execute({
+                config,
+                sandboxId: record.sandboxId,
+                timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.subSandboxHelper,
+                ...subSandboxHelperScript(),
+              }),
+            ).pipe(
+              Effect.as<string | null>(null),
+              Effect.orElseSucceed(() => SUB_SANDBOX_HELPER_WARNING),
+            ),
+        // The token a stopped sandbox kept has most likely expired.
+        refreshGithubToken(record, (script, timeoutSeconds) =>
+          onHttp(
+            driver.execute({
+              config,
+              sandboxId: record.sandboxId,
+              timeoutSeconds,
+              ...asScript(script),
+            }),
+          ),
+        ),
+      ],
+      { concurrency: "unbounded" },
+    );
+    // What the record says from here, so an error state does not lose a new key or token.
+    const withResumed = (next: SandboxRecord): SandboxRecord => {
+      const withGithub =
+        github.githubApp === undefined ? next : { ...next, githubApp: github.githubApp };
+      if (keepAliveSettings === undefined) return withGithub;
+      const {
+        keepAliveKey: _keepAliveKey,
+        idleMinutes: _idleMinutes,
+        runningCapMinutes: _runningCapMinutes,
+        ...rest
+      } = withGithub;
+      return {
+        ...rest,
+        idleMinutes: keepAliveSettings.idleMinutes,
+        ...(keepAliveSettings.runningCapMinutes === undefined
+          ? {}
+          : { runningCapMinutes: keepAliveSettings.runningCapMinutes }),
+        ...(kept.keepAliveKey === undefined ? {} : { keepAliveKey: kept.keepAliveKey }),
+      };
+    };
     const errored = (detail: string, cause?: unknown) =>
       records
         .put(
-          withKeepAlive({
+          withResumed({
             ...record,
             state: "error",
             runningSince: now,
@@ -4140,67 +4225,6 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
             ),
           ),
         );
-    const rejoined = yield* onHttp(
-      rejoinTailnet(record, (script, timeoutSeconds) =>
-        driver.execute({
-          config,
-          sandboxId: record.sandboxId,
-          timeoutSeconds,
-          ...asScript(script),
-        }),
-      ),
-    );
-    const kept =
-      keepAliveSettings === undefined || idleTtl === undefined
-        ? { keepAliveKey: record.keepAliveKey, warning: null }
-        : yield* resumeKeepAlive(driver, config, record, idleTtl);
-    if (keepAliveSettings !== undefined) {
-      withKeepAlive = (next) => {
-        const {
-          keepAliveKey: _keepAliveKey,
-          idleMinutes: _idleMinutes,
-          runningCapMinutes: _runningCapMinutes,
-          ...rest
-        } = next;
-        return {
-          ...rest,
-          idleMinutes: keepAliveSettings.idleMinutes,
-          ...(keepAliveSettings.runningCapMinutes === undefined
-            ? {}
-            : { runningCapMinutes: keepAliveSettings.runningCapMinutes }),
-          ...(kept.keepAliveKey === undefined ? {} : { keepAliveKey: kept.keepAliveKey }),
-        };
-      };
-    }
-    // Every resume rewrites T3 Code's skill and instructions block before T3 starts, so a sandbox
-    // made before them, or with older text, has the current ones by the first agent session.
-    const guidance = yield* onHttp(
-      driver.execute({
-        config,
-        sandboxId: record.sandboxId,
-        command: sandboxAgentGuidanceScript(),
-        timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.agentGuidance,
-      }),
-    ).pipe(
-      Effect.as<string | null>(null),
-      Effect.orElseSucceed(() => SANDBOX_AGENT_GUIDANCE_WARNING),
-    );
-    // Every resume rewrites the sub-sandbox helper, so one made before it existed gets it and an
-    // older copy is replaced, again before T3 starts. Only a chat's sandbox has it.
-    const helper =
-      record.threadId === undefined || record.parentThreadId !== undefined
-        ? null
-        : yield* onHttp(
-            driver.execute({
-              config,
-              sandboxId: record.sandboxId,
-              timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.subSandboxHelper,
-              ...subSandboxHelperScript(),
-            }),
-          ).pipe(
-            Effect.as<string | null>(null),
-            Effect.orElseSucceed(() => SUB_SANDBOX_HELPER_WARNING),
-          );
     yield* onHttp(
       driver.execute({
         config,
@@ -4241,26 +4265,14 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
         "T3 Code on this sandbox was reset, so it cannot reconnect as this environment. Delete it.",
       );
     }
-    // The token a stopped sandbox kept has most likely expired.
-    const github = yield* refreshGithubToken(record, (script, timeoutSeconds) =>
-      onHttp(
-        driver.execute({
-          config,
-          sandboxId: record.sandboxId,
-          timeoutSeconds,
-          ...asScript(script),
-        }),
-      ),
-    );
     const { stoppedAt: _stoppedAt, ...rest } = record;
-    const updated: SandboxRecord = withKeepAlive({
+    const updated: SandboxRecord = withResumed({
       ...rest,
       state: "running",
       runningSince: now,
       updatedAt: now,
       httpBaseUrl,
       ...(rejoined.tailscale === undefined ? {} : { tailscale: rejoined.tailscale }),
-      ...(github.githubApp === undefined ? {} : { githubApp: github.githubApp }),
     });
     yield* records.put(updated).pipe(Effect.orDie);
     // The bridge reads the sandbox's address from its link, and its bearer may be near expiry.
@@ -4502,6 +4514,50 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     );
   });
 
+  // An unreachable provider says nothing about the machine, so the record keeps its state.
+  const readStatus = (
+    record: SandboxRecord,
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+  ) => {
+    const keepAlive = keepsItselfUp(record) ? driver.keepAlive : undefined;
+    const read: Effect.Effect<
+      { readonly status: SandboxProviderStatus | null; readonly autoStopAt?: string | null } | null,
+      SandboxProviderError,
+      HttpClient.HttpClient
+    > =
+      keepAlive !== undefined
+        ? keepAlive.status({ config, sandboxId: record.sandboxId })
+        : driver.status === undefined
+          ? Effect.succeed(null)
+          : driver
+              .status({ config, sandboxId: record.sandboxId })
+              .pipe(Effect.map((status) => ({ status })));
+    return onHttp(read).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("sandbox status check failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+  };
+
+  const refreshState = Effect.fn("SandboxProvisioner.refreshState")(function* (instanceId: string) {
+    const record = yield* readRecord(instanceId);
+    if (resumingNow.has(instanceId)) return record.state;
+    const driver = findDriver(record.provider);
+    const config = yield* recordConfig(driver, record);
+    const reported = yield* readStatus(record, driver, config);
+    const state = reconcileState(record.state, reported?.status ?? null);
+    if (state !== record.state) {
+      yield* putIfUnchanged(record, withState(record, state, yield* nowIso));
+      yield* listChanged;
+    }
+    return state;
+  });
+
   const sweepRecord = Effect.fn("SandboxProvisioner.sweepRecord")(function* (
     listed: SandboxRecord,
     config: SandboxProviderConfig,
@@ -4540,28 +4596,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       );
     }
     const keepAlive = keepsItselfUp(record) ? driver.keepAlive : undefined;
-    const read: Effect.Effect<
-      { readonly status: SandboxProviderStatus | null; readonly autoStopAt?: string | null } | null,
-      SandboxProviderError,
-      HttpClient.HttpClient
-    > =
-      keepAlive !== undefined
-        ? keepAlive.status({ config, sandboxId: record.sandboxId })
-        : driver.status === undefined
-          ? Effect.succeed(null)
-          : driver
-              .status({ config, sandboxId: record.sandboxId })
-              .pipe(Effect.map((status) => ({ status })));
-    // An unreachable provider says nothing about the machine, so the record keeps its state.
-    const reported = yield* onHttp(read).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("sandbox status check failed", {
-          instanceId: record.instanceId,
-          sandboxId: record.sandboxId,
-          cause,
-        }).pipe(Effect.as(null)),
-      ),
-    );
+    const reported = yield* readStatus(record, driver, config);
     const status = reported?.status ?? null;
     const state = reconcileState(record.state, status);
     if (
@@ -4827,6 +4862,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     list,
     stop,
     resume,
+    refreshState,
     checkWork,
     setSettlePending,
     runScript,
