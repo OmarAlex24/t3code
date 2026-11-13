@@ -31,7 +31,6 @@ import {
 import { ThreadDetailsItemsMenuItems } from "./ThreadDetailsItemsMenu";
 import { resolveThreadDetailsVisibility, THREAD_DETAILS_ITEMS } from "./threadDetailsItems";
 import { useClientSettings } from "../../hooks/useSettings";
-import { useSandboxChatOwnThread } from "../../state/sandboxes";
 import { cn } from "../../lib/utils";
 import { SlidersHorizontalIcon } from "lucide-react";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
@@ -98,8 +97,6 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
     props.activeProjectScripts && visible.scripts ? props.gitCwd : null,
   );
   const activeThreadRef = { environmentId: props.environmentId, threadId: props.threadId };
-  // A sandbox chat's host mirror has none of its agents; they are on the sandbox's own thread.
-  const lineageThreadRef = useSandboxChatOwnThread(activeThreadRef);
   const branchToolbarProps = {
     showGitControls: props.isGitRepo,
     environmentId: props.environmentId,
@@ -260,8 +257,8 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
 
               {density === "full" && !props.draftId && (visible.lineage || visible.sideChats) ? (
                 <ThreadRelationshipsPanel
-                  environmentId={lineageThreadRef.environmentId}
-                  threadId={lineageThreadRef.threadId}
+                  environmentId={props.environmentId}
+                  threadId={props.threadId}
                   showLineage={visible.lineage}
                   showSideChats={visible.sideChats}
                 />

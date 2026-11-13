@@ -3,6 +3,7 @@ import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
   type ModelSelection,
+  type OrchestrationV2Subagent,
   type ProjectId,
   ProviderInstanceId,
   SANDBOX_BRIDGE_INSTANCE_ID,
@@ -14,6 +15,7 @@ import {
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 
 /**
  * Whether a sandbox's chat is the provisioning server's thread with its id: once the launch linked
@@ -188,14 +190,50 @@ export const sandboxHostMirrors = (
   return mirrors;
 };
 
+/** One of a sandbox chat's agents with a thread on the sandbox. */
+export type SandboxMirrorAgent = OrchestrationV2Subagent & { readonly childThreadId: ThreadId };
+
+const firstSeen = (agent: OrchestrationV2Subagent) =>
+  DateTime.toEpochMillis(agent.startedAt ?? agent.updatedAt);
+
 /**
- * The thread a sandbox chat's details read: for a host mirror whose sandbox thread lists, that
- * thread, which has the chat's agents and tasks; any other thread is its own.
+ * What a sandbox chat's mirror lists under Lineage, from the host's read of the sandbox's own thread
+ * (`sandboxes.subscribeThreadMirror`), since the mirror has none of the chat's agents: each agent
+ * thread once, as its latest record has it (a follow-up to a delegated task records it again),
+ * newest thread first, and how many run with no thread of their own.
  */
-export const sandboxChatOwnThread = (
-  mirrors: ReadonlyMap<string, ScopedThreadRef>,
-  threadRef: ScopedThreadRef,
-): ScopedThreadRef => mirrors.get(threadKey(threadRef)) ?? threadRef;
+export const sandboxMirrorLineage = (
+  subagents: ReadonlyArray<OrchestrationV2Subagent>,
+): {
+  readonly agents: ReadonlyArray<SandboxMirrorAgent>;
+  readonly runningWithoutThread: number;
+} => {
+  const byThread = new Map<ThreadId, { latest: SandboxMirrorAgent; since: number }>();
+  let runningWithoutThread = 0;
+  for (const agent of subagents) {
+    const { childThreadId } = agent;
+    if (childThreadId === null) {
+      if (agent.status === "running") runningWithoutThread += 1;
+      continue;
+    }
+    const known = byThread.get(childThreadId);
+    const latest =
+      known === undefined ||
+      DateTime.toEpochMillis(agent.updatedAt) >= DateTime.toEpochMillis(known.latest.updatedAt)
+        ? { ...agent, childThreadId }
+        : known.latest;
+    byThread.set(childThreadId, {
+      latest,
+      since: Math.min(known?.since ?? Number.POSITIVE_INFINITY, firstSeen(agent)),
+    });
+  }
+  return {
+    agents: [...byThread.values()]
+      .sort((left, right) => right.since - left.since)
+      .map(({ latest }) => latest),
+    runningWithoutThread,
+  };
+};
 
 /**
  * Where a model pick on one thread of a sandbox chat also goes, so the two agree: the sandbox's

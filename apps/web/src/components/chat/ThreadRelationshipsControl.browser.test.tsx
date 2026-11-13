@@ -44,6 +44,9 @@ vi.mock(import("../../state/environments"), () => ({
   useEnvironment: (() => null) as never,
   useEnvironmentProviders: (() => new Map()) as never,
 }));
+vi.mock(import("../../state/sandboxes"), () => ({
+  useThreadSandbox: (() => undefined) as never,
+}));
 vi.mock(import("../../lib/archivedThreadsState"), () => ({
   useArchivedThreadSnapshots: (() => ({
     snapshots: [{ environmentId: "environment", snapshot: { threads: state.archivedThreads } }],
@@ -74,6 +77,7 @@ function setup() {
       id: threadId,
       title: "Fork",
       activeProviderThreadId: null,
+      modelSelection: { instanceId: "codex", model: "gpt-5" },
       lineage: { parentThreadId: ThreadId.make("source"), relationshipToParent: "fork" },
       forkedFrom: null,
     },
