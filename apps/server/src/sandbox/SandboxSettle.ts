@@ -225,6 +225,8 @@ const make = Effect.gen(function* () {
       }
       yield* FiberMap.remove(inHand, input.instanceId);
       if (input.choice === "keep") {
+        // Keep is a snapshot on every client: a running sandbox stops, and its disk is kept.
+        if (record.state === "running") yield* provisioner.stop({ instanceId: record.instanceId });
         yield* provisioner.setSettlePending(record.instanceId, undefined);
         return { warnings: [], resolved: true };
       }

@@ -855,6 +855,7 @@ function SandboxRow({
               {sandbox.settlePending.reason === "work"
                 ? "Its chat was settled. Its settings delete it then, but it may hold work that isn't pushed: keep it, or delete it?"
                 : "Its chat was settled: keep the sandbox, or delete it?"}
+              {sandbox.state === "running" ? " Keep stops it and keeps its disk." : ""}
             </p>
           )}
           {threadGone ? (
