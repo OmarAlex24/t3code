@@ -23,6 +23,7 @@ import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as Socket from "effect/socket/Socket";
 
 import { SandboxBridgeError, type SandboxSession } from "./bridge.ts";
+import { RELAYED_IMAGE_MAX_BYTES, RELAYED_IMAGE_TYPES, relayedImageExtension } from "./images.ts";
 import type { SandboxBridgeLink } from "./link.ts";
 
 const OPEN_TIMEOUT = "15 seconds";
@@ -63,6 +64,7 @@ const issueTicket = Effect.fn("SandboxBridge.issueTicket")(function* (link: Sand
 export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function* (
   link: SandboxBridgeLink,
 ): Effect.fn.Return<SandboxSession, SandboxBridgeError, Scope.Scope | HttpClient.HttpClient> {
+  const http = yield* HttpClient.HttpClient;
   const ticket = yield* issueTicket(link);
   const protocol = yield* Layer.build(
     Layer.effect(
@@ -128,5 +130,34 @@ export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function
           () => new SandboxBridgeError({ message: "The sandbox did not take the secret." }),
         ),
       ),
+    // Signed by the sandbox for its own clients' <img>, so the download carries no bearer.
+    readImage: Effect.fn("SandboxBridge.readImage")(function* (threadId, path) {
+      const notAnImage = new SandboxBridgeError({ message: "Not an image T3 shows." });
+      const extension = relayedImageExtension(path);
+      if (extension === undefined) return yield* notAnImage;
+      const asset = yield* client[WS_METHODS.assetsCreateUrl]({
+        resource: { _tag: "media-file", threadId, path },
+      }).pipe(Effect.mapError(failed("The sandbox would not share the image.")));
+      const response = yield* http
+        .execute(
+          HttpClientRequest.get(`${link.httpBaseUrl.replace(/\/+$/u, "")}${asset.relativeUrl}`),
+        )
+        .pipe(
+          Effect.flatMap(HttpClientResponse.filterStatusOk),
+          Effect.mapError(failed("Could not download the image from the sandbox.")),
+        );
+      const type = response.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+      const declared = Number(response.headers["content-length"] ?? 0);
+      if (type !== RELAYED_IMAGE_TYPES[extension] || declared > RELAYED_IMAGE_MAX_BYTES) {
+        return yield* notAnImage;
+      }
+      const body = yield* response.arrayBuffer.pipe(
+        Effect.mapError(failed("Could not download the image from the sandbox.")),
+      );
+      if (body.byteLength === 0 || body.byteLength > RELAYED_IMAGE_MAX_BYTES) {
+        return yield* notAnImage;
+      }
+      return { bytes: new Uint8Array(body), extension };
+    }),
   } satisfies SandboxSession;
 });

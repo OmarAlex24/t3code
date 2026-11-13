@@ -18,6 +18,7 @@ import {
 import {
   bridgeLaunchSecretName,
   bridgeResumeFailureSecretName,
+  SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
   SandboxBridgeResumeFailureJson,
 } from "@t3tools/sandbox-bridge/link";
@@ -433,6 +434,11 @@ describe("SandboxBridge", () => {
         expect(seeded?.environment).toContainEqual({
           name: SANDBOX_BRIDGE_SECRETS_DIR_ENV,
           value: config.secretsDir,
+          sensitive: false,
+        });
+        expect(seeded?.environment).toContainEqual({
+          name: SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
+          value: config.attachmentsDir,
           sensitive: false,
         });
 
