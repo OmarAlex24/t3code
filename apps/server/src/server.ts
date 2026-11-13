@@ -84,6 +84,7 @@ import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrid
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
 import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
+import * as SandboxSettle from "./sandbox/SandboxSettle.ts";
 import { layerGithubAppManifestRoute } from "./sandbox/githubAppManifestRoute.ts";
 import * as DiyKit from "./diy/DiyKit.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
@@ -703,6 +704,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
   SandboxProvisioner.layerSweep,
   SandboxBridge.layerLive,
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const service = yield* SandboxSettle.SandboxSettle;
+      yield* service.start();
+    }),
+  ).pipe(Layer.provideMerge(SandboxSettle.layer)),
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),

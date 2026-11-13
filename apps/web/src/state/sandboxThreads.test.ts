@@ -23,6 +23,7 @@ import {
   findThreadSandbox,
   isSandboxlessBridgeThread,
   movesToSandboxChatAlias,
+  newSettleDecisions,
   sandboxChatAliases,
   sandboxChatAliasTarget,
   sandboxChatOwnThread,
@@ -34,8 +35,8 @@ import {
   sandboxRowPhase,
   sandboxRowStates,
   sandboxRowThread,
-  sandboxSettleOutcome,
   sandboxesToPair,
+  settleDecisionKeys,
   withSandboxHostMirrors,
 } from "./sandboxThreads";
 
@@ -102,7 +103,13 @@ describe("sandboxRowStates", () => {
 
   it("gives the sandbox's own thread and the host thread its bridge drives the same state", () => {
     const rows = sandboxRowStates([linked({ state: "stopped" })], HOST);
-    const stopped = { provider: "boat", state: "stopped", resumingSince: null, onHost: false };
+    const stopped = {
+      provider: "boat",
+      state: "stopped",
+      resumingSince: null,
+      onHost: false,
+      settlePending: false,
+    };
     expect(rows(sandboxRef)).toEqual(stopped);
     expect(rows(hostRef)).toEqual({ ...stopped, onHost: true });
     // Any thread on the sandbox, such as a subagent's, runs on that machine too.
@@ -115,13 +122,28 @@ describe("sandboxRowStates", () => {
     expect(sandboxRowPhase(rows(hostRef))).toBe("starting");
   });
 
+  it("carries a settle decision the host waits on, on both of the chat's threads", () => {
+    const rows = sandboxRowStates(
+      [linked({ settlePending: { since: "2026-11-13T10:00:00.000Z", reason: "ask" } })],
+      HOST,
+    );
+    expect(rows(hostRef)?.settlePending).toBe(true);
+    expect(rows(sandboxRef)?.settlePending).toBe(true);
+  });
+
   it("leaves other threads, deleted sandboxes and unlinked host threads alone", () => {
     expect(sandboxRowStates([linked({ state: "deleted" })], HOST)(sandboxRef)).toBeNull();
     expect(sandboxRowStates([record({ provider: "boat" })], HOST)(hostRef)).toBeNull();
     // A launch's host thread shows its sandbox's provider from the send on.
     expect(
       sandboxRowStates([record({ provider: "boat", state: "provisioning" })], HOST)(hostRef),
-    ).toEqual({ provider: "boat", state: "provisioning", resumingSince: null, onHost: true });
+    ).toEqual({
+      provider: "boat",
+      state: "provisioning",
+      resumingSince: null,
+      onHost: true,
+      settlePending: false,
+    });
     const other = { environmentId: EnvironmentId.make("other"), threadId };
     expect(sandboxRowStates([linked()], HOST)(other)).toBeNull();
     // A record that answers as the host must not claim the host's own threads.
@@ -162,6 +184,7 @@ describe("sandboxRowPhase", () => {
     state,
     resumingSince,
     onHost: false,
+    settlePending: false,
   });
 
   it("is starting during a resume, stopped while stopped, and nothing otherwise", () => {
@@ -536,36 +559,22 @@ describe("sandboxesToPair", () => {
   });
 });
 
-describe("sandboxSettleOutcome", () => {
-  it("applies the config to a live sandbox, and still asks for a stopped one", () => {
-    const cases = [
-      ["running", undefined, "ask"],
-      ["running", "snapshot", "snapshot"],
-      ["running", "delete", "delete-later"],
-      ["error", "delete", "delete-later"],
-      ["stopped", undefined, "ask"],
-      ["stopped", "ask", "ask"],
-      // Already stopped, so keeping it is the outcome; its work cannot be checked, so a delete asks.
-      ["stopped", "snapshot", "kept"],
-      ["stopped", "delete", "confirm-delete"],
-    ] as const;
-    for (const [state, onSettle, outcome] of cases) {
-      expect(sandboxSettleOutcome(record({ state }), onSettle), `${state} ${onSettle}`).toBe(
-        outcome,
-      );
-    }
-  });
+describe("newSettleDecisions", () => {
+  const pending = (instanceId: string, since: string) =>
+    record({ instanceId, settlePending: { since, reason: "ask" } });
 
-  it("says a sandbox that is launching or resuming was left alone, and skips a gone one", () => {
-    expect(sandboxSettleOutcome(record({ state: "provisioning" }), "snapshot")).toBe("starting");
-    expect(
-      sandboxSettleOutcome(
-        record({ state: "stopped", resumingSince: "2026-11-13T00:00:00Z" }),
-        "delete",
-      ),
-    ).toBe("starting");
-    expect(sandboxSettleOutcome(record({ state: "expired" }), "delete")).toBe("none");
-    expect(sandboxSettleOutcome(record({ state: "deleted" }), "ask")).toBe("none");
-    expect(sandboxSettleOutcome(undefined, "ask")).toBe("none");
+  it("asks about decisions recorded after the first read, each once", () => {
+    const first = [pending("sandbox-1", "2026-11-13T09:00:00.000Z"), record()];
+    // Nothing yet: the list has not been read, so nothing is new.
+    expect(newSettleDecisions(first, null)).toEqual([]);
+    const seen = settleDecisionKeys(first);
+    expect(newSettleDecisions(first, seen)).toEqual([]);
+    const later = [...first, pending("sandbox-2", "2026-11-13T10:00:00.000Z")];
+    expect(newSettleDecisions(later, seen).map(({ key }) => key)).toEqual([
+      "sandbox-2:2026-11-13T10:00:00.000Z",
+    ]);
+    // The same sandbox settled again after the user answered is a new decision.
+    const again = [pending("sandbox-1", "2026-11-13T11:00:00.000Z")];
+    expect(newSettleDecisions(again, seen)).toHaveLength(1);
   });
 });

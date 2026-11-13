@@ -109,6 +109,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
 import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
+import * as SandboxSettle from "./sandbox/SandboxSettle.ts";
 import * as DiyKit from "./diy/DiyKit.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
@@ -854,6 +855,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ReviewService.ReviewService)({}),
   Layer.mock(SandboxProvisioner.SandboxProvisioner)({}),
   Layer.mock(SandboxBridge.SandboxBridge)({}),
+  Layer.mock(SandboxSettle.SandboxSettle)({}),
   Layer.mock(DiyKit.DiyKit)({}),
   Layer.mock(ScheduledTasks.ScheduledTaskService)({}),
   Layer.mock(SecretRequests.SecretRequests)({}),

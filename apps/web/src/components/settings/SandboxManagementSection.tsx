@@ -606,6 +606,9 @@ function SandboxRow({
   const deleteSandbox = useAtomCommand(serverEnvironment.sandboxesDelete, {
     reportFailure: false,
   });
+  const resolveSettle = useAtomCommand(serverEnvironment.sandboxesResolveSettle, {
+    reportFailure: false,
+  });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const { entries } = useAtomValue(environmentCatalog.catalogValueAtom);
   const { environments } = useEnvironments();
@@ -680,24 +683,34 @@ function SandboxRow({
     sandbox.threadId === undefined &&
     !subagent;
 
-  const run = async (action: "stop" | "resume" | "delete") => {
+  const run = async (action: "stop" | "resume" | "delete" | "keep") => {
     startCheck.cancel();
     setConfirmingDelete(false);
     setPending(true);
     const input = { environmentId, input: { instanceId: sandbox.instanceId } };
+    // A settled chat's sandbox the host asked about: answering records the question as answered.
+    const settleChoice =
+      action === "keep" || (action === "delete" && sandbox.settlePending !== undefined)
+        ? action
+        : null;
     const result =
-      action === "stop"
-        ? await stopSandbox(input)
-        : action === "resume"
-          ? await resumeSandbox(input)
-          : await deleteSandbox({
-              environmentId,
-              input: {
-                provider: sandbox.provider,
-                sandboxId: sandbox.sandboxId,
-                instanceId: sandbox.instanceId,
-              },
-            });
+      settleChoice !== null
+        ? await resolveSettle({
+            environmentId,
+            input: { instanceId: sandbox.instanceId, choice: settleChoice },
+          })
+        : action === "stop"
+          ? await stopSandbox(input)
+          : action === "resume"
+            ? await resumeSandbox(input)
+            : await deleteSandbox({
+                environmentId,
+                input: {
+                  provider: sandbox.provider,
+                  sandboxId: sandbox.sandboxId,
+                  instanceId: sandbox.instanceId,
+                },
+              });
     if (action === "resume") startCheck.refresh();
     if (result._tag === "Failure") {
       setPending(false);
@@ -708,7 +721,9 @@ function SandboxRow({
             ? "Could not stop sandbox"
             : action === "resume"
               ? "Could not resume sandbox"
-              : "Could not delete sandbox",
+              : action === "keep"
+                ? "Could not keep sandbox"
+                : "Could not delete sandbox",
         );
         toastManager.add(
           stackedThreadToast({
@@ -823,6 +838,13 @@ function SandboxRow({
               {attention.line}
             </p>
           )}
+          {sandbox.settlePending === undefined ? null : (
+            <p className={warningClassName}>
+              {sandbox.settlePending.reason === "work"
+                ? "Its chat was settled. Its settings delete it then, but it may hold work that isn't pushed: keep it, or delete it?"
+                : "Its chat was settled: keep the sandbox, or delete it?"}
+            </p>
+          )}
           {threadGone ? (
             <p className={warningClassName}>
               Its thread was deleted. Delete the sandbox unless you still need its disk.
@@ -874,6 +896,26 @@ function SandboxRow({
                 Open thread
               </Button>
             </span>
+          )}
+          {sandbox.settlePending === undefined ? null : (
+            <>
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={pending}
+                onClick={() => void run("keep")}
+              >
+                Keep
+              </Button>
+              <Button
+                size="xs"
+                variant="destructive-outline"
+                disabled={pending || confirmingDelete}
+                onClick={() => setConfirmingDelete(true)}
+              >
+                Delete…
+              </Button>
+            </>
           )}
           {canStop ? (
             <Button size="xs" variant="outline" disabled={pending} onClick={() => void run("stop")}>

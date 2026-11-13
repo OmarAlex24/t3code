@@ -797,80 +797,87 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isSelected,
   });
   // A sandbox's machine comes first: a run waiting on it says nothing more until it is up, and
-  // nothing on a stopped one moves until a message resumes it.
+  // nothing on a stopped one moves until a message resumes it. A settled chat whose host waits on
+  // the user to keep or delete its sandbox says so before either.
   const topStatus =
-    sandboxPhase === "starting"
+    props.sandbox?.settlePending === true
       ? {
-          label: "Starting sandbox",
-          icon: "working" as const,
-          className: "text-info-foreground",
+          label: "Keep sandbox?",
+          icon: "input" as const,
+          className: "text-warning-foreground",
         }
-      : sandboxPhase === "stopped"
+      : sandboxPhase === "starting"
         ? {
-            label: "Stopped",
-            icon: "paused" as const,
-            className: "text-muted-foreground",
+            label: "Starting sandbox",
+            icon: "working" as const,
+            className: "text-info-foreground",
           }
-        : status === "preparing" || status === "working"
+        : sandboxPhase === "stopped"
           ? {
-              label:
-                status === "preparing"
-                  ? "Setting up"
-                  : thread.goal?.status === "active"
-                    ? "Goal"
-                    : "Working",
-              icon: "working" as const,
-              className: "text-info-foreground",
+              label: "Stopped",
+              icon: "paused" as const,
+              className: "text-muted-foreground",
             }
-          : status === "waiting"
+          : status === "preparing" || status === "working"
             ? {
-                label: "Waiting",
-                icon: "waiting" as const,
-                className: "text-muted-foreground",
+                label:
+                  status === "preparing"
+                    ? "Setting up"
+                    : thread.goal?.status === "active"
+                      ? "Goal"
+                      : "Working",
+                icon: "working" as const,
+                className: "text-info-foreground",
               }
-            : status === "approval"
+            : status === "waiting"
               ? {
-                  label: "Approval",
-                  icon: "approval" as const,
-                  className: "text-warning-foreground",
+                  label: "Waiting",
+                  icon: "waiting" as const,
+                  className: "text-muted-foreground",
                 }
-              : status === "input"
+              : status === "approval"
                 ? {
-                    label: "Input",
-                    icon: "input" as const,
-                    className: "text-indigo-600 dark:text-indigo-300",
+                    label: "Approval",
+                    icon: "approval" as const,
+                    className: "text-warning-foreground",
                   }
-                : status === "request"
+                : status === "input"
                   ? {
-                      label: "Request",
-                      icon: "request" as const,
-                      className: "text-guest-foreground",
+                      label: "Input",
+                      icon: "input" as const,
+                      className: "text-indigo-600 dark:text-indigo-300",
                     }
-                  : status === "limited"
+                  : status === "request"
                     ? {
-                        label: "Limited",
-                        icon: "failed" as const,
-                        className: "text-warning-foreground",
+                        label: "Request",
+                        icon: "request" as const,
+                        className: "text-guest-foreground",
                       }
-                    : status === "failed"
+                    : status === "limited"
                       ? {
-                          label: "Failed",
+                          label: "Limited",
                           icon: "failed" as const,
-                          className: "text-error-foreground",
+                          className: "text-warning-foreground",
                         }
-                      : isWoke
+                      : status === "failed"
                         ? {
-                            label: "Woke",
-                            icon: "woke" as const,
-                            className: "text-warning-foreground",
+                            label: "Failed",
+                            icon: "failed" as const,
+                            className: "text-error-foreground",
                           }
-                        : isUnread
+                        : isWoke
                           ? {
-                              label: "Done",
-                              icon: "done" as const,
-                              className: "text-success-foreground",
+                              label: "Woke",
+                              icon: "woke" as const,
+                              className: "text-warning-foreground",
                             }
-                          : null;
+                          : isUnread
+                            ? {
+                                label: "Done",
+                                icon: "done" as const,
+                                className: "text-success-foreground",
+                              }
+                            : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
