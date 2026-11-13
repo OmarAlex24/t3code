@@ -52,3 +52,7 @@ export const describeSandboxWork = (work: SandboxCheckWorkResult): string => {
   ];
   return `${parts.join(" and ")} would be lost.`;
 };
+
+/** Says why answering a settle question changed nothing (`resolved: false` from the host). */
+export const SANDBOX_SETTLE_STALE_ANSWER =
+  "Nothing was changed: the chat is no longer settled, or its sandbox was already decided.";

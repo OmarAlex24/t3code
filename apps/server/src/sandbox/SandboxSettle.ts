@@ -1,9 +1,9 @@
 import type {
   OrchestrationV2DomainEvent,
-  SandboxDeleteResult,
   SandboxProviderError,
   SandboxRecord,
   SandboxResolveSettleInput,
+  SandboxResolveSettleResult,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -46,7 +46,7 @@ export class SandboxSettle extends Context.Service<
     readonly reconcile: Effect.Effect<void>;
     readonly resolve: (
       input: SandboxResolveSettleInput,
-    ) => Effect.Effect<SandboxDeleteResult, SandboxProviderError>;
+    ) => Effect.Effect<SandboxResolveSettleResult, SandboxProviderError>;
     /** Waits for the settles still in hand: a delete's undo window, or a sandbox still starting. */
     readonly drain: Effect.Effect<void>;
   }
@@ -211,20 +211,29 @@ const make = Effect.gen(function* () {
       ),
   );
 
+  // A card on another device, or a click in flight, can answer after the chat was un-settled or
+  // the question answered elsewhere; only a question still waiting on a settled chat is answered.
   const resolve: SandboxSettle["Service"]["resolve"] = Effect.fn("SandboxSettle.resolve")(
     function* (input) {
-      yield* FiberMap.remove(inHand, input.instanceId);
       const record = yield* recordOf(input.instanceId);
-      if (record === undefined) return { warnings: [] };
+      if (
+        record?.settlePending === undefined ||
+        record.threadId === undefined ||
+        !(yield* stillSettled(record.threadId).pipe(Effect.orDie))
+      ) {
+        return { warnings: [], resolved: false };
+      }
+      yield* FiberMap.remove(inHand, input.instanceId);
       if (input.choice === "keep") {
         yield* provisioner.setSettlePending(record.instanceId, undefined);
-        return { warnings: [] };
+        return { warnings: [], resolved: true };
       }
-      return yield* provisioner.delete({
+      const deleted = yield* provisioner.delete({
         provider: record.provider,
         sandboxId: record.sandboxId,
         instanceId: record.instanceId,
       });
+      return { ...deleted, resolved: true };
     },
   );
 

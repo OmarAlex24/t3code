@@ -558,6 +558,13 @@ export const SandboxResolveSettleInput = Schema.Struct({
 });
 export type SandboxResolveSettleInput = typeof SandboxResolveSettleInput.Type;
 
+export const SandboxResolveSettleResult = Schema.Struct({
+  warnings: Schema.Array(Schema.String),
+  /** False when nothing waited on the answer: the chat was un-settled, or it was answered already. */
+  resolved: Schema.Boolean,
+});
+export type SandboxResolveSettleResult = typeof SandboxResolveSettleResult.Type;
+
 const SANDBOX_TEMPLATE_RESERVED_NAMES: ReadonlySet<string> = new Set([
   "latest",
   "tree",
