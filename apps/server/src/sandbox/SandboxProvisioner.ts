@@ -694,6 +694,13 @@ export class SandboxProvisioner extends Context.Service<
     readonly pairLaunch: (
       input: SandboxLaunchThreadInput,
     ) => Effect.Effect<SandboxLaunchPairResult, SandboxProviderError>;
+    /**
+     * Pairs a client with a chat's sandbox on request, as `pairLaunch` does, resuming a stopped
+     * one first; for a client that has none of the chat's surfaces until it is connected.
+     */
+    readonly connectThread: (
+      input: SandboxLaunchThreadInput,
+    ) => Effect.Effect<SandboxLaunchPairResult, SandboxProviderError>;
     /** Signs in with a Tailscale OAuth client and says whether it can do what T3 needs. */
     readonly checkTailscale: (
       input: SandboxTailscaleCheckInput,
@@ -3441,13 +3448,18 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     });
   });
 
+  const threadRecord = (threadId: ThreadId) =>
+    records.list.pipe(
+      Effect.orDie,
+      Effect.map((all) =>
+        all.find((candidate) => candidate.threadId === threadId && candidate.state !== "deleted"),
+      ),
+    );
+
   const pairLaunch = Effect.fn("SandboxProvisioner.pairLaunch")(function* (
     input: SandboxLaunchThreadInput,
   ) {
-    const all = yield* records.list.pipe(Effect.orDie);
-    const record = all.find(
-      (candidate) => candidate.threadId === input.threadId && candidate.state !== "deleted",
-    );
+    const record = yield* threadRecord(input.threadId);
     if (
       record === undefined ||
       record.state !== "running" ||
@@ -3464,6 +3476,20 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       pairingCode,
       projectId: record.sandboxProjectId,
     } satisfies SandboxLaunchPairResult;
+  });
+
+  const connectThread = Effect.fn("SandboxProvisioner.connectThread")(function* (
+    input: SandboxLaunchThreadInput,
+  ) {
+    const record = yield* threadRecord(input.threadId);
+    if (record === undefined) {
+      return yield* new SandboxProviderError({
+        stage: "pair",
+        detail: "This chat has no sandbox to connect to.",
+      });
+    }
+    if (record.state === "stopped") yield* resume({ instanceId: record.instanceId });
+    return yield* pairLaunch(input);
   });
 
   const retryLaunch = Effect.fn("SandboxProvisioner.retryLaunch")(function* (
@@ -4815,6 +4841,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     cancelLaunch,
     retryLaunch,
     pairLaunch,
+    connectThread,
     launching,
     markLaunchLost,
     launchLifecycle: tracker.lifecycle,
@@ -4882,6 +4909,8 @@ export const rpcHandlers = Effect.gen(function* () {
       sandboxes.retryLaunch(input).pipe(Effect.asVoid),
     [WS_METHODS.sandboxesPairLaunch]: (input: SandboxLaunchThreadInput) =>
       sandboxes.pairLaunch(input),
+    [WS_METHODS.sandboxesConnectThread]: (input: SandboxLaunchThreadInput) =>
+      sandboxes.connectThread(input),
     [WS_METHODS.sandboxesCheckTailscale]: (input: SandboxTailscaleCheckInput) =>
       sandboxes.checkTailscale(input),
     [WS_METHODS.sandboxesConnectGithubApp]: (input: SandboxConnectGithubAppInput) =>
