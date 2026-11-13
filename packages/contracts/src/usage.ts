@@ -161,3 +161,31 @@ export class UsageReadError extends Schema.TaggedError<UsageReadError>()("UsageR
     return `Usage read failed (${this.reason}): ${this.detail}`;
   }
 }
+
+export const UsageSandboxShareInput = Schema.Struct({
+  /** IANA zone whose Mondays start the weeks. */
+  timeZone: TrimmedNonEmptyString,
+});
+export type UsageSandboxShareInput = typeof UsageSandboxShareInput.Type;
+
+export const UsageSandboxShareSide = Schema.Struct({
+  /** Chats with a turn that week; each counts once, on the side its last turn that week ran. */
+  chats: NonNegativeInt,
+  turns: NonNegativeInt,
+});
+export type UsageSandboxShareSide = typeof UsageSandboxShareSide.Type;
+
+export const UsageSandboxShareWeek = Schema.Struct({
+  weekStart: UsageDay,
+  local: UsageSandboxShareSide,
+  sandbox: UsageSandboxShareSide,
+});
+export type UsageSandboxShareWeek = typeof UsageSandboxShareWeek.Type;
+
+/** The host's chats on this computer versus on its sandboxes, by week, oldest first. */
+export const UsageSandboxShare = Schema.Struct({
+  timeZone: TrimmedNonEmptyString,
+  /** The last week is the current one, so far. */
+  weeks: Schema.Array(UsageSandboxShareWeek),
+});
+export type UsageSandboxShare = typeof UsageSandboxShare.Type;
