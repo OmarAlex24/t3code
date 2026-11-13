@@ -26,6 +26,7 @@ import {
   isSandboxlessBridgeThread,
   movesToSandboxChatAlias,
   newSettleDecisions,
+  newThreadProjectRef,
   sandboxChatAliases,
   sandboxChatAliasTarget,
   sandboxChatPickPartner,
@@ -340,6 +341,36 @@ describe("sandboxMirrorOf", () => {
     const linked = record({ hostProjectId: ProjectId.make("p") });
     expect(sandboxMirrorOf([linked], { environmentId: HOST, threadId }, HOST)).toBeNull();
     expect(sandboxMirrorOf([{ ...linked, state: "deleted" }], ref, HOST)).toBeNull();
+  });
+});
+
+describe("newThreadProjectRef", () => {
+  it("starts a sandbox project's new thread in the project the sandbox was launched for", () => {
+    const launchedFor = ProjectId.make("project-launched");
+    const placeholder = ProjectId.make("project-placeholder");
+    const projects = [
+      { id: launchedFor, environmentId: HOST, workspaceRoot: "/work/app" },
+      {
+        id: placeholder,
+        environmentId: HOST,
+        workspaceRoot: "/home/me/.t3/userdata/sandbox-projects/octo/app",
+      },
+      { id: ProjectId.make("clone"), environmentId: SANDBOX, workspaceRoot: "/work/app" },
+    ];
+    const onSandbox = { environmentId: SANDBOX, projectId: ProjectId.make("clone") };
+    const sandbox = record({ projectId: launchedFor, hostProjectId: placeholder });
+    expect(newThreadProjectRef([sandbox], projects, onSandbox)).toEqual({
+      environmentId: HOST,
+      projectId: launchedFor,
+    });
+    // Never the placeholder that only holds the phone's copy of the chat.
+    const unlisted = record({ projectId: ProjectId.make("gone"), hostProjectId: placeholder });
+    expect(newThreadProjectRef([unlisted], projects, onSandbox)).toBeNull();
+    const hostRef = { environmentId: HOST, projectId: launchedFor };
+    expect(newThreadProjectRef([sandbox], projects, hostRef)).toBe(hostRef);
+    expect(newThreadProjectRef([{ ...sandbox, state: "deleted" }], projects, onSandbox)).toBe(
+      onSandbox,
+    );
   });
 });
 

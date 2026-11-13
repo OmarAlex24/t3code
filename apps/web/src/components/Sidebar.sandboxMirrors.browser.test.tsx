@@ -561,6 +561,7 @@ describe("sandbox chats in the sidebar", () => {
         ensureRunning: async () => true,
         deleteThreadAndSandbox: async () => {},
         deleteSandbox,
+        newThreadProjectRef: (ref) => ref,
       }),
     );
     vi.mocked(usePrimaryEnvironmentId).mockReturnValue(HOST);
