@@ -31,6 +31,13 @@ const settleOf = (settledAt: DateTime.Utc | null) =>
   settledAt === null ? "unknown" : DateTime.formatIso(settledAt);
 
 /**
+ * A settle is about the sandbox the chat had then. The bridge settles a chat whose sandbox went,
+ * and a relaunch's new sandbox for the same thread must not take that settle as its own.
+ */
+const launchedBefore = (record: SandboxRecord, settledAt: DateTime.Utc | null) =>
+  settledAt === null || !(Date.parse(record.createdAt) > DateTime.toEpochMillis(settledAt));
+
+/**
  * Applies a sandbox config's `onSettle` when its chat's thread on this host settles, whichever
  * client, agent, or sweep settled it. What it cannot do alone waits on the record as
  * `settlePending` for the user.
@@ -191,7 +198,7 @@ const make = Effect.gen(function* () {
           if (handledSettles.get(event.threadId) === settle) return;
           handledSettles.set(event.threadId, settle);
           const record = yield* chatSandbox(event.threadId);
-          if (record === undefined) return;
+          if (record === undefined || !launchedBefore(record, event.payload.settledAt)) return;
           yield* FiberMap.run(
             inHand,
             record.instanceId,
@@ -254,7 +261,8 @@ const make = Effect.gen(function* () {
       if (record.state === "deleted" || record.state === "expired") continue;
       if (yield* FiberMap.has(inHand, record.instanceId)) continue;
       const shell = yield* orchestrator.getThreadShell(threadId);
-      if (shell?.settledOverride !== "settled") continue;
+      if (shell?.settledOverride !== "settled" || !launchedBefore(record, shell.settledAt))
+        continue;
       const settle = settleOf(shell.settledAt);
       if (record.settleHandled === settle) continue;
       handledSettles.set(threadId, settle);
