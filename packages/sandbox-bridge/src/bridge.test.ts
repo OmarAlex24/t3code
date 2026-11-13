@@ -281,7 +281,22 @@ const makeFakeSandbox = (options: {
               sizeBytes: attachment.sizeBytes,
             })) as never;
           }),
-        subscribe: () => Stream.fromQueue(stream),
+        // As a sandbox does: the thread's snapshot first, and nothing for a thread it lacks.
+        subscribe: () =>
+          Stream.suspend(() =>
+            options.existing === undefined && launches.length === 0
+              ? Stream.empty
+              : Stream.concat(
+                  options.existing === undefined
+                    ? Stream.empty
+                    : Stream.make({
+                        kind: "snapshot",
+                        snapshotSequence: 0,
+                        projection: options.existing,
+                      } as OrchestrationV2ThreadStreamItem),
+                  Stream.fromQueue(stream),
+                ),
+          ),
         readImage: (_threadId, path) =>
           Effect.suspend(() => {
             imageReads.push(path);
@@ -1079,6 +1094,102 @@ describe("forwarding a turn", () => {
           assert.deepStrictEqual(fake.commands, []);
           assert.deepStrictEqual(fake.launches, []);
         }),
+      );
+    }),
+  );
+
+  it.effect("follows a message queued on the sandbox instead of sending it again", () =>
+    Effect.gen(function* () {
+      // Sent on the computer while a run worked: queued, with no user message item yet.
+      const fake = yield* makeFakeSandbox({
+        existing: projection(
+          [
+            userMessage("msg-0", 100, "run-0", 1_000),
+            assistant("old", "Earlier answer", 101, "run-0", 1_001),
+          ],
+          [
+            run("msg-0" as MessageId, "running", "run-0", 1),
+            run("msg-queued" as MessageId, "queued", "run-queued", 2),
+          ],
+        ),
+      });
+      yield* withBridge({ fake }, ({ acp, updates }) =>
+        Effect.gen(function* () {
+          const session = yield* openThread(acp);
+          const prompt = yield* say(acp, session.sessionId, "Then do this", {
+            messageId: "msg-queued",
+            creationSource: "web",
+          }).pipe(Effect.forkScoped);
+          yield* Effect.forEach(
+            [
+              event("run.updated", run("msg-0" as MessageId, "completed", "run-0", 1)),
+              event("run.updated", run("msg-queued" as MessageId, "running", "run-queued", 2)),
+              event("turn-item.updated", userMessage("msg-queued", 200, "run-queued", 1_002)),
+              event(
+                "turn-item.updated",
+                assistant("next", "Queued answer", 201, "run-queued", 1_003),
+              ),
+              event("run.updated", run("msg-queued" as MessageId, "completed", "run-queued", 2)),
+            ],
+            fake.push,
+            { discard: true },
+          );
+          const result = yield* Fiber.join(prompt);
+          assert.strictEqual(result.stopReason, "end_turn");
+          assert.deepStrictEqual(messages(updates), ["Queued answer"]);
+          assert.deepStrictEqual(fake.commands, []);
+          assert.deepStrictEqual(fake.launches, []);
+        }),
+      );
+    }),
+  );
+
+  it.effect("keeps one sandbox connection for the session's models and all its turns", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeSandbox({
+        existing: projection([], []),
+        react: answerWith("Done"),
+      });
+      let connects = 0;
+      yield* withBridge(
+        { fake, connect: () => Effect.sync(() => (connects++, fake.session)) },
+        ({ acp }) =>
+          Effect.gen(function* () {
+            const session = yield* openThread(acp);
+            yield* say(acp, session.sessionId, "One", { messageId: "msg-1" });
+            yield* say(acp, session.sessionId, "Two", { messageId: "msg-2" });
+            assert.strictEqual(connects, 1);
+          }),
+      );
+    }),
+  );
+
+  it.effect("connects again when the session's connection has dropped", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeSandbox({
+        existing: projection([], []),
+        react: answerWith("Done"),
+      });
+      let connects = 0;
+      const dropped: SandboxSession = {
+        ...fake.session,
+        subscribe: () => Stream.fail(new SandboxBridgeError({ message: "socket closed" })),
+      };
+      yield* withBridge(
+        {
+          fake,
+          // The session's first connection drops before the turn; the next one answers.
+          connect: () => Effect.sync(() => (connects++ === 0 ? dropped : fake.session)),
+        },
+        ({ acp, updates }) =>
+          Effect.gen(function* () {
+            const session = yield* openThread(acp);
+            const result = yield* say(acp, session.sessionId, "Still there?");
+            assert.strictEqual(result.stopReason, "end_turn");
+            assert.strictEqual(connects, 2);
+            assert.strictEqual(messages(updates).join(""), "Done");
+            assert.deepStrictEqual(messages(updates, "agent_thought_chunk"), []);
+          }),
       );
     }),
   );

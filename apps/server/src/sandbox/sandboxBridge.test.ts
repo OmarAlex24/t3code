@@ -20,6 +20,7 @@ import {
   bridgeResumeFailureSecretName,
   SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
+  SANDBOX_BRIDGE_TRACE_FILE_ENV,
   SandboxBridgeResumeFailureJson,
 } from "@t3tools/sandbox-bridge/link";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -449,6 +450,11 @@ describe("SandboxBridge", () => {
         expect(seeded?.environment).toContainEqual({
           name: SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
           value: config.attachmentsDir,
+          sensitive: false,
+        });
+        expect(seeded?.environment).toContainEqual({
+          name: SANDBOX_BRIDGE_TRACE_FILE_ENV,
+          value: `${config.logsDir}/sandbox-bridge.trace.ndjson`,
           sensitive: false,
         });
 
