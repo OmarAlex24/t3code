@@ -13,6 +13,13 @@ const state = vi.hoisted(() => ({
   relatedShells: [] as unknown[],
   threadTitles: {} as Record<string, string>,
   archivedThreads: [] as unknown[],
+  sandboxMirror: null as unknown,
+  sandbox: undefined as unknown,
+  sandboxConnected: false,
+  connectAllowed: true,
+  // Settles the sandbox connect a test starts: null once connected, else why it failed.
+  connectResult: Promise.resolve(null as unknown),
+  connectCalls: [] as unknown[],
 }));
 
 vi.mock(import("../../state/query"), async (original) => ({
@@ -25,8 +32,44 @@ vi.mock(import("../../state/query"), async (original) => ({
 
 vi.mock(import("@effect/atom-react"), async (original) => ({
   ...(await original()),
-  useAtomValue: (() => false) as never,
+  useAtomValue: ((atom: unknown) =>
+    atom === "sandbox-mirror"
+      ? state.sandboxMirror
+      : atom === "connect-permission"
+        ? state.connectAllowed
+        : false) as never,
 }));
+vi.mock(import("../../state/server"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    serverEnvironment: {
+      ...actual.serverEnvironment,
+      sandboxesThreadMirrorValue: ((target: unknown) =>
+        target === null ? "no-mirror" : "sandbox-mirror") as never,
+      sandboxesConnectThread: {
+        ...actual.serverEnvironment.sandboxesConnectThread,
+        permissionAtom: (() => "connect-permission") as never,
+      },
+    },
+  };
+});
+vi.mock(import("../sandbox/SandboxConnect"), async (original) => {
+  const { useSandboxConnectionsStore } = await import("../../state/sandboxConnections");
+  return {
+    ...(await original()),
+    useConnectSandbox: (() =>
+      async (sandbox: { environmentId: EnvironmentId }, resume: boolean) => {
+        state.connectCalls.push({ ...sandbox, resume });
+        const { setAttempt } = useSandboxConnectionsStore.getState();
+        setAttempt(sandbox.environmentId, { connecting: true, failure: null });
+        const failure = await state.connectResult;
+        if (failure === null) state.sandboxConnected = true;
+        setAttempt(sandbox.environmentId, failure === null ? null : { connecting: false, failure });
+        return failure;
+      }) as never,
+  };
+});
 
 vi.mock(import("../../state/entities"), () => ({
   useQuietThreadShell: (() => null) as never,
@@ -41,11 +84,15 @@ vi.mock(import("../../state/entities"), () => ({
   useAnyEnvironmentHiding: (() => false) as never,
 }));
 vi.mock(import("../../state/environments"), () => ({
-  useEnvironment: (() => null) as never,
+  useEnvironment: ((id: unknown) =>
+    id === "sandbox" && state.sandboxConnected
+      ? { label: "Sandbox", connection: { phase: "connected" } }
+      : null) as never,
   useEnvironmentProviders: (() => new Map()) as never,
 }));
 vi.mock(import("../../state/sandboxes"), () => ({
-  useThreadSandbox: (() => undefined) as never,
+  useThreadSandbox: (() => state.sandbox) as never,
+  useSandboxProvisionerEnvironmentId: (() => "environment") as never,
 }));
 vi.mock(import("../../lib/archivedThreadsState"), () => ({
   useArchivedThreadSnapshots: (() => ({
@@ -61,6 +108,7 @@ vi.mock(import("../../state/use-atom-command"), () => ({
 
 import { render } from "../../../test/render";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
+import { useSandboxConnectionsStore } from "../../state/sandboxConnections";
 import { ToastProvider } from "../ui/toast";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
@@ -72,6 +120,12 @@ function setup() {
   state.relatedShells = [];
   state.threadTitles = { source: "Source" };
   state.archivedThreads = [];
+  state.sandboxMirror = null;
+  state.sandbox = undefined;
+  state.sandboxConnected = false;
+  state.connectAllowed = true;
+  state.connectResult = Promise.resolve(null);
+  state.connectCalls = [];
   state.projection = {
     thread: {
       id: threadId,
@@ -409,4 +463,106 @@ it("hides a deleted fork and keeps unloaded and archived forks with their curren
   await expect.element(screen.getByText("Unloaded fork", { exact: true })).toBeVisible();
   await expect.element(screen.getByText("Archived fork", { exact: true })).toBeVisible();
   await expect.element(screen.getByText("deleted-fork", { exact: true })).not.toBeInTheDocument();
+});
+
+function setupSandboxMirror() {
+  setup();
+  useSandboxConnectionsStore.setState({ attempts: new Map(), disconnected: [] });
+  const now = DateTime.makeUnsafe("2026-11-01T10:00:00.000Z");
+  const mirror = state.projection as { thread: Record<string, unknown> };
+  state.projection = {
+    ...mirror,
+    thread: {
+      ...mirror.thread,
+      modelSelection: { instanceId: "sandboxes", model: "gpt-5" },
+      lineage: { parentThreadId: null, relationshipToParent: null },
+    },
+  };
+  state.sandbox = {
+    instanceId: "instance",
+    environmentId: "sandbox",
+    threadId,
+    hostProjectId: "project-host",
+    state: "running",
+  };
+  state.sandboxMirror = {
+    available: true,
+    subagents: [
+      {
+        id: NodeId.make("sandbox-agent"),
+        threadId,
+        runId: null,
+        parentNodeId: NodeId.make("parent"),
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: "codex",
+        providerInstanceId: "codex",
+        providerThreadId: null,
+        childThreadId: ThreadId.make("sandbox-agent-thread"),
+        nativeTaskRef: null,
+        prompt: "Review the change",
+        title: "Sandbox reviewer",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      },
+    ],
+  };
+}
+
+it("connects to the sandbox, then opens a sandbox chat's agent there", async () => {
+  setupSandboxMirror();
+  let connected = (_failure: unknown) => {};
+  state.connectResult = new Promise((resolve) => {
+    connected = resolve;
+  });
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={threadId}
+      showLineage
+      showSideChats={false}
+    />,
+    { router: "/environment/fork" },
+  );
+
+  await screen.getByRole("button", { name: /Sandbox reviewer/ }).click();
+  await expect.element(screen.getByText("Connecting", { exact: true })).toBeVisible();
+  expect(state.connectCalls).toEqual([{ environmentId: "sandbox", threadId, resume: true }]);
+  expect(screen.router?.state.location.pathname).toBe("/environment/fork");
+
+  connected(null);
+  await vi.waitFor(() =>
+    expect(screen.router?.state.location.pathname).toBe("/sandbox/sandbox-agent-thread"),
+  );
+});
+
+it.each([
+  ["the connect fails", true, "Could not connect to the sandbox: The host refused the connection"],
+  [
+    "this device may not connect",
+    false,
+    "Needs a connection to this chat's sandbox, which this device is not allowed to make.",
+  ],
+])("reads a sandbox chat's agent through the host when %s", async (_case, allowed, reason) => {
+  setupSandboxMirror();
+  state.connectAllowed = allowed;
+  state.connectResult = Promise.resolve(new Error("The host refused the connection"));
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={threadId}
+      showLineage
+      showSideChats={false}
+    />,
+    { router: "/environment/fork" },
+  );
+
+  await screen.getByRole("button", { name: /Sandbox reviewer/ }).click();
+  await expect.element(page.getByRole("dialog").getByText(reason, { exact: true })).toBeVisible();
+  expect(state.connectCalls).toHaveLength(allowed ? 1 : 0);
+  expect(screen.router?.state.location.pathname).toBe("/environment/fork");
 });
