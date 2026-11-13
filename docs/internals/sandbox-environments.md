@@ -582,7 +582,9 @@ Templates are saved only from a sandbox with no thread: saving deletes the sourc
 The thread lives on the sandbox's own server, which this host never hears from, so settle,
 resume-on-send, and thread delete start in the client. `SandboxThreadCoordinator` (mounted once at
 the root) registers handlers in `state/sandboxThreads.ts`. `useThreadActions.settleThread` calls
-`notifySandboxThreadSettled`, which applies the config's `onSettle` (`ask` when unset). Settles the
+`notifySandboxThreadSettled`, which applies the config's `onSettle` (`ask` when unset). A stopped
+sandbox is already kept, so `snapshot` only says so and `delete` always asks; one still launching or
+resuming is left alone, with a toast (`sandboxSettleOutcome`). Settles the
 sandbox's server makes on its own are not hooked, since this host is not told about them.
 `unsettleThread` and the composer's send on a stopped sandbox with no host mirror call
 `ensureSandboxThreadRunning`: resume, then wait for the environment to connect (4 minutes at
