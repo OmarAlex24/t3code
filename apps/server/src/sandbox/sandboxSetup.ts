@@ -721,9 +721,10 @@ export const KEEP_ALIVE_INTERVAL_SECONDS = 300;
 // A thread in one of these is working; `waiting` waits on the user, so it counts as idle.
 const BUSY_STATUSES = ["queued", "preparing", "starting", "running"] as const;
 
-// `t3 thread list` leaves out subagents, so the official server's MCP endpoint is asked for busy
-// threads (subagents included) with an `mcp-client` session the CLI mints; the CLI's list is the
-// fallback. With neither, the running limit applies. Tokens go in `curl -H @file`, never in argv.
+// A check extends when a thread is busy or was updated since the last check, so a short turn
+// between two checks counts. The official server's MCP endpoint, through an `mcp-client` session
+// the CLI mints, sees subagents; `t3 thread list` does not and is the fallback. With neither, the
+// running limit applies. Tokens go in `curl -H @file`, never in argv.
 const keepAliveLoop = (port: number) => `#!/bin/sh
 dir="${KEEP_ALIVE_DIR}"
 export PATH="$HOME/.local/bin:$PATH"
@@ -756,7 +757,27 @@ mcp() {
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \\
     -d "$1" "$origin/mcp" 2>/dev/null
 }
-# Prints busy or idle, or fails when the server cannot say.
+listed() { [ "$1" = 200 ] && grep -q '"isError":false' "$dir/out"; }
+# Whether a thread in $dir/out was updated at or after the last check, both in UTC seconds.
+worked_since() {
+  since="$(cat "$dir/last-check" 2>/dev/null || true)"
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  newest="$(grep -o '"updatedAt":"[^"]*"' "$dir/out" | cut -d'"' -f4 | cut -c1-19 | tr -d 'T:-' | sort | tail -n 1)"
+  case "$newest" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$newest" -ge "$since" ]
+}
+# Prints busy, active or idle, or fails when the server cannot say.
+mcp_ask() {
+  listed "$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"t3_thread_list","arguments":{"allProjects":true,"includeSubagents":true,"statuses":${JSON.stringify(BUSY_STATUSES)},"limit":1}}}')" || return 1
+  if ! grep -q '"threads":\\[\\]' "$dir/out"; then
+    # A server that ignores the status filter answers with any thread; only a busy one counts.
+    first="$(grep -o '"status":"[a-z_]*"' "$dir/out" | head -n 1 | cut -d'"' -f4)"
+    case "$first" in ${BUSY_STATUSES.join("|")}) echo busy; return 0 ;; *) return 1 ;; esac
+  fi
+  # The server lists threads newest-updated first.
+  listed "$(mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"t3_thread_list","arguments":{"allProjects":true,"includeSubagents":true,"limit":1}}}')" || return 1
+  if worked_since; then echo active; else echo idle; fi
+}
 mcp_state() {
   [ -s "$dir/mcp-auth" ] || mint_session || return 1
   : >"$dir/mcp-headers"
@@ -771,18 +792,16 @@ mcp_state() {
   version="$(grep -o '"protocolVersion":"[^"]*"' "$dir/out" | head -n 1 | cut -d'"' -f4)"
   printf 'mcp-session-id: %s\\nmcp-protocol-version: %s\\n' "$sid" "\${version:-2025-06-18}" >"$dir/mcp-headers"
   mcp '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
-  code="$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"t3_thread_list","arguments":{"allProjects":true,"includeSubagents":true,"statuses":${JSON.stringify(BUSY_STATUSES)},"limit":1}}}')"
+  state="$(mcp_ask)" || state=""
   [ -n "$sid" ] && curl -sS -m 10 -o /dev/null -X DELETE -H @"$dir/mcp-auth" -H @"$dir/mcp-headers" "$origin/mcp" >/dev/null 2>&1
-  [ "$code" = 200 ] && grep -q '"isError":false' "$dir/out" || return 1
-  grep -q '"threads":\\[\\]' "$dir/out" && { echo idle; return 0; }
-  # A server that ignores the status filter answers with any thread; only a busy one counts.
-  first="$(grep -o '"status":"[a-z_]*"' "$dir/out" | head -n 1 | cut -d'"' -f4)"
-  case "$first" in ${BUSY_STATUSES.join("|")}) echo busy ;; *) return 1 ;; esac
+  [ -n "$state" ] && echo "$state"
 }
 cli_state() {
   [ -n "\${PROJECT_ROOT:-}" ] || return 1
   t3 thread list --project "$PROJECT_ROOT" --json >"$dir/out" 2>/dev/null || return 1
-  if grep -Eq '"status":"(${BUSY_STATUSES.join("|")})"' "$dir/out"; then echo busy; else echo idle; fi
+  if grep -Eq '"status":"(${BUSY_STATUSES.join("|")})"' "$dir/out"; then echo busy
+  elif worked_since; then echo active
+  else echo idle; fi
 }
 extend() {
   curl -sS -m 30 -o /dev/null -w '%{http_code}' -X "$EXTEND_METHOD" -H @"$dir/boat-auth" \\
@@ -797,6 +816,7 @@ within_running_limit() {
 tick() {
   [ -s "$dir/boat-auth" ] && [ -s "$dir/config" ] || return 1
   . "$dir/config"
+  now="$(date -u +%Y%m%d%H%M%S)"
   state="$(mcp_state || cli_state || echo unknown)"
   rm -f "$dir/out" "$dir/head"
   # A T3 that answers neither way (a changed CLI, say) must not stop a sandbox that may be working,
@@ -805,11 +825,15 @@ tick() {
     if within_running_limit; then note "unknown extend $(extend)"; else note unknown; fi
     return 0
   fi
-  if [ "$state" != busy ]; then
-    note "$state"
+  if [ "$state" = idle ]; then
+    note idle
+    echo "$now" >"$dir/last-check"
     return 0
   fi
-  note "busy extend $(extend)"
+  code="$(extend)"
+  note "$state extend $code"
+  # A failed extend leaves the last check where it was, so the next one tries again.
+  case "$code" in 2??) echo "$now" >"$dir/last-check" ;; esac
 }
 case "\${1:-}" in
 start)
@@ -841,11 +865,17 @@ run)
   [ -n "$other" ] && [ "$other" != "$$" ] && exit 0
   echo "$$" >"$dir/pid"
   date +%s >"$dir/started"
+  date -u +%Y%m%d%H%M%S >"$dir/last-check"
   while tick; do sleep "\${INTERVAL_SECONDS:-${KEEP_ALIVE_INTERVAL_SECONDS}}"; done
   ;;
 *) exit 64 ;;
 esac
 `;
+
+// Written on every install and every start of T3, so a sandbox picks up a newer loop when it resumes.
+const writeKeepAliveLoop = (port: number, orElse: string) =>
+  `cat >"${KEEP_ALIVE_DIR}/loop.sh.tmp" <<'T3_KEEPALIVE_LOOP' && chmod 700 "${KEEP_ALIVE_DIR}/loop.sh.tmp" && mv "${KEEP_ALIVE_DIR}/loop.sh.tmp" "${KEEP_ALIVE_DIR}/loop.sh" || ${orElse}
+${keepAliveLoop(port)}T3_KEEPALIVE_LOOP`;
 
 /**
  * Writes the keep-alive's key, settings, and loop under T3's userdata, then starts the loop. The
@@ -877,15 +907,13 @@ MAX_RUNNING_MINUTES=${Math.max(0, Math.round(input.maxRunningMinutes))}
 PROJECT_ROOT=${shellQuote(input.projectRoot ?? "")}
 T3_KEEPALIVE_CONFIG
 mv "$dir/config.tmp" "$dir/config"
-cat >"$dir/loop.sh.tmp" <<'T3_KEEPALIVE_LOOP'
-${keepAliveLoop(input.port)}T3_KEEPALIVE_LOOP
-chmod 700 "$dir/loop.sh.tmp"
-mv "$dir/loop.sh.tmp" "$dir/loop.sh"
+${writeKeepAliveLoop(input.port, "exit 1")}
 sh "$dir/loop.sh" start`,
 });
 
-/** Starts the keep-alive loop when it is installed; part of every start of T3 on the sandbox. */
-export const KEEP_ALIVE_START = `if [ -f "${KEEP_ALIVE_DIR}/loop.sh" ]; then
+/** Updates and starts the keep-alive loop when it is installed; part of every start of T3 on the sandbox. */
+export const keepAliveStart = (port: number) => `if [ -f "${KEEP_ALIVE_DIR}/loop.sh" ]; then
+${writeKeepAliveLoop(port, "true")}
   sh "${KEEP_ALIVE_DIR}/loop.sh" start >/dev/null 2>&1 || true
 fi`;
 

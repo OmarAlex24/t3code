@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -14,6 +15,7 @@ import {
   githubAppLoginScript,
   githubLoginScript,
   KEEP_ALIVE_SCRUB,
+  keepAliveStart,
   MCP_SERVERS_SCRUB,
   mcpServersScript,
   parseEndpointReach,
@@ -573,7 +575,7 @@ describe("sandboxKeepAliveScript", () => {
 
   // Stand-ins for what the official T3 Code, curl and systemd do on a sandbox. curl logs each
   // call with the headers it read from files; the MCP server answers with the statuses in
-  // `threads`, or not at all when `down` exists.
+  // `threads` and the newest thread in `latest`, or not at all when `down` exists.
   const stubs = (home: string) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -627,8 +629,10 @@ if (call.url.endsWith("/mcp")) {
     body = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18" } });
     if (head) fs.writeFileSync(head, "HTTP/1.1 200 OK\\r\\nMcp-Session-Id: sid-1\\r\\n\\r\\n");
   } else if (data.includes("tools/call")) {
-    const statuses = JSON.parse(fs.readFileSync(home + "/threads", "utf8"));
-    const threads = statuses.map((status, index) => ({ threadId: "thread-" + index, status }));
+    // Asked by status, the busy threads; otherwise the most recently updated one, if any.
+    const threads = JSON.parse(data).params.arguments.statuses === undefined
+      ? (fs.existsSync(home + "/latest") ? [JSON.parse(fs.readFileSync(home + "/latest", "utf8"))] : [])
+      : JSON.parse(fs.readFileSync(home + "/threads", "utf8")).map((status, index) => ({ threadId: "thread-" + index, status }));
     body = JSON.stringify({ jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: JSON.stringify({ threads }) }], structuredContent: { threads, total: threads.length }, isError: false } });
   } else if (data.includes("notifications/initialized")) status = 202;
 }
@@ -745,11 +749,80 @@ if (format) process.stdout.write(String(status));
           yield* once(home);
           expect(yield* extends_(home)).toHaveLength(2);
 
+          // Every start of T3 brings an installed loop up to date, so a resume picks up a newer one.
+          const loop = yield* fs.readFileString(`${dir}/loop.sh`);
+          yield* fs.writeFileString(`${dir}/loop.sh`, "#!/bin/sh\n");
+          yield* runIn(home, keepAliveStart(3773));
+          expect(yield* fs.readFileString(`${dir}/loop.sh`)).toBe(loop);
+          expect(yield* mode(`${dir}/loop.sh`)).toBe("700");
+
           // A template keeps neither the loop nor the key.
           yield* runIn(home, KEEP_ALIVE_SCRUB);
           expect(yield* fs.exists(dir)).toBe(false);
         }),
       ),
+  );
+
+  it.live("counts work that started and ended between two checks", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = `${home}/.t3/userdata/sandbox-keepalive`;
+        yield* stubs(home);
+        yield* runIn(
+          home,
+          sandboxKeepAliveScript({
+            key,
+            extend: { method: "PATCH", url: extendUrl },
+            ttlSeconds: 2100,
+            maxRunningMinutes: 480,
+            port: 3773,
+            projectRoot: "/home/boat/work/hello",
+          }),
+        );
+        yield* fs.writeFileString(`${home}/threads`, JSON.stringify([]));
+        const lastCheck = (stamp: string) => fs.writeFileString(`${dir}/last-check`, `${stamp}\n`);
+
+        // Nothing is busy now, but a turn ran from 18:03:54 to 18:07:22, after the 18:03:36 check.
+        yield* lastCheck("20261113180336");
+        yield* fs.writeFileString(
+          `${home}/latest`,
+          JSON.stringify({
+            threadId: "t",
+            status: "completed",
+            updatedAt: "2026-11-13T18:07:22.481Z",
+          }),
+        );
+        yield* once(home);
+        const lists = (yield* curlCalls(home)).filter((call) => call.data?.includes("tools/call"));
+        // The newest thread by update, subagents included.
+        expect(JSON.parse(lists.at(-1)!.data!).params.arguments).toEqual({
+          allProjects: true,
+          includeSubagents: true,
+          limit: 1,
+        });
+        expect(yield* extends_(home)).toEqual([
+          expect.objectContaining({ method: "PATCH", data: '{"ttlSeconds":2100}' }),
+        ]);
+
+        // The next check counts from this one, so the same turn does not count again.
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(1);
+
+        // The CLI's list says the same where the MCP endpoint does not answer.
+        yield* fs.writeFileString(`${home}/down`, "");
+        yield* fs.writeFileString(
+          `${home}/cli-threads`,
+          '[{"status":"waiting","updatedAt":"2026-11-13T18:09:44.000Z"},{"status":"completed","updatedAt":"2026-11-13T17:00:00.000Z"}]',
+        );
+        yield* lastCheck("20261113180836");
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(2);
+        yield* lastCheck("20261113181336");
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(2);
+      }),
+    ),
   );
 
   it.live("keeps a sandbox up to its running limit while nothing says whether it works", () =>
@@ -799,7 +872,7 @@ if (format) process.stdout.write(String(status));
     ),
   );
 
-  it.live("records when the loop starts, for the running limit", () =>
+  it.live("records when the loop starts, for the running limit and its first check", () =>
     withHome((home) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -820,9 +893,29 @@ if (format) process.stdout.write(String(status));
         const clock = runIn(home, "date +%s").pipe(Effect.map((out) => Number(out.trim())));
         const before = yield* clock;
         yield* runIn(home, `sh "$HOME/.t3/userdata/sandbox-keepalive/loop.sh" run`);
+        const after = yield* clock;
         const started = Number((yield* fs.readFileString(`${dir}/started`)).trim());
         expect(started).toBeGreaterThanOrEqual(before);
-        expect(started).toBeLessThanOrEqual(yield* clock);
+        expect(started).toBeLessThanOrEqual(after);
+
+        // The first check counts from the start, not from work before the sandbox last stopped.
+        const iso = (seconds: number) => DateTime.formatIso(DateTime.makeUnsafe(seconds * 1000));
+        const stamp = (seconds: number) => iso(seconds).slice(0, 19).replace(/\D/g, "");
+        const lastCheck = (yield* fs.readFileString(`${dir}/last-check`)).trim();
+        expect(lastCheck >= stamp(before) && lastCheck <= stamp(after)).toBe(true);
+        yield* fs.writeFileString(`${dir}/boat-auth`, `Authorization: Bearer ${key}\n`);
+        yield* fs.writeFileString(`${home}/threads`, JSON.stringify([]));
+        yield* fs.writeFileString(
+          `${home}/latest`,
+          JSON.stringify({
+            threadId: "t",
+            status: "completed",
+            updatedAt: iso(before - 60),
+          }),
+        );
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(0);
+        expect(yield* fs.readFileString(`${dir}/log`)).toMatch(/ idle\n$/);
       }),
     ),
   );

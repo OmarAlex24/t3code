@@ -117,7 +117,7 @@ import {
   gitIdentityScript,
   KEEP_ALIVE_INTERVAL_SECONDS,
   KEEP_ALIVE_SCRUB,
-  KEEP_ALIVE_START,
+  keepAliveStart,
   MCP_SERVERS_SCRUB,
   mcpServersScript,
   NORTHFLANK_LOGIN_SCRUB,
@@ -247,14 +247,16 @@ fi`;
 
 // Also starts the keep-alive loop, which a stop ends: every resume runs this, whether T3 itself
 // comes back through systemd or nohup.
-const startScript = (serveEnvironment: Readonly<Record<string, string>> | undefined) => `set -eu
+const startScript = (
+  driver: Pick<SandboxProviderDriver, "serveEnvironment" | "serverPort">,
+) => `set -eu
 export PATH="$HOME/.local/bin:$PATH"
 if ! command -v t3 >/dev/null 2>&1; then
   echo "The t3 CLI is missing." >&2
   exit 1
 fi
-${KEEP_ALIVE_START}
-${serveScript(serveEnvironment)}`;
+${keepAliveStart(driver.serverPort)}
+${serveScript(driver.serveEnvironment)}`;
 
 // A template copies the disk, and T3's userdata holds the environment id, auth sessions, and secrets:
 // a sandbox started from it would answer as the source with the source's valid bearer sessions.
@@ -1675,7 +1677,7 @@ const make = Effect.gen(function* () {
     );
     // Built before the machine exists, so a bad driver definition cannot strand a billed sandbox.
     const installCommand = installScript(label);
-    const startCommand = startScript(driver.serveEnvironment);
+    const startCommand = startScript(driver);
     const githubToken =
       input.passGithubToken === true ? yield* hostAccess.githubToken : Option.none();
     if (input.passGithubToken === true && Option.isNone(githubToken)) {
@@ -4177,7 +4179,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       driver.execute({
         config,
         sandboxId: record.sandboxId,
-        command: startScript(driver.serveEnvironment),
+        command: startScript(driver),
         // The bridge waits out every step's limit for a turn on this sandbox's host thread.
         timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.t3Start,
       }),
