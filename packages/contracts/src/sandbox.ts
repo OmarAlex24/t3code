@@ -439,6 +439,14 @@ export const SandboxRecord = Schema.Struct({
   stoppedAt: Schema.optionalKey(TrimmedString),
   /** Set while a resume runs, from when it began, so clients can say the sandbox is starting. */
   resumingSince: Schema.optionalKey(TrimmedString),
+  /**
+   * The chat was settled and the host could not act alone: its config asks (`ask`), or deletes but
+   * the sandbox may hold work (`work`). Clients offer Delete and Keep (`sandboxes.resolveSettle`);
+   * un-settling the chat clears it.
+   */
+  settlePending: Schema.optionalKey(
+    Schema.Struct({ since: TrimmedString, reason: Schema.Literals(["ask", "work"]) }),
+  ),
   credentialEnvironment: Schema.optionalKey(TrimmedString),
   /** The template the sandbox started from, for display. */
   template: Schema.optionalKey(TrimmedString),
@@ -537,6 +545,13 @@ export const SandboxLifecycleInput = Schema.Struct({
   instanceId: TrimmedNonEmptyString,
 });
 export type SandboxLifecycleInput = typeof SandboxLifecycleInput.Type;
+
+/** The user's answer to a settled chat's `settlePending`: delete the sandbox, or keep it as it is. */
+export const SandboxResolveSettleInput = Schema.Struct({
+  instanceId: TrimmedNonEmptyString,
+  choice: Schema.Literals(["delete", "keep"]),
+});
+export type SandboxResolveSettleInput = typeof SandboxResolveSettleInput.Type;
 
 const SANDBOX_TEMPLATE_RESERVED_NAMES: ReadonlySet<string> = new Set([
   "latest",

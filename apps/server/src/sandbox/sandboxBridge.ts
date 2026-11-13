@@ -21,6 +21,7 @@ import {
   SANDBOX_HOST_PROJECTS_FOLDER,
   SANDBOX_PI_INSTANCE_ID,
   SandboxLaunchInput,
+  type SandboxResolveSettleInput,
   type SandboxLaunchMessage,
   type SandboxLaunchResult,
   type SandboxLaunchThreadInput,
@@ -65,6 +66,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SandboxProvisioner from "./SandboxProvisioner.ts";
+import * as SandboxSettle from "./SandboxSettle.ts";
 import type { SandboxLaunchLifecycle } from "./sandboxLaunches.ts";
 
 const instanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
@@ -911,8 +913,11 @@ export const layerLive = layer.pipe(Layer.provide(layerThreadRemote));
 export const rpcHandlers = Effect.gen(function* () {
   const provisionerHandlers = yield* SandboxProvisioner.rpcHandlers;
   const bridge = yield* SandboxBridge;
+  const settle = yield* SandboxSettle.SandboxSettle;
   return {
     ...provisionerHandlers,
+    [WS_METHODS.sandboxesResolveSettle]: (input: SandboxResolveSettleInput) =>
+      settle.resolve(input),
     [WS_METHODS.sandboxesLinkHostThread]: (input: SandboxLaunchThreadInput) =>
       bridge.linkHostThread(input),
     [WS_METHODS.sandboxesLaunch]: (input: SandboxLaunchInput) => bridge.launch(input),

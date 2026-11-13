@@ -579,13 +579,39 @@ Templates are saved only from a sandbox with no thread: saving deletes the sourc
 
 ### Settling and deleting a thread's sandbox
 
-The thread lives on the sandbox's own server, which this host never hears from, so settle,
-resume-on-send, and thread delete start in the client. `SandboxThreadCoordinator` (mounted once at
-the root) registers handlers in `state/sandboxThreads.ts`. `useThreadActions.settleThread` calls
-`notifySandboxThreadSettled`, which applies the config's `onSettle` (`ask` when unset). A stopped
-sandbox is already kept, so `snapshot` only says so and `delete` always asks; one still launching or
-resuming is left alone, with a toast (`sandboxSettleOutcome`). Settles the
-sandbox's server makes on its own are not hooked, since this host is not told about them.
+The host decides what a settle does to a chat's sandbox, so every entry point gets it: any client,
+the phone, an agent's MCP thread tool, a scheduled task, and `ThreadSettlementService`'s
+auto-settle. [`SandboxSettle`](../../apps/server/src/sandbox/SandboxSettle.ts) follows the
+committed `thread.settled` events of the host's thread of the chat (the mirror the bridge drives,
+matched by thread id) and applies the config's `onSettle` (`ask` when unset):
+
+- `snapshot` stops a running sandbox; a stopped one is already kept.
+- `delete` waits 10 seconds (Effect time) so the settle's Undo keeps everything, re-checks that the
+  thread is still settled, runs `checkWork`, and deletes only on `clean`, re-checking once more.
+- `ask`, a `delete` whose check is not clean, and a stopped sandbox under `delete` (its work cannot
+  be checked) record `settlePending` on the record (`reason` `ask` or `work`) instead of acting.
+  A failed stop records `ask`.
+- A launch or resume writes back the record it started with, so a settle on a starting sandbox
+  waits for it to end (woken by `listChanges` and `launchLifecycle`, with a minute's backstop),
+  then decides as above.
+
+An un-settle (`thread.unsettled`, or `thread.pinned` off a settled thread) interrupts the wait and
+clears `settlePending`. Each thread's settle is decided once: settling a settled thread keeps its
+`settledAt`, which the service remembers. The wait lives in memory, so a restart during it deletes
+nothing and records nothing. `sandboxes.resolveSettle` answers a pending decision: `delete` runs
+the normal delete, `keep` clears it.
+
+Clients show the decision, they do not make it. `SandboxThreadCoordinator` opens its settle prompt
+for a `settlePending` recorded while the app runs (older ones wait in Settings → Sandboxes, with
+Keep and Delete…, and on the chat's row as "Keep sandbox?"); Keep snapshot stops a running
+sandbox, then resolves `keep`, and Delete goes through the delete confirmation and its work check,
+then resolves `delete`. A remembered delete on a running sandbox only shows a 10-second notice
+with the settle's Undo. A settle of the sandbox's own thread happens on the sandbox's server, which
+this host never hears from, so the client also settles the host mirror (`onSettled`), and an
+un-settle, or a pin of a settled thread, un-settles it (`onUnsettled`). A chat with no host mirror
+(launched before the bridge, or whose link failed) gets no settle decision. Mobile has no sandbox
+surface; its settles reach the host thread, and the decision waits for a computer.
+
 `unsettleThread` and the composer's send on a stopped sandbox with no host mirror call
 `ensureSandboxThreadRunning`: resume, then wait for the environment to connect (4 minutes at
 most), then send. A chat the host mirrors sends on the mirror instead (see above).
@@ -595,11 +621,7 @@ sandbox's server still answers, then deletes the sandbox and forgets its environ
 first runs `sandboxes.checkWork`: `git status --porcelain` and
 `git rev-list --count HEAD --not --remotes` in the record's `repoDir`, run with a 10-second command
 timeout inside a 15-second limit. A stopped sandbox, a record without `repoDir` (launched before
-the field existed), or a timeout returns `unknown`, and the client then always asks. A remembered
-`delete` skips the prompt only when the check comes back `clean`, and only after a 10-second wait
-held in client memory: the coordinator's toast takes over the settle's Undo (`settleThread` then
-skips its own notice), and an Undo, an un-settle from anywhere, or the sandbox stopping cancels
-it. A reload during the wait deletes nothing.
+the field existed), or a timeout returns `unknown`, and the client then always asks.
 
 A bridged chat keeps its conversation in the host thread. However its sandbox goes (a delete from
 the header menu or the settle prompt, the sweep, or a new launch replacing an abandoned one), the

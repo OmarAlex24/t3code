@@ -174,6 +174,14 @@ export function createSandboxEnvironmentAtoms<R, E>(
       label: "environment-data:sandboxes:check-work",
       tag: WS_METHODS.sandboxesCheckWork,
     }),
+    sandboxesResolveSettle: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandboxes:resolve-settle",
+      tag: WS_METHODS.sandboxesResolveSettle,
+      onSuccess: ({ environmentId }, registry) =>
+        Effect.sync(() =>
+          registry.update(sandboxesListRevisionAtom(environmentId), (revision) => revision + 1),
+        ),
+    }),
     sandboxesLinkHostThread: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandboxes:link-host-thread",
       tag: WS_METHODS.sandboxesLinkHostThread,

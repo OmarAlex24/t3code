@@ -30,11 +30,13 @@ import {
   findThreadSandbox,
   isBridgedSandbox,
   isHostThreadRef,
+  newSettleDecisions,
   registerSandboxThreadHandlers,
+  sandboxMirrorOf,
   sandboxMirrorTitleUpdates,
   sandboxesToPair,
   type SandboxSettleUndo,
-  sandboxSettleOutcome,
+  settleDecisionKeys,
   shortSandboxId,
 } from "~/state/sandboxThreads";
 import { serverEnvironment } from "~/state/server";
@@ -60,22 +62,8 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 const RESUME_WAIT_MS = 4 * 60_000;
 // How long this app waits before it tries again to pair with a sandbox that refused.
 const PAIR_RETRY_MS = 2 * 60_000;
-// How long a remembered delete waits after a settle, with Undo, before it deletes anything.
+// How long the host waits after a settle, with Undo, before a remembered delete (SandboxSettle).
 export const SETTLE_DELETE_DELAY_MS = 10_000;
-
-// A settle's delete waiting out its delay. A reload drops it, so nothing is deleted then.
-type PendingSettleDelete = {
-  readonly threadRef: ScopedThreadRef;
-  readonly instanceId: string;
-  readonly settle: SandboxSettleUndo;
-  readonly timer: number;
-  readonly toastId: string;
-  // The settle reaches the thread's shell after a moment; only a later un-settle cancels.
-  readonly sawSettled: boolean;
-};
-
-const isLive = (sandbox: SandboxRecord | undefined): sandbox is SandboxRecord =>
-  sandbox !== undefined && (sandbox.state === "running" || sandbox.state === "error");
 
 type DeleteReason = "settle" | "thread" | "menu";
 
@@ -137,11 +125,9 @@ const deleteDescription = (
 const CHAT_KEPT = "The chat is kept, under Settled";
 
 /**
- * Settling, resuming and deleting a thread's own sandbox. Mounted once; the thread actions reach
- * it through `sandboxThreads.ts`, since every settle and delete path goes through them.
- *
- * A bridged thread keeps its conversation in the host thread, so deleting its sandbox loses only
- * the sandbox's disk. A legacy thread lives only on its sandbox and goes with it.
+ * Resuming and deleting a thread's sandbox, and asking what the host left to the user when a chat
+ * settled (`settlePending`); the host applies `onSettle` from its own thread of the chat. Mounted
+ * once; the thread actions reach it through `sandboxThreads.ts`.
  */
 export function SandboxThreadCoordinator() {
   const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
@@ -179,6 +165,15 @@ export function SandboxThreadCoordinator() {
   const checkWork = useAtomCommand(serverEnvironment.sandboxesCheckWork, {
     reportFailure: false,
   });
+  const resolveSettle = useAtomCommand(serverEnvironment.sandboxesResolveSettle, {
+    reportFailure: false,
+  });
+  const settleRemoteThread = useOrchestrationCommand(threadEnvironment.settle, {
+    reportFailure: false,
+  });
+  const unsettleRemoteThread = useOrchestrationCommand(threadEnvironment.unsettle, {
+    reportFailure: false,
+  });
   const saveConfig = useAtomCommand(serverEnvironment.sandboxesSaveConfig, {
     reportFailure: false,
   });
@@ -202,7 +197,6 @@ export function SandboxThreadCoordinator() {
   const [closing, setClosing] = useState<Prompt | null>(null);
   const nextId = useRef(0);
   const waiters = useRef(new Map<EnvironmentId, Array<() => void>>());
-  const pendingDeletes = useRef(new Map<string, PendingSettleDelete>());
 
   const sandboxes = list.data?.sandboxes ?? [];
   const configs = configsQuery.data?.configs ?? [];
@@ -232,9 +226,10 @@ export function SandboxThreadCoordinator() {
 
   // When this app last tried to pair with each sandbox, so a refusal is not retried at once.
   const pairAttempts = useRef(new Map<string, number>());
-  const canPair =
+  const canManage =
     provisionerEnvironmentId !== null &&
     readEnvironmentScope(provisionerEnvironmentId, AuthSettingsWriteScope);
+  const canPair = canManage;
   const unpaired = canPair
     ? sandboxesToPair(
         sandboxes,
@@ -286,9 +281,20 @@ export function SandboxThreadCoordinator() {
     }
   });
 
+  // A settle question answered elsewhere (another client, Settings, an un-settle) goes away.
+  const askable = prompts.filter(
+    (candidate) =>
+      candidate.kind !== "settle" ||
+      list.data === null ||
+      sandboxes.some(
+        (sandbox) =>
+          sandbox.instanceId === candidate.sandbox.instanceId &&
+          sandbox.settlePending !== undefined,
+      ),
+  );
   const enqueue = (prompt: Prompt) => setPrompts((current) => [...current, prompt]);
   const close = (id: number) => {
-    if (prompts[0]?.id === id) setClosing(prompts[0]);
+    if (askable[0]?.id === id) setClosing(askable[0]);
     setPrompts((current) => current.filter((prompt) => prompt.id !== id));
   };
   const patch = (id: number, work: SandboxCheckWorkResult) =>
@@ -330,22 +336,34 @@ export function SandboxThreadCoordinator() {
     );
   };
 
-  const keepSnapshot = async (sandbox: SandboxRecord) => {
+  // The answer to a settle the host asked about: stop the machine if it runs, and keep it.
+  const keepSettled = async (sandbox: SandboxRecord) => {
     if (provisionerEnvironmentId === null) return;
-    if (sandbox.state === "stopped") {
-      keptToast(sandbox, `Sandbox ${shortSandboxId(sandbox.sandboxId)} is already stopped`);
-      return;
+    if (sandbox.state === "running") {
+      const result = await stopSandbox({
+        environmentId: provisionerEnvironmentId,
+        input: { instanceId: sandbox.instanceId },
+      });
+      if (result._tag === "Failure") {
+        void list.refresh();
+        if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not stop the sandbox");
+        return;
+      }
     }
-    const result = await stopSandbox({
+    const kept = await resolveSettle({
       environmentId: provisionerEnvironmentId,
-      input: { instanceId: sandbox.instanceId },
+      input: { instanceId: sandbox.instanceId, choice: "keep" },
     });
-    void list.refresh();
-    if (result._tag === "Failure") {
-      if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not stop the sandbox");
+    if (kept._tag === "Failure") {
+      if (!isAtomCommandInterrupted(kept)) failureToast(kept, "Could not keep the sandbox");
       return;
     }
-    keptToast(sandbox, `Stopped sandbox ${shortSandboxId(sandbox.sandboxId)}`);
+    keptToast(
+      sandbox,
+      sandbox.state === "running"
+        ? `Stopped sandbox ${shortSandboxId(sandbox.sandboxId)}`
+        : `Kept sandbox ${shortSandboxId(sandbox.sandboxId)}`,
+    );
   };
 
   // The sandbox's thread goes with the sandbox. A kept host thread, which shares its id, takes its
@@ -376,17 +394,27 @@ export function SandboxThreadCoordinator() {
     sandbox: SandboxRecord,
     threadRef: ScopedThreadRef,
     title: string,
-    options: { readonly bridged: boolean; readonly hostThreadDeleted: boolean },
+    options: {
+      readonly bridged: boolean;
+      readonly hostThreadDeleted: boolean;
+      // The answer to the host's settle question, which it records as answered.
+      readonly settle: boolean;
+    },
   ) => {
     if (provisionerEnvironmentId === null) return false;
-    const result = await deleteSandbox({
-      environmentId: provisionerEnvironmentId,
-      input: {
-        provider: sandbox.provider,
-        sandboxId: sandbox.sandboxId,
-        instanceId: sandbox.instanceId,
-      },
-    });
+    const result = options.settle
+      ? await resolveSettle({
+          environmentId: provisionerEnvironmentId,
+          input: { instanceId: sandbox.instanceId, choice: "delete" },
+        })
+      : await deleteSandbox({
+          environmentId: provisionerEnvironmentId,
+          input: {
+            provider: sandbox.provider,
+            sandboxId: sandbox.sandboxId,
+            instanceId: sandbox.instanceId,
+          },
+        });
     void list.refresh();
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not delete the sandbox");
@@ -436,35 +464,16 @@ export function SandboxThreadCoordinator() {
         };
   };
 
-  // Asks before every delete, with what the check found, unless a remembered choice found nothing
-  // to lose: then the delete goes ahead and the toast says what went.
+  // Asks before every delete, with what the check found.
   const startDelete = (
     sandbox: SandboxRecord,
     threadRef: ScopedThreadRef,
     reason: DeleteReason,
-    options: {
-      readonly deleteThread?: () => Promise<{ readonly _tag: string }>;
-      readonly remembered?: boolean;
-    } = {},
+    options: { readonly deleteThread?: () => Promise<{ readonly _tag: string }> } = {},
   ) =>
     new Promise<void>((resolve) => {
       const id = nextId.current++;
       const bridged = bridgedOf(sandbox);
-      if (options.remembered === true) {
-        void runCheck(sandbox).then((work) => {
-          if (work.status === "clean") {
-            void removeSandbox(
-              sandbox,
-              threadRef,
-              `Deleted sandbox ${shortSandboxId(sandbox.sandboxId)}`,
-              { bridged, hostThreadDeleted: false },
-            ).then(() => resolve());
-            return;
-          }
-          enqueue({ kind: "delete", id, threadRef, sandbox, reason, bridged, work, done: resolve });
-        });
-        return;
-      }
       enqueue({
         kind: "delete",
         id,
@@ -518,47 +527,86 @@ export function SandboxThreadCoordinator() {
       prompt.reason === "thread"
         ? `Deleted the thread and sandbox ${shortSandboxId(sandbox.sandboxId)}`
         : `Deleted sandbox ${shortSandboxId(sandbox.sandboxId)}`,
-      { bridged: prompt.bridged, hostThreadDeleted },
+      { bridged: prompt.bridged, hostThreadDeleted, settle: prompt.reason === "settle" },
     );
     prompt.done();
   };
 
-  const isSettled = (threadRef: ScopedThreadRef) =>
-    threads.find(
-      (thread) =>
-        thread.environmentId === threadRef.environmentId && thread.id === threadRef.threadId,
-    )?.settledOverride === "settled";
+  // The chat a settle decision is about: the sandbox's own thread where it lists, else the host's.
+  const decisionThreadRef = (sandbox: SandboxRecord): ScopedThreadRef | null => {
+    if (sandbox.threadId === undefined) return null;
+    const own =
+      sandbox.environmentId === null
+        ? undefined
+        : threads.find(
+            (thread) =>
+              thread.environmentId === sandbox.environmentId && thread.id === sandbox.threadId,
+          );
+    if (own !== undefined) return { environmentId: own.environmentId, threadId: own.id };
+    return provisionerEnvironmentId === null
+      ? null
+      : { environmentId: provisionerEnvironmentId, threadId: sandbox.threadId };
+  };
 
-  const cancelSettleDelete = useStableCallback((key: string) => {
-    const entry = pendingDeletes.current.get(key);
-    if (entry === undefined) return;
-    pendingDeletes.current.delete(key);
-    window.clearTimeout(entry.timer);
-    toastManager.close(entry.toastId);
-    entry.settle.claim.finish();
+  // The decisions already in the list when this app first read it; Settings and the row show those.
+  const seenDecisions = useRef<Set<string> | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks about a settle decision the host records while this app runs
+  useEffect(() => {
+    if (list.data === null || !canManage) return;
+    if (seenDecisions.current === null) {
+      seenDecisions.current = settleDecisionKeys(sandboxes);
+      return;
+    }
+    for (const { key, sandbox } of newSettleDecisions(sandboxes, seenDecisions.current)) {
+      seenDecisions.current.add(key);
+      const threadRef = decisionThreadRef(sandbox);
+      if (threadRef === null) continue;
+      enqueue({
+        kind: "settle",
+        id: nextId.current++,
+        threadRef,
+        sandbox,
+        bridged: bridgedOf(sandbox),
+      });
+    }
   });
 
-  // Settling with a remembered delete deletes nothing yet: the toast offers the settle's Undo first.
-  const scheduleSettleDelete = (
-    sandbox: SandboxRecord,
-    threadRef: ScopedThreadRef,
-    settle: SandboxSettleUndo,
-  ) => {
-    const key = scopedThreadKey(threadRef);
-    cancelSettleDelete(key);
+  // The host learns of a settle from its own thread of the chat; the sandbox's thread is not its.
+  const hostMirrorOf = (threadRef: ScopedThreadRef) => {
+    const sandbox = findSandbox(threadRef);
+    return sandbox === undefined || isHostThreadRef(sandbox, threadRef)
+      ? null
+      : (sandboxMirrorOf(sandboxes, threadRef, provisionerEnvironmentId)?.mirror ?? null);
+  };
+
+  const onSettled = useStableCallback((threadRef: ScopedThreadRef, settle: SandboxSettleUndo) => {
+    const sandbox = findSandbox(threadRef);
+    if (sandbox === undefined) return false;
+    const mirror = hostMirrorOf(threadRef);
+    if (mirror !== null) {
+      void settleRemoteThread({
+        environmentId: mirror.environmentId,
+        input: { threadId: mirror.threadId },
+      });
+    }
+    if (configOf(sandbox)?.onSettle !== "delete" || sandbox.state !== "running") return false;
+    // Says what the host will do, with the settle's Undo, which keeps everything.
     const short = shortSandboxId(sandbox.sandboxId);
-    const toastId = toastManager.add(
+    toastManager.add(
       stackedThreadToast({
         type: "warning",
         title: `Settled · sandbox ${short} will be deleted in 10 s`,
-        description: bridgedOf(sandbox)
-          ? `${CHAT_KEPT}; only work on the sandbox's disk is lost.`
-          : "The conversation is on the sandbox, so it goes too.",
-        timeout: 0,
+        description: `${
+          bridgedOf(sandbox)
+            ? `${CHAT_KEPT}; only work on the sandbox's disk is lost.`
+            : "The conversation is on the sandbox, so it goes too."
+        } If it holds unpushed work, you are asked first.`,
+        timeout: SETTLE_DELETE_DELAY_MS,
         actionProps: {
           children: "Undo",
           onClick: () => {
-            cancelSettleDelete(key);
+            if (!settle.claim.isCurrent()) return;
+            settle.claim.finish();
             void settle.undo().then((result) => {
               if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
                 failureToast(result, "Failed to undo settle");
@@ -568,100 +616,17 @@ export function SandboxThreadCoordinator() {
         },
       }),
     );
-    pendingDeletes.current.set(key, {
-      threadRef,
-      instanceId: sandbox.instanceId,
-      settle,
-      timer: window.setTimeout(() => runSettleDelete(key), SETTLE_DELETE_DELAY_MS),
-      toastId,
-      sawSettled: isSettled(threadRef),
-    });
-  };
-
-  const runSettleDelete = useStableCallback((key: string) => {
-    const entry = pendingDeletes.current.get(key);
-    if (entry === undefined) return;
-    pendingDeletes.current.delete(key);
-    toastManager.close(entry.toastId);
-    const sandbox = sandboxes.find((candidate) => candidate.instanceId === entry.instanceId);
-    if (!entry.settle.claim.isCurrent() || !isSettled(entry.threadRef) || !isLive(sandbox)) {
-      entry.settle.claim.finish();
-      return;
-    }
-    void startDelete(sandbox, entry.threadRef, "settle", { remembered: true }).finally(() =>
-      entry.settle.claim.finish(),
-    );
+    window.setTimeout(() => settle.claim.finish(), SETTLE_DELETE_DELAY_MS);
+    return true;
   });
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- cancels a settle's pending delete once the thread is un-settled or its sandbox stops or goes elsewhere
-  useEffect(() => {
-    for (const [key, entry] of pendingDeletes.current) {
-      const settled = isSettled(entry.threadRef);
-      if (settled && !entry.sawSettled) {
-        pendingDeletes.current.set(key, { ...entry, sawSettled: true });
-      }
-      const sandbox =
-        list.data === null
-          ? null
-          : sandboxes.find((candidate) => candidate.instanceId === entry.instanceId);
-      if ((entry.sawSettled && !settled) || (sandbox !== null && !isLive(sandbox))) {
-        cancelSettleDelete(key);
-      }
-    }
-  });
-
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a pin, un-settle or new settle of the thread supersedes the settle's claim, and with it the pending delete
-  useEffect(() => {
-    const pending = pendingDeletes.current;
-    const unsubscribe = ThreadUndo.subscribe(() => {
-      for (const [key, entry] of pending) {
-        if (!entry.settle.claim.isCurrent()) cancelSettleDelete(key);
-      }
+  const onUnsettled = useStableCallback((threadRef: ScopedThreadRef) => {
+    const mirror = hostMirrorOf(threadRef);
+    if (mirror === null) return;
+    void unsettleRemoteThread({
+      environmentId: mirror.environmentId,
+      input: { threadId: mirror.threadId, reason: "user" },
     });
-    return () => {
-      unsubscribe();
-      for (const key of pending.keys()) cancelSettleDelete(key);
-    };
-  }, [cancelSettleDelete]);
-
-  const onSettled = useStableCallback((threadRef: ScopedThreadRef, settle: SandboxSettleUndo) => {
-    const sandbox = findSandbox(threadRef);
-    if (sandbox === undefined) return false;
-    switch (sandboxSettleOutcome(sandbox, configOf(sandbox)?.onSettle)) {
-      case "snapshot":
-      case "kept":
-        void keepSnapshot(sandbox);
-        break;
-      case "delete-later":
-        scheduleSettleDelete(sandbox, threadRef, settle);
-        return true;
-      // Its work cannot be checked, so the delete always asks, and the settle keeps its own Undo.
-      case "confirm-delete":
-        void startDelete(sandbox, threadRef, "settle");
-        break;
-      case "ask":
-        enqueue({
-          kind: "settle",
-          id: nextId.current++,
-          threadRef,
-          sandbox,
-          bridged: bridgedOf(sandbox),
-        });
-        break;
-      case "starting":
-        toastManager.add(
-          stackedThreadToast({
-            type: "info",
-            title: `Sandbox ${shortSandboxId(sandbox.sandboxId)} is still starting`,
-            description:
-              "It was left as it is. Stop or delete it under Settings → Sandboxes once it runs.",
-          }),
-        );
-        break;
-      case "none":
-        break;
-    }
-    return false;
   });
 
   const ensureRunning = useStableCallback(async (threadRef: ScopedThreadRef) => {
@@ -738,14 +703,23 @@ export function SandboxThreadCoordinator() {
         isSandboxThread,
         sandboxState,
         onSettled,
+        onUnsettled,
         ensureRunning,
         deleteThreadAndSandbox,
         deleteSandbox: deleteOnly,
       }),
-    [isSandboxThread, sandboxState, onSettled, ensureRunning, deleteThreadAndSandbox, deleteOnly],
+    [
+      isSandboxThread,
+      sandboxState,
+      onSettled,
+      onUnsettled,
+      ensureRunning,
+      deleteThreadAndSandbox,
+      deleteOnly,
+    ],
   );
 
-  const open = prompts[0];
+  const open = askable[0];
   const prompt = open ?? closing;
   // One dialog stays mounted, as in ConfirmDialogHost, and shows the queue's first prompt.
   return (
@@ -783,7 +757,7 @@ export function SandboxThreadCoordinator() {
             onKeep={(rememberChoice) => {
               close(prompt.id);
               if (rememberChoice) void remember(prompt.sandbox, "snapshot");
-              void keepSnapshot(prompt.sandbox);
+              void keepSettled(prompt.sandbox);
             }}
             onDelete={(rememberChoice) => {
               close(prompt.id);
@@ -836,6 +810,9 @@ function SandboxThreadPrompt({
             <AlertDialogDescription>
               {threadTitle === null ? "This chat" : `"${threadTitle}"`}{" "}
               {prompt.bridged ? "runs on" : "lives on"} {providerLabel} sandbox {short}.{" "}
+              {prompt.sandbox.settlePending?.reason === "work"
+                ? "Its settings delete it on settle, but it may hold work that hasn't been pushed. "
+                : ""}
               {prompt.sandbox.state === "stopped"
                 ? "It is stopped, so its work can't be checked. A snapshot keeps its disk, and sending a message resumes it."
                 : "A snapshot stops the machine and keeps its disk, and sending a message resumes it."}

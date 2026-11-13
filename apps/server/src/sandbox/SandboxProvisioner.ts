@@ -618,6 +618,11 @@ export class SandboxProvisioner extends Context.Service<
     readonly checkWork: (
       input: SandboxLifecycleInput,
     ) => Effect.Effect<SandboxCheckWorkResult, SandboxProviderError>;
+    /** Records or clears the decision a settled chat waits on; false when the record is gone. */
+    readonly setSettlePending: (
+      instanceId: string,
+      pending: SandboxRecord["settlePending"],
+    ) => Effect.Effect<boolean>;
     /**
      * Runs one of T3 Code's own scripts on a running sandbox through its provider, as the poll for
      * its agents' sub-sandbox requests does. Fails when the sandbox is gone or not running.
@@ -3716,6 +3721,8 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     const environmentWarning = agent === null ? null : yield* agent.finish();
     if (instanceId !== undefined) yield* records.remove(instanceId).pipe(Effect.orDie);
     if (Option.isSome(record)) yield* PubSub.publish(removedRecords, record.value);
+    // The host deletes on its own after a settle; other clients drop the row without a refresh.
+    yield* listChanged;
     // The bearer dies with the machine; only this server's copy is left to clear.
     if (Option.isSome(record) && record.value.bridge !== undefined) {
       yield* secrets.remove(record.value.bridge.secret).pipe(Effect.ignore);
@@ -3832,6 +3839,23 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       unpushedCommits: report.commits,
     } satisfies SandboxCheckWorkResult;
   });
+
+  const setSettlePending: SandboxProvisioner["Service"]["setSettlePending"] = Effect.fn(
+    "SandboxProvisioner.setSettlePending",
+  )(function* (instanceId, pending) {
+    const stored = yield* records.get(instanceId);
+    if (Option.isNone(stored)) return false;
+    if (pending === undefined && stored.value.settlePending === undefined) return true;
+    const { settlePending: _settlePending, ...rest } = stored.value;
+    // A new `updatedAt` makes a sweep that read the record earlier skip its write.
+    yield* records.put({
+      ...rest,
+      ...(pending === undefined ? {} : { settlePending: pending }),
+      updatedAt: yield* nowIso,
+    });
+    yield* listChanged;
+    return true;
+  }, Effect.orDie);
 
   const runScript: SandboxProvisioner["Service"]["runScript"] = Effect.fn(
     "SandboxProvisioner.runScript",
@@ -4738,6 +4762,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     stop,
     resume,
     checkWork,
+    setSettlePending,
     runScript,
     templates,
     saveTemplate,
