@@ -1538,6 +1538,11 @@ export function createServerEnvironmentAtoms<R, E>(
         );
       },
     }),
+    usageSandboxShare: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:usage-sandbox-share",
+      tag: WS_METHODS.serverGetUsageSandboxShare,
+      staleTimeMs: 60_000,
+    }),
     resourceTelemetry: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:resource-telemetry",
       tag: WS_METHODS.subscribeResourceTelemetry,

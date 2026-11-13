@@ -10,13 +10,18 @@ import {
 } from "@t3tools/contracts";
 import { refreshUsage, usageSummaryInput } from "@t3tools/client-runtime/state/usage";
 import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
+import {
+  summarizeSandboxShare,
+  type SandboxShareSummary,
+} from "@t3tools/client-runtime/state/usage-sandbox-share";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useState } from "react";
 
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentPresentations } from "./presentation";
-import { useSandboxFollowers } from "./sandboxes";
+import { useEnvironmentQuery } from "./query";
+import { useSandboxFollowers, useSandboxProvisionerEnvironmentId } from "./sandboxes";
 import { serverEnvironment } from "./server";
 import { environmentSession, readEnvironmentScope } from "./session";
 
@@ -289,4 +294,28 @@ export function useUsage(
     isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,
   };
+}
+
+/**
+ * The sandbox host's local versus sandbox chats, while the host is among the environments shown.
+ * Null until it answers, and when it can't read diagnostics.
+ */
+export function useUsageSandboxShare(
+  environments: readonly EnvironmentUsageStatus[],
+  timeZone: string,
+): SandboxShareSummary | null {
+  const hostEnvironmentId = useSandboxProvisionerEnvironmentId();
+  const host = environments.find(
+    (environment) =>
+      environment.environmentId === hostEnvironmentId && environment.canReadDiagnostics,
+  );
+  const query = useEnvironmentQuery(
+    host === undefined
+      ? null
+      : serverEnvironment.usageSandboxShare({
+          environmentId: host.environmentId,
+          input: { timeZone },
+        }),
+  );
+  return query.data === null ? null : summarizeSandboxShare(query.data);
 }
