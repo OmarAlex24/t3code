@@ -395,8 +395,10 @@ without pairing with the sandbox.
   is served by the host ([`SandboxMirror.ts`](../../apps/server/src/sandbox/SandboxMirror.ts)) through
   the bridge's link and bearer: `sandboxes.subscribeThreadMirror` (orchestration read) follows the
   sandbox's own `subscribeThread` and sends the thread's provider, selection, agents and the runs
-  their turn is told from, only when one of those changes; `sandboxes.setThreadModel`
-  (orchestration operate) sets a pick on the sandbox thread's provider and on the mirror, or on
+  their turn is told from, its branch and its visible linked pull requests (without their
+  watches), only when one of those changes. The mirror's folder is no repository, so every
+  client's details show the branch and pull requests from this; links and watches stay on the
+  sandbox's thread. `sandboxes.setThreadModel` (orchestration operate) sets a pick on the sandbox thread's provider and on the mirror, or on
   the mirror alone while the sandbox is stopped, for the bridge to hand over. A stopped or
   unreachable sandbox shows as `available: false` with what the host last read (kept in memory, so
   a host restart forgets it), retried every 20 seconds while a client follows it. Until either source

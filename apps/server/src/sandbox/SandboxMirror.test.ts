@@ -10,6 +10,7 @@ import {
   type SandboxThreadMirror,
   type ServerProvider,
   ThreadId,
+  type ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import { SandboxBridgeError, type SandboxSession } from "@t3tools/sandbox-bridge";
 import { bridgeLinkSecretName, type SandboxBridgeLink } from "@t3tools/sandbox-bridge/link";
@@ -76,6 +77,19 @@ const subagent = (id: string, runId: string, status: string): OrchestrationV2Sub
     status,
     updatedAt: at,
   }) as unknown as OrchestrationV2Subagent;
+
+const pullRequest = (number: number, overrides: Partial<ThreadPullRequestLink> = {}) =>
+  ({
+    host: "github.com",
+    repository: "acme/app",
+    number,
+    url: `https://github.com/acme/app/pull/${number}`,
+    source: "agent",
+    linkedAt: "2026-11-13T10:00:00.000Z",
+    snapshot: null,
+    stack: null,
+    ...overrides,
+  }) as ThreadPullRequestLink;
 
 const projection = (overrides: Partial<OrchestrationV2ThreadProjection> = {}) =>
   ({
@@ -224,6 +238,62 @@ describe("SandboxMirror", () => {
     }),
   );
 
+  it.effect("shows the sandbox thread's branch and linked pull requests, not its watches", () =>
+    Effect.gen(function* () {
+      const { sandbox, layer } = yield* makeHarness;
+      yield* Effect.gen(function* () {
+        const views = yield* follow(threadId);
+        const watched = pullRequest(48, {
+          watch: { startedAt: "2026-11-13T10:00:00.000Z" } as ThreadPullRequestLink["watch"],
+        });
+        const thread = {
+          id: threadId,
+          modelSelection: opus,
+          branch: "fix/one",
+          pullRequests: [watched, pullRequest(47, { source: "stack-dismissed" })],
+        };
+        yield* Queue.offer(
+          sandbox.items,
+          snapshot(projection({ thread } as unknown as Partial<OrchestrationV2ThreadProjection>)),
+        );
+        const first = yield* Queue.take(views);
+        expect(first.branch).toBe("fix/one");
+        expect(first.pullRequests).toEqual([pullRequest(48)]);
+
+        // A thread event that changes neither sends nothing.
+        yield* Queue.offer(sandbox.items, event("thread.visited", thread));
+        yield* Queue.offer(
+          sandbox.items,
+          event("thread.pull-request-synced", {
+            ...thread,
+            pullRequests: [watched, pullRequest(49)],
+          }),
+        );
+        expect((yield* Queue.take(views)).pullRequests?.map((link) => link.number)).toEqual([
+          48, 49,
+        ]);
+
+        const synced = pullRequest(49, {
+          snapshot: { state: "merged", title: "Ship it" } as ThreadPullRequestLink["snapshot"],
+        });
+        yield* Queue.offer(sandbox.items, event("thread.pull-request-link-updated", synced));
+        expect((yield* Queue.take(views)).pullRequests?.[1]).toEqual(synced);
+
+        yield* Queue.offer(
+          sandbox.items,
+          event("thread.metadata-updated", {
+            ...thread,
+            branch: "fix/two",
+            pullRequests: [watched, synced],
+          }),
+        );
+        const moved = yield* Queue.take(views);
+        expect(moved.branch).toBe("fix/two");
+        expect(moved.pullRequests).toEqual([pullRequest(48), synced]);
+      }).pipe(Effect.scoped, Effect.provide(layer));
+    }),
+  );
+
   it.effect("keeps only the runs the agents' turn is told from", () =>
     Effect.sync(() => {
       const runs = [
@@ -288,6 +358,8 @@ describe("SandboxMirror", () => {
           modelSelection: null,
           runs: [],
           subagents: [],
+          branch: null,
+          pullRequests: [],
         });
       }).pipe(Effect.scoped, Effect.provide(layer));
     }),
