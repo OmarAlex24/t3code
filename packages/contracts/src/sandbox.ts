@@ -253,14 +253,14 @@ export const DEFAULT_SANDBOX_MAX_RUNNING_MINUTES = 480;
 /**
  * The longest each step of a sandbox resume may take on the host: the provider starting the
  * machine (every driver polls 90 times, 2 seconds apart), installing a keep-alive key, rejoining a
- * tailnet, starting T3 Code on it, and adding T3 Code's agent skill when it is missing.
+ * tailnet, starting T3 Code on it, and rewriting T3 Code's agent skill and instructions.
  */
 export const SANDBOX_RESUME_STEP_SECONDS = {
   machineStart: 180,
   keepAlive: 60,
   tailnetRejoin: 420,
   t3Start: 180,
-  agentSkill: 30,
+  agentGuidance: 30,
   subSandboxHelper: 30,
 } as const;
 
