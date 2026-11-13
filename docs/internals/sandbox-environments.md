@@ -409,10 +409,11 @@ without pairing with the sandbox.
   thread. The host card waits 280 seconds, under `fetch`'s five-minute wait for response headers;
   answered on the sandbox first, the bridge drops its call, which closes the card.
 - **Cancel.** The `sandboxes` instance has no native steering, so the host steers by cancelling
-  the prompt and restarting the run with the new message. A cancel that is not the user's Stop
-  (no runtime restart requested) carries `_meta` `SANDBOX_BRIDGE_CANCEL_META: "steer"`
-  (`steerCancelMeta` on the ACP flavor); the bridge ends the host turn `cancelled` and leaves the
-  sandbox working, and the next prompt sends the message with `deliveryIntent: "auto"`, as any
+  the prompt and restarting the run with the new message. Only that restart's cancel (the
+  interrupt's `steer`, set by `interruptAndAwaitTerminal`) carries `_meta`
+  `SANDBOX_BRIDGE_CANCEL_META: "steer"` (`steerCancelMeta` on the ACP flavor); a detach, as
+  force-stop and session replacement do, is a Stop like any other cancel. On a steer the bridge
+  ends the host turn `cancelled` and leaves the sandbox working, and the next prompt sends the message with `deliveryIntent: "auto"`, as any
   chat send does, so a busy sandbox thread takes it as a steer or queues it. Every send uses
   that intent. Any other cancel is Stop: `thread.stop` where the sandbox advertises it (which, as
   in any chat, also stops the thread's delegated tasks), else `run.interrupt`.
