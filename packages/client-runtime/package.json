@@ -383,6 +383,10 @@
       "types": "./src/state/sandboxMirror.ts",
       "default": "./src/state/sandboxMirror.ts"
     },
+    "./state/sandbox-settle": {
+      "types": "./src/state/sandboxSettle.ts",
+      "default": "./src/state/sandboxSettle.ts"
+    },
     "./state/thread-subagents": {
       "types": "./src/state/threadSubagents.ts",
       "default": "./src/state/threadSubagents.ts"

@@ -1,6 +1,11 @@
-import { type EnvironmentId, type ServerSettings, WS_METHODS } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  type ServerSettings,
+  type ThreadId,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as Persistence from "../platform/persistence.ts";
@@ -9,6 +14,11 @@ import {
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
+import { type SandboxSettleDecision, sandboxSettleDecisionOf } from "./sandboxSettle.ts";
+
+const NO_SETTLE_DECISION = Atom.make<SandboxSettleDecision | null>(null).pipe(
+  Atom.withLabel("environment-data:sandboxes:settle-decision:none"),
+);
 
 /** The settings the server reads its sandbox host facts from, as one comparable value. */
 const sandboxHostSettingsKey = (
@@ -97,8 +107,28 @@ export function createSandboxEnvironmentAtoms<R, E>(
     refreshTrigger: ({ environmentId }) => sandboxesListTriggerAtom(environmentId),
   });
 
+  const settleDecisionAtom = Atom.family((key: string) => {
+    const [environmentId, threadId] = JSON.parse(key) as [EnvironmentId, ThreadId];
+    return Atom.make((get) => {
+      const result = get(sandboxesList({ environmentId, input: undefined }));
+      return AsyncResult.isSuccess(result)
+        ? sandboxSettleDecisionOf(result.value.sandboxes, threadId)
+        : null;
+    }).pipe(Atom.withLabel(`environment-data:sandboxes:settle-decision:${key}`));
+  });
+
   return {
     sandboxesProviders,
+    /**
+     * The settle decision the host waits on for a sandbox chat's thread there; null for none, and
+     * for a null target, which reads no list.
+     */
+    sandboxesSettleDecision: (
+      target: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null,
+    ) =>
+      target === null
+        ? NO_SETTLE_DECISION
+        : settleDecisionAtom(JSON.stringify([target.environmentId, target.threadId])),
     sandboxesEnvironments,
     sandboxesLimits,
     sandboxesTemplates,

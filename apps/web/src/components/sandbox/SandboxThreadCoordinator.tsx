@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
+import { describeSandboxWork } from "@t3tools/client-runtime/state/sandbox-settle";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -86,22 +87,6 @@ type Prompt =
       readonly deleteThread?: () => Promise<{ readonly _tag: string }>;
       readonly done: () => void;
     };
-
-const describeWork = (work: SandboxCheckWorkResult) => {
-  if (work.status === "clean") return "No uncommitted or unpushed work.";
-  if (work.status === "unknown") {
-    return `Couldn't check for unpushed work. ${work.detail ?? ""}`.trim();
-  }
-  const parts = [
-    ...(work.uncommittedFiles === 0
-      ? []
-      : [`${work.uncommittedFiles} uncommitted ${work.uncommittedFiles === 1 ? "file" : "files"}`]),
-    ...(work.unpushedCommits === 0
-      ? []
-      : [`${work.unpushedCommits} unpushed ${work.unpushedCommits === 1 ? "commit" : "commits"}`]),
-  ];
-  return `${parts.join(" and ")} would be lost.`;
-};
 
 const deleteDescription = (
   prompt: Extract<Prompt, { kind: "delete" }>,
@@ -869,7 +854,7 @@ function SandboxThreadPrompt({
                 Checking for unpushed work…
               </>
             ) : (
-              describeWork(prompt.work)
+              describeSandboxWork(prompt.work)
             )}
           </p>
           <AlertDialogFooter>
