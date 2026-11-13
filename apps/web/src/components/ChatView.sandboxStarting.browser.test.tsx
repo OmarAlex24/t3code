@@ -1,6 +1,12 @@
 import { secondTick } from "@t3tools/client-runtime/clock";
 import { createMemoryHistory } from "@tanstack/react-router";
-import { EnvironmentId, RunId, type SandboxRecord } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  RunId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  type SandboxRecord,
+} from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import type * as Context from "effect/Context";
 import { expect, it, vi } from "vite-plus/test";
@@ -15,6 +21,7 @@ import { getRouter } from "~/router";
 import {
   ENVIRONMENT_ID,
   installFakeEnvironment,
+  PROJECT_ID,
   runningRun,
   threadWithHistory,
   userItem,
@@ -138,4 +145,71 @@ it("a stopped sandbox's chat shows the run its machine stopped in as stopped, no
     .element(page.getByRole("button", { name: "Stop generation" }))
     .not.toBeInTheDocument();
   await page.screenshot({ path: "__screenshots__/sandbox-stopped-halted-run.png" });
+});
+
+it("a message on a sandbox chat's mirror reads as queued while its sandbox starts", async () => {
+  // The host's run resumed the sandbox and waits at the bridge, which says "Starting sandbox".
+  const bridge = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
+  const base = threadWithHistory("thread-mirror", 1);
+  const mirror = {
+    ...base,
+    modelSelection: { instanceId: bridge, model: "sandbox" },
+    runs: [
+      ...base.runs,
+      {
+        ...runningRun(base.id, "thread-mirror-run-1", 2, "thread-mirror-user-1"),
+        providerInstanceId: bridge,
+      },
+    ],
+    items: [
+      ...base.items,
+      userItem(base.id, RunId.make("thread-mirror-run-1"), "thread-mirror-user-1", 2, "Ship it"),
+    ],
+  };
+  const resumingSince = new Date(secondTick.getSnapshot() - 3_000).toISOString();
+  const sandboxes = [
+    {
+      instanceId: "instance-1",
+      environmentId: EnvironmentId.make(ENVIRONMENT_ID),
+      configId: "config-1",
+      threadId: mirror.id,
+      provider: "boat",
+      sandboxId: "bx_46wrabcd",
+      label: "render on Boat small",
+      size: "small",
+      state: "stopped",
+      createdAt: "2026-11-01T10:00:00.000Z",
+      updatedAt: resumingSince,
+      httpBaseUrl: "https://bx.example.test",
+      runningSince: null,
+      stoppedAt: "2026-11-10T11:00:00.000Z",
+      resumingSince,
+      maxRunningMinutes: 480,
+      hostProjectId: PROJECT_ID,
+    },
+  ] satisfies ReadonlyArray<SandboxRecord>;
+  using _environment = installFakeEnvironment([mirror], { sandboxes });
+  __setClientSettingsForTests({
+    ...DEFAULT_CLIENT_SETTINGS,
+    onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+  });
+  await page.viewport(1100, 700);
+
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${mirror.id}`] }),
+  );
+  await router.load();
+  await using _app = await render(<AppRoot router={router} />, { router: false });
+  await expect.element(page.getByText("Answer 0 for thread-mirror.").first()).toBeVisible();
+
+  await expect.element(page.getByText(/^Starting sandbox bx_46wr$/).first()).toBeVisible();
+  await expect.element(page.getByLabelText("Queued message 1 of 1, not sent")).toBeVisible();
+  // Nothing runs until the sandbox answers: no timer, and the queued row, not the composer, stops it.
+  await expect.element(page.getByText(/^Working for/)).not.toBeInTheDocument();
+  await expect
+    .element(page.getByRole("button", { name: "Stop generation" }))
+    .not.toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "Remove queued message" })).toBeEnabled();
+  await expect.element(page.getByRole("button", { name: /^Send now/ })).not.toBeInTheDocument();
+  await page.screenshot({ path: "__screenshots__/sandbox-starting-queued.png" });
 });

@@ -1,17 +1,22 @@
 import {
   type EnvironmentId,
   type ModelSelection,
+  type OrchestrationV2ThreadProjection,
   ProviderInstanceId,
+  type RunId,
   SANDBOX_BRIDGE_INSTANCE_ID,
+  type SandboxRecord,
   type SandboxThreadMirror,
   type ServerProvider,
   type ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import type { EnvironmentThreadState } from "./threadState.ts";
 import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
@@ -89,6 +94,117 @@ export const sandboxMirrorPickerSource = (input: {
       };
 };
 
+// "waiting" asks the user, which the bridge does only once it reaches the sandbox.
+const AT_BRIDGE_BEFORE_SANDBOX = new Set(["preparing", "starting", "running"]);
+
+/**
+ * The run on a sandbox chat's host mirror that waits at the bridge while its stopped sandbox
+ * starts: the run resumes the sandbox, and the bridge sends its message once the sandbox answers.
+ * Null for any other thread, and once the host lists the sandbox running.
+ */
+export const sandboxStartRunId = (
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  sandboxes: ReadonlyArray<SandboxRecord>,
+): RunId | null => {
+  const runId = bridgeRunId(projection);
+  if (runId === null) return null;
+  const sandbox = sandboxes.find(
+    (record) => record.threadId === projection.thread.id && record.state !== "deleted",
+  );
+  return sandbox !== undefined &&
+    (sandbox.state === "stopped" || sandbox.resumingSince !== undefined)
+    ? runId
+    : null;
+};
+
+const bridgeRunId = (
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+): RunId | null =>
+  isSandboxMirrorThread(projection.thread)
+    ? (projection.runs.findLast(
+        (run) =>
+          run.providerInstanceId === bridgeInstanceId && AT_BRIDGE_BEFORE_SANDBOX.has(run.status),
+      )?.id ?? null)
+    : null;
+
+/** The thread with `runId` first in its queue and none of its items shown yet. */
+export const queueSandboxStartRun = <
+  P extends Pick<OrchestrationV2ThreadProjection, "runs" | "turnItems" | "visibleTurnItems">,
+>(
+  projection: P,
+  runId: RunId,
+): P => ({
+  ...projection,
+  runs: projection.runs.map((run) => {
+    if (run.id === runId) {
+      const { queueHeld: _queueHeld, ...rest } = run;
+      return { ...rest, status: "queued" as const, queuePosition: 1 };
+    }
+    return run.status === "queued"
+      ? { ...run, queuePosition: (run.queuePosition ?? run.ordinal) + 1 }
+      : run;
+  }),
+  turnItems: projection.turnItems.filter((item) => item.runId !== runId),
+  visibleTurnItems: projection.visibleTurnItems.filter(({ item }) => item.runId !== runId),
+});
+
+type ThreadStateAtom<E> = (
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+) => Atom.Atom<AsyncResult.AsyncResult<EnvironmentThreadState, E>>;
+
+/**
+ * Thread state in which a sandbox chat's message reads as queued while its sandbox starts (see
+ * `sandboxStartRunId`). Only a mirror with a run at the bridge reads the host's sandbox list.
+ */
+export function createSandboxStartQueueAtoms<E>(input: {
+  readonly threadStateAtom: ThreadStateAtom<E>;
+  readonly sandboxesList: (key: {
+    readonly environmentId: EnvironmentId;
+    readonly input: undefined;
+  }) => Atom.Atom<
+    AsyncResult.AsyncResult<{ readonly sandboxes: ReadonlyArray<SandboxRecord> }, unknown>
+  >;
+}) {
+  const startRunIdAtom = Atom.family((key: string) => {
+    const { environmentId, threadId } = parseMirrorKey(key);
+    return Atom.make((get): RunId | null => {
+      const state = get(input.threadStateAtom(environmentId, threadId));
+      const projection = AsyncResult.isSuccess(state) ? Option.getOrNull(state.value.data) : null;
+      if (projection === null || bridgeRunId(projection) === null) return null;
+      const list = get(input.sandboxesList({ environmentId, input: undefined }));
+      return AsyncResult.isSuccess(list)
+        ? sandboxStartRunId(projection, list.value.sandboxes)
+        : null;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-data:sandboxes:start-run:${key}`));
+  });
+
+  const threadStateAtom = Atom.family((key: string) => {
+    const { environmentId, threadId } = parseMirrorKey(key);
+    return Atom.make((get) => {
+      const state = get(input.threadStateAtom(environmentId, threadId));
+      const runId = get(startRunIdAtom(key));
+      return runId === null
+        ? state
+        : AsyncResult.map(state, (value) => ({
+            ...value,
+            data: Option.map(value.data, (projection) => queueSandboxStartRun(projection, runId)),
+          }));
+    }).pipe(
+      Atom.setIdleTTL(0),
+      Atom.withLabel(`environment-data:sandboxes:start-queued-thread:${key}`),
+    );
+  });
+
+  return {
+    threadStateAtom: (environmentId: EnvironmentId, threadId: ThreadId) =>
+      threadStateAtom(mirrorKey({ environmentId, threadId })),
+    /** The run that reads as queued while the chat's sandbox starts; it is stopped, not cancelled. */
+    sandboxStartRunId: (target: MirrorTarget | null) =>
+      target === null ? NO_START_RUN : startRunIdAtom(mirrorKey(target)),
+  };
+}
+
 /** Changes whenever the host reports the agent behind `childThreadId` changed, so its read follows. */
 const sandboxMirrorChildRevision = (
   mirror: SandboxThreadMirror | null,
@@ -99,6 +215,10 @@ const sandboxMirrorChildRevision = (
     ? ""
     : `${agent.status}:${DateTime.toEpochMillis(agent.updatedAt)}:${mirror?.available === true}`;
 };
+
+const NO_START_RUN = Atom.make<RunId | null>(null).pipe(
+  Atom.withLabel("environment-data:sandboxes:start-run:none"),
+);
 
 const NO_MIRROR = Atom.make<SandboxThreadMirror | null>(null).pipe(
   Atom.withLabel("environment-data:sandboxes:thread-mirror:none"),

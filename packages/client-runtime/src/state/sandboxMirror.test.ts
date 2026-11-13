@@ -1,16 +1,22 @@
 import {
   type ModelSelection,
+  type OrchestrationV2ThreadProjection,
   ProviderInstanceId,
+  RunId,
+  type SandboxRecord,
   type SandboxThreadMirror,
   type ServerProvider,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  queueSandboxStartRun,
   sandboxMirrorModelSource,
   sandboxMirrorModelSourceOf,
   sandboxMirrorPickerSource,
+  sandboxStartRunId,
 } from "./sandboxMirror.ts";
+import { deriveThreadQueueWorkflowState } from "./threadWorkflows.ts";
 
 const sandboxClaude = {
   instanceId: "claudeAgent",
@@ -103,5 +109,91 @@ describe("sandboxMirrorPickerSource", () => {
     expect(
       sandboxMirrorPickerSource({ ...input, hostMirror: { ...hostMirror, provider: null } }),
     ).toEqual({ providers: [bridge], modelSelection: mirrorSelection, readOnly: true });
+  });
+});
+
+describe("sandboxStartRunId and queueSandboxStartRun", () => {
+  const sandbox = (state: SandboxRecord["state"], resumingSince?: string) =>
+    ({
+      instanceId: "instance-1",
+      threadId: "thread",
+      state,
+      ...(resumingSince === undefined ? {} : { resumingSince }),
+    }) as SandboxRecord;
+  const projection = {
+    thread: {
+      id: "thread",
+      activeProviderThreadId: null,
+      providerInstanceId: "sandboxes",
+      modelSelection: { instanceId: "sandboxes", model: "sandbox" },
+    },
+    messages: [{ id: "message-waiting", text: "Fix the build" }],
+    providerSessions: [],
+    providerThreads: [],
+    providerTurns: [],
+    runs: [
+      { id: "done", status: "completed", ordinal: 1, providerInstanceId: "sandboxes" },
+      {
+        id: "waiting",
+        status: "running",
+        ordinal: 2,
+        userMessageId: "message-waiting",
+        providerInstanceId: "sandboxes",
+      },
+      {
+        id: "later",
+        status: "queued",
+        ordinal: 3,
+        queuePosition: 1,
+        providerInstanceId: "sandboxes",
+      },
+    ],
+    turnItems: [
+      { id: "answer", runId: "done" },
+      { id: "message", runId: "waiting" },
+      { id: "starting-thought", runId: "waiting" },
+    ],
+    visibleTurnItems: [
+      { item: { id: "answer", runId: "done" } },
+      { item: { id: "message", runId: "waiting" } },
+      { item: { id: "starting-thought", runId: "waiting" } },
+    ],
+  } as unknown as OrchestrationV2ThreadProjection;
+
+  // The host's run resumes the sandbox and waits at the bridge until it answers; it showed as
+  // "Working · Thinking" for as long as the sandbox took to start.
+  it("finds the mirror's run waiting on its sandbox while that sandbox is stopped or resuming", () => {
+    expect(sandboxStartRunId(projection, [sandbox("stopped")])).toBe("waiting");
+    expect(sandboxStartRunId(projection, [sandbox("stopped", "2026-11-13T10:00:00.000Z")])).toBe(
+      "waiting",
+    );
+    // Once the sandbox runs, the bridge sends the message and streams the turn.
+    expect(sandboxStartRunId(projection, [sandbox("running")])).toBeNull();
+    expect(sandboxStartRunId(projection, [])).toBeNull();
+    // Only the host's mirror has a run at the bridge; the sandbox's own thread runs its turns.
+    expect(
+      sandboxStartRunId(
+        {
+          ...projection,
+          thread: {
+            ...projection.thread,
+            modelSelection: { ...projection.thread.modelSelection, instanceId: "claudeAgent" },
+          },
+        } as OrchestrationV2ThreadProjection,
+        [sandbox("stopped")],
+      ),
+    ).toBeNull();
+  });
+
+  it("shows the waiting run as the first queued message, with none of its items yet", () => {
+    const queued = queueSandboxStartRun(projection, RunId.make("waiting"));
+    const workflow = deriveThreadQueueWorkflowState(queued as never);
+    expect(workflow.queuedRuns.map(({ run, text }) => [run.id, text])).toEqual([
+      ["waiting", "Fix the build"],
+      ["later", "Queued message"],
+    ]);
+    expect(queued.turnItems.map((item) => item.id)).toEqual(["answer"]);
+    expect(queued.visibleTurnItems.map(({ item }) => item.id)).toEqual(["answer"]);
+    expect(workflow.activeRun).toBeNull();
   });
 });
