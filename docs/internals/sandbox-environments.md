@@ -619,6 +619,10 @@ matched by thread id) and applies the config's `onSettle` (`ask` when unset):
   `setSettlePending` writes them, and every other record write keeps the stored ones, so a resume
   or stop that read the record minutes earlier cannot bring back a cleared `settlePending`.
 
+A settle applies only to a sandbox launched before the thread's `settledAt`. The bridge settles a
+chat whose sandbox went (see below), and a relaunch over an abandoned sandbox makes a new record for
+the same thread; the event and `reconcile` both leave that one alone.
+
 An un-settle (`thread.unsettled`, or `thread.pinned` off a settled thread) interrupts the wait and
 clears `settlePending`. Each thread's settle is decided once: settling a settled thread keeps its
 `settledAt`, and the record's `settleHandled` holds the `settledAt` whose outcome was applied,
