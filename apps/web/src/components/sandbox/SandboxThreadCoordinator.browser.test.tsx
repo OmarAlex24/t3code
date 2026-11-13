@@ -27,7 +27,7 @@ const mocks = vi.hoisted(() => ({
   resumeSandbox: vi.fn(async () => AsyncResult.success(undefined)),
   saveConfig: vi.fn(async () => AsyncResult.success(undefined)),
   checkWork: vi.fn(async () => AsyncResult.success(mocks.work)),
-  resolveSettle: vi.fn(async () => AsyncResult.success({ warnings: [] })),
+  resolveSettle: vi.fn(async () => AsyncResult.success({ warnings: [], resolved: true })),
   settleThread: vi.fn(async () => AsyncResult.success(undefined)),
   unsettleThread: vi.fn(async () => AsyncResult.success(undefined)),
   removeEnvironment: vi.fn(async () => AsyncResult.success(undefined)),
@@ -290,9 +290,8 @@ describe("SandboxThreadCoordinator", () => {
         expect.objectContaining({ input: { instanceId: "instance-1", choice: "keep" } }),
       ),
     );
-    expect(mocks.stopSandbox).toHaveBeenCalledWith(
-      expect.objectContaining({ input: { instanceId: "instance-1" } }),
-    );
+    // The host's keep stops the machine, as it does for the phone and Settings.
+    expect(mocks.stopSandbox).not.toHaveBeenCalled();
     expect(mocks.saveConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         input: { config: expect.objectContaining({ id: "config-1", onSettle: "snapshot" }) },

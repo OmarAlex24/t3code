@@ -121,7 +121,9 @@ function SettleQuestion(props: {
         {decision.reason === "work"
           ? "Its settings delete it on settle, but it may hold work that hasn't been pushed. "
           : ""}
-        {decision.stopped ? "It is stopped, so its work can't be checked. " : ""}
+        {decision.stopped
+          ? "It is stopped, so its work can't be checked. "
+          : "Keep stops it and keeps its disk. "}
         If you delete the sandbox, the chat is kept, under Settled; only work on its disk is lost.
       </Text>
       {step.kind === "delete" ? (
