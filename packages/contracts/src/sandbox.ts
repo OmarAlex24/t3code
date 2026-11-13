@@ -1299,6 +1299,7 @@ const SANDBOX_GITHUB_APP_PERMISSIONS = {
   actions: "read",
   // A push that changes `.github/workflows/` needs it, or GitHub refuses the push.
   workflows: "write",
+  issues: "write",
 } as const;
 
 /** The sandboxes' GitHub App's homepage on github.com. */
