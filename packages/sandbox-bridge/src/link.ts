@@ -50,3 +50,5 @@ export const bridgeResumeFailureSecretName = (threadId: string): string =>
 
 /** Names the host's secrets directory for the bridge process; set on the provider instance. */
 export const SANDBOX_BRIDGE_SECRETS_DIR_ENV = "T3_SANDBOX_BRIDGE_SECRETS_DIR";
+/** Where the bridge keeps the images a sandbox reply embeds; the host's attachments directory. */
+export const SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV = "T3_SANDBOX_BRIDGE_ATTACHMENTS_DIR";

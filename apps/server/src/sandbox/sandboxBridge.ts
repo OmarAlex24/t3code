@@ -39,6 +39,7 @@ import {
   bridgeLaunchSecretName,
   bridgeLinkSecretName,
   bridgeResumeFailureSecretName,
+  SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
   SandboxBridgeLinkJson,
   SandboxBridgeResumeFailureJson,
@@ -76,7 +77,11 @@ const bridgeModelSelection = {
   model: SANDBOX_BRIDGE_MODEL,
 } as ModelSelection;
 
-const BRIDGE_ENVIRONMENT_NAMES = new Set([SANDBOX_BRIDGE_SECRETS_DIR_ENV, "ELECTRON_RUN_AS_NODE"]);
+const BRIDGE_ENVIRONMENT_NAMES = new Set([
+  SANDBOX_BRIDGE_SECRETS_DIR_ENV,
+  SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
+  "ELECTRON_RUN_AS_NODE",
+]);
 
 const sameArgs = (left: unknown, right: ReadonlyArray<string>) =>
   Array.isArray(left) &&
@@ -84,8 +89,8 @@ const sameArgs = (left: unknown, right: ReadonlyArray<string>) =>
   left.every((value, index) => value === right[index]);
 
 /**
- * Upserts the `sandboxes` instance when it is missing or its command is stale (the server binary
- * or secrets directory moved). Off machine-wide on first seed, so it shows only in projects that
+ * Upserts the `sandboxes` instance when it is missing or its command is stale (the server binary,
+ * secrets directory, or attachments directory moved). Off machine-wide on first seed, so it shows only in projects that
  * host a sandbox thread; a user's later edits, such as its name, are kept.
  */
 export const seedInstance = Effect.gen(function* () {
@@ -95,16 +100,16 @@ export const seedInstance = Effect.gen(function* () {
   const commandArgs = selfInvocationArgs(self, ["sandbox-bridge"]);
   const existing = (yield* settings.getSettings).providerInstances[instanceId];
   const existingConfig = existing?.config as Record<string, unknown> | undefined;
-  const secretsDir = existing?.environment?.find(
-    (variable) => variable.name === SANDBOX_BRIDGE_SECRETS_DIR_ENV,
-  );
+  const environmentValue = (name: string) =>
+    existing?.environment?.find((variable) => variable.name === name)?.value;
   if (
     existing !== undefined &&
     existing.driver === "acpRegistry" &&
     existingConfig?.source === "local" &&
     existingConfig.commandPath === self.command &&
     sameArgs(existingConfig.commandArgs, commandArgs) &&
-    secretsDir?.value === config.secretsDir
+    environmentValue(SANDBOX_BRIDGE_SECRETS_DIR_ENV) === config.secretsDir &&
+    environmentValue(SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV) === config.attachmentsDir
   ) {
     return;
   }
@@ -119,6 +124,7 @@ export const seedInstance = Effect.gen(function* () {
       ),
       // Never a credential: the bridge reads the sandbox's link from the secret store there.
       { name: SANDBOX_BRIDGE_SECRETS_DIR_ENV, value: config.secretsDir, sensitive: false },
+      { name: SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV, value: config.attachmentsDir, sensitive: false },
       // Desktop runs this server on Electron's binary, which acts as Node only with this set.
       { name: "ELECTRON_RUN_AS_NODE", value: "1", sensitive: false },
     ],

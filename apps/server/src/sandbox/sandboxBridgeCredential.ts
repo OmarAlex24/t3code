@@ -8,7 +8,12 @@ import type * as NodeCrypto from "node:crypto";
 import { sealPreamble, unseal } from "./sandboxPairing.ts";
 
 const BRIDGE_CREDENTIAL_LABEL = "t3-sandbox-bridge";
-const BRIDGE_CREDENTIAL_SCOPES = ["orchestration:read", "orchestration:operate"] as const;
+// `filesystem:read` lets the bridge copy the images a reply embeds to the host.
+export const BRIDGE_CREDENTIAL_SCOPES = [
+  "orchestration:read",
+  "orchestration:operate",
+  "filesystem:read",
+] as const;
 // The longest the CLI allows is unbounded; a year outlives any sandbox, which dies with its token.
 const BRIDGE_CREDENTIAL_TTL = "365d";
 

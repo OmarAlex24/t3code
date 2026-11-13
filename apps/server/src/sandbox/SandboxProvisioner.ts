@@ -148,6 +148,7 @@ import {
 } from "./sandboxPi.ts";
 import {
   type BridgeCredentialReport,
+  BRIDGE_CREDENTIAL_SCOPES,
   bridgeCredentialScript,
   readBridgeCredential,
 } from "./sandboxBridgeCredential.ts";
@@ -2282,8 +2283,9 @@ const make = Effect.gen(function* () {
 
   /**
    * Writes the link the host's sandbox bridge reads for `record`'s thread. The bearer it carries is
-   * minted on the sandbox only when there is none, its secret is gone, or it is near expiry; the
-   * link itself is rewritten every time, since a resumed sandbox can come back at a new address.
+   * minted on the sandbox only when there is none, its secret is gone, it is near expiry, or it
+   * lacks a scope the bridge now uses; the link itself is rewritten every time, since a resumed
+   * sandbox can come back at a new address.
    */
   const ensureBridge = Effect.fn("SandboxProvisioner.ensureBridge")(function* (
     record: SandboxRecord,
@@ -2317,7 +2319,8 @@ const make = Effect.gen(function* () {
     const fresh =
       record.bridge !== undefined &&
       Option.isSome(stored) &&
-      Date.parse(record.bridge.expiresAt) - now > BRIDGE_RENEW_BEFORE_MS;
+      Date.parse(record.bridge.expiresAt) - now > BRIDGE_RENEW_BEFORE_MS &&
+      BRIDGE_CREDENTIAL_SCOPES.every((scope) => record.bridge?.scopes?.includes(scope) === true);
     let token: string;
     let bridge: NonNullable<SandboxRecord["bridge"]>;
     if (fresh && Option.isSome(stored) && record.bridge !== undefined) {
@@ -2338,7 +2341,12 @@ const make = Effect.gen(function* () {
         );
       }
       token = report.token;
-      bridge = { sessionId: report.sessionId, secret, expiresAt: report.expiresAt };
+      bridge = {
+        sessionId: report.sessionId,
+        secret,
+        expiresAt: report.expiresAt,
+        scopes: [...BRIDGE_CREDENTIAL_SCOPES],
+      };
     }
     const link: SandboxBridgeLink = {
       threadId: record.threadId,

@@ -54,6 +54,7 @@ import {
   toolTitleOf,
   TurnTracker,
 } from "./bridge.ts";
+import { releasableEnd } from "./images.ts";
 import type { SandboxBridgeLink, SandboxBridgeResumeFailure } from "./link.ts";
 
 const threadId = ThreadId.make("thread-sandbox-1");
@@ -219,6 +220,7 @@ interface FakeSandbox {
   readonly launches: Array<OrchestrationV2ThreadLaunchInput>;
   readonly uploads: Array<unknown>;
   readonly secretAnswers: Array<unknown>;
+  readonly imageReads: Array<string>;
   readonly push: (item: OrchestrationV2ThreadStreamItem) => Effect.Effect<void>;
 }
 
@@ -227,6 +229,8 @@ const makeFakeSandbox = (options: {
   readonly existing?: OrchestrationV2ThreadProjection;
   readonly providers?: SandboxSession["providers"];
   readonly threadStop?: boolean;
+  /** Images on the sandbox, by the path a reply names them with. */
+  readonly images?: Readonly<Record<string, string>>;
   readonly react?: (
     command: { readonly type: string; readonly messageId?: MessageId | undefined },
     fake: FakeSandbox,
@@ -238,11 +242,13 @@ const makeFakeSandbox = (options: {
     const launches: Array<OrchestrationV2ThreadLaunchInput> = [];
     const uploads: Array<unknown> = [];
     const secretAnswers: Array<unknown> = [];
+    const imageReads: Array<string> = [];
     const fake: FakeSandbox = {
       commands,
       launches,
       uploads,
       secretAnswers,
+      imageReads,
       push: (item) => Queue.offer(stream, item).pipe(Effect.asVoid),
       session: {
         threadStop: options.threadStop ?? true,
@@ -276,6 +282,14 @@ const makeFakeSandbox = (options: {
             })) as never;
           }),
         subscribe: () => Stream.fromQueue(stream),
+        readImage: (_threadId, path) =>
+          Effect.suspend(() => {
+            imageReads.push(path);
+            const image = options.images?.[path];
+            return image === undefined
+              ? Effect.fail(new SandboxBridgeError({ message: "No such file on the sandbox." }))
+              : Effect.succeed({ bytes: encoder.encode(image), extension: ".png" });
+          }),
         answerSecret: (input) =>
           Effect.suspend(() => {
             secretAnswers.push(input);
@@ -337,6 +351,7 @@ const withBridge = <A, E>(
     readonly connect?: SandboxBridgePorts["connect"];
     readonly findResumeFailure?: SandboxBridgePorts["findResumeFailure"];
     readonly requestSecret?: SandboxBridgePorts["requestSecret"];
+    readonly saveImage?: SandboxBridgePorts["saveImage"];
     /** Null waits as long as the bridge does by default, spaced as it does by default. */
     readonly reconnectWindow?: null;
     readonly permission?: (
@@ -370,6 +385,7 @@ const withBridge = <A, E>(
         ? {}
         : { findResumeFailure: options.findResumeFailure }),
       ...(options.requestSecret === undefined ? {} : { requestSecret: options.requestSecret }),
+      ...(options.saveImage === undefined ? {} : { saveImage: options.saveImage }),
       ...(options.reconnectWindow === null
         ? {}
         : { reconnectWindow: "40 millis", reconnectSpacing: "10 millis" }),
@@ -1159,6 +1175,85 @@ describe("forwarding a turn", () => {
     }),
   );
 
+  it.effect(
+    "copies the images a reply embeds to the host, once each, and points the reply at them",
+    () =>
+      Effect.gen(function* () {
+        const reply = [
+          "Listo:",
+          "",
+          "![Mockup de Inicio y Correo](/home/user/shots/mesa-v4.png)",
+          "",
+          'Otra vez <img src="/home/user/shots/mesa-v4.png" alt="mesa"> y ![relativa](shots/logo.png "Logo")',
+          "",
+          "![perdida](/home/user/shots/gone.png) ![texto](/home/user/notes.txt)",
+          "",
+          "```md",
+          "![en código](/home/user/shots/mesa-v4.png)",
+          "```",
+          "Fin",
+        ].join("\n");
+        const split = reply.indexOf("shots/mesa-v4.png)") + 3;
+        const fake = yield* makeFakeSandbox({
+          images: { "/home/user/shots/mesa-v4.png": "mesa", "shots/logo.png": "logo" },
+          react: (command, fake) =>
+            command.type === "launch"
+              ? Effect.forEach(
+                  [
+                    event("run.created", run(command.messageId!, "running")),
+                    event("turn-item.updated", assistant("answer", reply.slice(0, split), 2)),
+                    event("turn-item.updated", assistant("answer", reply, 2)),
+                    event("run.updated", run(command.messageId!, "completed")),
+                  ],
+                  fake.push,
+                  { discard: true },
+                )
+              : Effect.void,
+        });
+        const saved: Array<string> = [];
+        yield* withBridge(
+          {
+            fake,
+            saveImage: (_threadId, image) =>
+              Effect.sync(() => {
+                const content = new TextDecoder().decode(image.bytes);
+                saved.push(content);
+                return `/host state/attachments/${content}${image.extension}`;
+              }),
+          },
+          ({ acp, updates }) =>
+            Effect.gen(function* () {
+              const session = yield* openThread(acp);
+              yield* say(acp, session.sessionId, "Haz el mockup");
+              const shown = messages(updates).join("");
+              assert.strictEqual(
+                shown,
+                [
+                  "Listo:",
+                  "",
+                  "![Mockup de Inicio y Correo](</host state/attachments/mesa.png>)",
+                  "",
+                  'Otra vez <img src="/host state/attachments/mesa.png" alt="mesa"> y ![relativa](</host state/attachments/logo.png> "Logo")',
+                  "",
+                  "![perdida](/home/user/shots/gone.png) ![texto](/home/user/notes.txt)",
+                  "",
+                  "```md",
+                  "![en código](/home/user/shots/mesa-v4.png)",
+                  "```",
+                  "Fin",
+                ].join("\n"),
+              );
+              assert.deepStrictEqual(saved, ["mesa", "logo"]);
+              assert.deepStrictEqual(fake.imageReads, [
+                "/home/user/shots/mesa-v4.png",
+                "shots/logo.png",
+                "/home/user/shots/gone.png",
+              ]);
+            }),
+        );
+      }),
+  );
+
   it.effect("turns a sandbox question into a form and sends back the answers", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeSandbox({
@@ -1453,6 +1548,22 @@ describe("forwarding a turn", () => {
 });
 
 describe("mapping", () => {
+  it("holds back only an image reference still arriving on the last line", () => {
+    const rows: ReadonlyArray<readonly [string, number]> = [
+      ["Plain text, sent at once.", 25],
+      ["Wow!", 3],
+      ["if (!ready) {", 13],
+      ["See ![mockup](/home/user/sh", 4],
+      ["See ![mockup](/home/user/shots/a.png) and more", 46],
+      ["See ![mockup] and more", 22],
+      ["x < y", 5],
+      ['Then <img src="/home', 5],
+      ['Then <img src="/a.png"> too', 27],
+      ["![unfinished\nnext line", 22],
+    ];
+    for (const [text, end] of rows) assert.strictEqual(releasableEnd(text, 0), end, text);
+  });
+
   it("offers one option per kind and always a way to decline", () => {
     const options = approvalOptions([
       { decision: "accept", label: "Yes" },

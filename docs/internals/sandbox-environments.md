@@ -372,6 +372,14 @@ without pairing with the sandbox.
   already has (`attach`), an item begun before that message counts as sent up to what the first
   read holds: after a steer, the host's cancelled turn already showed its start. Text it gained
   between that cancel and the read is not shown.
+- **Images in replies.** An image a reply embeds by a path on the sandbox (`![…](…)` or
+  `<img src>`, wherever chat markdown renders one) would resolve on the host, where the file is not,
+  and the sandbox goes with the chat. The bridge copies it into the host's attachments directory
+  (`assets.createUrl` on the sandbox, then the signed download) and the forwarded text names the
+  copy, which every client loads as host media. Only png, jpeg, gif and webp up to 10 MB, once per
+  turn, waiting 10 seconds at most; a copy that fails leaves the sandbox path. A line naming an
+  image waits until the reference is whole. The sandbox's own thread keeps its path, which its own
+  clients load from the sandbox. Copies stay when the host thread is deleted.
 - **Modes.** The sandbox thread runs in the host thread's runtime and interaction modes. The host
   forwards a mode change on a `sandboxes` thread as soon as it happens (`SandboxThreadRemote`), and
   each new message re-checks them, so Supervised asks and other modes do not wait.
@@ -420,13 +428,16 @@ without pairing with the sandbox.
   in any chat, also stops the thread's delegated tasks), else `run.interrupt`.
 - **Credential.** After the launch hand-off the provisioner runs
   [`bridgeCredentialScript`](../../apps/server/src/sandbox/sandboxBridgeCredential.ts) on the
-  sandbox: `t3 auth session issue` with `orchestration:read` and `orchestration:operate`, label
-  `t3-sandbox-bridge`, 365 days (the CLI has no cap, and the token dies with the machine). The
-  token comes back sealed to a one-time key in 180-byte parts, like the pairing code. The record
-  keeps `bridge: { sessionId, secret, expiresAt }`; the token, address, sandbox project and ids sit
-  in the server secret `sandbox-bridge-<hex thread id>`, which the bridge reads from the directory
-  the instance environment names (`T3_SANDBOX_BRIDGE_SECRETS_DIR`). Resume rewrites the link and
-  re-mints a bearer within 30 days of expiry, revoking the old one; delete removes the secret.
+  sandbox: `t3 auth session issue` with `orchestration:read`, `orchestration:operate` and
+  `filesystem:read` (for those images; the host can already run commands there through the
+  provider), label `t3-sandbox-bridge`, 365 days (the CLI has no cap, and the token dies with the
+  machine). The token comes back sealed to a one-time key in 180-byte parts, like the pairing code.
+  The record keeps `bridge: { sessionId, secret, expiresAt, scopes }`; the token, address, sandbox
+  project and ids sit in the server secret `sandbox-bridge-<hex thread id>`, which the bridge reads
+  from the directory the instance environment names (`T3_SANDBOX_BRIDGE_SECRETS_DIR`; the images go to
+  `T3_SANDBOX_BRIDGE_ATTACHMENTS_DIR`). Resume and linking rewrite the link and re-mint a bearer
+  within 30 days of expiry or missing a scope the bridge now asks for (an older record has no
+  `scopes`), revoking the old one; delete removes the secret.
 - **Linking.** `sandboxes.linkHostThread` (settings-write scope) picks the host project: the
   launch's verified host copy (`hostProjectId` on the record), or a lightweight project, an empty
   folder `<baseDir>/sandbox-projects/<owner>/<repo>` titled with the repository name, reused per

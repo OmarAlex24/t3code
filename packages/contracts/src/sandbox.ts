@@ -508,10 +508,16 @@ export const SandboxRecord = Schema.Struct({
   hostProjectId: Schema.optionalKey(ProjectId),
   /**
    * The bearer session minted on the sandbox for the sandbox bridge. The token is a server secret
-   * named by `secret`; the record only says where it lives and when it expires.
+   * named by `secret`; the record only says where it lives, when it expires, and what it may do
+   * (none recorded: minted before the scopes were, so re-minted on the next link).
    */
   bridge: Schema.optionalKey(
-    Schema.Struct({ sessionId: TrimmedString, secret: TrimmedString, expiresAt: TrimmedString }),
+    Schema.Struct({
+      sessionId: TrimmedString,
+      secret: TrimmedString,
+      expiresAt: TrimmedString,
+      scopes: Schema.optionalKey(Schema.Array(TrimmedString)),
+    }),
   ),
   /**
    * When T3 found this sandbox's launch with nothing left to finish it (the server stopped

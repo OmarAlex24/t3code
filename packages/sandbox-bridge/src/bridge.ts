@@ -55,6 +55,12 @@ import * as AcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
 import type * as AcpSchema from "effect-acp/schema";
 
+import {
+  localImageReferences,
+  pointAtHostCopies,
+  type RelayedImage,
+  releasableEnd,
+} from "./images.ts";
 import type { SandboxBridgeLink, SandboxBridgeResumeFailure } from "./link.ts";
 
 export class SandboxBridgeError extends Schema.TaggedError<SandboxBridgeError>()(
@@ -105,6 +111,11 @@ export interface SandboxSession {
   readonly answerSecret: (
     input: SecretRequestAnswerInput,
   ) => Effect.Effect<void, SandboxBridgeError>;
+  /** An image file on the sandbox, at most `RELAYED_IMAGE_MAX_BYTES` and of a type T3 shows. */
+  readonly readImage: (
+    threadId: ThreadId,
+    path: string,
+  ) => Effect.Effect<RelayedImage, SandboxBridgeError>;
 }
 
 /** A secret the sandbox's agent asked for, put to the user on the host thread. */
@@ -146,6 +157,14 @@ export interface SandboxBridgePorts {
     mcp: HostMcp,
     request: HostSecretRequest,
   ) => Effect.Effect<HostSecretAnswer, SandboxBridgeError>;
+  /**
+   * Keeps an image from the sandbox on the host for the thread, the same bytes at the same path,
+   * and answers that path. Without it, replies keep their sandbox paths.
+   */
+  readonly saveImage?: (
+    threadId: ThreadId,
+    image: RelayedImage,
+  ) => Effect.Effect<string, SandboxBridgeError>;
 }
 
 export const PROBE_CLIENT_NAME = "t3-code-provider-test";
@@ -154,6 +173,8 @@ const DRY_RUN_SESSION_PREFIX = "sandbox-dry-run:";
 const MODEL_OPTION_VALUE = SANDBOX_BRIDGE_MODEL;
 // One short read of the sandbox's models when a session opens; a stopped sandbox must not stall it.
 const CATALOG_READ_TIMEOUT = "5 seconds";
+// The reply waits for an image's copy; past this it goes out with the sandbox's path.
+const IMAGE_COPY_TIMEOUT = "10 seconds";
 
 /** Sandbox chats are made only where the sandbox configs live; other clients continue them. */
 export const NOT_LINKED_MESSAGE =
@@ -1636,10 +1657,69 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         .pipe(Effect.ignore);
     });
 
-    const perform = (action: TurnAction) => {
+    // A reply's images live on the sandbox, which the host's clients cannot read and which goes
+    // away with the chat: each is copied to the host once a turn, and the reply names the copy.
+    const saveImage = ports.saveImage;
+    const copied = new Map<string, Option.Option<string>>();
+    const relayed = new Map<string, { kind: "message" | "thought"; text: string; sent: number }>();
+    const hostCopies = Effect.fn("SandboxBridge.hostCopies")(function* (
+      paths: ReadonlyArray<string>,
+      copyNew: boolean,
+    ) {
+      if (saveImage === undefined) return new Map<string, string>();
+      const missing = copyNew ? [...new Set(paths)].filter((path) => !copied.has(path)) : [];
+      yield* Effect.forEach(
+        missing,
+        (path) =>
+          sandbox.readImage(threadId, path).pipe(
+            Effect.flatMap((image) => saveImage(threadId, image)),
+            Effect.timeout(IMAGE_COPY_TIMEOUT),
+            Effect.option,
+            Effect.map((copy) => void copied.set(path, copy)),
+          ),
+        { concurrency: 4, discard: true },
+      );
+      return new Map(
+        paths.flatMap((path) => {
+          const copy = copied.get(path);
+          return copy !== undefined && Option.isSome(copy) ? [[path, copy.value] as const] : [];
+        }),
+      );
+    });
+    // Sends what of an item's text can go now: all of it when `whole`, else all but an image
+    // reference still arriving.
+    const relayText = Effect.fn("SandboxBridge.relayText")(function* (
+      kind: "message" | "thought",
+      id: string,
+      text: string,
+      whole: boolean,
+      copyNew = true,
+    ) {
+      const entry = relayed.get(id) ?? { kind, text: "", sent: 0 };
+      relayed.set(id, entry);
+      entry.text += text;
+      const start = entry.sent;
+      const end = whole ? entry.text.length : releasableEnd(entry.text, start);
+      if (end <= start) return;
+      const references = localImageReferences(entry.text, start, end);
+      const copies = yield* hostCopies(
+        references.map((reference) => reference.path),
+        copyNew,
+      );
+      const segment = entry.text.slice(start, end);
+      entry.sent = end;
+      yield* say(sessionId, kind, id, pointAtHostCopies(segment, start, references, copies));
+    });
+    // Held text goes out before anything else, so the host keeps the sandbox's order.
+    const flushText = (exceptId?: string, copyNew = true) =>
+      Effect.forEach(
+        [...relayed].filter(([id, entry]) => id !== exceptId && entry.sent < entry.text.length),
+        ([id, entry]) => relayText(entry.kind, id, "", true, copyNew),
+        { discard: true },
+      );
+
+    const performAction = (action: Exclude<TurnAction, { readonly _tag: "text" }>) => {
       switch (action._tag) {
-        case "text":
-          return say(sessionId, action.kind, action.id, action.text);
         case "tool":
           return update(sessionId, {
             sessionUpdate: "tool_call_update",
@@ -1657,6 +1737,14 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
           return forwardSecret(action.item);
       }
     };
+    const perform = (action: TurnAction) =>
+      action._tag !== "text"
+        ? flushText().pipe(Effect.andThen(performAction(action)))
+        : saveImage === undefined
+          ? say(sessionId, action.kind, action.id, action.text)
+          : flushText(action.id).pipe(
+              Effect.andThen(relayText(action.kind, action.id, action.text, false)),
+            );
 
     // The stream keeps reading while an approval waits on the host, so an answer given on the
     // computer reaches it; actions run one at a time, in order.
@@ -1676,7 +1764,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     const performAll = Effect.gen(function* () {
       while (true) {
         const action = yield* Queue.take(actions);
-        if (action._tag === "end") return;
+        if (action._tag === "end") return yield* flushText();
         yield* perform(action);
       }
     });
@@ -1685,6 +1773,8 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       Effect.as("followed" as const),
       Effect.raceFirst(Deferred.await(cancel)),
     );
+    // What a cancelled turn held back still shows, with the copies it already made.
+    if (outcome !== "followed") yield* flushText(undefined, false);
     // A steer's cancel leaves the run and its tasks working; the steer follows as the next prompt.
     if (outcome === "steer") return "cancelled";
     if (outcome === "stop") {
