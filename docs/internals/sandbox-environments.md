@@ -626,8 +626,11 @@ then resolves `delete`. A remembered delete on a running sandbox only shows a 10
 with the settle's Undo. A settle of the sandbox's own thread happens on the sandbox's server, which
 this host never hears from, so the client also settles the host mirror (`onSettled`), and an
 un-settle, or a pin of a settled thread, un-settles it (`onUnsettled`). A chat with no host mirror
-(launched before the bridge, or whose link failed) gets no settle decision. Mobile has no sandbox
-surface; its settles reach the host thread, and the decision waits for a computer.
+(launched before the bridge, or whose link failed) gets no settle decision. The phone reads the
+decision from the host's `sandboxes.list`, only for a mirror thread
+(`sandboxesSettleDecision`), since the mirror subscription runs only while a thread is open and
+costs the host a sandbox connection. It shows "Keep sandbox?" on the row and a card on the thread
+with Keep and Delete…; Delete runs `checkWork`, shows what would be lost, then resolves `delete`.
 
 `unsettleThread` and the composer's send on a stopped sandbox with no host mirror call
 `ensureSandboxThreadRunning`: resume, then wait for the environment to connect (4 minutes at
