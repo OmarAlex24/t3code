@@ -422,6 +422,8 @@ export interface ChatComposerProps {
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
   providerCatalogKnown: boolean;
+  /** Shows the selection without letting it change, and why. */
+  modelPickerReadOnlyReason?: string | null;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
   reportedModelSelection?: ModelSelection | null;
@@ -542,6 +544,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     lockedProvider,
     providerStatuses,
     providerCatalogKnown,
+    modelPickerReadOnlyReason = null,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     reportedModelSelection,
@@ -1909,7 +1912,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
         if (applied) {
           setComposerHighlightedItemId(null);
-          setIsComposerModelPickerOpen(true);
+          if (modelPickerReadOnlyReason === null) setIsComposerModelPickerOpen(true);
         }
         return;
       }
@@ -2456,6 +2459,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       providerSetupInstanceId={providerSetupInstanceId}
       onOpenProviderSetup={onOpenProviderSetup}
       providerCatalogPending={providerCatalogPending}
+      modelPickerReadOnlyReason={modelPickerReadOnlyReason}
       isSendBusy={isSendBusy}
       multipleModelsEnabled={routeKind === "draft" && supportsMultipleModels}
       multipleModelSelections={multipleModelSelections}
@@ -2949,6 +2953,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, []);
 
   const openModelPicker = () => {
+    // The keybinding opens it here, past the disabled trigger.
+    if (modelPickerReadOnlyReason !== null) return;
     if (composerControlsHidden) {
       if (composerBlurFrameRef.current !== null) {
         window.cancelAnimationFrame(composerBlurFrameRef.current);
@@ -3009,7 +3015,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       },
       openModelPicker: openModelPickerStable,
       stepReasoningEffort: (direction) => {
-        if (noProviderAvailable || pendingUserInputs.length > 0 || isEditingQueuedMessage) {
+        if (
+          noProviderAvailable ||
+          modelPickerReadOnlyReason !== null ||
+          pendingUserInputs.length > 0 ||
+          isEditingQueuedMessage
+        ) {
           return;
         }
         const change = getComposerReasoningStep({
