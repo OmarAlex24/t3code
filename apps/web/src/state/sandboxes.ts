@@ -24,7 +24,6 @@ import {
   findThreadSandbox,
   isSandboxlessBridgeThread,
   sandboxChatAliases,
-  sandboxChatOwnThread,
   sandboxHostMirrors,
   sandboxRowStates,
   type SandboxRowState,
@@ -217,17 +216,6 @@ export function useSandboxChatAliases(): ReadonlyMap<string, ScopedThreadRef> {
   const threads = useQuietThreadShells();
   const sandboxes = useSandboxRecords();
   return sandboxChatAliases(sandboxes, threads, provisionerEnvironmentId);
-}
-
-/** The sandbox's own thread for its chat's host mirror; see `sandboxChatOwnThread`. */
-export function useSandboxChatOwnThread(threadRef: ScopedThreadRef): ScopedThreadRef {
-  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
-  const threads = useQuietThreadShells();
-  const sandboxes = useSandboxRecords();
-  return sandboxChatOwnThread(
-    sandboxHostMirrors(sandboxes, threads, provisionerEnvironmentId),
-    threadRef,
-  );
 }
 
 /**

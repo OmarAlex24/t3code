@@ -393,9 +393,7 @@ without pairing with the sandbox.
   unreachable sandbox shows as `available: false` with what the host last read (kept in memory, so
   a host restart forgets it), retried every 20 seconds while a client follows it. Until either source
   has the sandbox's provider, the picker shows the mirror's pick read-only, never the host's own
-  providers, which the host refuses on a bridge thread (`sandboxMirrorPickerSource`). The computer stays
-  on its paired path: its lineage panel navigates into, stops and merges the sandbox's child
-  threads, which a read through the host cannot offer.
+  providers, which the host refuses on a bridge thread (`sandboxMirrorPickerSource`).
 - **Approvals and questions.** Nothing the sandbox asks is ever left unanswerable. On a Supervised
   host thread a pending approval becomes `session/request_permission` with an `edit` or `execute`
   tool kind (never a read kind the host's policy would allow on its own); on any other mode, whose
@@ -460,10 +458,11 @@ without pairing with the sandbox.
   resumes the sandbox, whose own thread then lists, and moving then would swap the conversation
   under them. It carries an unsent draft across (`moveComposerPromptAndImages`). A chat with no
   mirror listed keeps its sandbox's thread and the client-side resume path (`sandboxResendPending`).
-  The mirror has none of the chat's agents or tasks, so its details panel lists the lineage of the
-  sandbox's thread (`sandboxChatOwnThread`), and the phone's Agents sheet lists them from
-  `sandboxes.subscribeThreadMirror`, opening an agent's messages read-only through
-  `sandboxes.readMirrorChild`, which reads again when the host reports that agent changed. `sandboxHostMirrors` pairs the two threads when both are listed,
+  The mirror has none of the chat's agents or tasks, so its details panel's Lineage and the
+  phone's Agents sheet list them from `sandboxes.subscribeThreadMirror`, paired or not: the mirror
+  stays open only while the sandbox's thread is not listed here, since the redirect above moves it
+  otherwise. An agent opens on the sandbox when this client is connected to it, else read-only
+  through `sandboxes.readMirrorChild`, which reads again when the host reports that agent changed. `sandboxHostMirrors` pairs the two threads when both are listed,
   and the mirror takes the sandbox thread's title. Each
   message the composer sends on a linked sandbox thread (not on the mirror) is copied to the mirror with the same
   message id and `dispatchMode: "queue"`
