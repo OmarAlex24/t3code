@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   describeSandboxWork,
+  SANDBOX_SETTLE_STALE_ANSWER,
   type SandboxSettleDecision,
 } from "@t3tools/client-runtime/state/sandbox-settle";
 import {
@@ -69,6 +70,11 @@ function SettleQuestion(props: {
       input: { instanceId: decision.instanceId, choice },
     });
     // On success the host's list drops the question and this card goes with it.
+    if (AsyncResult.isSuccess(result) && !result.value.resolved) {
+      setStep({ kind: "ask" });
+      setError(SANDBOX_SETTLE_STALE_ANSWER);
+      return;
+    }
     if (AsyncResult.isFailure(result)) {
       setStep({ kind: "ask" });
       setError(
