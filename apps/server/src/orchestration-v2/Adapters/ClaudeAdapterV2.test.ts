@@ -11297,6 +11297,23 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           [WAKE_TASK_ID, true],
         ],
       );
+      // Partial and empty levels can precede the task's notification; only its end clears the mark.
+      yield* Queue.offer(
+        harness.sdkMessages,
+        roster(["dev-server"], "00000000-0000-4000-8000-000000000310"),
+      );
+      yield* Queue.offer(harness.sdkMessages, roster([], "00000000-0000-4000-8000-000000000311"));
+      yield* Queue.offer(
+        harness.sdkMessages,
+        roster([WAKE_TASK_ID, "dev-server"], "00000000-0000-4000-8000-000000000312"),
+      );
+      assert.deepStrictEqual(
+        marks(yield* nextRoster((tasks) => tasks[0]?.taskId === WAKE_TASK_ID)),
+        [
+          [WAKE_TASK_ID, true],
+          ["dev-server", false],
+        ],
+      );
 
       // Once the task ends, a reused id starts unmarked.
       yield* Queue.offer(
