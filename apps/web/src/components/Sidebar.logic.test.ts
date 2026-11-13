@@ -309,7 +309,7 @@ describe("resolveSidebarThreadStatus", () => {
         ...idle,
         runtime: { ...runtime, status: "idle" as const, lastError: "persisted" },
       }),
-    ).toBe("waiting");
+    ).toBe("working");
   });
 
   it("titles the window with live work and requests only", () => {
@@ -320,7 +320,8 @@ describe("resolveSidebarThreadStatus", () => {
       [{ ...idle, runtime }, "Working"],
       [{ ...idle, runtime, pendingGuestMessageCount: 1 }, "Working"],
       [{ ...idle, runtime, blockedOnThreadWait: true }, "Working"],
-      [{ ...idle, runtime: { ...runtime, status: "idle" as const } }, null],
+      // Background work the agent waits on holds the turn open.
+      [{ ...idle, runtime: { ...runtime, status: "idle" as const } }, "Working"],
       [{ ...idle, runtime: { ...runtime, status: "failed" as const } }, null],
       [{ ...idle, runtime: { ...runtime, status: "completed" as const } }, null],
       [idle, null],
@@ -450,14 +451,11 @@ describe("resolveThreadStatusPill", () => {
     });
   });
 
-  it("shows waiting for an idle thread with pending background tasks", () => {
+  it("shows working for a thread held idle by background work", () => {
     expect(
       resolveThreadStatusPill({
         thread: {
           ...baseThread,
-          pendingBackgroundTasks: [
-            { taskId: "bg-1", description: "Watch build", kind: "monitor", awaited: true },
-          ],
           runtime: {
             ...baseThread.runtime,
             status: "idle",
@@ -465,12 +463,7 @@ describe("resolveThreadStatusPill", () => {
           },
         },
       }),
-    ).toMatchObject({
-      label: "Waiting",
-      colorClass: "text-sidebar-muted-foreground",
-      dotClass: "bg-sidebar-muted-foreground",
-      pulse: false,
-    });
+    ).toEqual(resolveThreadStatusPill({ thread: baseThread }));
   });
 
   it("shows plan ready when a settled plan turn has a proposed plan ready for follow-up", () => {
@@ -963,24 +956,36 @@ describe("unseen completion with background work", () => {
     {
       roster: "awaited command",
       task: { kind: "command", awaited: true },
-      status: "waiting",
+      status: "working",
       receded: true,
-      pill: "Waiting",
+      pill: "Working",
+    },
+    {
+      roster: "background subagent",
+      task: { kind: "subagent" },
+      status: "working",
+      receded: true,
+      pill: "Working",
     },
   ] as const)("presents a completed thread with a $roster roster", (expected) => {
+    const completedAt = "2026-06-20T01:00:00.000Z";
     const thread = presentThreadShell(localEnvironmentId, {
       ...makeThreadFixture().source,
       latestRunId: RunId.make("run-background-completion"),
       status: "completed",
-      latestRunCompletedAt: DateTime.makeUnsafe("2026-06-20T01:00:00.000Z"),
+      latestRunCompletedAt: DateTime.makeUnsafe(completedAt),
       lastVisitedAt: DateTime.makeUnsafe("2026-06-20T00:59:00.000Z"),
       pendingBackgroundTasks: [{ taskId: "background-work", ...expected.task }],
     });
     const status = resolveSidebarThreadStatus(thread);
     const isUnread = hasUnseenCompletion(thread);
+    const held = expected.status === "working";
 
     expect(isUnread).toBe(true);
     expect(status).toBe(expected.status);
+    expect(resolveSidebarFolderDot([thread])).toBe(held ? "working" : "unread");
+    expect(resolveWindowTitleThreadStatus(thread)).toBe(held ? "Working" : null);
+    expect(resolveWorkingStartedAt(thread)).toBe(held ? completedAt : null);
     expect(
       shouldRecedeSidebarThread({
         status,
@@ -1651,9 +1656,7 @@ describe("resolveSidebarFolderDot", () => {
 
     expect(resolveSidebarFolderDot([idle])).toBeNull();
     // A waiting thread stays quiet even with an unread completion, like its row.
-    expect(
-      resolveSidebarFolderDot([{ ...unread, runtime: { ...runtime, status: "idle" as const } }]),
-    ).toBeNull();
+    expect(resolveSidebarFolderDot([{ ...unread, runtime, blockedOnThreadWait: true }])).toBeNull();
     expect(resolveSidebarFolderDot([idle, working])).toBe("working");
     expect(resolveSidebarFolderDot([working, unread])).toBe("unread");
     expect(resolveSidebarFolderDot([unread, limited])).toBe("attention");
