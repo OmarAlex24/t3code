@@ -1,7 +1,9 @@
 import {
   type MessageId,
   type ModelSelection,
+  SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_MESSAGE_META,
+  SANDBOX_BRIDGE_STEER_CANCEL,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
   SANDBOX_RESUME_STEP_SECONDS,
   type OrchestrationV2Command,
@@ -1177,6 +1179,63 @@ describe("forwarding a turn", () => {
           assert.deepStrictEqual(
             fake.commands.map((command) => command.type),
             [threadStop ? "thread.stop" : "run.interrupt"],
+          );
+        }),
+      );
+    }),
+  );
+
+  it.effect("leaves the sandbox working when a steer cancels the turn, and steers it in", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const fake = yield* makeFakeSandbox({
+        existing: projection(
+          [userMessage("msg-0", 100, "run-0")],
+          [run("msg-0" as MessageId, "completed", "run-0", 1)],
+        ),
+        react: (command, sandbox) => {
+          if (command.type !== "message.dispatch") return Effect.void;
+          if (command.messageId === "msg-1") {
+            return sandbox
+              .push(event("run.created", run("msg-1" as MessageId, "running", "run-1", 2)))
+              .pipe(Effect.andThen(Deferred.succeed(started, undefined)));
+          }
+          // The sandbox takes the steer into the run that is still working.
+          return Effect.forEach(
+            [
+              event("turn-item.updated", userMessage("msg-steer", 201, "run-1")),
+              event("turn-item.updated", assistant("steered", "On it", 202, "run-1")),
+              event("run.updated", run("msg-1" as MessageId, "completed", "run-1", 2)),
+            ],
+            sandbox.push,
+            { discard: true },
+          );
+        },
+      });
+      yield* withBridge({ fake }, ({ acp, updates }) =>
+        Effect.gen(function* () {
+          const session = yield* openThread(acp);
+          const prompt = yield* say(acp, session.sessionId, "Long job", {
+            messageId: "msg-1",
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(started);
+          yield* Effect.yieldNow;
+          yield* acp.agent.cancel({
+            sessionId: session.sessionId,
+            _meta: { [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL },
+          });
+          assert.strictEqual((yield* Fiber.join(prompt)).stopReason, "cancelled");
+          const steer = yield* say(acp, session.sessionId, "Also check the tests", {
+            messageId: "msg-steer",
+          });
+          assert.strictEqual(steer.stopReason, "end_turn");
+          assert.deepStrictEqual(messages(updates), ["On it"]);
+          // Nothing stopped the run or its tasks; the steer went the way a chat's send goes.
+          assert.deepStrictEqual(
+            fake.commands.map((command) =>
+              command.type === "message.dispatch" ? command.deliveryIntent : command.type,
+            ),
+            ["auto", "auto"],
           );
         }),
       );

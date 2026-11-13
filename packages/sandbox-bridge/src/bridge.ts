@@ -25,9 +25,11 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
+  SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_MODEL,
+  SANDBOX_BRIDGE_STEER_CANCEL,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
   SANDBOX_RESUME_WAIT_SECONDS,
   type ServerProvider,
@@ -988,10 +990,18 @@ export const threadIdOfSession = (sessionId: string): ThreadId | null =>
     ? ThreadId.make(sessionId.slice(SANDBOX_SESSION_PREFIX.length))
     : null;
 
+/** Why the host ended a turn: the user's Stop, or a newer message taking the turn over. */
+type CancelReason = "stop" | "steer";
+
+const cancelReasonOf = (meta: unknown): CancelReason =>
+  isRecord(meta) && meta[SANDBOX_BRIDGE_CANCEL_META] === SANDBOX_BRIDGE_STEER_CANCEL
+    ? "steer"
+    : "stop";
+
 interface BridgeSession {
   readonly threadId: ThreadId | null;
   mcp: HostMcp | null;
-  cancel: Deferred.Deferred<void> | null;
+  cancel: Deferred.Deferred<CancelReason> | null;
   configOptions: ReadonlyArray<AcpSchema.SessionConfigOption>;
   /** A host thread with no sandbox link: its sandbox was deleted. */
   readonly sandboxGone?: boolean;
@@ -1153,7 +1163,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
   yield* agent.handleCloseSession((request) =>
     Effect.sync(() => {
       const session = sessions.get(request.sessionId);
-      if (session?.cancel) Deferred.doneUnsafe(session.cancel, Effect.void);
+      if (session?.cancel) Deferred.doneUnsafe(session.cancel, Effect.succeed("stop"));
       sessions.delete(request.sessionId);
       return {};
     }),
@@ -1164,14 +1174,14 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       const cancel = sessions.get(notification.sessionId)?.cancel;
       return cancel === undefined || cancel === null
         ? Effect.void
-        : Deferred.succeed(cancel, undefined).pipe(Effect.asVoid);
+        : Deferred.succeed(cancel, cancelReasonOf(notification._meta)).pipe(Effect.asVoid);
     }),
   );
 
   yield* agent.handlePrompt((request) =>
     Effect.gen(function* () {
       const session = yield* sessionOf(request.sessionId);
-      const cancel = yield* Deferred.make<void>();
+      const cancel = yield* Deferred.make<CancelReason>();
       session.cancel = cancel;
       const stopReason = yield* runTurn(request, session, cancel).pipe(
         Effect.scoped,
@@ -1266,7 +1276,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
   const runTurn = Effect.fn("SandboxBridge.turn")(function* (
     request: AcpSchema.PromptRequest,
     session: BridgeSession,
-    cancel: Deferred.Deferred<void>,
+    cancel: Deferred.Deferred<CancelReason>,
   ): Effect.fn.Return<AcpSchema.StopReason, SandboxBridgeError | AcpError.AcpError, Scope.Scope> {
     const sessionId = request.sessionId;
     const threadId = session.threadId;
@@ -1351,6 +1361,8 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         text: content.text,
         attachments: [...attachments],
         ...(picked === null ? {} : { modelSelection: picked }),
+        // As a chat's send: a busy thread takes it as a steer, or queues it when it cannot.
+        deliveryIntent: "auto",
         dispatchMode: { type: "start_immediately" },
       });
       if (Option.isNone(before)) {
@@ -1585,9 +1597,11 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     const outcome = yield* performAll.pipe(
       Effect.andThen(Fiber.join(reader)),
       Effect.as("followed" as const),
-      Effect.raceFirst(Deferred.await(cancel).pipe(Effect.as("cancelled" as const))),
+      Effect.raceFirst(Deferred.await(cancel)),
     );
-    if (outcome === "cancelled") {
+    // A steer's cancel leaves the run and its tasks working; the steer follows as the next prompt.
+    if (outcome === "steer") return "cancelled";
+    if (outcome === "stop") {
       const runId = tracker.activeRunId;
       yield* (
         sandbox.threadStop
