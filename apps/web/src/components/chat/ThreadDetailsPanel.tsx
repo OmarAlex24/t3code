@@ -22,6 +22,7 @@ import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
+import { SandboxMirrorVersionControl } from "./SandboxMirrorVersionControl";
 import { ThreadServersPanel } from "./ThreadServersPanel";
 import {
   ThreadDetailsContext,
@@ -240,6 +241,20 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                         {...(props.onOpenChanges ? { onOpenChanges: props.onOpenChanges } : {})}
                       />
                     ) : null}
+                  </div>
+                </ThreadDetailsSection>
+              ) : null}
+
+              {/* A sandbox chat's mirror has no repository here; its branch and PRs are the sandbox's. */}
+              {visible.branch && !show.branch && !props.draftId ? (
+                <ThreadDetailsSection
+                  headingId="thread-details-sandbox-version-control-heading"
+                  title="Version Control"
+                  showHeading={false}
+                  separated={density === "full"}
+                >
+                  <div className="flex flex-col">
+                    <SandboxMirrorVersionControl threadRef={activeThreadRef} />
                   </div>
                 </ThreadDetailsSection>
               ) : null}

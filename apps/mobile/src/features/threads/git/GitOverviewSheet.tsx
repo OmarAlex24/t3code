@@ -27,6 +27,7 @@ import { ScreenContent } from "../../../components/ui/ScreenContent";
 import { InspectorSheetContext } from "../../layout/workspace-inspector-sheet";
 import { AppText as Text } from "../../../components/ui/AppText";
 import { useEnvironmentQuery } from "../../../state/query";
+import { useSandboxMirror } from "../../../state/sandbox-mirror";
 import { useThreadSelection } from "../../../state/use-thread-selection";
 import { useSelectedThreadGitActions } from "../../../state/use-selected-thread-git-actions";
 import { useSelectedThreadGitState } from "../../../state/use-selected-thread-git-state";
@@ -76,7 +77,20 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
     context: selectedThread ?? undefined,
   });
   const { selectedThreadCwd, selectedThreadWorktreePath } = useSelectedThreadWorktree();
-  const linkedPrLines = useLinkedPullRequestLines(selectedThread, selectedEnvironmentRuntime);
+  // A sandbox chat's mirror shows the branch and pull requests of the sandbox's own thread, which
+  // act only there.
+  const sandboxMirror = useSandboxMirror(
+    selectedThread === null
+      ? null
+      : { environmentId: selectedThread.environmentId, threadId: selectedThread.id },
+    selectedThread,
+  );
+  const linkedPrLines = useLinkedPullRequestLines(
+    sandboxMirror !== null && selectedThread !== null
+      ? { ...selectedThread, pullRequests: sandboxMirror.pullRequests ?? [] }
+      : selectedThread,
+    selectedEnvironmentRuntime,
+  );
   const linkedPrActions = useLinkedPullRequestActions({
     thread: selectedThread,
     project: selectedThreadProject,
@@ -95,7 +109,8 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
       : null,
   );
 
-  const currentBranchLabel = gitStatus.data?.refName ?? selectedThread?.branch ?? "Detached HEAD";
+  const currentBranchLabel =
+    gitStatus.data?.refName ?? sandboxMirror?.branch ?? selectedThread?.branch ?? "Detached HEAD";
   const currentStatusSummary = statusSummary(gitStatus.data);
   const currentWorktreePath = selectedThreadWorktreePath;
   const gitOperationLabel = gitState.gitOperationLabel;
@@ -302,7 +317,7 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
             )
           }
         />
-        {linkedPrActions.canLink ? (
+        {linkedPrActions.canLink && sandboxMirror === null ? (
           <ListRow
             icon="link"
             label={`Link ${linkedPrActions.terminology.singular}`}
@@ -321,7 +336,7 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
               separator={index < linkedPrLines.length - 1}
               surfaceClassName="text-grouped-card"
               openPullRequest={openPullRequest}
-              actions={linkedPrActions}
+              actions={sandboxMirror === null ? linkedPrActions : null}
             />
           ))}
         </ListSection>
