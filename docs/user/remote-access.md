@@ -133,9 +133,13 @@ configs live; a new thread started from the phone gets a reply saying so. Once i
 can keep the conversation going from the phone.
 
 The small project is an empty folder, not the repository, so it offers no git actions, scripts,
-files, or terminal; a notice above the composer says so. The repository's files, diffs, and
-terminals are on the sandbox: **Open sandbox thread**, in that notice or in the sandbox menu in the
-thread's header, opens the same thread on the sandbox.
+files, or terminal. The repository's files, diffs, terminals and previews are on the sandbox. This
+computer usually connects to it on its own; when it is not connected, **Connect to the sandbox**
+(in the side panel, the thread details, or the sandbox menu in the thread's header) connects it,
+resuming a stopped sandbox first, and the chat then shows the sandbox's own thread. The phone does
+not connect to sandboxes, so there these are available only from a computer. **Settings →
+Connections → Sandboxes** has **Connect** and **Disconnect** for each chat's sandbox; after
+**Disconnect**, this device stays disconnected until you connect again, and the chat stays here.
 
 - Keep the thread **Supervised**. In another mode the sandbox's approvals cannot reach you: the
   request waits on the sandbox and the thread says so.
