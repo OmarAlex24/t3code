@@ -378,8 +378,14 @@ without pairing with the sandbox.
   host asks: when the request is answered on the sandbox (on the computer), it sends
   `SANDBOX_BRIDGE_WITHDRAW_METHOD` and the host's ACP adapter cancels its copy. Requests already
   pending when a turn starts are surfaced first.
-- **Cancel** sends `thread.stop` where the sandbox advertises it, else `run.interrupt`, and ends
-  the turn `cancelled`.
+- **Cancel.** The `sandboxes` instance has no native steering, so the host steers by cancelling
+  the prompt and restarting the run with the new message. A cancel that is not the user's Stop
+  (no runtime restart requested) carries `_meta` `SANDBOX_BRIDGE_CANCEL_META: "steer"`
+  (`steerCancelMeta` on the ACP flavor); the bridge ends the host turn `cancelled` and leaves the
+  sandbox working, and the next prompt sends the message with `deliveryIntent: "auto"`, as any
+  chat send does, so a busy sandbox thread takes it as a steer or queues it. Every send uses
+  that intent. Any other cancel is Stop: `thread.stop` where the sandbox advertises it (which, as
+  in any chat, also stops the thread's delegated tasks), else `run.interrupt`.
 - **Credential.** After the launch hand-off the provisioner runs
   [`bridgeCredentialScript`](../../apps/server/src/sandbox/sandboxBridgeCredential.ts) on the
   sandbox: `t3 auth session issue` with `orchestration:read` and `orchestration:operate`, label
