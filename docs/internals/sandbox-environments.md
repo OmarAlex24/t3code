@@ -378,6 +378,13 @@ without pairing with the sandbox.
   host asks: when the request is answered on the sandbox (on the computer), it sends
   `SANDBOX_BRIDGE_WITHDRAW_METHOD` and the host's ACP adapter cancels its copy. Requests already
   pending when a turn starts are surfaced first.
+- **Secrets.** A pending `secret_request` on the sandbox is asked with the host's own
+  `request_secret` (`delivery: "file"`, through the thread-scoped MCP credential), so the mirror
+  shows the native secret card and the host thread keeps only the request's status. The bridge
+  reads and removes the owner-only file and answers the sandbox with `secrets.answerRequest`
+  (`orchestration:operate`). An ACP form would not do: its answers are recorded in the host
+  thread. The host card waits 280 seconds, under `fetch`'s five-minute wait for response headers;
+  answered on the sandbox first, the bridge drops its call, which closes the card.
 - **Cancel.** The `sandboxes` instance has no native steering, so the host steers by cancelling
   the prompt and restarting the run with the new message. A cancel that is not the user's Stop
   (no runtime restart requested) carries `_meta` `SANDBOX_BRIDGE_CANCEL_META: "steer"`
