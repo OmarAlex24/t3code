@@ -525,6 +525,7 @@ function ThreadRouteContent(
   const mirrorPicker = sandboxMirrorPicker(
     sandboxMirror,
     routeEnvironmentRuntime?.serverConfig ?? null,
+    selectedThread,
   );
   const selectedThreadWithDraftSettings = selectedThread
     ? {

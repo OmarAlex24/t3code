@@ -6,7 +6,11 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { sandboxMirrorModelSource, sandboxMirrorModelSourceOf } from "./sandboxMirror.ts";
+import {
+  sandboxMirrorModelSource,
+  sandboxMirrorModelSourceOf,
+  sandboxMirrorPickerSource,
+} from "./sandboxMirror.ts";
 
 const sandboxClaude = {
   instanceId: "claudeAgent",
@@ -49,5 +53,55 @@ describe("sandboxMirrorModelSource", () => {
       sandboxMirrorModelSource(running, [sandboxClaude]),
     );
     expect(sandboxMirrorModelSourceOf({ ...mirror, provider: null })).toBeNull();
+  });
+});
+
+describe("sandboxMirrorPickerSource", () => {
+  const bridge = {
+    ...sandboxClaude,
+    instanceId: "sandboxes",
+    driver: "acpRegistry",
+  } as ServerProvider;
+  const hostCodex = { ...sandboxClaude, instanceId: "codex", driver: "codex" } as ServerProvider;
+  const mirrorSelection = {
+    instanceId: ProviderInstanceId.make("sandboxes"),
+    model: "claude-opus-5-5",
+  } as ModelSelection;
+  const hostMirror = {
+    available: false,
+    provider: sandboxClaude,
+    modelSelection: running,
+    runs: [],
+    subagents: [],
+  } satisfies SandboxThreadMirror;
+  const input = {
+    paired: null,
+    hostMirror: null,
+    mirrorSelection,
+    hostProviders: [sandboxClaude, bridge, hostCodex],
+  };
+
+  it("prefers the paired sandbox's thread, then what the host read of it", () => {
+    const paired = sandboxMirrorModelSource(running, [sandboxClaude]);
+    expect(sandboxMirrorPickerSource({ ...input, paired, hostMirror })).toEqual({
+      ...paired,
+      readOnly: false,
+    });
+    expect(sandboxMirrorPickerSource({ ...input, hostMirror })).toEqual({
+      ...sandboxMirrorModelSourceOf(hostMirror),
+      readOnly: false,
+    });
+  });
+
+  // Picking the host's Claude on a stopped sandbox's mirror was refused by the host.
+  it("never offers the host's own providers while neither has read the sandbox", () => {
+    expect(sandboxMirrorPickerSource(input)).toEqual({
+      providers: [bridge],
+      modelSelection: mirrorSelection,
+      readOnly: true,
+    });
+    expect(
+      sandboxMirrorPickerSource({ ...input, hostMirror: { ...hostMirror, provider: null } }),
+    ).toEqual({ providers: [bridge], modelSelection: mirrorSelection, readOnly: true });
   });
 });

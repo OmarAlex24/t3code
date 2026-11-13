@@ -381,16 +381,19 @@ without pairing with the sandbox.
   session reported last, so no client's mirror picker reads it: each shows the sandbox's own
   provider and selection under the bridge's instance (`sandboxMirrorModelSource` in client-runtime),
   and a pick is set on both threads, since otherwise the bridge would hand the sandbox the mirror's
-  older pick. The computer, paired with the sandbox, reads its thread and providers directly and
-  sets the pick on both (`sandboxChatPickPartner`). The phone never pairs with a sandbox, so the
-  host serves it ([`SandboxMirror.ts`](../../apps/server/src/sandbox/SandboxMirror.ts)) through
+  older pick. A client paired with the sandbox that lists its thread reads it and its providers
+  directly and sets the pick on both (`sandboxChatPickPartner`). Any other client (the phone, which
+  never pairs with a sandbox, app.t3.codes, or the computer while the sandbox's thread is unlisted)
+  is served by the host ([`SandboxMirror.ts`](../../apps/server/src/sandbox/SandboxMirror.ts)) through
   the bridge's link and bearer: `sandboxes.subscribeThreadMirror` (orchestration read) follows the
   sandbox's own `subscribeThread` and sends the thread's provider, selection, agents and the runs
   their turn is told from, only when one of those changes; `sandboxes.setThreadModel`
   (orchestration operate) sets a pick on the sandbox thread's provider and on the mirror, or on
   the mirror alone while the sandbox is stopped, for the bridge to hand over. A stopped or
   unreachable sandbox shows as `available: false` with what the host last read (kept in memory, so
-  a host restart forgets it), retried every 20 seconds while a client follows it. The computer stays
+  a host restart forgets it), retried every 20 seconds while a client follows it. Until either source
+  has the sandbox's provider, the picker shows the mirror's pick read-only, never the host's own
+  providers, which the host refuses on a bridge thread (`sandboxMirrorPickerSource`). The computer stays
   on its paired path: its lineage panel navigates into, stops and merges the sandbox's child
   threads, which a read through the host cannot offer.
 - **Approvals and questions.** Nothing the sandbox asks is ever left unanswerable. On a Supervised

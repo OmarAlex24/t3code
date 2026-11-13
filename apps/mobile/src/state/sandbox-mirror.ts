@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   isSandboxMirrorThread,
-  sandboxMirrorModelSourceOf,
+  sandboxMirrorPickerSource,
 } from "@t3tools/client-runtime/state/sandbox-mirror";
 import type {
   EnvironmentId,
@@ -31,15 +31,31 @@ export function useSandboxMirror(
 }
 
 /**
- * What a mirror's model picker reads: the sandbox's provider in place of the bridge's shared list,
- * and the sandbox's selection (null for any other thread, which keeps its own config and pick).
+ * What a mirror's model picker reads: the sandbox's provider and selection, or the mirror's own
+ * pick alone, read-only, until the host has read them; see `sandboxMirrorPickerSource`. Any other
+ * thread keeps its own config and pick (a null selection).
  */
 export function sandboxMirrorPicker(
   mirror: SandboxThreadMirror | null,
   config: ServerConfig | null,
-): { readonly config: ServerConfig | null; readonly modelSelection: ModelSelection | null } {
-  const source = sandboxMirrorModelSourceOf(mirror);
-  return source === null || config === null
-    ? { config, modelSelection: null }
-    : { config: { ...config, providers: source.providers }, modelSelection: source.modelSelection };
+  thread: { readonly modelSelection: ModelSelection } | null | undefined,
+): {
+  readonly config: ServerConfig | null;
+  readonly modelSelection: ModelSelection | null;
+  readonly readOnly: boolean;
+} {
+  if (config === null || thread == null || !isSandboxMirrorThread(thread)) {
+    return { config, modelSelection: null, readOnly: false };
+  }
+  const source = sandboxMirrorPickerSource({
+    paired: null,
+    hostMirror: mirror,
+    mirrorSelection: thread.modelSelection,
+    hostProviders: config.providers,
+  });
+  return {
+    config: { ...config, providers: source.providers },
+    modelSelection: source.modelSelection,
+    readOnly: source.readOnly,
+  };
 }
