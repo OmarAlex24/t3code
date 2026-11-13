@@ -232,6 +232,16 @@ const bridgedSandboxChats = (
             ],
       );
 
+/**
+ * Whether the chat view moves now from a sandbox chat's thread to the one standing for it. The two
+ * keep different histories, so a user reading back stays, typing or not, and so does one who sent
+ * since opening it: the send scrolls to the end, and would land them in the other conversation.
+ */
+export const movesToSandboxChatAlias = (visit: {
+  readonly readingBack: boolean;
+  readonly sentThisVisit: boolean;
+}): boolean => !visit.readingBack && !visit.sentThisVisit;
+
 /** The thread a sandbox chat's other thread stands for; undefined for any other thread. */
 export const sandboxChatAliasTarget = (
   aliases: ReadonlyMap<string, ScopedThreadRef>,

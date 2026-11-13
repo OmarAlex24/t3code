@@ -424,14 +424,15 @@ without pairing with the sandbox.
   (a remount or a reload), and a send for a thread whose sandbox is stopped or unreachable waits
   with a toast instead of launching.
 - **One thread on the computer.** A sandbox chat the host mirrors lists as one of its two threads.
-  `sandboxChatAliases` (in `state/sandboxThreads.ts`) shows the sandbox's own thread only while
-  `showsSandboxOwnThread`: the sandbox is running, not resuming, and its environment is connected.
-  Otherwise the host's mirror stands for it, since the host keeps it live and a send there waits on
-  the host while the sandbox resumes. The sidebar, the command palette and `ChatView`'s redirect
-  all read that one map, so the chat never has two rows. The redirect carries an unsent draft
-  across (`moveComposerPromptAndImages`) and waits while the user is scrolled back with an empty
-  composer. A chat with no mirror listed keeps its sandbox's thread and the client-side resume
-  path (`sandboxResendPending`). `sandboxHostMirrors` pairs the two threads when both are listed,
+  `sandboxChatAliases` (in `state/sandboxThreads.ts`) shows the sandbox's own thread whenever it
+  lists, whatever the sandbox's state, since a send there resumes it; the host's mirror stands in
+  only for a stopped sandbox's thread this app never listed. The sidebar, the command palette and
+  `ChatView`'s redirect all read that one map, so the chat never has two rows. The two threads keep
+  different histories, so the redirect (`movesToSandboxChatAlias`) waits while the user is scrolled
+  back, typing or not, and never moves a thread they sent in since opening it: a send on the mirror
+  resumes the sandbox, whose own thread then lists, and moving then would swap the conversation
+  under them. It carries an unsent draft across (`moveComposerPromptAndImages`). A chat with no
+  mirror listed keeps its sandbox's thread and the client-side resume path (`sandboxResendPending`). `sandboxHostMirrors` pairs the two threads when both are listed,
   and the mirror takes the sandbox thread's title. Each
   message the composer sends on a linked sandbox thread (not on the mirror) is copied to the mirror with the same
   message id and `dispatchMode: "queue"`
