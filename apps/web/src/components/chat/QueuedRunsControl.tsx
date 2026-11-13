@@ -27,7 +27,7 @@ import * as DateTime from "effect/DateTime";
 import { useId, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 
 import { useAssetUrls } from "../../assets/assetUrls";
-import { threadEnvironment } from "../../state/threads";
+import { threadEnvironment, useSandboxStartRunId } from "../../state/threads";
 import { useQuietThreadShell, useThreadProjection } from "../../state/entities";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { isImageAttachment, type ChatMessage } from "../../types";
@@ -93,12 +93,15 @@ export function QueuedRunsControl({
   readonly timestampFormat: TimestampFormat;
   readonly onOpenThread: (threadId: ThreadId) => void;
 }) {
-  const projection = useThreadProjection(
-    scopeThreadRef(props.environmentId, props.threadId),
-  )?.projection;
+  const threadRef = scopeThreadRef(props.environmentId, props.threadId);
+  const projection = useThreadProjection(threadRef)?.projection;
+  // Already started on the host, where it waits for its sandbox: it is stopped, not cancelled,
+  // and nothing can be sent ahead of it.
+  const sandboxStartRunId = useSandboxStartRunId(threadRef);
   const promote = useAtomCommand(threadEnvironment.promoteQueuedRun);
   const resume = useAtomCommand(threadEnvironment.resumeThreadQueue);
   const cancel = useAtomCommand(threadEnvironment.cancelQueuedRun);
+  const interrupt = useAtomCommand(threadEnvironment.interruptTurn);
   const [showAll, setShowAll] = useState(false);
   const queueListId = useId();
   const [busyRunId, setBusyRunId] = useState<RunId | null>(null);
@@ -115,9 +118,10 @@ export function QueuedRunsControl({
   const activeRun = workflow?.activeRun ?? null;
   // A fresh message starts its own turn: it may skip compaction, but not steer into a turn.
   const canSendRun = (freshContext: boolean) =>
-    workflow?.canSendNow === true ||
-    (workflow?.canPromoteToSteer === true &&
-      (!freshContext || workflow.promoteSkipsCompaction === true));
+    sandboxStartRunId === null &&
+    (workflow?.canSendNow === true ||
+      (workflow?.canPromoteToSteer === true &&
+        (!freshContext || workflow.promoteSkipsCompaction === true)));
   const queuedImageUrlById = new Map(
     queuedImageAttachmentUrls.flatMap((url, index) => {
       const resource = queuedImageAttachmentResources[index];
@@ -137,7 +141,7 @@ export function QueuedRunsControl({
       serverIndex,
       text,
       // A guest's message keeps the guest's words; the owner can cancel it, not rewrite it.
-      editable: context?.guest === undefined,
+      editable: context?.guest === undefined && run.id !== sandboxStartRunId,
       attachments,
       thumbnails: attachments
         .filter((attachment) => attachment.type === "image")
@@ -204,6 +208,7 @@ export function QueuedRunsControl({
       if (
         !latest ||
         latest.context?.guest !== undefined ||
+        latest.run.id === sandboxStartRunId ||
         props.editingRunId !== null ||
         props.editBlockedReason !== null ||
         busyRunId !== null
@@ -227,10 +232,11 @@ export function QueuedRunsControl({
 
   const remove = async (runId: RunId) => {
     setBusyRunId(runId);
-    await cancel({
+    const target = {
       environmentId: props.environmentId,
       input: { threadId: props.threadId, runId },
-    });
+    };
+    await (runId === sandboxStartRunId ? interrupt(target) : cancel(target));
     setBusyRunId(null);
   };
 
