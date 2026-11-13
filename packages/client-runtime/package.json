@@ -387,6 +387,10 @@
       "types": "./src/state/contextWindow.ts",
       "default": "./src/state/contextWindow.ts"
     },
+    "./state/sandbox-mirror": {
+      "types": "./src/state/sandboxMirror.ts",
+      "default": "./src/state/sandboxMirror.ts"
+    },
     "./state/thread-subagents": {
       "types": "./src/state/threadSubagents.ts",
       "default": "./src/state/threadSubagents.ts"

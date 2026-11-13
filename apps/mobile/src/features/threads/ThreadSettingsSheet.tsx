@@ -89,6 +89,7 @@ import {
 } from "../../state/use-composer-drafts";
 import { useQuietThreadStructure } from "../../state/use-thread-detail";
 import { activeComposerDraftKey, useQueuedRunEdit } from "../../state/queued-run-edit";
+import { sandboxMirrorPicker, useSandboxMirror } from "../../state/sandbox-mirror";
 import { selectThreadModel } from "../../state/thread-model-selection";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
@@ -1366,16 +1367,20 @@ export function ExistingThreadSettingsRouteScreen({
   // A queued edit can end while the sheet is open; the prompt then belongs to the thread's draft.
   const draftKey = activeComposerDraftKey(threadKey, route.params.draftKey, queuedRunEdit);
   const prompt = useComposerDraft(draftKey).text;
+  const sandboxMirror = useSandboxMirror(selectedThreadDetailRef, selectedThread);
 
   if (!selectedThread) {
     return <View className="flex-1 bg-sheet" />;
   }
 
-  const serverConfig = serverConfigForCwd(
-    selectedEnvironmentRuntime?.serverConfig ?? null,
-    selectedThreadCwd,
+  // A sandbox chat's mirror picks among the sandbox's own models, read through the host.
+  const mirrorPicker = sandboxMirrorPicker(
+    sandboxMirror,
+    serverConfigForCwd(selectedEnvironmentRuntime?.serverConfig ?? null, selectedThreadCwd),
   );
-  const modelSelection = draftSettings.modelSelection ?? selectedThread.modelSelection;
+  const serverConfig = mirrorPicker.config;
+  const modelSelection =
+    draftSettings.modelSelection ?? mirrorPicker.modelSelection ?? selectedThread.modelSelection;
   const lockedProviderInstanceId = threadAllowsProviderSwitch({
     thread: selectedThread,
     projection: structure?.projection,

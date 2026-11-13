@@ -74,6 +74,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.subscribeWorktreeSetup
   | typeof WS_METHODS.sandboxesSubscribeLaunch
   | typeof WS_METHODS.sandboxesSubscribeListChanges
+  | typeof WS_METHODS.sandboxesSubscribeThreadMirror
   | typeof WS_METHODS.subscribeProjectClones
   | typeof WS_METHODS.terminalAttach
   | typeof WS_METHODS.terminalObserve;
