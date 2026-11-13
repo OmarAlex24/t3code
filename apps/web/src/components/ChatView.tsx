@@ -205,6 +205,7 @@ import {
 import {
   ensureSandboxThreadRunning,
   isHostThreadRef,
+  movesToSandboxChatAlias,
   sandboxChatAliasTarget,
   shortSandboxId,
 } from "../state/sandboxThreads";
@@ -1028,8 +1029,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   // A legacy sandbox thread's server is off on purpose, so the session cannot be read and the
   // connection never comes up until a send or un-settle resumes it from this client.
-  const legacySandboxStopped =
-    activeSandboxStopped && !activeSandboxOnHost && activeAliasTarget === undefined;
+  const legacySandboxStopped = activeSandboxStopped && !activeSandboxOnHost;
   // A run the sandbox was in when it stopped ended with its machine, though the thread's last
   // known state still reads as running: until a resume brings the real state back, nothing
   // works there, so it shows no live run and nothing to interrupt.
@@ -2272,14 +2272,20 @@ export default function ChatView(props: ChatViewProps) {
     timelineAnchorMessageId,
     setTimelineAnchor,
   });
-  const activeComposerHasContent = useComposerDraftStore((store) =>
-    activeAliasTarget === undefined || activeThreadRef === null
-      ? false
-      : composerDraftHasUserContent(store.getComposerDraft(activeThreadRef)),
-  );
-  // Reading back through the chat is left alone until the end or the composer is reached again:
-  // the other thread opens at its own end.
-  const holdAliasSwitch = showScrollToBottom && !activeComposerHasContent;
+  const [sentVisit, setSentVisit] = useState<{
+    readonly threadKey: string | null;
+    readonly sent: boolean;
+  }>({ threadKey: activeThreadKey, sent: false });
+  if (sentVisit.threadKey !== activeThreadKey) {
+    setSentVisit({ threadKey: activeThreadKey, sent: false });
+  }
+  const markSentThisVisit = () => {
+    if (!sentVisit.sent) setSentVisit({ threadKey: activeThreadKey, sent: true });
+  };
+  const holdAliasSwitch = !movesToSandboxChatAlias({
+    readingBack: showScrollToBottom,
+    sentThisVisit: sentVisit.sent,
+  });
   const activeAliasTargetKey =
     activeAliasTarget === undefined ? null : scopedThreadKey(activeAliasTarget);
   const switchToAliasTarget = useStableCallback(() => {
@@ -3244,13 +3250,16 @@ export default function ChatView(props: ChatViewProps) {
   };
   const onWorktreeSetupWorkLocallyStable = useStableCallback(onWorktreeSetupWorkLocally);
   // A draft on a sandbox config launches its machine first; the message waits in the composer.
-  const onComposerSendStable = useStableCallback((...args: Parameters<typeof onSend>) =>
-    sandboxLaunch.interceptSend() ? Promise.resolve() : onSend(...args),
-  );
+  const onComposerSendStable = useStableCallback((...args: Parameters<typeof onSend>) => {
+    if (sandboxLaunch.interceptSend()) return Promise.resolve();
+    markSentThisVisit();
+    return onSend(...args);
+  });
   const sendPreviewAnnotation = (
     annotation: PreviewAnnotationPayload,
     image: ComposerImageAttachment | null,
   ) => {
+    markSentThisVisit();
     void onSend(undefined, "auto", "foreground", { annotation, image });
   };
   const sendPreviewAnnotationStable = useStableCallback(sendPreviewAnnotation);
