@@ -19,7 +19,7 @@ import ProjectScriptsControl, {
   type NewProjectScriptInput,
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
-import { memo, useState, type ComponentProps } from "react";
+import { memo, useState, type ComponentProps, type ReactNode } from "react";
 import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
@@ -94,6 +94,8 @@ interface ThreadDetailsPanelProps extends Pick<
   ) => Promise<ProjectScriptActionResult>;
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
   usage: ThreadDetailsUsageInput;
+  /** On a sandbox chat's mirror: connects this client to the sandbox, where its workspace is. */
+  sandboxConnect?: ReactNode;
 }
 
 export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
@@ -183,7 +185,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
         return (
           <>
             <div className="group/details-items">
-              {show.environment || show.openIn || show.scripts ? (
+              {show.environment || show.openIn || show.scripts || props.sandboxConnect ? (
                 <ThreadDetailsSection
                   headingId="thread-details-workspace-heading"
                   title="Workspace"
@@ -191,6 +193,9 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   showHeading={false}
                 >
                   <div className="flex flex-col">
+                    {props.sandboxConnect ? (
+                      <div className="px-3 py-2">{props.sandboxConnect}</div>
+                    ) : null}
                     {show.environment ? (
                       <BranchToolbar
                         layout="panel"

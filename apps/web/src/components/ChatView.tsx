@@ -342,6 +342,7 @@ import {
 } from "./chat/PanelLayoutControls";
 import type { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { ThreadDetailsPanel } from "./chat/ThreadDetailsPanel";
+import { SandboxConnectAction, useSandboxConnect } from "./sandbox/SandboxConnect";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import {
   resolveEffectiveEnvMode,
@@ -1068,6 +1069,12 @@ export default function ChatView(props: ChatViewProps) {
       ? undefined
       : sandboxChatAliasTarget(sandboxChatAliases, activeThreadRef);
   const activeSandboxStopped = activeSandbox?.state === "stopped";
+  // On a sandbox chat's mirror, the surfaces that need the sandbox offer to connect to it.
+  const sandboxConnect = useSandboxConnect(activeThreadRef);
+  const sandboxSurfaceConnect =
+    sandboxConnect === null
+      ? null
+      : { reason: sandboxConnect.reason, action: <SandboxConnectAction state={sandboxConnect} /> };
   // A chat whose sandbox was deleted keeps its conversation here, but has nowhere to send.
   const sandboxDeleted = useSandboxlessBridgeThread(
     activeThreadRef,
@@ -4238,6 +4245,9 @@ export default function ChatView(props: ChatViewProps) {
 
                 <ThreadDetailsPanel
                   anchor={threadPanelPopoverAnchorRef}
+                  sandboxConnect={
+                    sandboxConnect === null ? null : <SandboxConnectAction state={sandboxConnect} />
+                  }
                   handle={threadPanelPopoverHandle}
                   forceNewWorktree={multipleModelSelections !== null}
                   environmentId={activeThread.environmentId}
@@ -4404,6 +4414,7 @@ export default function ChatView(props: ChatViewProps) {
           deviceAvailable={activeThreadRef !== null}
           sideChatAvailable={sideChat.available}
           sideChatDisabledReason={sideChatDisabledReason}
+          sandboxConnect={sandboxSurfaceConnect}
         >
           {rightPanelContent}
         </ChatRightPanel>
