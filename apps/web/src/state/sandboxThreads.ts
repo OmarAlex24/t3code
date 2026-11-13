@@ -145,6 +145,25 @@ export const sandboxesToPair = (
           !pairedEnvironmentIds.has(sandbox.environmentId),
       );
 
+/**
+ * Whether a sandbox chat's host mirror can offer to connect this client to its sandbox. The mirror
+ * lives in an empty placeholder project, so terminals, files, diffs and previews exist only on the
+ * sandbox's own thread, which this client reads once paired; connecting resumes a stopped sandbox.
+ */
+export const sandboxConnectOffer = (
+  sandbox: SandboxRecord | undefined,
+  threadRef: ScopedThreadRef,
+  connected: boolean,
+): { readonly resumes: boolean } | null =>
+  sandbox === undefined ||
+  connected ||
+  sandbox.environmentId === null ||
+  sandbox.hostProjectId === undefined ||
+  !isHostThreadRef(sandbox, threadRef) ||
+  (sandbox.state !== "running" && sandbox.state !== "stopped")
+    ? null
+    : { resumes: sandbox.state === "stopped" };
+
 /** Whether the ref is the host thread the bridge drives rather than the sandbox's own thread. */
 export const isHostThreadRef = (sandbox: SandboxRecord, threadRef: ScopedThreadRef) =>
   sandbox.environmentId !== threadRef.environmentId;
