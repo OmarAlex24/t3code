@@ -7,20 +7,32 @@ import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 
-const state = vi.hoisted(() => ({
-  projection: null as unknown,
-  commandSucceeds: false,
-  relatedShells: [] as unknown[],
-  threadTitles: {} as Record<string, string>,
-  archivedThreads: [] as unknown[],
-  sandboxMirror: null as unknown,
-  sandbox: undefined as unknown,
-  sandboxConnected: false,
-  connectAllowed: true,
-  // Settles the sandbox connect a test starts: null once connected, else why it failed.
-  connectResult: Promise.resolve(null as unknown),
-  connectCalls: [] as unknown[],
-}));
+type SandboxConnection = { readonly phase: string; readonly error: string | null };
+
+const state = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  return {
+    projection: null as unknown,
+    commandSucceeds: false,
+    relatedShells: [] as unknown[],
+    threadTitles: {} as Record<string, string>,
+    archivedThreads: [] as unknown[],
+    sandboxMirror: null as unknown,
+    sandbox: undefined as unknown,
+    connectAllowed: true,
+    // Settles the sandbox connect a test starts: null once paired, else why it failed.
+    connectResult: Promise.resolve(null as unknown),
+    connectCalls: [] as unknown[],
+    // The sandbox environment's connection, which a successful pairing sets.
+    sandboxConnection: null as SandboxConnection | null,
+    connectionAfterPairing: { phase: "connected", error: null } as SandboxConnection,
+    listeners,
+    setSandboxConnection(connection: SandboxConnection | null) {
+      this.sandboxConnection = connection;
+      for (const listener of listeners) listener();
+    },
+  };
+});
 
 vi.mock(import("../../state/query"), async (original) => ({
   ...(await original()),
@@ -64,7 +76,7 @@ vi.mock(import("../sandbox/SandboxConnect"), async (original) => {
         const { setAttempt } = useSandboxConnectionsStore.getState();
         setAttempt(sandbox.environmentId, { connecting: true, failure: null });
         const failure = await state.connectResult;
-        if (failure === null) state.sandboxConnected = true;
+        if (failure === null) state.setSandboxConnection(state.connectionAfterPairing);
         setAttempt(sandbox.environmentId, failure === null ? null : { connecting: false, failure });
         return failure;
       }) as never,
@@ -83,13 +95,20 @@ vi.mock(import("../../state/entities"), () => ({
   useHiddenThreadKeys: (() => new Set()) as never,
   useAnyEnvironmentHiding: (() => false) as never,
 }));
-vi.mock(import("../../state/environments"), () => ({
-  useEnvironment: ((id: unknown) =>
-    id === "sandbox" && state.sandboxConnected
-      ? { label: "Sandbox", connection: { phase: "connected" } }
-      : null) as never,
-  useEnvironmentProviders: (() => new Map()) as never,
-}));
+vi.mock(import("../../state/environments"), async () => {
+  const { useSyncExternalStore } = await import("react");
+  const subscribe = (listener: () => void) => {
+    state.listeners.add(listener);
+    return () => state.listeners.delete(listener);
+  };
+  return {
+    useEnvironment: ((id: unknown) => {
+      const connection = useSyncExternalStore(subscribe, () => state.sandboxConnection);
+      return id === "sandbox" && connection !== null ? { label: "Sandbox", connection } : null;
+    }) as never,
+    useEnvironmentProviders: (() => new Map()) as never,
+  };
+});
 vi.mock(import("../../state/sandboxes"), () => ({
   useThreadSandbox: (() => state.sandbox) as never,
   useSandboxProvisionerEnvironmentId: (() => "environment") as never,
@@ -122,7 +141,8 @@ function setup() {
   state.archivedThreads = [];
   state.sandboxMirror = null;
   state.sandbox = undefined;
-  state.sandboxConnected = false;
+  state.sandboxConnection = null;
+  state.connectionAfterPairing = { phase: "connected", error: null };
   state.connectAllowed = true;
   state.connectResult = Promise.resolve(null);
   state.connectCalls = [];
@@ -541,28 +561,51 @@ it("connects to the sandbox, then opens a sandbox chat's agent there", async () 
 });
 
 it.each([
-  ["the connect fails", true, "Could not connect to the sandbox: The host refused the connection"],
+  [
+    "the connect fails",
+    true,
+    new Error("The host refused the connection"),
+    null,
+    "Could not connect to the sandbox: The host refused the connection",
+  ],
   [
     "this device may not connect",
     false,
+    null,
+    null,
     "Needs a connection to this chat's sandbox, which this device is not allowed to make.",
   ],
-])("reads a sandbox chat's agent through the host when %s", async (_case, allowed, reason) => {
-  setupSandboxMirror();
-  state.connectAllowed = allowed;
-  state.connectResult = Promise.resolve(new Error("The host refused the connection"));
-  await using screen = await render(
-    <ThreadRelationshipsPanel
-      environmentId={environmentId}
-      threadId={threadId}
-      showLineage
-      showSideChats={false}
-    />,
-    { router: "/environment/fork" },
-  );
+  [
+    "the sandbox fails to connect after pairing",
+    true,
+    null,
+    { phase: "error", error: "The sandbox rejected this device" },
+    "Could not connect to the sandbox: The sandbox rejected this device",
+  ],
+])(
+  "reads a sandbox chat's agent through the host when %s",
+  async (_case, allowed, failure, lost, reason) => {
+    setupSandboxMirror();
+    state.connectAllowed = allowed;
+    state.connectResult = Promise.resolve(failure);
+    state.connectionAfterPairing = { phase: "connecting", error: null };
+    await using screen = await render(
+      <ThreadRelationshipsPanel
+        environmentId={environmentId}
+        threadId={threadId}
+        showLineage
+        showSideChats={false}
+      />,
+      { router: "/environment/fork" },
+    );
 
-  await screen.getByRole("button", { name: /Sandbox reviewer/ }).click();
-  await expect.element(page.getByRole("dialog").getByText(reason, { exact: true })).toBeVisible();
-  expect(state.connectCalls).toHaveLength(allowed ? 1 : 0);
-  expect(screen.router?.state.location.pathname).toBe("/environment/fork");
-});
+    await screen.getByRole("button", { name: /Sandbox reviewer/ }).click();
+    if (lost !== null) {
+      await expect.element(screen.getByText("Connecting", { exact: true })).toBeVisible();
+      state.setSandboxConnection(lost);
+    }
+    await expect.element(page.getByRole("dialog").getByText(reason, { exact: true })).toBeVisible();
+    expect(state.connectCalls).toHaveLength(allowed ? 1 : 0);
+    expect(screen.router?.state.location.pathname).toBe("/environment/fork");
+  },
+);
