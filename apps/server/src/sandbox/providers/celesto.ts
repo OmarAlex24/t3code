@@ -387,7 +387,8 @@ export const celestoDriver: SandboxProviderDriver = {
           authorize(HttpClientRequest.post(`${CELESTO_API_BASE}/computers`), input.config.apiKey),
           { "Idempotency-Key": input.idempotencyKey, "X-Celesto-Client": "sdk" },
         ),
-        // Without a size the template's default is Standard, not Micro.
+        // Without a size the template's default is Standard, not Micro. A persistent home
+        // (`external_volume_enabled`) answers 422 here: `coding-agent` is a pool template.
         { template_id: "coding-agent", size_id: SIZES[input.size] ?? "micro" },
       ),
     });
