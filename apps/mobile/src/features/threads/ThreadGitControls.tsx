@@ -89,7 +89,25 @@ export type ThreadGitMenuProps = {
   readonly onMergeBack?: () => void;
   readonly onPull: () => Promise<void>;
   readonly onRunAction: (input: GitActionRequestInput) => Promise<GitRunStackedActionResult | null>;
+  /** Why this thread's workspace is not on this device, such as a sandbox chat's mirror. */
+  readonly unavailableReason?: string;
 };
+
+/** A menu whose surface lives elsewhere: one disabled row that says where. */
+function unavailableMenu(
+  title: string,
+  icon: AppBarMenu["icon"] & string,
+  reason: string,
+): AppBarMenu {
+  return {
+    title,
+    icon,
+    separateBackground: false,
+    items: [
+      { id: "unavailable", title, icon, subtitle: reason, disabled: true, onPress: () => {} },
+    ],
+  };
+}
 
 export type ThreadGitControlsProps = ThreadGitMenuProps & {
   readonly canOpenTerminal: boolean;
@@ -249,6 +267,9 @@ function useThreadGitControlModel(props: ThreadGitMenuProps) {
 }
 
 export function threadTerminalMenu(props: ThreadGitControlsProps): AppBarMenu | null {
+  if (props.unavailableReason !== undefined) {
+    return unavailableMenu("Terminal", "terminal", props.unavailableReason);
+  }
   if (!props.canOpenTerminal) return null;
   return {
     title: "Terminal",
@@ -304,6 +325,13 @@ export function threadTerminalMenu(props: ThreadGitControlsProps): AppBarMenu | 
 /** The thread's git menu, shared by the thread bar and Review. */
 export function useThreadGitMenuDefinition(props: ThreadGitMenuProps): AppBarMenu | null {
   const model = useThreadGitControlModel(props);
+  if (props.unavailableReason !== undefined) {
+    return unavailableMenu(
+      "Git controls",
+      "point.topleft.down.curvedto.point.bottomright.up",
+      props.unavailableReason,
+    );
+  }
   return {
     title: "Git controls",
     icon: "point.topleft.down.curvedto.point.bottomright.up",
