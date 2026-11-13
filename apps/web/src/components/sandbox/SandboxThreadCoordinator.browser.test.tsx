@@ -165,6 +165,7 @@ import {
   notifySandboxThreadUnsettled,
   threadSandboxUnavailableReason,
 } from "~/state/sandboxThreads";
+import { useSandboxConnectionsStore } from "~/state/sandboxConnections";
 import { toastManager } from "../ui/toast";
 import { SETTLE_DELETE_DELAY_MS, SandboxThreadCoordinator } from "./SandboxThreadCoordinator";
 
@@ -240,6 +241,7 @@ function setup(
   ];
   mocks.configs = [config(onSettle)];
   mocks.work = work ?? { status: "clean", uncommittedFiles: 0, unpushedCommits: 0 };
+  useSandboxConnectionsStore.setState({ disconnected: [] });
   for (const mock of [
     mocks.deleteSandbox,
     mocks.stopSandbox,
@@ -659,6 +661,16 @@ describe("SandboxThreadCoordinator", () => {
         { ...linked, state: "provisioning" },
         { ...linked, instanceId: "instance-2", threadId: "thread-2", state: "stopped" },
       ];
+      await using _screen = await render(<SandboxThreadCoordinator />);
+      expect(mocks.pairLaunch).not.toHaveBeenCalled();
+    });
+
+    it("does not pair again with a sandbox this app was disconnected from", async () => {
+      setup("ask", undefined, { bridged: true });
+      mocks.sandboxConnected = false;
+      mocks.sandboxes = [linked];
+      mocks.pairLaunch.mockClear();
+      useSandboxConnectionsStore.setState({ disconnected: [EnvironmentId.make(SANDBOX_ENV)] });
       await using _screen = await render(<SandboxThreadCoordinator />);
       expect(mocks.pairLaunch).not.toHaveBeenCalled();
     });

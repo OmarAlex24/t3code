@@ -34,7 +34,9 @@ import { useComposerDraftStore } from "~/composerDraftStore";
 import { useThreadShells } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
+import { useSandboxConnectionsStore } from "~/state/sandboxConnections";
 import { useSandboxProvisionerEnvironmentId } from "~/state/sandboxes";
+import { useSandboxConnect } from "../sandbox/SandboxConnect";
 import { useEnvironmentQuery } from "~/state/query";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -618,6 +620,34 @@ function SandboxRow({
   const [pending, setPending] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [savingTemplate, setSavingTemplate] = useState(false);
+  const markDisconnected = useSandboxConnectionsStore((state) => state.markDisconnected);
+  const markConnected = useSandboxConnectionsStore((state) => state.markConnected);
+  // A chat the host mirrors stays open without the sandbox, so this app can connect or not.
+  const connection = useSandboxConnect(
+    sandbox.threadId === undefined ? null : { environmentId, threadId: sandbox.threadId },
+  );
+  const canDisconnect =
+    sandbox.hostProjectId !== undefined &&
+    sandbox.environmentId !== null &&
+    entries.has(sandbox.environmentId);
+  const disconnect = async (sandboxEnvironmentId: EnvironmentId) => {
+    setPending(true);
+    markDisconnected(sandboxEnvironmentId);
+    const result = await removeEnvironment(sandboxEnvironmentId);
+    setPending(false);
+    if (result._tag === "Failure") {
+      markConnected(sandboxEnvironmentId);
+      if (!isAtomCommandInterrupted(result)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not disconnect from the sandbox",
+            description: describeSandboxFailure(squashAtomCommandFailure(result), "").description,
+          }),
+        );
+      }
+    }
+  };
   // The tick is UTC truncated to the minute; a minute's precision is all these labels show.
   const nowMillis = Date.parse(`${minute}:00.000Z`);
   const sandboxEnvironment =
@@ -930,6 +960,49 @@ function SandboxRow({
               </Button>
             </>
           )}
+          {connection !== null && connection.allowed ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={pending || connection.connecting}
+                    onClick={connection.connect}
+                  />
+                }
+              >
+                {connection.connecting ? <Spinner className="size-3" /> : null}
+                Connect
+              </TooltipTrigger>
+              <TooltipPopup side="top">
+                {connection.resumes
+                  ? "Resume the sandbox and connect this device to it, for its terminal, files and diff"
+                  : "Connect this device to the sandbox, for its terminal, files and diff"}
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
+          {canDisconnect && sandbox.environmentId !== null ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={pending}
+                    onClick={() =>
+                      sandbox.environmentId !== null && void disconnect(sandbox.environmentId)
+                    }
+                  />
+                }
+              >
+                Disconnect
+              </TooltipTrigger>
+              <TooltipPopup side="top">
+                Forget the sandbox on this device. The chat stays, through this server.
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
           {canStop ? (
             <Button size="xs" variant="outline" disabled={pending} onClick={() => void run("stop")}>
               {pending ? (
