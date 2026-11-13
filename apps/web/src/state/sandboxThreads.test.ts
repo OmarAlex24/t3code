@@ -1,6 +1,8 @@
 import {
   EnvironmentId,
+  type ModelSelection,
   ProjectId,
+  ProviderInstanceId,
   type SandboxRecord,
   type SandboxSetupSnapshot,
   type ServerProvider,
@@ -23,7 +25,9 @@ import {
   movesToSandboxChatAlias,
   sandboxChatAliases,
   sandboxChatAliasTarget,
+  sandboxChatPickPartner,
   sandboxHostMirrors,
+  sandboxMirrorModelSource,
   sandboxMirrorOf,
   sandboxMirrorTitleUpdates,
   sandboxRowPhase,
@@ -36,6 +40,17 @@ import {
 const HOST = EnvironmentId.make("host");
 const SANDBOX = EnvironmentId.make("sandbox");
 const threadId = ThreadId.make("thread-1");
+
+const selection = (
+  instanceId: string,
+  model: string,
+  options?: ReadonlyArray<{ readonly id: string; readonly value: string }>,
+): ModelSelection =>
+  ({
+    instanceId: ProviderInstanceId.make(instanceId),
+    model,
+    ...(options === undefined ? {} : { options }),
+  }) as ModelSelection;
 
 const record = (fields: Partial<SandboxRecord> = {}): SandboxRecord =>
   ({
@@ -406,6 +421,73 @@ describe("the sandbox bridge as an internal provider instance", () => {
     expect(
       resolveProjectDefaultProviderModelSelection(providers, settings as never, projectId),
     ).toEqual({ instanceId: "claudeAgent", model: "opus" });
+  });
+});
+
+describe("sandboxMirrorModelSource", () => {
+  const sandboxClaude = {
+    instanceId: "claudeAgent",
+    driver: "claudeAgent",
+    enabled: true,
+    installed: true,
+    status: "ready",
+    models: [{ slug: "claude-opus-5-5", name: "Opus 5.5", isCustom: false, capabilities: null }],
+  } as unknown as ServerProvider;
+  const running = selection("claudeAgent", "claude-opus-5-5", [{ id: "effort", value: "xhigh" }]);
+
+  // The host's bridge lists one set of models and options for every sandbox, so its picker read
+  // "Sandboxes" with another chat's effort.
+  it("shows the sandbox's own provider and selection, under the bridge the mirror sends on", () => {
+    expect(sandboxMirrorModelSource(running, [sandboxClaude])).toEqual({
+      providers: [{ ...sandboxClaude, instanceId: "sandboxes" }],
+      modelSelection: { ...running, instanceId: ProviderInstanceId.make("sandboxes") },
+    });
+  });
+
+  it("leaves the bridge's list while the sandbox's provider is unknown here", () => {
+    expect(sandboxMirrorModelSource(running, [])).toBeNull();
+  });
+});
+
+describe("sandboxChatPickPartner", () => {
+  const sandboxRef = { environmentId: SANDBOX, threadId };
+  const mirrorRef = { environmentId: HOST, threadId };
+  const mirrors = new Map([[threadKey(mirrorRef), sandboxRef]]);
+  const threads = [
+    {
+      environmentId: SANDBOX,
+      id: threadId,
+      modelSelection: selection("claudeAgent", "claude-opus-5-5"),
+    },
+    {
+      environmentId: HOST,
+      id: threadId,
+      modelSelection: selection("sandboxes", "claude-opus-5-5"),
+    },
+  ];
+  const options = [{ id: "effort", value: "xhigh" }];
+
+  it("gives a pick on the mirror to the sandbox's thread, on its own provider", () => {
+    const pick = selection("sandboxes", "claude-fable-5-2", options);
+    expect(sandboxChatPickPartner(mirrors, threads, mirrorRef, pick)).toEqual({
+      ref: sandboxRef,
+      modelSelection: selection("claudeAgent", "claude-fable-5-2", options),
+    });
+  });
+
+  // The bridge hands the mirror's pick to the sandbox with the phone's next message.
+  it("gives a pick on the sandbox's thread to the mirror, on the bridge", () => {
+    const pick = selection("claudeAgent", "claude-opus-5-5", options);
+    expect(sandboxChatPickPartner(mirrors, threads, sandboxRef, pick)).toEqual({
+      ref: mirrorRef,
+      modelSelection: selection("sandboxes", "claude-opus-5-5", options),
+    });
+  });
+
+  it("has nothing to do for a thread of no sandbox chat", () => {
+    const other = { environmentId: HOST, threadId: ThreadId.make("thread-2") };
+    const pick = selection("claudeAgent", "claude-opus-5-5");
+    expect(sandboxChatPickPartner(mirrors, threads, other, pick)).toBeNull();
   });
 });
 

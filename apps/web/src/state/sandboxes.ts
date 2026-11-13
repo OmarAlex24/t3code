@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import {
   type EnvironmentId,
   type ProjectId,
@@ -10,13 +11,15 @@ import {
 
 import { environmentCatalog } from "../connection/catalog";
 import { useQuietThreadShells } from "./entities";
-import { usePrimaryEnvironmentId } from "./environments";
+import { useEnvironmentProviders, usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentPresentation } from "./presentation";
 import { useEnvironmentQuery } from "./query";
 import {
   findThreadSandbox,
   isSandboxlessBridgeThread,
   sandboxChatAliases,
+  sandboxHostMirrors,
+  sandboxMirrorModelSource,
   sandboxRowStates,
   type SandboxRowState,
 } from "./sandboxThreads";
@@ -208,6 +211,34 @@ export function useSandboxChatAliases(): ReadonlyMap<string, ScopedThreadRef> {
   const threads = useQuietThreadShells();
   const sandboxes = useSandboxRecords();
   return sandboxChatAliases(sandboxes, threads, provisionerEnvironmentId);
+}
+
+/**
+ * The sandbox's provider and selection for the model picker on its chat's host mirror; see
+ * `sandboxMirrorModelSource`. Null for any other thread, and while the sandbox's thread is unlisted.
+ */
+export function useSandboxMirrorModelSource(threadRef: ScopedThreadRef | null) {
+  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
+  const threads = useQuietThreadShells();
+  const sandboxes = useSandboxRecords();
+  const providersByEnvironment = useEnvironmentProviders();
+  if (threadRef === null || threadRef.environmentId !== provisionerEnvironmentId) return null;
+  const sandboxRef = sandboxHostMirrors(sandboxes, threads, provisionerEnvironmentId).get(
+    threadKey(threadRef),
+  );
+  const sandboxThread =
+    sandboxRef === undefined
+      ? undefined
+      : threads.find(
+          (thread) =>
+            thread.environmentId === sandboxRef.environmentId && thread.id === sandboxRef.threadId,
+        );
+  return sandboxThread === undefined
+    ? null
+    : sandboxMirrorModelSource(
+        sandboxThread.modelSelection,
+        providersByEnvironment.get(sandboxThread.environmentId) ?? [],
+      );
 }
 
 const NO_SANDBOXES: ReadonlyArray<SandboxRecord> = [];
