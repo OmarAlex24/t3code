@@ -693,7 +693,8 @@ export type SandboxProviderErrorCode = typeof SandboxProviderErrorCode.Type;
 export class SandboxProviderError extends Schema.TaggedError<SandboxProviderError>()(
   "SandboxProviderError",
   {
-    provider: SandboxProviderKind,
+    /** The sandbox's provider; absent when no sandbox record names one, such as an unknown thread. */
+    provider: Schema.optional(SandboxProviderKind),
     stage: SandboxStage,
     /**
      * Bounded, human-readable reason shown to the user. Never a raw provider response body or
@@ -710,7 +711,7 @@ export class SandboxProviderError extends Schema.TaggedError<SandboxProviderErro
   },
 ) {
   override get message(): string {
-    return `${this.provider}: ${this.detail}`;
+    return this.provider === undefined ? this.detail : `${this.provider}: ${this.detail}`;
   }
 }
 

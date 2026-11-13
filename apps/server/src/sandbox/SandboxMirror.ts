@@ -180,8 +180,8 @@ export class SandboxMirror extends Context.Service<
 
 const decodeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
 
-const failed = (detail: string) =>
-  new SandboxProviderError({ provider: "boat", stage: "pair", detail });
+// The mirror reads the bridge link, not the sandbox record, so its refusals name no provider.
+const failed = (detail: string) => new SandboxProviderError({ stage: "pair", detail });
 
 const make = Effect.fn("SandboxMirror.make")(function* (connect: SandboxConnect) {
   const secrets = yield* ServerSecretStore.ServerSecretStore;

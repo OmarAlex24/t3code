@@ -350,6 +350,9 @@ describe("SandboxMirror", () => {
         })
         .pipe(Effect.flip);
       expect(error._tag).toBe("SandboxProviderError");
+      // The mirror reads no sandbox record, so it names no provider rather than a wrong one.
+      expect(error.provider).toBeUndefined();
+      expect(error.message).toBe("The sandbox does not offer that model for this chat.");
       expect(sandbox.dispatched).toEqual([]);
       expect(hostCommands).toEqual([]);
     }),

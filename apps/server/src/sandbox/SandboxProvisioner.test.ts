@@ -6213,6 +6213,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         .linkBridge({ threadId: ThreadId.make("thread-elsewhere"), hostProjectId })
         .pipe(Effect.flip);
       expect(unknown.detail).toBe("No sandbox belongs to this thread.");
+      expect(unknown.provider).toBeUndefined();
     }).pipe(
       Effect.provide(
         provisionerLayer({}, repository.layer, {
@@ -7626,6 +7627,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         .launch({ configId: "missing", threadId, project })
         .pipe(Effect.flip);
       expect(gone.detail).toBe("This sandbox config no longer exists.");
+      expect(gone.provider).toBeUndefined();
       expect(fake.requests.filter((request) => request.startsWith("POST"))).toEqual([]);
     }).pipe(
       Effect.provide(provisionerLayer({}, discardingRepository, { configs: configs.layer })),

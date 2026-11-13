@@ -1158,7 +1158,6 @@ const make = Effect.gen(function* () {
         Effect.mapError(
           (cause) =>
             new SandboxProviderError({
-              provider: "boat",
               stage: "config",
               detail: "Could not save the GitHub App on this server.",
               cause,
@@ -1222,7 +1221,6 @@ const make = Effect.gen(function* () {
         Effect.mapError(
           (cause) =>
             new SandboxProviderError({
-              provider: "boat",
               stage: "config",
               detail: "Could not save the Railway token on this server.",
               cause,
@@ -2580,7 +2578,7 @@ const make = Effect.gen(function* () {
       return Fiber.interrupt(launch.fiber);
     });
 
-  const launchConfigError = (detail: string, provider: SandboxProviderKind = "boat") =>
+  const launchConfigError = (detail: string, provider?: SandboxProviderKind) =>
     new SandboxProviderError({ provider, stage: "config", detail });
 
   const createInputFor = (
@@ -3379,7 +3377,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     return current !== undefined && current.fiber.pollUnsafe() === undefined ? current : null;
   };
 
-  const notReady = (provider: SandboxProviderKind) =>
+  const notReady = (provider: SandboxProviderKind | undefined) =>
     new SandboxProviderError({
       provider,
       stage: "pair",
@@ -3425,7 +3423,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
       record.sandboxProjectId === undefined ||
       runningLaunch(input.threadId) !== null
     ) {
-      return yield* notReady(record?.provider ?? "boat");
+      return yield* notReady(record?.provider);
     }
     const pairingCode = yield* pairWith(runOnRecord(record), record.provider);
     return {
@@ -3670,7 +3668,6 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     );
     if (record === undefined) {
       return yield* new SandboxProviderError({
-        provider: "boat",
         stage: "pair",
         detail: "No sandbox belongs to this thread.",
       });
@@ -3874,7 +3871,7 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     const found = yield* records.get(input.instanceId).pipe(Effect.orDie);
     if (Option.isNone(found) || found.value.state !== "running") {
       return yield* new SandboxProviderError({
-        provider: Option.isNone(found) ? "boat" : found.value.provider,
+        provider: Option.isNone(found) ? undefined : found.value.provider,
         stage: "start",
         detail: "The sandbox is not running.",
       });
