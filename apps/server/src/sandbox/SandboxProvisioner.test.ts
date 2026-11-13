@@ -6217,6 +6217,7 @@ describe("SandboxProvisioner per-thread launches", () => {
             sessionId: "bridge-session-1",
             secret: bridgeLinkSecretName(threadId),
             expiresAt: "2027-11-05T00:00:00.000Z",
+            scopes: ["orchestration:read", "orchestration:operate", "filesystem:read"],
           },
         });
         expect(JSON.stringify(record)).not.toContain(bridgeToken);
@@ -6232,7 +6233,7 @@ describe("SandboxProvisioner per-thread launches", () => {
         // Scoped to what the bridge drives, and never in a command's text.
         expect(bridgeIssues(fake)).toHaveLength(1);
         expect(bridgeIssues(fake)[0]).toContain(
-          "--scope orchestration:read --scope orchestration:operate --ttl 365d --label t3-sandbox-bridge",
+          "--scope orchestration:read --scope orchestration:operate --scope filesystem:read --ttl 365d --label t3-sandbox-bridge",
         );
         expect(fake.commands.some((command) => command.includes(bridgeToken))).toBe(false);
       }).pipe(
@@ -6287,6 +6288,39 @@ describe("SandboxProvisioner per-thread launches", () => {
       expect(bridgeIssues(fake)).toHaveLength(2);
       expect(bridgeIssues(fake)[1]).toContain("t3 auth session revoke bridge-session-1");
       expect(repository.records.get(instanceId)?.bridge?.sessionId).toBe("bridge-session-2");
+    }).pipe(
+      Effect.provide(
+        provisionerLayer({}, repository.layer, {
+          configs: memoryConfigs().layer,
+          secrets: secrets.layer,
+        }),
+      ),
+      Effect.provideService(HttpClient.HttpClient, fake.client),
+    );
+  });
+
+  it.effect("re-mints a bridge credential minted without a scope the bridge now needs", () => {
+    const fake = boatFake();
+    const repository = memoryRepository();
+    const secrets = memorySecrets();
+    return Effect.gen(function* () {
+      const { provisioner, instanceId } = yield* launchedThread;
+      // As minted before the bridge copied images: no scopes recorded, and no filesystem:read.
+      const record = repository.records.get(instanceId)!;
+      const { scopes: _scopes, ...older } = record.bridge!;
+      repository.records.set(instanceId, { ...record, bridge: older });
+      yield* provisioner.stop({ instanceId });
+      const resumed = yield* provisioner.resume({ instanceId });
+      expect(bridgeIssues(fake)).toHaveLength(2);
+      expect(bridgeIssues(fake)[1]).toContain("t3 auth session revoke bridge-session-1");
+      expect(bridgeIssues(fake)[1]).toContain("--scope filesystem:read");
+      expect(resumed.sandbox.bridge).toMatchObject({
+        sessionId: "bridge-session-2",
+        scopes: ["orchestration:read", "orchestration:operate", "filesystem:read"],
+      });
+      // Recorded, so the next resume keeps it.
+      yield* provisioner.linkBridge({ threadId, hostProjectId: projectId });
+      expect(bridgeIssues(fake)).toHaveLength(2);
     }).pipe(
       Effect.provide(
         provisionerLayer({}, repository.layer, {

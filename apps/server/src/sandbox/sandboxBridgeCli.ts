@@ -4,6 +4,9 @@
  * sandbox's address and bearer from this server's secret store, named by the instance environment,
  * so no credential ever appears on a command line.
  */
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect has no synchronous digest.
+import * as NodeCrypto from "node:crypto";
+
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ModelSelection, ProviderInteractionMode, RuntimeMode, ThreadId } from "@t3tools/contracts";
@@ -19,6 +22,7 @@ import {
 import {
   bridgeLinkSecretName,
   bridgeResumeFailureSecretName,
+  SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
   SandboxBridgeLinkJson,
   SandboxBridgeResumeFailureJson,
@@ -26,6 +30,7 @@ import {
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -33,6 +38,7 @@ import * as Schema from "effect/Schema";
 import { FetchHttpClient } from "effect/http";
 import * as AcpAgent from "effect-acp/agent";
 
+import { createDeterministicAttachmentId } from "../attachmentStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import { mcpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
@@ -60,9 +66,12 @@ const SECRET_CARD_TIMEOUT_MS = 280_000;
 const decodeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
 const decodeResumeFailure = Schema.decodeEffect(SandboxBridgeResumeFailureJson);
 
-const program = Effect.gen(function* () {
+const program = Effect.fn("SandboxBridgeCli.program")(function* (
+  attachmentsDir: string | undefined,
+) {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   // A file request hands back an owner-only file; the bridge takes the value and removes it.
   const takeSecretFile = (file: string) =>
     fileSystem.readFileString(file).pipe(
@@ -143,6 +152,31 @@ const program = Effect.gen(function* () {
         () => new SandboxBridgeError({ message: "Could not ask for the sandbox's secret." }),
       ),
     ),
+    // Named by the thread and the bytes, so a reply shown again reuses its copy.
+    ...(attachmentsDir === undefined
+      ? {}
+      : {
+          saveImage: Effect.fn("SandboxBridge.saveImage")(
+            function* (threadId, image) {
+              const digest = NodeCrypto.createHash("sha256").update(image.bytes).digest("hex");
+              const id = createDeterministicAttachmentId(threadId, `sandbox-image:${digest}`);
+              if (id === null) {
+                return yield* new SandboxBridgeError({ message: "No file name for the image." });
+              }
+              const target = path.join(attachmentsDir, `${id}${image.extension}`);
+              if (yield* fileSystem.exists(target)) return target;
+              // `.part`: a copy cut short is swept with the host's other partial uploads.
+              const partial = `${target}.part`;
+              yield* fileSystem.writeFile(partial, image.bytes);
+              yield* fileSystem.rename(partial, target);
+              return target;
+            },
+            Effect.mapError(
+              (cause) =>
+                new SandboxBridgeError({ message: "Could not keep the image on the host.", cause }),
+            ),
+          ),
+        }),
   };
   return yield* runSandboxBridge(ports);
 });
@@ -168,5 +202,6 @@ export async function runSandboxBridgeCli(): Promise<void> {
     Layer.provideMerge(Layer.mergeAll(secrets, SecureRandom.layerWebCrypto)),
     Layer.provideMerge(NodeServices.layer),
   );
-  program.pipe(Effect.provide(services), NodeRuntime.runMain);
+  const attachmentsDir = process.env[SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV] || undefined;
+  program(attachmentsDir).pipe(Effect.provide(services), NodeRuntime.runMain);
 }

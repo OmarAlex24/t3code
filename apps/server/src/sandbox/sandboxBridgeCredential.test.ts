@@ -78,7 +78,7 @@ esac`);
         expect(command).not.toContain(TOKEN);
         expect(output).not.toContain(TOKEN.slice(0, 40));
         expect(calls.trim()).toBe(
-          "auth session issue --scope orchestration:read --scope orchestration:operate --ttl 365d --label t3-sandbox-bridge --json",
+          "auth session issue --scope orchestration:read --scope orchestration:operate --scope filesystem:read --ttl 365d --label t3-sandbox-bridge --json",
         );
         expect(readBridgeCredential(output, key.privateKey)).toEqual({
           _tag: "issued",
