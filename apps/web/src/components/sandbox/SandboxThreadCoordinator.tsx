@@ -28,6 +28,7 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 import { useThreadShells } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
+import { useSandboxConnectionsStore } from "~/state/sandboxConnections";
 import { useSandboxProvisionerEnvironmentId } from "~/state/sandboxes";
 import {
   sandboxHostMirrors,
@@ -217,11 +218,13 @@ export function SandboxThreadCoordinator() {
     provisionerEnvironmentId !== null &&
     readEnvironmentScope(provisionerEnvironmentId, AuthSettingsWriteScope);
   const canPair = canManage;
+  const disconnected = useSandboxConnectionsStore((state) => state.disconnected);
   const unpaired = canPair
     ? sandboxesToPair(
         sandboxes,
         provisionerEnvironmentId,
-        new Set(environments.map((environment) => environment.environmentId)),
+        // One the user disconnected from stays so until they connect again.
+        new Set([...environments.map((environment) => environment.environmentId), ...disconnected]),
       )
     : [];
   const pair = useStableCallback(async (sandbox: SandboxRecord) => {
