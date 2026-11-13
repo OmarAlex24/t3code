@@ -4854,9 +4854,9 @@ mkdir -p ${parents.map(shellQuote).join(" ")}`,
     createSubSandbox,
     delete: remove,
     removed: Stream.fromPubSub(removedRecords),
-    listChanges: SubscriptionRef.changes(listRevision).pipe(
-      Stream.filter((revision) => revision > 0),
-    ),
+    // Not the revision current at subscribe: a client reads the list as it subscribes, so that
+    // one would only make it read the list again.
+    listChanges: SubscriptionRef.changes(listRevision).pipe(Stream.drop(1)),
     environments,
     limits,
     list,

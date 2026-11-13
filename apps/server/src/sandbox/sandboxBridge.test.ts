@@ -23,6 +23,7 @@ import {
   SANDBOX_BRIDGE_TRACE_FILE_ENV,
   SandboxBridgeResumeFailureJson,
 } from "@t3tools/sandbox-bridge/link";
+import type { SandboxSession } from "@t3tools/sandbox-bridge";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -1001,5 +1002,70 @@ describe("SandboxBridge", () => {
         yield* nextDispatch(harness, "prepared-run.release");
       }),
     ),
+  );
+});
+
+describe("SandboxThreadRemote", () => {
+  it.effect("reaches the sandbox for new modes, or while a move waits on its run", () =>
+    Effect.gen(function* () {
+      const link = {
+        threadId,
+        instanceId: "sandbox-1",
+        sandboxId: "bx_1",
+        label: "hello on Boat",
+        httpBaseUrl: "https://sandbox.example",
+        sandboxProjectId: "project-remote",
+        token: "bearer",
+      };
+      const sandbox = { runtimeMode: "approval-required", runStatus: "running" };
+      const dispatched: Array<string> = [];
+      let connects = 0;
+      const connect = () =>
+        Effect.sync(() => {
+          connects++;
+          return {
+            projection: () =>
+              Effect.succeedSome({
+                thread: {
+                  id: threadId,
+                  runtimeMode: sandbox.runtimeMode,
+                  interactionMode: "default",
+                },
+                runs: [{ id: "run-1", status: sandbox.runStatus }],
+                runtimeRequests: [],
+              }),
+            dispatch: (command: { readonly type: string }) =>
+              Effect.sync(() => void dispatched.push(command.type)),
+          } as unknown as SandboxSession;
+        });
+      const remote = yield* SandboxBridge.SandboxThreadRemote.pipe(
+        Effect.provide(
+          SandboxBridge.layerThreadRemoteWith(connect).pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.succeed(ServerSecretStore.ServerSecretStore, {
+                  get: () => Effect.succeedSome(new TextEncoder().encode(JSON.stringify(link))),
+                } as unknown as ServerSecretStore.ServerSecretStore["Service"]),
+                NodeCrypto.layer,
+              ),
+            ),
+          ),
+        ),
+      );
+      const fullAccess = { runtimeMode: "full-access", interactionMode: "default" } as const;
+      // The sandbox's run is working, so the move waits; the end of a host run checks again.
+      yield* remote.setModes(threadId, fullAccess);
+      yield* remote.setModes(threadId, fullAccess);
+      expect({ connects, dispatched }).toEqual({ connects: 2, dispatched: [] });
+      sandbox.runStatus = "completed";
+      yield* remote.setModes(threadId, fullAccess);
+      expect({ connects, dispatched }).toEqual({
+        connects: 3,
+        dispatched: ["thread.runtime-mode.set"],
+      });
+      // Nothing waits any more, and the modes are the ones it was put in.
+      yield* remote.setModes(threadId, fullAccess);
+      expect(connects).toBe(3);
+    }),
   );
 });

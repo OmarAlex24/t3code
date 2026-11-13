@@ -444,6 +444,15 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set
 
 const isTerminalRun = (run: OrchestrationV2Run) => TERMINAL_RUN_STATUSES.has(run.status);
 
+/** Whether `modeSyncCommands` leaves a move to full access for after the sandbox's run ends. */
+export const holdsRuntimeMode = (
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  modes: { readonly runtimeMode: RuntimeMode },
+) =>
+  modes.runtimeMode === "full-access" &&
+  projection.thread.runtimeMode !== modes.runtimeMode &&
+  projection.runs.some((run) => !isTerminalRun(run));
+
 /**
  * Puts a sandbox's thread in the host thread's modes. Full access grants its waiting approvals
  * (not questions) now, but its runtime mode waits for the run to end: a sandbox cuts its agent's
@@ -455,10 +464,8 @@ export const modeSyncCommands = (
   commandId: () => CommandId,
 ): ReadonlyArray<OrchestrationV2Command> => {
   const threadId = projection.thread.id;
-  const holdRuntimeMode =
-    modes.runtimeMode === "full-access" && projection.runs.some((run) => !isTerminalRun(run));
   return [
-    ...(projection.thread.runtimeMode === modes.runtimeMode || holdRuntimeMode
+    ...(projection.thread.runtimeMode === modes.runtimeMode || holdsRuntimeMode(projection, modes)
       ? []
       : [
           {

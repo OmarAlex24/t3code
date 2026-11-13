@@ -34,7 +34,7 @@ import {
   type ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
-import { connectSandbox, modeSyncCommands } from "@t3tools/sandbox-bridge";
+import { connectSandbox, holdsRuntimeMode, modeSyncCommands } from "@t3tools/sandbox-bridge";
 import {
   bridgeLaunchSecretName,
   bridgeLinkSecretName,
@@ -67,6 +67,7 @@ import { persistChatAttachments } from "../persistChatAttachments.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import type { SandboxConnect } from "./SandboxMirror.ts";
 import * as SandboxProvisioner from "./SandboxProvisioner.ts";
 import * as SandboxSettle from "./SandboxSettle.ts";
 import type { SandboxLaunchLifecycle } from "./sandboxLaunches.ts";
@@ -145,7 +146,8 @@ export class SandboxThreadRemote extends Context.Service<
   {
     /**
      * Puts the sandbox's thread in the host thread's modes, granting its waiting approvals under
-     * full access; a thread with no link is skipped.
+     * full access; a thread with no link is skipped, and so are the modes it was last put in
+     * unless a move to full access still waits on its run.
      */
     readonly setModes: (
       threadId: ThreadId,
@@ -165,77 +167,97 @@ export class SandboxThreadRemote extends Context.Service<
 
 const decodeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
 
-const layerThreadRemote = Layer.effect(
-  SandboxThreadRemote,
-  Effect.gen(function* () {
-    const secrets = yield* ServerSecretStore.ServerSecretStore;
-    const random = yield* SecureRandom.SecureRandom;
-    // Keyed by thread with no sandbox record in hand, so these name no provider.
-    const failed = (detail: string) => (cause: unknown) =>
-      new SandboxProviderError({ stage: "pair", detail, cause });
-    const readLink = Effect.fn("SandboxThreadRemote.readLink")(function* (threadId: ThreadId) {
-      const stored = yield* secrets
-        .get(bridgeLinkSecretName(threadId))
-        .pipe(Effect.mapError(failed("Could not read this thread's sandbox link.")));
-      if (Option.isNone(stored)) return Option.none();
-      return Option.some(
-        yield* decodeLink(new TextDecoder().decode(stored.value)).pipe(
-          Effect.mapError(failed("This thread's sandbox link is unreadable.")),
-        ),
-      );
-    });
-    const providerReady = Effect.fn("SandboxThreadRemote.providerReady")(
-      function* (threadId: ThreadId, providerInstanceId: string, model: string) {
-        const link = yield* readLink(threadId);
-        if (Option.isNone(link)) return false;
-        const sandbox = yield* connectSandbox(link.value);
-        const provider = sandbox.providers.find(
-          (candidate) => candidate.instanceId === providerInstanceId,
+type ThreadModes = {
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+};
+
+export const layerThreadRemoteWith = (connect: SandboxConnect) =>
+  Layer.effect(
+    SandboxThreadRemote,
+    Effect.gen(function* () {
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const random = yield* SecureRandom.SecureRandom;
+      // The modes each thread's sandbox was last put in, and the threads whose move to full access
+      // waits on a run; a repeat of the same modes reaches the sandbox only while one is held.
+      const pushed = new Map<ThreadId, ThreadModes>();
+      const held = new Set<ThreadId>();
+      // Keyed by thread with no sandbox record in hand, so these name no provider.
+      const failed = (detail: string) => (cause: unknown) =>
+        new SandboxProviderError({ stage: "pair", detail, cause });
+      const readLink = Effect.fn("SandboxThreadRemote.readLink")(function* (threadId: ThreadId) {
+        const stored = yield* secrets
+          .get(bridgeLinkSecretName(threadId))
+          .pipe(Effect.mapError(failed("Could not read this thread's sandbox link.")));
+        if (Option.isNone(stored)) return Option.none();
+        return Option.some(
+          yield* decodeLink(new TextDecoder().decode(stored.value)).pipe(
+            Effect.mapError(failed("This thread's sandbox link is unreadable.")),
+          ),
         );
-        return (
-          provider !== undefined &&
-          provider.enabled &&
-          provider.status === "ready" &&
-          provider.models.some((candidate) => candidate.slug === model)
-        );
-      },
-      Effect.scoped,
-      Effect.provide(FetchHttpClient.layer),
-      Effect.orElseSucceed(() => false),
-    );
-    const setModes = Effect.fn("SandboxThreadRemote.setModes")(function* (
-      threadId: ThreadId,
-      modes: {
-        readonly runtimeMode: RuntimeMode;
-        readonly interactionMode: ProviderInteractionMode;
-      },
-    ) {
-      const stored = yield* readLink(threadId);
-      if (Option.isNone(stored)) return;
-      const link = stored;
-      yield* Effect.gen(function* () {
-        const sandbox = yield* connectSandbox(link.value);
-        const projection = yield* sandbox.projection(threadId);
-        if (Option.isNone(projection)) return;
-        const id = yield* random.uuidV4().pipe(Effect.orDie);
-        let count = 0;
-        const commands = modeSyncCommands(projection.value, modes, () =>
-          CommandId.make(`sandbox-mode-sync:${id}:${count++}`),
-        );
-        for (const command of commands) {
-          // An approval answered meanwhile is refused; the rest still apply.
-          yield* sandbox
-            .dispatch(command)
-            .pipe(command.type === "runtime-request.respond" ? Effect.ignore : Effect.asVoid);
-        }
-      }).pipe(
+      });
+      const providerReady = Effect.fn("SandboxThreadRemote.providerReady")(
+        function* (threadId: ThreadId, providerInstanceId: string, model: string) {
+          const link = yield* readLink(threadId);
+          if (Option.isNone(link)) return false;
+          const sandbox = yield* connect(link.value);
+          const provider = sandbox.providers.find(
+            (candidate) => candidate.instanceId === providerInstanceId,
+          );
+          return (
+            provider !== undefined &&
+            provider.enabled &&
+            provider.status === "ready" &&
+            provider.models.some((candidate) => candidate.slug === model)
+          );
+        },
         Effect.scoped,
-        Effect.provide(FetchHttpClient.layer),
-        Effect.mapError(failed("Could not reach the sandbox to change its modes.")),
+        Effect.orElseSucceed(() => false),
       );
-    });
-    return SandboxThreadRemote.of({ setModes, providerReady });
-  }),
+      const setModes = Effect.fn("SandboxThreadRemote.setModes")(function* (
+        threadId: ThreadId,
+        modes: ThreadModes,
+      ) {
+        const last = pushed.get(threadId);
+        if (
+          !held.has(threadId) &&
+          last?.runtimeMode === modes.runtimeMode &&
+          last.interactionMode === modes.interactionMode
+        ) {
+          return;
+        }
+        const stored = yield* readLink(threadId);
+        if (Option.isNone(stored)) return;
+        const link = stored;
+        yield* Effect.gen(function* () {
+          const sandbox = yield* connect(link.value);
+          const projection = yield* sandbox.projection(threadId);
+          if (Option.isNone(projection)) return;
+          if (holdsRuntimeMode(projection.value, modes)) held.add(threadId);
+          else held.delete(threadId);
+          const id = yield* random.uuidV4().pipe(Effect.orDie);
+          let count = 0;
+          const commands = modeSyncCommands(projection.value, modes, () =>
+            CommandId.make(`sandbox-mode-sync:${id}:${count++}`),
+          );
+          for (const command of commands) {
+            // An approval answered meanwhile is refused; the rest still apply.
+            yield* sandbox
+              .dispatch(command)
+              .pipe(command.type === "runtime-request.respond" ? Effect.ignore : Effect.asVoid);
+          }
+          pushed.set(threadId, modes);
+        }).pipe(
+          Effect.scoped,
+          Effect.mapError(failed("Could not reach the sandbox to change its modes.")),
+        );
+      });
+      return SandboxThreadRemote.of({ setModes, providerReady });
+    }),
+  );
+
+const layerThreadRemote = layerThreadRemoteWith((link) =>
+  connectSandbox(link).pipe(Effect.provide(FetchHttpClient.layer)),
 );
 
 export class SandboxBridge extends Context.Service<
