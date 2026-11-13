@@ -64,11 +64,14 @@ const CelestoUsage = Schema.Struct({
   running_limit: Schema.Number,
 });
 
-// `restorable` is a spot move Celesto finishes on its own, so it leaves the record alone.
+// `restorable` then `restoring` is a spot move Celesto finishes on its own, so like any `starting`
+// it leaves the record alone.
 const CELESTO_STATUS: Record<string, SandboxProviderStatus> = {
   running: "running",
   creating: "starting",
+  pending: "starting",
   starting: "starting",
+  restorable: "starting",
   restoring: "starting",
   stopping: "stopped",
   stopped: "stopped",
