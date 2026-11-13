@@ -1330,6 +1330,68 @@ it.effect("restarts the turn for an image when native steering takes text only",
   }),
 );
 
+it.effect("a steer that restarts the turn closes the secret card the stopped turn asked", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { layer, startFirstTurn } = yield* nextTurnSelectionHarness(
+        "steering-closes-secret-card",
+        true,
+        false,
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = yield* startFirstTurn;
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+        const turnItemId = TurnItemId.make("turn-item:secret-request:steered");
+        const record = (secretStatus: "pending" | "cancelled" | "saved") =>
+          orchestrator.dispatch({
+            type: "secret_request.record",
+            commandId: CommandId.make(`secret-request:${secretStatus}`),
+            threadId,
+            runId: run.id,
+            nodeId: run.rootNodeId!,
+            turnItemId,
+            label: "Gateway key",
+            reason: "Signs the payment gateway calls.",
+            delivery: "file",
+            secretStatus,
+          });
+        const card = orchestrator
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.map((projection) => projection.turnItems.find((item) => item.id === turnItemId)),
+          );
+        yield* record("pending");
+
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("steer-past-secret"),
+          threadId,
+          messageId: MessageId.make("message:steer-past-secret"),
+          text: "skip the gateway for now",
+          attachments: [],
+          modelSelection: runSelection,
+          dispatchMode: { type: "steer_active", targetRunId: run.id },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+        const restarted = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+        assert.equal(restarted.id, run.id);
+        assert.notEqual(restarted.rootNodeId, run.rootNodeId);
+        assert.deepInclude(yield* card, { status: "cancelled", secretStatus: "cancelled" });
+
+        // The interrupted `request_secret` call still closes its card; nothing can save into it.
+        yield* record("cancelled");
+        const saved = yield* record("saved").pipe(Effect.flip);
+        assert.include(String(saved.cause), "is not the root of run");
+        assert.deepInclude(yield* card, { secretStatus: "cancelled" });
+      }).pipe(Effect.provide(layer));
+    }),
+  ),
+);
+
 it.effect("starts a steer that missed the turn on the saved next-turn selection", () =>
   Effect.gen(function* () {
     const { events, started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(

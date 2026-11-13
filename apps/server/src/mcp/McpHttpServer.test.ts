@@ -20,6 +20,7 @@ import {
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -27,7 +28,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
-import { HttpBody, HttpClient, HttpClientRequest, HttpRouter } from "effect/http";
+import { HttpBody, HttpClient, HttpClientRequest, HttpRouter, HttpServer } from "effect/http";
 
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -47,6 +48,7 @@ import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReview
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { mcpToolSession } from "./AcpMcpStdioBridge.ts";
 import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
@@ -1865,6 +1867,76 @@ it.effect("lists optional tools to a deferring client only after tool_search loa
       ).toEqual({ tools: [{ name: "preview_open", description: "Opens a browser preview." }] });
       expect(yield* deferring.listed).toEqual(["delegate_task", "preview_open", "tool_search"]);
       expect(yield* other.listed).toEqual(["delegate_task", "preview_open", "schedule_task"]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("interrupts a tool handler when its HTTP caller drops the call", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const token = "providerTokenWithoutDots";
+      const scope: McpInvocationContext.McpThreadInvocationScope = {
+        environmentId,
+        requestNamespace: "provider-session",
+        thread: {
+          threadId: ThreadId.make("thread-provider"),
+          providerSessionId: "provider-session",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+      const started = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const WaitsToolkit = Toolkit.make(
+        Tool.make("waits", {
+          description: "Waits until its caller goes away.",
+          success: Schema.Struct({}),
+          failure: OrchestratorMcpFailure,
+          failureMode: "return",
+        }),
+      );
+      const serverLayer = McpHttpServer.layerMcpTransport(
+        McpHttpServer.toolkitRegistration(
+          WaitsToolkit,
+          McpToolAccess.toLayer(WaitsToolkit, {
+            waits: McpToolAccess.reads(() =>
+              Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+              ),
+            ),
+          }),
+        ),
+      ).pipe(
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
+        Layer.provide(
+          Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+            resolve: (presented) => Effect.succeed(presented === token ? scope : undefined),
+          }),
+        ),
+      );
+      yield* HttpRouter.serve(serverLayer, {
+        disableListenLog: true,
+        disableLogger: true,
+      }).pipe(Layer.build);
+      const { address } = yield* HttpServer.HttpServer;
+      if (address._tag === "UnixPathAddress") return yield* Effect.die("expected TCP");
+
+      const call = yield* mcpToolSession({
+        endpoint: `http://127.0.0.1:${address.port}/mcp`,
+        authorization: `Bearer ${token}`,
+        clientName: "probe",
+      }).pipe(
+        Effect.flatMap((session) => session.call("waits", {})),
+        Effect.scoped,
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      yield* Fiber.interrupt(call);
+      yield* Deferred.await(interrupted);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

@@ -6413,6 +6413,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: { ...currentAttempt, status: "superseded", completedAt: now },
       });
     }
+    yield* closePendingSecretRequests({
+      command: input.command,
+      events: input.events,
+      threadId: input.command.threadId,
+      nodeId: rootNodeId,
+      now,
+    });
     if (currentRootNode !== undefined) {
       yield* emitEvent({
         type: "node.updated",
@@ -10213,14 +10220,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ),
         );
       const run = projection.runs.find((candidate) => candidate.id === command.runId);
-      if (run === undefined || run.rootNodeId !== command.nodeId) {
+      const existing = projection.turnItems.find((item) => item.id === command.turnItemId);
+      // A card whose node a steer replaced can still be closed, never answered.
+      const closesExisting =
+        existing?.nodeId === command.nodeId &&
+        (command.secretStatus === "declined" || command.secretStatus === "cancelled");
+      if (run === undefined || (run.rootNodeId !== command.nodeId && !closesExisting)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Node ${command.nodeId} is not the root of run ${command.runId}.`,
         });
       }
-      const existing = projection.turnItems.find((item) => item.id === command.turnItemId);
       if (existing !== undefined && existing.type !== "secret_request") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -10499,6 +10510,53 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...item,
             status: "cancelled",
             linkStatus: "cancelled",
+            completedAt: input.now,
+            updatedAt: input.now,
+          },
+        });
+      }
+    },
+  );
+
+  /**
+   * Closes the secret cards a stopped root node asked. Only the `request_secret`
+   * call in that node's provider turn could hand the agent the answer.
+   */
+  const closePendingSecretRequests = Effect.fn("orchestrationV2.closePendingSecretRequests")(
+    function* (input: {
+      readonly command: OrchestrationV2ServerCommand;
+      readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+      readonly threadId: ThreadId;
+      readonly nodeId: NodeId;
+      readonly now: DateTime.Utc;
+    }) {
+      const { turnItems } = yield* projectionStore
+        .getThreadRecords(input.threadId, ["turnItems"], {
+          turnItemTypes: ["secret_request"],
+          turnItemStatuses: ["waiting"],
+          messageRoles: [],
+        })
+        .pipe(mapDispatchError(input.command));
+      for (const item of turnItems) {
+        if (
+          item.type !== "secret_request" ||
+          item.secretStatus !== "pending" ||
+          item.nodeId !== input.nodeId
+        )
+          continue;
+        yield* emit(
+          input.events,
+          input.command,
+        )({
+          type: "turn-item.updated",
+          threadId: input.threadId,
+          ...(item.runId === null ? {} : { runId: item.runId }),
+          nodeId: item.nodeId,
+          occurredAt: input.now,
+          payload: {
+            ...item,
+            status: "cancelled",
+            secretStatus: "cancelled",
             completedAt: input.now,
             updatedAt: input.now,
           },
