@@ -1,4 +1,9 @@
-import { AuthOrchestrationReadScope, AuthSettingsWriteScope, WS_METHODS } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthSettingsWriteScope,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import { expect, it } from "vite-plus/test";
 
 import { requiredScopeForRpcMethod } from "../auth/RpcAuthorization.ts";
@@ -13,6 +18,8 @@ it("lets read-only clients see sandbox limits but keeps starting machines behind
     WS_METHODS.sandboxesConfigs,
     WS_METHODS.sandboxesSubscribeLaunch,
     WS_METHODS.sandboxesSubscribeListChanges,
+    WS_METHODS.sandboxesSubscribeThreadMirror,
+    WS_METHODS.sandboxesReadMirrorChild,
   ]) {
     expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
   }
@@ -35,4 +42,8 @@ it("lets read-only clients see sandbox limits but keeps starting machines behind
   ]) {
     expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
   }
+  // Picking a sandbox chat's model is a thread change, not a machine change.
+  expect(requiredScopeForRpcMethod(WS_METHODS.sandboxesSetThreadModel)).toBe(
+    AuthOrchestrationOperateScope,
+  );
 });

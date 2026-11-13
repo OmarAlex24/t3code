@@ -33,6 +33,7 @@ export * from "./git.ts";
 export * from "./vcs.ts";
 export * from "./sourceControl.ts";
 export * from "./sandbox.ts";
+export * from "./sandboxMirror.ts";
 export * from "./sandboxSettings.ts";
 export * from "./diy.ts";
 export * from "./projectClone.ts";
