@@ -226,8 +226,9 @@ A thread's Boat sandbox has no running limit while its agents work. It stops on 
 have been idle for the config's **Stop when idle** time (30 minutes by default).
 
 - Every 5 minutes the sandbox checks whether any thread on it, subagents included, is queued,
-  starting or running. If one is, it moves Boat's auto-stop to the idle time plus 5 minutes from
-  now. A thread waiting on you, for an approval or an answer, counts as idle.
+  starting or running, or has had any activity since the last check, such as a short turn or your
+  answer to a question. If so, it moves Boat's auto-stop to the idle time plus 5 minutes from now.
+  A thread left waiting on you, for an approval or an answer, counts as idle.
 - The sandbox does this itself, so it keeps working while this machine sleeps or the app is
   closed. With no work, nothing moves the auto-stop, and Boat stops the sandbox when it passes.
   Its disk stays, and sending a message resumes it.
