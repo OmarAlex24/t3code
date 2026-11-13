@@ -700,7 +700,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       const service = yield* SandboxSettle.SandboxSettle;
       yield* service.start();
     }),
-  ).pipe(Layer.provideMerge(SandboxSettle.layer)),
+  ).pipe(Layer.provideMerge(SandboxSettle.layer.pipe(Layer.provide(SandboxMirror.layer)))),
   SandboxMirror.layer,
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),
