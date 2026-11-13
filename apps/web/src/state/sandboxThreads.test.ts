@@ -36,6 +36,7 @@ import {
   sandboxRowPhase,
   sandboxRowStates,
   sandboxRowThread,
+  sandboxConnectOffer,
   sandboxesToPair,
   settleDecisionKeys,
   withSandboxHostMirrors,
@@ -553,6 +554,31 @@ describe("sandboxesToPair", () => {
     // One that answers as the host, or with no host to pair through.
     expect(sandboxesToPair([linked({ environmentId: HOST })], HOST, new Set())).toEqual([]);
     expect(sandboxesToPair([linked()], null, new Set())).toEqual([]);
+  });
+});
+
+describe("sandboxConnectOffer", () => {
+  const linked = (fields: Partial<SandboxRecord> = {}) =>
+    record({ hostProjectId: ProjectId.make("project-host"), ...fields });
+  const mirror = { environmentId: HOST, threadId };
+
+  it("offers a chat's mirror a connection to its sandbox, resuming a stopped one", () => {
+    expect(sandboxConnectOffer(linked(), mirror, false)).toEqual({ resumes: false });
+    expect(sandboxConnectOffer(linked({ state: "stopped" }), mirror, false)).toEqual({
+      resumes: true,
+    });
+  });
+
+  it("offers nothing once connected, on the sandbox's own thread, or with nothing to reach", () => {
+    expect(sandboxConnectOffer(linked(), mirror, true)).toBeNull();
+    expect(sandboxConnectOffer(linked(), { environmentId: SANDBOX, threadId }, false)).toBeNull();
+    expect(sandboxConnectOffer(undefined, mirror, false)).toBeNull();
+    // Still starting, gone, or a sandbox whose launch never linked a mirror.
+    for (const state of ["provisioning", "deleted", "expired", "error"] as const) {
+      expect(sandboxConnectOffer(linked({ state }), mirror, false)).toBeNull();
+    }
+    expect(sandboxConnectOffer(record(), mirror, false)).toBeNull();
+    expect(sandboxConnectOffer(linked({ environmentId: null }), mirror, false)).toBeNull();
   });
 });
 
