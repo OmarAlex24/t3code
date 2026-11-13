@@ -39,6 +39,7 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as RcMap from "effect/RcMap";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -223,6 +224,24 @@ const sameView = (left: SandboxThreadMirror, right: SandboxThreadMirror) =>
   left.branch === right.branch &&
   sameItems(left.pullRequests ?? [], right.pullRequests ?? []);
 
+/**
+ * For a client that keeps the provider it got: one connection's views share their provider
+ * object, so it goes out with the first view and again only once it is another.
+ */
+const withProviderOnChange = <E, R>(views: Stream.Stream<SandboxThreadMirror, E, R>) =>
+  views.pipe(
+    Stream.mapAccum(
+      () => Option.none<SandboxThreadMirror["provider"]>(),
+      (sent, view) => {
+        if (Option.isSome(sent) && sent.value === view.provider) {
+          const { provider: _unchanged, ...rest } = view;
+          return [sent, [rest]] as const;
+        }
+        return [Option.some(view.provider), [view]] as const;
+      },
+    ),
+  );
+
 const NOTHING_READ: SandboxThreadMirror = {
   available: false,
   provider: null,
@@ -241,7 +260,7 @@ export class SandboxMirror extends Context.Service<
      * sandbox is stopped, not answering or not linked, one view with `available: false` and what
      * was last read, then the next live one once it answers.
      */
-    readonly subscribe: (threadId: ThreadId) => Stream.Stream<SandboxThreadMirror>;
+    readonly subscribe: (input: SandboxThreadMirrorInput) => Stream.Stream<SandboxThreadMirror>;
     /** One of the thread's agents' messages, read when asked; refuses a thread that is not one. */
     readonly readChild: (
       input: SandboxMirrorChildInput,
@@ -306,7 +325,7 @@ const make = Effect.fn("SandboxMirror.make")(function* (connect: SandboxConnect)
       }),
     );
 
-  const subscribe = (threadId: ThreadId) => {
+  const views = (threadId: ThreadId) => {
     // One connection until it drops (a resume moves the link, so each reads it again), then
     // what was read last until the next try.
     const attempt = Stream.unwrap(
@@ -331,6 +350,16 @@ const make = Effect.fn("SandboxMirror.make")(function* (connect: SandboxConnect)
       ),
     );
     return Stream.forever(attempt).pipe(Stream.changesWith(sameView));
+  };
+  // Every client of a thread shares one connection and one subscription to the sandbox, held
+  // while any of them follows it; a client that joins late starts from the latest view.
+  const shared = yield* RcMap.make({
+    lookup: (threadId: ThreadId) =>
+      Stream.share(views(threadId), { capacity: 16, strategy: "sliding", replay: 1 }),
+  });
+  const subscribe = (input: SandboxThreadMirrorInput) => {
+    const followed = Stream.unwrap(RcMap.get(shared, input.threadId));
+    return input.providerOnChange === true ? withProviderOnChange(followed) : followed;
   };
 
   const readChild = Effect.fn("SandboxMirror.readChild")(function* (
@@ -446,7 +475,7 @@ export const rpcHandlers = Effect.gen(function* () {
   const mirror = yield* SandboxMirror;
   return {
     [WS_METHODS.sandboxesSubscribeThreadMirror]: (input: SandboxThreadMirrorInput) =>
-      mirror.subscribe(input.threadId),
+      mirror.subscribe(input),
     [WS_METHODS.sandboxesReadMirrorChild]: (input: SandboxMirrorChildInput) =>
       mirror.readChild(input),
     [WS_METHODS.sandboxesSetThreadModel]: (input: SandboxSetThreadModelInput) =>
