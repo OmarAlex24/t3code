@@ -1252,7 +1252,6 @@ describe("forwarding a turn", () => {
           const session = yield* openThread(acp);
           const prompt = yield* say(acp, session.sessionId, "Long job").pipe(Effect.forkScoped);
           yield* Deferred.await(started);
-          yield* Effect.yieldNow;
           yield* acp.agent.cancel({ sessionId: session.sessionId });
           const result = yield* Fiber.join(prompt);
           assert.strictEqual(result.stopReason, "cancelled");
@@ -1299,7 +1298,6 @@ describe("forwarding a turn", () => {
             messageId: "msg-1",
           }).pipe(Effect.forkScoped);
           yield* Deferred.await(started);
-          yield* Effect.yieldNow;
           yield* acp.agent.cancel({
             sessionId: session.sessionId,
             _meta: { [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL },
