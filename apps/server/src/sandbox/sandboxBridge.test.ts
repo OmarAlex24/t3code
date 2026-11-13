@@ -515,6 +515,7 @@ describe("SandboxBridge", () => {
           .linkHostThread({ threadId: ThreadId.make("thread-without-sandbox") })
           .pipe(Effect.flip);
         expect(missing.detail).toBe("No sandbox belongs to this thread.");
+        expect(missing.provider).toBeUndefined();
       }),
     ),
   );

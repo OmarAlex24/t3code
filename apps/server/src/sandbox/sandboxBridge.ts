@@ -158,8 +158,9 @@ const layerThreadRemote = Layer.effect(
   Effect.gen(function* () {
     const secrets = yield* ServerSecretStore.ServerSecretStore;
     const random = yield* SecureRandom.SecureRandom;
+    // Keyed by thread with no sandbox record in hand, so these name no provider.
     const failed = (detail: string) => (cause: unknown) =>
-      new SandboxProviderError({ provider: "boat", stage: "pair", detail, cause });
+      new SandboxProviderError({ stage: "pair", detail, cause });
     const readLink = Effect.fn("SandboxThreadRemote.readLink")(function* (threadId: ThreadId) {
       const stored = yield* secrets
         .get(bridgeLinkSecretName(threadId))
@@ -407,7 +408,10 @@ const make = Effect.gen(function* () {
       (candidate) => candidate.threadId === input.threadId && candidate.state !== "deleted",
     );
     if (record === undefined) {
-      return yield* failed("boat", "No sandbox belongs to this thread.");
+      return yield* new SandboxProviderError({
+        stage: "pair",
+        detail: "No sandbox belongs to this thread.",
+      });
     }
     const hostCopy =
       record.hostProjectId === undefined
