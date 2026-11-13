@@ -1,7 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
-import { describeSandboxWork } from "@t3tools/client-runtime/state/sandbox-settle";
+import {
+  describeSandboxWork,
+  SANDBOX_SETTLE_STALE_ANSWER,
+} from "@t3tools/client-runtime/state/sandbox-settle";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -321,6 +324,15 @@ export function SandboxThreadCoordinator() {
     );
   };
 
+  const staleAnswerToast = () =>
+    toastManager.add(
+      stackedThreadToast({
+        type: "info",
+        title: "Sandbox left as it is",
+        description: SANDBOX_SETTLE_STALE_ANSWER,
+      }),
+    );
+
   // The answer to a settle the host asked about: stop the machine if it runs, and keep it.
   const keepSettled = async (sandbox: SandboxRecord) => {
     if (provisionerEnvironmentId === null) return;
@@ -343,6 +355,7 @@ export function SandboxThreadCoordinator() {
       if (!isAtomCommandInterrupted(kept)) failureToast(kept, "Could not keep the sandbox");
       return;
     }
+    if (!kept.value.resolved) return staleAnswerToast();
     keptToast(
       sandbox,
       sandbox.state === "running"
@@ -403,6 +416,10 @@ export function SandboxThreadCoordinator() {
     void list.refresh();
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not delete the sandbox");
+      return false;
+    }
+    if ("resolved" in result.value && !result.value.resolved) {
+      staleAnswerToast();
       return false;
     }
     const hostKept = options.bridged && !options.hostThreadDeleted;
