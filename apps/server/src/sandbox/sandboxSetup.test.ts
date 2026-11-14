@@ -196,13 +196,16 @@ echo x >>"$HOME/curl.calls"
   );
 });
 
-// Stand-ins for sudo and Tailscale's binaries, so the scripts run without root. The daemon never
-// gets a TUN device, which is what a container gives tailscaled. `up` returns before the node has
-// registered, as when its first register request hangs past the timeout and a retry succeeds.
+// Stand-ins for sudo, systemctl, and Tailscale's binaries, so the scripts run without root and
+// never touch the host's tailscaled unit. The daemon never gets a TUN device, which is what a
+// container gives tailscaled. `up` returns before the node has registered, as when its first
+// register request hangs past the timeout and a retry succeeds.
 const TAILSCALE_STUBS = {
   sudo: `#!/bin/sh
 [ "$1" = -n ] && shift
 exec "$@"`,
+  systemctl: `#!/bin/sh
+exit 1`,
   tailscaled: `#!/bin/sh
 echo "$*" >"$T3_STUB/tailscaled.args"
 echo "$TS_ASSUME_NETWORK_UP_FOR_TEST" >"$T3_STUB/tailscaled.assume-up"
@@ -277,6 +280,9 @@ describe("tailscaleScript", () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const root = `${stub}/root`;
+          // Any character device passes the script's TUN check, so kernel mode is tried first.
+          yield* fs.makeDirectory(`${root}/dev/net`, { recursive: true });
+          yield* fs.symlink("/dev/null", `${root}/dev/net/tun`);
           const authKey = "tskey-auth-'$(touch pwned)\"";
           const join = tailscaleScript({ authKey, hostname: "t3-sandbox-web", root });
           expect(revealsSecret(join.command, authKey)).toBe(false);
@@ -302,6 +308,7 @@ describe("tailscaleScript", () => {
 
           // A daemon that still answers in the recorded mode is left running.
           const starts = yield* fs.readFileString(`${stub}/starts`);
+          expect(starts).toBe("start\nstart\n");
           const restart = tailscaleScript({ hostname: "t3-sandbox-web", root });
           expect(restart.secrets).toBeUndefined();
           const resumed = parseTailscaleReport(yield* run(restart));
