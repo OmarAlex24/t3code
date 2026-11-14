@@ -1105,13 +1105,11 @@ export class SandboxWork {
         pendingBackgroundTasks: held,
       });
     return [
-      ...live.map(
-        (run): OrchestrationV2PendingBackgroundTask => ({
-          taskId: `${SANDBOX_RUN_TASK_PREFIX}${run.id}`,
-          kind: "background_task",
-          description: "Working on the sandbox",
-        }),
-      ),
+      ...live.map((run): OrchestrationV2PendingBackgroundTask => ({
+        taskId: `${SANDBOX_RUN_TASK_PREFIX}${run.id}`,
+        kind: "background_task",
+        description: "Working on the sandbox",
+      })),
       ...held.map((task) => hostTask(task, wakeHeld && task.kind === "monitor")),
     ];
   }

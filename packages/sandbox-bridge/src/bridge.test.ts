@@ -194,7 +194,12 @@ const projection = (
   modelSelection: ModelSelection = codexSelection("gpt-5.5"),
 ) =>
   ({
-    thread: { runtimeMode, interactionMode: "default", modelSelection, activeProviderThreadId: null },
+    thread: {
+      runtimeMode,
+      interactionMode: "default",
+      modelSelection,
+      activeProviderThreadId: null,
+    },
     turnItems,
     runs,
     runtimeRequests: [],
@@ -1544,7 +1549,7 @@ describe("forwarding a turn", () => {
     }),
   );
 
-  it.effect("holds the host thread while the sandbox's thread works on, until it settles or stops", () =>
+  it.effect("holds the host thread until the sandbox's thread settles or is stopped", () =>
     Effect.gen(function* () {
       const stopped = yield* Deferred.make<void>();
       const reviewer = (status: string) =>
@@ -1602,7 +1607,11 @@ describe("forwarding a turn", () => {
           assert.deepStrictEqual(yield* Queue.take(rosters), {
             sessionId: session.sessionId,
             tasks: [
-              { taskId: "sandbox-run:run-2", kind: "background_task", description: "Working on the sandbox" },
+              {
+                taskId: "sandbox-run:run-2",
+                kind: "background_task",
+                description: "Working on the sandbox",
+              },
             ],
           });
           // The host's Stop between turns stops that work on the sandbox, which then settles.
