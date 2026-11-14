@@ -11,6 +11,7 @@ import {
   type ModelSelection,
   ProviderInstanceId,
   ProviderSessionId,
+  SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
   SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_STEER_CANCEL,
@@ -1334,6 +1335,90 @@ describe("AcpRegistryAdapterV2", () => {
         });
         assert.equal((yield* session.terminal).status, "interrupted");
       }
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.effect("keeps the roster the sandbox bridge reports after its turn, and stops it there", () =>
+    Effect.gen(function* () {
+      const roster = (tasks: ReadonlyArray<unknown>) => ({
+        type: "emit_inbound",
+        frame: {
+          kind: "notification",
+          method: SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
+          params: { sessionId: CLAUDE_ROOT_SESSION, tasks },
+        },
+      });
+      const reviewer = [
+        { taskId: "item-reviewer", kind: "subagent" as const, description: "Review the diff" },
+      ];
+      const gate = makeProviderReplayGate(["report", "settle"]);
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          {
+            type: "expect_outbound",
+            frame: { kind: "request", method: "session/set_config_option", params: "<any>" },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/set_config_option",
+              result: { configOptions: [] },
+            },
+          },
+          ...claudeFrames.prompt(1),
+          claudeFrames.idle("end_turn"),
+          { ...roster(reviewer), label: "report" },
+          roster(reviewer),
+          claudeMarker("held"),
+          {
+            type: "expect_outbound",
+            frame: {
+              kind: "notification",
+              method: "session/cancel",
+              params: { sessionId: CLAUDE_ROOT_SESSION },
+            },
+          },
+          { ...roster([]), label: "settle" },
+          claudeMarker("settled"),
+          claudeFrames.closeRequest,
+          claudeFrames.closed,
+        ],
+        gate,
+        false,
+        "fixture-agent",
+        SANDBOX_BRIDGE_INSTANCE_ID,
+      );
+      // The rosters a marker's events carry, the marker's own update left out.
+      const rosters = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+        events
+          .slice(0, -1)
+          .flatMap((event) =>
+            event.type === "provider_thread.updated"
+              ? [event.providerThread.pendingBackgroundTasks]
+              : [],
+          );
+      yield* session.runtime.startTurn(session.turnInput(1));
+      const ended = yield* session.until((event) => event.type === "turn.terminal");
+      const turn = ended.findLast((event) => event.type === "provider_turn.updated");
+      if (turn?.type !== "provider_turn.updated") throw new Error("Missing settled turn");
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+      // A repeated roster changes nothing, so it sends nothing on.
+      gate.release("report");
+      assert.deepEqual(rosters(yield* session.throughMarker("held")), [reviewer]);
+      assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+      // Stop on the held thread reaches the bridge, which stops the sandbox's thread.
+      yield* session.runtime.interruptTurn({
+        providerThread: session.providerThread,
+        providerTurnId: turn.providerTurn.id,
+        requestRuntimeRestart: true,
+      });
+      gate.release("settle");
+      assert.deepEqual(rosters(yield* session.throughMarker("settled")), [[]]);
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+      // The roster is the bridge's to keep, so a dead bridge leaves none behind.
+      assert.isTrue(session.runtime.backgroundTasksEndWithProcess);
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
