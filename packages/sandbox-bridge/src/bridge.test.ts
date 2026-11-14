@@ -1,6 +1,7 @@
 import {
   type MessageId,
   type ModelSelection,
+  SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
   SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_STEER_CANCEL,
@@ -47,6 +48,7 @@ import {
   modeSyncCommands,
   runSandboxBridge,
   sandboxSelectionFor,
+  SandboxWork,
   SandboxBridgeError,
   type SandboxBridgePorts,
   type SandboxSession,
@@ -192,10 +194,12 @@ const projection = (
   modelSelection: ModelSelection = codexSelection("gpt-5.5"),
 ) =>
   ({
-    thread: { runtimeMode, interactionMode: "default", modelSelection },
+    thread: { runtimeMode, interactionMode: "default", modelSelection, activeProviderThreadId: null },
     turnItems,
     runs,
     runtimeRequests: [],
+    providerThreads: [],
+    messages: [],
   }) as unknown as OrchestrationV2ThreadProjection;
 const userMessage = (
   messageId: string,
@@ -222,6 +226,8 @@ interface FakeSandbox {
   readonly secretAnswers: Array<unknown>;
   readonly imageReads: Array<string>;
   readonly push: (item: OrchestrationV2ThreadStreamItem) => Effect.Effect<void>;
+  /** What the sandbox's thread holds now, for the next read or subscription. */
+  readonly settle: (projection: OrchestrationV2ThreadProjection) => void;
 }
 
 /** A sandbox whose thread stream the test drives; `react` answers each command it receives. */
@@ -243,6 +249,7 @@ const makeFakeSandbox = (options: {
     const uploads: Array<unknown> = [];
     const secretAnswers: Array<unknown> = [];
     const imageReads: Array<string> = [];
+    let existing = options.existing;
     const fake: FakeSandbox = {
       commands,
       launches,
@@ -250,11 +257,14 @@ const makeFakeSandbox = (options: {
       secretAnswers,
       imageReads,
       push: (item) => Queue.offer(stream, item).pipe(Effect.asVoid),
+      settle: (projection) => {
+        existing = projection;
+      },
       session: {
         threadStop: options.threadStop ?? true,
         defaultModelSelection: { instanceId: "codex", model: "gpt-5.5" } as never,
         providers: options.providers ?? [],
-        projection: () => Effect.succeed(Option.fromNullishOr(options.existing)),
+        projection: () => Effect.sync(() => Option.fromNullishOr(existing)),
         launch: (input) =>
           Effect.suspend(() => {
             launches.push(input);
@@ -284,15 +294,15 @@ const makeFakeSandbox = (options: {
         // As a sandbox does: the thread's snapshot first, and nothing for a thread it lacks.
         subscribe: () =>
           Stream.suspend(() =>
-            options.existing === undefined && launches.length === 0
+            existing === undefined && launches.length === 0
               ? Stream.empty
               : Stream.concat(
-                  options.existing === undefined
+                  existing === undefined
                     ? Stream.empty
                     : Stream.make({
                         kind: "snapshot",
                         snapshotSequence: 0,
-                        projection: options.existing,
+                        projection: existing,
                       } as OrchestrationV2ThreadStreamItem),
                   Stream.fromQueue(stream),
                 ),
@@ -344,6 +354,8 @@ interface Harness {
   readonly permissions: Array<AcpSchema.RequestPermissionRequest>;
   readonly elicitations: Array<AcpSchema.CreateElicitationRequest>;
   readonly withdrawals: Array<unknown>;
+  /** The background rosters the bridge reported, in order. */
+  readonly rosters: Queue.Queue<unknown>;
 }
 
 const messages = (
@@ -417,7 +429,13 @@ const withBridge = <A, E>(
       permissions: [],
       elicitations: [],
       withdrawals: [],
+      rosters: yield* Queue.unbounded<unknown>(),
     };
+    yield* acp.handleExtNotification(
+      SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
+      Schema.Unknown,
+      (payload) => Queue.offer(harness.rosters, payload).pipe(Effect.asVoid),
+    );
     yield* acp.handleExtNotification(SANDBOX_BRIDGE_WITHDRAW_METHOD, Schema.Unknown, (payload) =>
       Effect.sync(() => void harness.withdrawals.push(payload)),
     );
@@ -1526,6 +1544,81 @@ describe("forwarding a turn", () => {
     }),
   );
 
+  it.effect("holds the host thread while the sandbox's thread works on, until it settles or stops", () =>
+    Effect.gen(function* () {
+      const stopped = yield* Deferred.make<void>();
+      const reviewer = (status: string) =>
+        ({
+          id: "item-reviewer",
+          type: "subagent",
+          title: "Review the diff",
+          status,
+          ordinal: 3,
+          runId: "run-1",
+          childThreadId: "sandbox-child",
+          updatedAt: at(),
+        }) as never;
+      const fake = yield* makeFakeSandbox({
+        existing: projection([]),
+        react: (command, sandbox) => {
+          if (command.type === "thread.stop") {
+            return Effect.forEach(
+              [
+                event("turn-item.updated", reviewer("interrupted")),
+                event("run.updated", run(null as never, "interrupted", "run-2", 2)),
+              ],
+              sandbox.push,
+              { discard: true },
+            ).pipe(Effect.andThen(Deferred.succeed(stopped, undefined)));
+          }
+          if (command.type !== "message.dispatch") return Effect.void;
+          const ran = run(command.messageId!, "completed");
+          sandbox.settle(projection([reviewer("running")], [ran]));
+          return Effect.forEach(
+            [
+              event("run.created", run(command.messageId!, "running")),
+              event("turn-item.updated", reviewer("running")),
+              event("turn-item.updated", assistant("answer", "Started a reviewer", 2)),
+              event("run.updated", ran),
+            ],
+            sandbox.push,
+            { discard: true },
+          );
+        },
+      });
+      yield* withBridge({ fake }, ({ acp, rosters }) =>
+        Effect.gen(function* () {
+          const session = yield* openThread(acp);
+          const result = yield* say(acp, session.sessionId, "Review it in the background");
+          // The forwarded run ended, so the host's turn did; the reviewer still runs.
+          assert.strictEqual(result.stopReason, "end_turn");
+          assert.deepStrictEqual(yield* Queue.take(rosters), {
+            sessionId: session.sessionId,
+            tasks: [{ taskId: "item-reviewer", kind: "subagent", description: "Review the diff" }],
+          });
+          // A run the sandbox wakes for on its own holds it too, and only once that ends is it done.
+          const wake = run(null as never, "running", "run-2", 2);
+          yield* fake.push(event("run.created", wake));
+          assert.deepStrictEqual(yield* Queue.take(rosters), {
+            sessionId: session.sessionId,
+            tasks: [
+              { taskId: "sandbox-run:run-2", kind: "background_task", description: "Working on the sandbox" },
+            ],
+          });
+          // The host's Stop between turns stops that work on the sandbox, which then settles.
+          yield* acp.agent.cancel({ sessionId: session.sessionId });
+          yield* Deferred.await(stopped);
+          assert.strictEqual(fake.commands.at(-1)?.type, "thread.stop");
+          assert.deepStrictEqual(yield* Queue.take(rosters), {
+            sessionId: session.sessionId,
+            tasks: [],
+          });
+          assert.strictEqual(yield* Queue.size(rosters), 0);
+        }),
+      );
+    }),
+  );
+
   it.effect("waits out a slow resume and then sends the message it was given", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeSandbox({ react: answerWith("Back up") });
@@ -1675,6 +1768,51 @@ describe("mapping", () => {
       ["![unfinished\nnext line", 22],
     ];
     for (const [text, end] of rows) assert.strictEqual(releasableEnd(text, 0), end, text);
+  });
+
+  it("holds for a monitor between the progress wakes it gives the sandbox, as the sandbox does", () => {
+    const monitor = {
+      id: "item-monitor",
+      type: "command_execution",
+      monitor: true,
+      input: "tail -f build.log",
+      title: null,
+      status: "running",
+      ordinal: 2,
+      runId: "run-1",
+      updatedAt: at(),
+    };
+    const rosterAfter = (wake: boolean) => {
+      const work = new SandboxWork();
+      work.apply({
+        kind: "snapshot",
+        snapshotSequence: 0,
+        projection: {
+          ...projection([monitor], [run("msg-1" as MessageId, "completed", "run-1", 1)]),
+          messages: [
+            {
+              id: "msg-1",
+              ...(wake
+                ? {
+                    notification: {
+                      source: { kind: "monitor" },
+                      outcome: "updated",
+                      summary: "Build log grew",
+                    },
+                  }
+                : {}),
+            },
+          ],
+        },
+      } as never);
+      return work.tasks;
+    };
+    assert.deepStrictEqual(rosterAfter(false), [
+      { taskId: "item-monitor", kind: "monitor", description: "tail -f build.log" },
+    ]);
+    assert.deepStrictEqual(rosterAfter(true), [
+      { taskId: "item-monitor", kind: "monitor", description: "tail -f build.log", awaited: true },
+    ]);
   });
 
   it("offers one option per kind and always a way to decline", () => {
