@@ -50,7 +50,7 @@ import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { describeSandboxFailure } from "../settings/SandboxStartLimits";
-import { useConnectSandbox } from "./SandboxConnect";
+import { RESUME_WAIT_MS, useConnectSandbox } from "./SandboxConnect";
 import {
   AlertDialog,
   AlertDialogDescription,
@@ -64,8 +64,6 @@ import { Checkbox } from "../ui/checkbox";
 import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
-// How long a resumed sandbox gets to answer again before a send or un-settle gives up.
-const RESUME_WAIT_MS = 4 * 60_000;
 // How long this app waits before it tries again to pair with a sandbox that refused.
 const PAIR_RETRY_MS = 2 * 60_000;
 // How long the host waits after a settle, with Undo, before a remembered delete (SandboxSettle).

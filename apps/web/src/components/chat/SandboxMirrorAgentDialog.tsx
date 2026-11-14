@@ -2,6 +2,7 @@ import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { type SandboxConnect, SandboxConnectAction } from "../sandbox/SandboxConnect";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -17,14 +18,16 @@ const ROLE_LABEL = { user: "Task", assistant: "Agent", system: "System" } as con
 
 /**
  * One of a sandbox chat's agents, read only through the host, as the phone reads it, for a client
- * not connected to the sandbox. The host reads it again whenever it reports the agent changed.
- * Mount only while open.
+ * that could not connect to the sandbox, with why and a way to try again. The host reads it again
+ * whenever it reports the agent changed. Mount only while open.
  */
 export function SandboxMirrorAgentDialog(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly childThreadId: ThreadId;
   readonly title: string;
+  /** Connecting opens the agent's thread on the sandbox. */
+  readonly connect: SandboxConnect | null;
   readonly onClose: () => void;
 }) {
   const query = useEnvironmentQuery(
@@ -41,9 +44,17 @@ export function SandboxMirrorAgentDialog(props: {
           <DialogTitle>{props.title}</DialogTitle>
           <DialogDescription>
             Read only. This agent runs on the chat's sandbox, which this app is not connected to.
+            {props.connect?.allowed ? " Connect to open its thread." : null}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
+          {props.connect === null ? null : props.connect.allowed ? (
+            <div className="mb-4">
+              <SandboxConnectAction state={props.connect} />
+            </div>
+          ) : (
+            <p className="mb-4 text-sm text-muted-foreground">{props.connect.reason}</p>
+          )}
           {query.error !== null ? (
             <p className="text-sm text-destructive">{query.error}</p>
           ) : child === null ? (
