@@ -1146,6 +1146,11 @@ export const SANDBOX_BRIDGE_CANCEL_META = "t3code/cancel";
 export const SANDBOX_BRIDGE_STEER_CANCEL = "steer";
 /** The bridge's ACP notification that its open approval or question was answered on the sandbox. */
 export const SANDBOX_BRIDGE_WITHDRAW_METHOD = "_t3code/sandbox_requests_withdrawn";
+/**
+ * The bridge's ACP notification of what the sandbox's thread still works on after the host's turn
+ * ended, as the host thread's background roster; an empty list once it settles.
+ */
+export const SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD = "_t3code/sandbox_background_work";
 
 /**
  * Provider instances T3 seeds and runs for itself, like the sandbox bridge. They work wherever a
