@@ -36,6 +36,8 @@ export const SANDBOX_FOLLOWED_SERVER_SETTING_KEYS = [
   "backgroundActivityProfile",
   "defaultTheme",
   "defaultThemeSetAt",
+  "defaultAppearance",
+  "defaultAppearanceSetAt",
   "newWorktreesStartFromOrigin",
   "worktreeSubmodules",
   "ghqCloneLayout",
@@ -90,6 +92,7 @@ export const SANDBOX_HOST_ONLY_SERVER_SETTING_KEYS = [
   // The host machine's identity and its links to other machines and guests.
   "environmentIcon",
   "guestSharingEnabled",
+  "requireConnectDeviceApproval",
   "linkedEnvironmentsEnabled",
   // Keyed by the host's project ids, which mean nothing on the sandbox.
   "projectSettingsOverrides",
