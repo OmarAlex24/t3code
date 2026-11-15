@@ -376,6 +376,7 @@ export function AddEnvironmentDialog({
         )}
         disabled={isAddingSavedBackend || sandboxProvisioning.isProvisioning}
         onClick={() => {
+          if (!selected) onErrorChange(null);
           setSavedBackendMode(input.mode);
         }}
       >

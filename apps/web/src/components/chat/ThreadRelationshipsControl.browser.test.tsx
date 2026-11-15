@@ -1,3 +1,4 @@
+import "~/index.css";
 import * as DateTime from "effect/DateTime";
 import { EnvironmentId, NodeId, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -85,7 +86,7 @@ vi.mock(import("../sandbox/SandboxConnect"), async (original) => {
 
 vi.mock(import("../../state/entities"), () => ({
   useQuietThreadShell: (() => null) as never,
-  useThreadProjection: ((ref: unknown) =>
+  useQuietThreadProjection: ((ref: unknown) =>
     ref === null ? null : { projection: state.projection }) as never,
   useThreadRelationshipShells: (() =>
     state.projection === null
@@ -128,6 +129,7 @@ vi.mock(import("../../state/use-atom-command"), () => ({
 import { render } from "../../../test/render";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
 import { useSandboxConnectionsStore } from "../../state/sandboxConnections";
+import { ScrollArea } from "../ui/scroll-area";
 import { ToastProvider } from "../ui/toast";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
@@ -609,3 +611,44 @@ it.each([
     expect(screen.router?.state.location.pathname).toBe("/environment/fork");
   },
 );
+
+it.each([1, 18])("continues scrolling the panel past a list of %i subagents", async (count) => {
+  setup();
+  const projection = makeThreadProjectionFixture();
+  state.projection = projection;
+  state.relatedShells = Array.from({ length: count }, (_, index) => ({
+    id: ThreadId.make(`subagent-${index}`),
+    title: `Subagent ${index}`,
+    forkedFrom: null,
+    lineage: { parentThreadId: projection.thread.id, relationshipToParent: "subagent" },
+    activityRunStatus: "running",
+    status: "running",
+  }));
+  await using screen = await render(
+    <div data-testid="panel" style={{ height: 320, width: 280 }}>
+      <ScrollArea>
+        <ThreadRelationshipsPanel
+          environmentId={environmentId}
+          threadId={projection.thread.id}
+          showLineage
+          showSideChats
+        />
+        <div style={{ height: 600 }} />
+      </ScrollArea>
+    </div>,
+  );
+  if (count > 6) {
+    await screen.getByRole("button", { name: "Show 12 more" }).click();
+    await expect.element(screen.getByText("Subagent 17", { exact: true })).toBeInTheDocument();
+  }
+  const list = screen.getByRole("list", { name: "Related threads" }).element();
+  const viewport = screen
+    .getByTestId("panel")
+    .element()
+    .querySelector<HTMLElement>("[data-slot=scroll-area-viewport]")!;
+  list.scrollTop = list.scrollHeight;
+  if (count > 6) expect(list.scrollTop).toBeGreaterThan(0);
+  viewport.scrollTop = 0;
+  await userEvent.wheel(list, { delta: { y: 300 } });
+  await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0));
+});
