@@ -1144,6 +1144,8 @@ export const SANDBOX_BRIDGE_MESSAGE_META = "t3code/message";
  */
 export const SANDBOX_BRIDGE_CANCEL_META = "t3code/cancel";
 export const SANDBOX_BRIDGE_STEER_CANCEL = "steer";
+/** The bridge's model option `_meta` key naming the model a sandbox chat gets when none is picked. */
+export const SANDBOX_BRIDGE_DEFAULT_MODEL_META = "t3code/defaultModel";
 /** The bridge's ACP notification that its open approval or question was answered on the sandbox. */
 export const SANDBOX_BRIDGE_WITHDRAW_METHOD = "_t3code/sandbox_requests_withdrawn";
 /**

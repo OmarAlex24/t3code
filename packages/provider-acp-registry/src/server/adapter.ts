@@ -26,6 +26,7 @@ import {
   OrchestrationV2PendingBackgroundTask,
   SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
   SANDBOX_BRIDGE_CANCEL_META,
+  SANDBOX_BRIDGE_DEFAULT_MODEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_STEER_CANCEL,
@@ -33,6 +34,7 @@ import {
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
 } from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
+import { findModelConfigOption } from "@t3tools/provider-acp/server/runtimeModel";
 import { AcpRegistrySettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
@@ -398,11 +400,23 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
                   ),
               }
             : {}),
-          onSessionConfigurationUpdate: (configOptions, modeState, modelState) =>
-            runtimeCoordinator.publishLiveConfiguration(
+          onSessionConfigurationUpdate: (configOptions, modeState, modelState) => {
+            const configuration = normalizeAcpRegistryLiveConfiguration(
+              configOptions,
+              modeState,
+              modelState,
+            );
+            const defaultModelId =
+              options.instanceId === SANDBOX_BRIDGE_INSTANCE_ID
+                ? findModelConfigOption(configOptions)?._meta?.[SANDBOX_BRIDGE_DEFAULT_MODEL_META]
+                : undefined;
+            return runtimeCoordinator.publishLiveConfiguration(
               options.instanceId,
-              normalizeAcpRegistryLiveConfiguration(configOptions, modeState, modelState),
-            ),
+              typeof defaultModelId === "string"
+                ? { ...configuration, defaultModelId }
+                : configuration,
+            );
+          },
           onUrlElicitation: ({ elicitationId, url, message }) => {
             const normalizedUrl = normalizeAcpRegistryWebUrl(url);
             if (normalizedUrl === undefined || elicitationId.trim().length === 0) {

@@ -30,6 +30,7 @@ import {
   type RuntimeMode,
   type RuntimeRequestId,
   SANDBOX_BRIDGE_CANCEL_META,
+  SANDBOX_BRIDGE_DEFAULT_MODEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_MODEL,
@@ -235,14 +236,14 @@ const choiceOf = (
   descriptor.options[0]?.id;
 
 /**
- * What the host's model picker offers for a sandbox's thread: the models of the provider that
- * thread runs on, with that model's options (effort and the like), so the phone can pick one.
- * The bridge's own `sandbox` value stays listed and means "whatever the sandbox has". Null when the
- * sandbox does not list the provider.
+ * The models of the provider a sandbox's thread runs on, with that model's options, for the host's
+ * picker. The bridge's `sandbox` value stays listed ("whatever the sandbox has"); the model that is
+ * goes in the option's `_meta` for the host to mark. Null when the sandbox lacks the provider.
  */
 export const sandboxConfigOptions = (
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection | null,
+  sandboxDefault: ModelSelection | null,
 ): ReadonlyArray<AcpSchema.SessionConfigOption> | null => {
   if (selection === null) return null;
   const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
@@ -250,6 +251,11 @@ export const sandboxConfigOptions = (
   if (models.length === 0) return null;
   const current = models.find((model) => model.slug === selection.model);
   const picked = new Map((selection.options ?? []).map((option) => [option.id, option.value]));
+  const defaultModel =
+    models.find(
+      (model) =>
+        model.slug === sandboxDefault?.model && sandboxDefault.instanceId === selection.instanceId,
+    ) ?? models.find((model) => model.isDefault === true);
   const options: Array<AcpSchema.SessionConfigOption> = [
     {
       configId: "model",
@@ -261,6 +267,9 @@ export const sandboxConfigOptions = (
         ...models.map((model) => ({ value: model.slug, name: model.name })),
         { value: MODEL_OPTION_VALUE, name: "Sandbox default" },
       ],
+      ...(defaultModel === undefined
+        ? {}
+        : { _meta: { [SANDBOX_BRIDGE_DEFAULT_MODEL_META]: defaultModel.slug } }),
     },
   ];
   for (const descriptor of (current ?? models[0])?.capabilities?.optionDescriptors ?? []) {
@@ -1425,7 +1434,9 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         onNone: () => sandbox.defaultModelSelection,
         onSome: (projection) => projection.thread.modelSelection,
       });
-      return sandboxConfigOptions(sandbox.providers, selection) ?? [];
+      return (
+        sandboxConfigOptions(sandbox.providers, selection, sandbox.defaultModelSelection) ?? []
+      );
     },
     Effect.scoped,
     Effect.timeoutOption(CATALOG_READ_TIMEOUT),
@@ -1886,7 +1897,11 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       tracker = new TurnTracker(messageId, before);
     }
     // A session opened while the sandbox was stopped gets its models now.
-    const catalog = sandboxConfigOptions(sandbox.providers, sandboxSelection);
+    const catalog = sandboxConfigOptions(
+      sandbox.providers,
+      sandboxSelection,
+      sandbox.defaultModelSelection,
+    );
     if (catalog !== null && !sameConfigOptions(catalog, session.configOptions)) {
       session.configOptions = catalog;
       yield* update(sessionId, { sessionUpdate: "config_option_update", configOptions: catalog });

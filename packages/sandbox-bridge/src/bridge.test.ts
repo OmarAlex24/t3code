@@ -3,6 +3,7 @@ import {
   type ModelSelection,
   SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
   SANDBOX_BRIDGE_CANCEL_META,
+  SANDBOX_BRIDGE_DEFAULT_MODEL_META,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_STEER_CANCEL,
   SANDBOX_BRIDGE_WAKE_METHOD,
@@ -48,6 +49,7 @@ import {
   promptText,
   modeSyncCommands,
   runSandboxBridge,
+  sandboxConfigOptions,
   sandboxSelectionFor,
   SandboxWork,
   SandboxBridgeError,
@@ -603,6 +605,7 @@ describe("the sandbox's models", () => {
             model?.type === "select" ? model.options.map((option) => option.name) : [],
             ["GPT-5.5", "GPT-5.5 Mini", "Sandbox default"],
           );
+          assert.deepStrictEqual(model?._meta, { [SANDBOX_BRIDGE_DEFAULT_MODEL_META]: "gpt-5.5" });
           assert.deepInclude(level, {
             id: "effort",
             category: "thought_level",
@@ -618,6 +621,26 @@ describe("the sandbox's models", () => {
       );
     }),
   );
+
+  // The host marks the model a chat gets with nothing picked, not the one this chat runs.
+  it("names the sandbox's default model apart from the thread's pick", () => {
+    const [mini] =
+      sandboxConfigOptions(
+        sandboxProviders,
+        codexSelection("gpt-5.5-mini"),
+        codexSelection("gpt-5.5"),
+      ) ?? [];
+    assert.deepInclude(mini, {
+      currentValue: "gpt-5.5-mini",
+      _meta: { [SANDBOX_BRIDGE_DEFAULT_MODEL_META]: "gpt-5.5" },
+    });
+    const [elsewhere] =
+      sandboxConfigOptions(sandboxProviders, codexSelection("gpt-5.5-mini"), {
+        instanceId: "claudeAgent",
+        model: "gpt-5.5",
+      } as ModelSelection) ?? [];
+    assert.notProperty(elsewhere, "_meta");
+  });
 
   it.effect("sends the model picked on the host with the next message, and only then", () =>
     Effect.gen(function* () {

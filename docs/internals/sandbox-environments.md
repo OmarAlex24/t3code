@@ -385,8 +385,14 @@ without pairing with the sandbox.
   each new message re-checks them, so Supervised asks and other modes do not wait.
 - **Models.** The bridge offers the models and options of the sandbox thread's provider
   (`sandboxConfigOptions`) and hands a pick on the host thread to the sandbox with the next message
-  (`sandboxSelectionFor`). The host keeps one model list for the `sandboxes` instance, whichever
-  session reported last, so no client's mirror picker reads it: each shows the sandbox's own
+  (`sandboxSelectionFor`). The host keeps one model list for the `sandboxes` instance, which
+  clients that know nothing of sandboxes (the App Store app) show: every model any sandbox chat
+  reported, each as its newest report has it, without the `sandbox` placeholder once one is known,
+  and the default the bridge names in `SANDBOX_BRIDGE_DEFAULT_MODEL_META`. A report that is empty
+  or only the placeholder (a sandbox not answering) changes nothing, and the list is saved beside
+  the provider status cache so a host restart keeps it
+  ([`sandboxBridgeModels.ts`](../../packages/provider-acp-registry/src/server/sandboxBridgeModels.ts)).
+  It mixes sandboxes, so no fork client's mirror picker reads it: each shows the sandbox's own
   provider and selection under the bridge's instance (`sandboxMirrorModelSource` in client-runtime),
   and a pick is set on both threads, since otherwise the bridge would hand the sandbox the mirror's
   older pick. A client paired with the sandbox that lists its thread reads it and its providers
