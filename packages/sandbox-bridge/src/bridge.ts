@@ -307,22 +307,32 @@ export const withConfigValue = (
           : option,
   );
 
-const optionKey = (selection: ModelSelection) =>
+type OptionDescriptors = NonNullable<
+  NonNullable<ServerProvider["models"][number]["capabilities"]>["optionDescriptors"]
+>;
+
+const defaultOptionValue = (descriptor: OptionDescriptors[number]) =>
+  descriptor.type === "boolean"
+    ? (descriptor.currentValue ?? false)
+    : choiceOf(descriptor, undefined);
+
+// Options as the model runs them: one stated at its default reads as one left out.
+const optionKey = (options: ModelSelection["options"], descriptors: OptionDescriptors) =>
   JSON.stringify(
-    [...(selection.options ?? [])]
+    [...(options ?? [])]
+      .filter((option) => {
+        const descriptor = descriptors.find((candidate) => candidate.id === option.id);
+        return descriptor === undefined || defaultOptionValue(descriptor) !== option.value;
+      })
       .map((option) => [option.id, option.value] as const)
       .toSorted(([left], [right]) => left.localeCompare(right)),
   );
 
-const sameSelection = (left: ModelSelection, right: ModelSelection) =>
-  left.instanceId === right.instanceId &&
-  left.model === right.model &&
-  optionKey(left) === optionKey(right);
-
 /**
  * The model to give the sandbox's thread for a message sent from the host: the one picked there,
- * on the provider the sandbox's thread runs on. Null to keep the sandbox's own, as for the
- * bridge's `sandbox` value, a model the sandbox does not list, or one it already has.
+ * on the provider the sandbox's thread runs on, with the sandbox's own value for any option the
+ * host leaves out. Null to keep the sandbox's own, as for the bridge's `sandbox` value, a model the
+ * sandbox does not list, or one it already runs the same way.
  */
 export const sandboxSelectionFor = (
   host: ModelSelection | null,
@@ -338,13 +348,29 @@ export const sandboxSelectionFor = (
     return null;
   }
   const provider = providers.find((candidate) => candidate.instanceId === sandbox.instanceId);
-  if (provider?.models.some((model) => model.slug === host.model) !== true) return null;
-  const next = {
+  const model = provider?.models.find((candidate) => candidate.slug === host.model);
+  if (model === undefined) return null;
+  const descriptors = model.capabilities?.optionDescriptors ?? [];
+  const hostOptions = host.options ?? [];
+  const options = [
+    ...hostOptions,
+    ...(sandbox.options ?? []).filter(
+      (option) =>
+        !hostOptions.some((stated) => stated.id === option.id) &&
+        descriptors.some((descriptor) => descriptor.id === option.id),
+    ),
+  ];
+  if (
+    host.model === sandbox.model &&
+    optionKey(options, descriptors) === optionKey(sandbox.options, descriptors)
+  ) {
+    return null;
+  }
+  return {
     instanceId: sandbox.instanceId,
     model: host.model,
-    ...(host.options === undefined || host.options.length === 0 ? {} : { options: host.options }),
+    ...(options.length === 0 ? {} : { options }),
   } as ModelSelection;
-  return sameSelection(next, sandbox) ? null : next;
 };
 
 /** What a sandbox thread runs on when nothing names its model. */
