@@ -10,6 +10,7 @@ import {
   isProviderNativeSubagentThread,
   latestProviderTurnForAttempt,
   PROVIDER_DISPLAY_NAMES,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   type ModelSelection,
   type OrchestrationV2NotificationSource,
   type OrchestrationV2PendingBackgroundTask,
@@ -110,6 +111,8 @@ function providerStartingLabel(
   projection: ThreadStructure,
   run: OrchestrationV2ThreadProjection["runs"][number],
 ): string {
+  // The sandbox bridge runs on the generic ACP Registry driver; name the machine it starts.
+  if (run.providerInstanceId === SANDBOX_BRIDGE_INSTANCE_ID) return "Starting sandbox";
   const driver = projection.providerSessions.findLast(
     (session) => session.providerInstanceId === run.providerInstanceId,
   )?.driver;
