@@ -62,7 +62,6 @@ import {
 } from "./desktopLocal";
 import * as ConnectionStorage from "./storage";
 import { clientPresentationMetadata } from "./clientMetadata";
-import { computerWakeups } from "./suspendWakeups";
 
 let nextObservedRpcRequestId = 0;
 
@@ -165,7 +164,6 @@ const layerWakeups = Wakeups.layer({
         Stream.map(() => "credentials-changed" as const),
       ),
       networkPathChanges,
-      computerWakeups,
     ],
     { concurrency: "unbounded" },
   ),
