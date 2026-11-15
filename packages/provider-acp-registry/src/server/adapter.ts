@@ -317,7 +317,9 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           // A steer restarts the host's turn; the sandbox's run, and its tasks, keep going.
           steerCancelMeta: { [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL },
           // The bridge lists the sandbox's models only while the sandbox answers, and reads the
-          // pick from the thread when it sends, so a model it does not list now is no failure.
+          // pick from the thread when it sends, so a model it does not list now is no failure,
+          // and a session opened before it answered still takes a model change.
+          modelOptionArrivesLate: true,
           applyModelSelection: ({ runtime, modelSelection }) =>
             runtime.setConfigOption("model", modelSelection.model).pipe(
               Effect.as(modelSelection.model),
