@@ -112,6 +112,7 @@ const event = (type: string, payload: unknown) =>
 
 interface FakeSandbox {
   reachable: boolean;
+  connects: number;
   readonly projections: Map<string, OrchestrationV2ThreadProjection>;
   readonly items: Queue.Queue<OrchestrationV2ThreadStreamItem | "end" | "fail">;
   readonly dispatched: Array<OrchestrationV2Command>;
@@ -120,6 +121,7 @@ interface FakeSandbox {
 const makeHarness = Effect.gen(function* () {
   const sandbox: FakeSandbox = {
     reachable: true,
+    connects: 0,
     projections: new Map([[threadId, projection()]]),
     items: yield* Queue.unbounded<OrchestrationV2ThreadStreamItem | "end" | "fail">(),
     dispatched: [],
@@ -129,7 +131,7 @@ const makeHarness = Effect.gen(function* () {
     [bridgeLinkSecretName(threadId), new TextEncoder().encode(JSON.stringify(link))],
   ]);
   const connect: SandboxMirror.SandboxConnect = () =>
-    sandbox.reachable
+    (sandbox.connects++, sandbox.reachable)
       ? Effect.succeed({
           threadStop: true,
           defaultModelSelection: null,
@@ -183,14 +185,16 @@ const makeHarness = Effect.gen(function* () {
 });
 
 /** Follows the mirror into a queue the test takes views from. */
-const follow = (id: ThreadId) =>
+const follow = (id: ThreadId, providerOnChange?: boolean) =>
   Effect.gen(function* () {
     const mirror = yield* SandboxMirror.SandboxMirror;
     const views = yield* Queue.unbounded<SandboxThreadMirror>();
-    yield* mirror.subscribe(id).pipe(
-      Stream.runForEach((view) => Queue.offer(views, view)),
-      Effect.forkScoped,
-    );
+    yield* mirror
+      .subscribe({ threadId: id, ...(providerOnChange ? { providerOnChange } : {}) })
+      .pipe(
+        Stream.runForEach((view) => Queue.offer(views, view)),
+        Effect.forkScoped,
+      );
     return views;
   });
 
@@ -234,6 +238,32 @@ describe("SandboxMirror", () => {
           event("thread.model-selection-updated", { id: threadId, modelSelection: sonnet }),
         );
         expect((yield* Queue.take(views)).modelSelection).toEqual(sonnet);
+      }).pipe(Effect.scoped, Effect.provide(layer));
+    }),
+  );
+
+  it.effect("follows a thread for every client over one connection to its sandbox", () =>
+    Effect.gen(function* () {
+      const { sandbox, layer } = yield* makeHarness;
+      yield* Effect.gen(function* () {
+        const first = yield* follow(threadId);
+        // This client keeps the provider it got, so later views leave it out.
+        const second = yield* follow(threadId, true);
+        // One snapshot per subscription a sandbox would send, so two for two connections.
+        const opened = snapshot(projection({ runs: [run("run-1", 1, "running")] }));
+        yield* Queue.offerAll(sandbox.items, [opened, opened]);
+        expect((yield* Queue.take(first)).provider?.instanceId).toBe("claudeAgent");
+        expect((yield* Queue.take(second)).provider?.instanceId).toBe("claudeAgent");
+
+        yield* Queue.offer(
+          sandbox.items,
+          event("subagent.updated", subagent("agent-1", "run-1", "running")),
+        );
+        expect((yield* Queue.take(first)).provider?.instanceId).toBe("claudeAgent");
+        const next = yield* Queue.take(second);
+        expect(next.subagents).toHaveLength(1);
+        expect("provider" in next).toBe(false);
+        expect(sandbox.connects).toBe(1);
       }).pipe(Effect.scoped, Effect.provide(layer));
     }),
   );
