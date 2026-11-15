@@ -1770,7 +1770,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
   projectDisplayName: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
-  sandbox: SandboxRowState | null;
+  sandbox?: SandboxRowState | null;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
   isHighlighted: boolean;
   isRouteActive: boolean;
@@ -1957,7 +1957,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
           projectDisplayName={props.projectDisplayName}
           environmentLabel={props.environmentLabel}
           environmentMachine={props.environmentMachine}
-          sandbox={props.sandbox}
+          sandbox={props.sandbox ?? null}
           providerEntry={providerEntry}
           providerEntryByInstanceId={props.providerEntryByInstanceId}
           showInstanceBadge={showInstanceBadge}

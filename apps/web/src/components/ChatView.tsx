@@ -2342,9 +2342,7 @@ export default function ChatView(props: ChatViewProps) {
     activeAliasTarget === undefined ? null : scopedThreadKey(activeAliasTarget);
   const switchToAliasTarget = useStableCallback(() => {
     if (activeAliasTarget === undefined || activeThreadRef === null) return;
-    useComposerDraftStore
-      .getState()
-      .moveComposerPromptAndImages(activeThreadRef, activeAliasTarget);
+    useComposerDraftStore.getState().moveComposerContent(activeThreadRef, activeAliasTarget);
     void navigate({
       to: "/$environmentId/$threadId",
       params: {
