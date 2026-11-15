@@ -1,7 +1,4 @@
-import {
-  createChildThreadApprovalsAtom,
-  createChildThreadSecretRequestsAtom,
-} from "@t3tools/client-runtime/state/thread-requests";
+import { createChildThreadApprovalsAtom } from "@t3tools/client-runtime/state/thread-requests";
 import { useAtomValue } from "@effect/atom-react";
 import { createSandboxStartQueueAtoms } from "@t3tools/client-runtime/state/sandbox-mirror";
 import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
@@ -60,10 +57,6 @@ export const environmentThreadShells = createEnvironmentThreadShellAtoms({
 export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
   childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
   pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,
-});
-export const childThreadSecretRequestsAtom = createChildThreadSecretRequestsAtom({
-  childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
-  visibleTurnItemsAtom: environmentThreadDetails.visibleTurnItemsAtom,
 });
 
 const EMPTY_THREAD_STATE_ATOM = Atom.make(AsyncResult.success(EMPTY_ENVIRONMENT_THREAD_STATE)).pipe(
