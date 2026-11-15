@@ -2,9 +2,11 @@
 
 import {
   type ChatAttachment,
+  MessageId,
   type ModelSelection,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2Notification,
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2PlanStep,
   type OrchestrationV2ProviderCapabilities,
@@ -280,6 +282,20 @@ export interface AcpAdapterV2ExtensionContext {
     readonly sessionId: string;
     readonly tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
   }) => Effect.Effect<void>;
+  /**
+   * Asks for a provider continuation between turns, for an agent that starts work on its own. Its
+   * prompt carries the message, so the agent can tell which of its own runs to show there.
+   */
+  readonly requestContinuation: (
+    notice: { readonly sessionId: string } & AcpAdapterV2ContinuationMessage,
+  ) => Effect.Effect<void>;
+}
+
+/** The message a requested continuation starts its run with. */
+export interface AcpAdapterV2ContinuationMessage {
+  readonly messageId: string;
+  readonly text: string;
+  readonly notification?: OrchestrationV2Notification | undefined;
 }
 
 /**
@@ -4723,7 +4739,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             });
           });
 
-        const offerContinuationRun = Effect.fnUntraced(function* (_sessionId: string) {
+        const offerContinuationRun = Effect.fnUntraced(function* (
+          _sessionId: string,
+          message?: AcpAdapterV2ContinuationMessage,
+        ) {
           if (continuationRequests === undefined) {
             return false;
           }
@@ -4748,7 +4767,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           );
           if (Option.isNone(pending)) return false;
           const { route, generation, reports } = pending.value;
-          const notification = backgroundWorkNotification([...reports.values()]);
+          const notification =
+            message?.notification ?? backgroundWorkNotification([...reports.values()]);
           yield* Effect.logInfo("orchestration-v2.acp-wake-turn-detected", {
             driver,
             providerSessionId: input.providerSessionId,
@@ -4759,7 +4779,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             threadId: route.threadId,
             providerThreadId: route.providerThreadId,
             driver,
-            detail: null,
+            detail: message?.text ?? null,
+            ...(message === undefined ? {} : { messageId: MessageId.make(message.messageId) }),
             ...(notification === null ? {} : { notification }),
             clearIfCurrent: () =>
               continuationPermit.withPermit(
@@ -7068,6 +7089,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       driver,
                       providerThread,
                     });
+                  }),
+                ).pipe(Effect.asVoid),
+              requestContinuation: ({ sessionId, ...message }) =>
+                runRuntimeCallbackAtGeneration(
+                  handlerGeneration,
+                  Effect.gen(function* () {
+                    if ((yield* Ref.get(activeSessionId)) !== sessionId) return;
+                    // A notice that crossed the next prompt belongs to that turn, not a new run.
+                    const context = yield* Ref.get(activeTurn);
+                    if (context !== null && !context.finalized) return;
+                    yield* offerContinuationRun(sessionId, message);
                   }),
                 ).pipe(Effect.asVoid),
               applyBackgroundTaskMutation: (incoming) =>

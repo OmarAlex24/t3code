@@ -20,12 +20,14 @@ import {
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
+  OrchestrationV2Notification,
   OrchestrationV2PendingBackgroundTask,
   SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
   SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_STEER_CANCEL,
+  SANDBOX_BRIDGE_WAKE_METHOD,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
 } from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
@@ -131,10 +133,17 @@ const SandboxBackgroundWork = Schema.Struct({
   sessionId: Schema.String,
   tasks: Schema.Array(OrchestrationV2PendingBackgroundTask),
 });
+const SandboxWake = Schema.Struct({
+  sessionId: Schema.String,
+  messageId: Schema.String,
+  text: Schema.String,
+  notification: Schema.optional(OrchestrationV2Notification),
+});
 
 /**
  * The sandbox bridge withdraws a request once it is answered on the sandbox, so both sides close
- * it, and reports what the sandbox's thread still works on after a turn as the thread's roster.
+ * it, reports what the sandbox's thread still works on after a turn as the thread's roster, and
+ * asks for a run of the host thread's own when the sandbox's thread starts one by itself.
  */
 function registerSandboxBridgeExtensions(context: AcpAdapterV2ExtensionContext) {
   return Effect.all(
@@ -148,6 +157,11 @@ function registerSandboxBridgeExtensions(context: AcpAdapterV2ExtensionContext) 
         SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
         SandboxBackgroundWork,
         context.reportBackgroundTasks,
+      ),
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_WAKE_METHOD,
+        SandboxWake,
+        context.requestContinuation,
       ),
     ],
     { discard: true },

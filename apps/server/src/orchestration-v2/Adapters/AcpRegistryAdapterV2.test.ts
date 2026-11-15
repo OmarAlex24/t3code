@@ -14,7 +14,9 @@ import {
   SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
   SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_STEER_CANCEL,
+  SANDBOX_BRIDGE_WAKE_METHOD,
   ThreadId,
 } from "@t3tools/contracts";
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -1424,6 +1426,102 @@ describe("AcpRegistryAdapterV2", () => {
       assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
       // The roster is the bridge's to keep, so a dead bridge leaves none behind.
       assert.isTrue(session.runtime.backgroundTasksEndWithProcess);
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.effect("starts a run when the sandbox bridge reports one the sandbox began itself", () =>
+    Effect.gen(function* () {
+      const notification = {
+        source: { kind: "subagent" },
+        outcome: "completed",
+        summary: "Review the diff finished",
+      } as const;
+      const wake = {
+        type: "emit_inbound",
+        frame: {
+          kind: "notification",
+          method: SANDBOX_BRIDGE_WAKE_METHOD,
+          params: {
+            sessionId: CLAUDE_ROOT_SESSION,
+            messageId: "sandbox-wake-1",
+            text: "Background task completed.",
+            notification,
+          },
+        },
+      };
+      const gate = makeProviderReplayGate(["wake"]);
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          {
+            type: "expect_outbound",
+            frame: { kind: "request", method: "session/set_config_option", params: "<any>" },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/set_config_option",
+              result: { configOptions: [] },
+            },
+          },
+          ...claudeFrames.prompt(1),
+          claudeFrames.idle("end_turn"),
+          // Repeated while one is pending, it asks for nothing more.
+          { ...wake, label: "wake" },
+          wake,
+          claudeMarker("woke"),
+          // The bridge follows the sandbox's run by the message id its prompt carries.
+          {
+            type: "expect_outbound",
+            frame: {
+              kind: "request",
+              method: "session/prompt",
+              params: {
+                sessionId: CLAUDE_ROOT_SESSION,
+                prompt: "<any>",
+                _meta: {
+                  [SANDBOX_BRIDGE_MESSAGE_META]: {
+                    messageId: "sandbox-wake-1",
+                    createdBy: "agent",
+                    creationSource: "provider",
+                  },
+                },
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            frame: { kind: "response", method: "session/prompt", result: {} },
+          },
+          claudeFrames.idle("end_turn"),
+          claudeFrames.closeRequest,
+          claudeFrames.closed,
+        ],
+        gate,
+        true,
+        "fixture-agent",
+        SANDBOX_BRIDGE_INSTANCE_ID,
+      );
+      yield* session.runtime.startTurn(session.turnInput(1));
+      yield* session.terminal;
+      gate.release("wake");
+      yield* Queue.take(session.offered);
+      yield* session.throughMarker("woke");
+      assert.lengthOf(session.offers, 1);
+      const [offer] = session.offers;
+      assert.strictEqual(offer?.threadId, session.turnInput(1).threadId);
+      assert.strictEqual(offer?.providerThreadId, session.providerThread.id);
+      assert.strictEqual(offer?.messageId, "sandbox-wake-1");
+      assert.strictEqual(offer?.detail, "Background task completed.");
+      assert.deepEqual(offer?.notification, notification);
+      // The server dispatches the request as the host thread's message, whose run reaches here.
+      const turn = session.turnInput(2, { continuation: true });
+      yield* session.runtime.startTurn({
+        ...turn,
+        message: { ...turn.message, messageId: MessageId.make("sandbox-wake-1") },
+      });
+      assert.strictEqual((yield* session.terminal).status, "completed");
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
