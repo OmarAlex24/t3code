@@ -719,13 +719,14 @@ const KEEP_ALIVE_DIR = `$HOME/.t3/userdata/sandbox-keepalive`;
 /** How often the sandbox checks for work; the provider's deadline is the idle window past a check. */
 export const KEEP_ALIVE_INTERVAL_SECONDS = 300;
 
-// A thread in one of these is working; `waiting` waits on the user, so it counts as idle.
+// A thread in one of these is working; `waiting` waits on the user or on background work, which
+// counts through the thread's pending background tasks instead.
 const BUSY_STATUSES = ["queued", "preparing", "starting", "running"] as const;
 
-// A check extends when a thread is busy or was updated since the last check, so a short turn
-// between two checks counts. The official server's MCP endpoint, through an `mcp-client` session
-// the CLI mints, sees subagents; `t3 thread list` does not and is the fallback. With neither, the
-// running limit applies. Tokens go in `curl -H @file`, never in argv.
+// A check extends when a thread works, waits on its background work, or changed since the last
+// check; unawaited work (a dev server) only up to the running limit, as unknown does. The official
+// server's MCP endpoint, via an `mcp-client` session the CLI mints, sees subagents; `t3 thread
+// list` is the fallback. Tokens go in `curl -H @file`, never in argv.
 const keepAliveLoop = (port: number) => `#!/bin/sh
 dir="${KEEP_ALIVE_DIR}"
 export PATH="$HOME/.local/bin:$PATH"
@@ -767,17 +768,31 @@ worked_since() {
   case "$newest" in ''|*[!0-9]*) return 1 ;; esac
   [ "$newest" -ge "$since" ]
 }
-# Prints busy, active or idle, or fails when the server cannot say.
-mcp_ask() {
-  listed "$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"t3_thread_list","arguments":{"allProjects":true,"includeSubagents":true,"statuses":${JSON.stringify(BUSY_STATUSES)},"limit":1}}}')" || return 1
-  if ! grep -q '"threads":\\[\\]' "$dir/out"; then
-    # A server that ignores the status filter answers with any thread; only a busy one counts.
-    first="$(grep -o '"status":"[a-z_]*"' "$dir/out" | head -n 1 | cut -d'"' -f4)"
-    case "$first" in ${BUSY_STATUSES.join("|")}) echo busy; return 0 ;; *) return 1 ;; esac
-  fi
-  # The server lists threads newest-updated first.
-  listed "$(mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"t3_thread_list","arguments":{"allProjects":true,"includeSubagents":true,"limit":1}}}')" || return 1
-  if worked_since; then echo active; else echo idle; fi
+# Prints busy, active, background or idle for the threads in $dir/out, with how many carry
+# background work. A subagent or background task holds its thread; a command or monitor only when
+# the agent awaits it.
+judge() {
+  pending="$(grep -o '"pendingBackgroundTasks":\\[{' "$dir/out" | wc -l | tr -d ' ')"
+  if grep -Eq '"status":"(${BUSY_STATUSES.join("|")})"|"kind":"(subagent|background_task)"|"awaited":true' "$dir/out"; then
+    state=busy
+  elif worked_since; then state=active
+  elif [ "$pending" -gt 0 ]; then state=background
+  else state=idle; fi
+  echo "$state pending=$pending"
+}
+# Lists every thread into $dir/out, subagents included. The page cap stops a server that ignores
+# the cursor.
+mcp_list() {
+  : >"$dir/all"
+  cursor=0
+  pages=0
+  while [ -n "$cursor" ] && [ "$pages" -lt 20 ]; do
+    listed "$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"t3_thread_list","arguments":{"allProjects":true,"includeSubagents":true,"limit":100,"cursor":'"$cursor"'}}}')" || return 1
+    cat "$dir/out" >>"$dir/all"
+    cursor="$(grep -o '"nextCursor":[0-9]*' "$dir/out" | head -n 1 | cut -d: -f2)"
+    pages=$((pages + 1))
+  done
+  mv "$dir/all" "$dir/out"
 }
 mcp_state() {
   [ -s "$dir/mcp-auth" ] || mint_session || return 1
@@ -793,16 +808,15 @@ mcp_state() {
   version="$(grep -o '"protocolVersion":"[^"]*"' "$dir/out" | head -n 1 | cut -d'"' -f4)"
   printf 'mcp-session-id: %s\\nmcp-protocol-version: %s\\n' "$sid" "\${version:-2025-06-18}" >"$dir/mcp-headers"
   mcp '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
-  state="$(mcp_ask)" || state=""
+  state=""
+  mcp_list && state="$(judge)"
   [ -n "$sid" ] && curl -sS -m 10 -o /dev/null -X DELETE -H @"$dir/mcp-auth" -H @"$dir/mcp-headers" "$origin/mcp" >/dev/null 2>&1
   [ -n "$state" ] && echo "$state"
 }
 cli_state() {
   [ -n "\${PROJECT_ROOT:-}" ] || return 1
   t3 thread list --project "$PROJECT_ROOT" --json >"$dir/out" 2>/dev/null || return 1
-  if grep -Eq '"status":"(${BUSY_STATUSES.join("|")})"' "$dir/out"; then echo busy
-  elif worked_since; then echo active
-  else echo idle; fi
+  judge
 }
 extend() {
   curl -sS -m 30 -o /dev/null -w '%{http_code}' -X "$EXTEND_METHOD" -H @"$dir/boat-auth" \\
@@ -819,15 +833,15 @@ tick() {
   . "$dir/config"
   now="$(date -u +%Y%m%d%H%M%S)"
   state="$(mcp_state || cli_state || echo unknown)"
-  rm -f "$dir/out" "$dir/head"
+  rm -f "$dir/out" "$dir/head" "$dir/all"
   # A T3 that answers neither way (a changed CLI, say) must not stop a sandbox that may be working,
   # so it stays up as it would have before keep-alive: until the running limit.
   if [ "$state" = unknown ]; then
     if within_running_limit; then note "unknown extend $(extend)"; else note unknown; fi
     return 0
   fi
-  if [ "$state" = idle ]; then
-    note idle
+  if [ "\${state%% *}" = idle ] || { [ "\${state%% *}" = background ] && ! within_running_limit; }; then
+    note "$state"
     echo "$now" >"$dir/last-check"
     return 0
   fi
