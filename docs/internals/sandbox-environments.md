@@ -428,6 +428,16 @@ without pairing with the sandbox.
   chat send does, so a busy sandbox thread takes it as a steer or queues it. Every send uses
   that intent. Any other cancel is Stop: `thread.stop` where the sandbox advertises it (which, as
   in any chat, also stops the thread's delegated tasks), else `run.interrupt`.
+- **Work after the turn.** A host turn ends with the sandbox run carrying its message, but the
+  sandbox thread can keep working: subagents, background tasks, runs it wakes itself for. So the
+  bridge keeps following it between turns and sends what it still works on (its live runs, and
+  the pending work its own shell would hold for, by the shared pending-work rules) as
+  `SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD`, then an empty list once it settles. The host's ACP adapter
+  (`reportsBackgroundTasks`) makes that the mirror's provider-thread roster, so the mirror's shell
+  holds it Working on every client, the phone included, with no per-row subscription and no
+  pairing with the sandbox. The roster belongs to the bridge process: a holding one keeps the
+  process from idle release, and it is cleared when the process ends. Stop on the held mirror
+  reaches the bridge as a plain cancel between turns, which stops the sandbox's thread.
 - **Credential.** After the launch hand-off the provisioner runs
   [`bridgeCredentialScript`](../../apps/server/src/sandbox/sandboxBridgeCredential.ts) on the
   sandbox: `t3 auth session issue` with `orchestration:read`, `orchestration:operate` and

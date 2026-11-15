@@ -11,6 +11,7 @@ import {
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRetry,
   type OrchestrationV2ProviderSession,
+  type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ProviderTurn,
@@ -37,6 +38,7 @@ import {
 import { AgentScope, AgentScopeThreadId } from "@t3tools/shared/AgentScope";
 import { HTML_RENDER_TOOL_NAME } from "@t3tools/shared/htmlRender";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { type SelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
 import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
 import {
@@ -273,6 +275,11 @@ export interface AcpAdapterV2ExtensionContext {
   readonly lastProposedPlanMarkdown: Effect.Effect<string | undefined>;
   /** Cancels the session's pending approvals and questions, for an agent whose request was answered elsewhere. */
   readonly withdrawPendingRequests: (sessionId: string) => Effect.Effect<void>;
+  /** Replaces the session's background roster, for flavors with `reportsBackgroundTasks`. */
+  readonly reportBackgroundTasks: (notice: {
+    readonly sessionId: string;
+    readonly tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
+  }) => Effect.Effect<void>;
 }
 
 /**
@@ -617,6 +624,11 @@ export interface AcpAdapterV2Flavor {
   readonly enablePostSettleContinuation?: boolean;
   /** Settle on native idle after the accepted user echo, only on negotiated ACP v2. */
   readonly followAgentWorkState?: boolean;
+  /**
+   * The agent reports its whole background roster through `reportBackgroundTasks`. A holding roster
+   * keeps its session open, and the roster ends with the agent's process.
+   */
+  readonly reportsBackgroundTasks?: boolean;
   /**
    * Grok CLI currently accepts and vision-processes image blocks while still
    * reporting the capability as false; without this override, screenshot turns
@@ -1709,6 +1721,11 @@ function acpSubagentStatusIsTerminal(status: OrchestrationV2Subagent["status"]):
 function acpSubagentStatusBlocksTurnSettlement(status: OrchestrationV2Subagent["status"]): boolean {
   return status === "running" || status === "pending";
 }
+
+const sameBackgroundRoster = (
+  left: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+  right: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+) => JSON.stringify(left) === JSON.stringify(right);
 
 function acpSubagentHasPendingBackgroundWork(subagent: ActiveAcpSubagent): boolean {
   return (
@@ -7023,6 +7040,36 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     }
                   }),
                 ).pipe(Effect.asVoid),
+              reportBackgroundTasks: (notice) =>
+                runRuntimeCallbackAtGeneration(
+                  handlerGeneration,
+                  Effect.gen(function* () {
+                    if (flavor.reportsBackgroundTasks !== true) return;
+                    if ((yield* Ref.get(activeSessionId)) !== notice.sessionId) return;
+                    const known = (yield* Ref.get(providerThreadByNativeSessionId)).get(
+                      notice.sessionId,
+                    );
+                    if (
+                      known === undefined ||
+                      sameBackgroundRoster(known.pendingBackgroundTasks ?? [], notice.tasks)
+                    ) {
+                      return;
+                    }
+                    const providerThread: OrchestrationV2ProviderThread = {
+                      ...known,
+                      pendingBackgroundTasks: [...notice.tasks],
+                      updatedAt: yield* DateTime.now,
+                    };
+                    yield* Ref.update(providerThreadByNativeSessionId, (current) =>
+                      new Map(current).set(notice.sessionId, providerThread),
+                    );
+                    yield* emitProviderEvent({
+                      type: "provider_thread.updated",
+                      driver,
+                      providerThread,
+                    });
+                  }),
+                ).pipe(Effect.asVoid),
               applyBackgroundTaskMutation: (incoming) =>
                 runRuntimeCallbackAtGeneration(
                   handlerGeneration,
@@ -7934,6 +7981,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             threadId: context.input.threadId,
             providerTurn: turn,
           });
+          // An agent's own report can arrive before this settles; the turn's input is older.
+          const reportedRoster =
+            flavor.reportsBackgroundTasks === true
+              ? (yield* Ref.get(providerThreadByNativeSessionId)).get(context.nativeThreadId)
+                  ?.pendingBackgroundTasks
+              : undefined;
           const updatedProviderThread: OrchestrationV2ProviderThread = {
             ...context.input.providerThread,
             providerSessionId: input.providerSessionId,
@@ -7943,6 +7996,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               context.input.providerThread.firstRunOrdinal ?? context.input.runOrdinal,
             contextUsage: context.contextUsage,
             nativeMetadata: context.nativeMetadata,
+            ...(reportedRoster === undefined ? {} : { pendingBackgroundTasks: reportedRoster }),
             updatedAt: now,
           };
           yield* Ref.update(providerThreadByNativeSessionId, (current) =>
@@ -8909,10 +8963,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     : flavor.getModelContextWindow?.(selection, session);
                 },
               }),
-          ...(postSettleContinuationEnabled || followsAgentWorkState
+          ...(flavor.reportsBackgroundTasks === true
+            ? { backgroundTasksEndWithProcess: true as const }
+            : {}),
+          ...(postSettleContinuationEnabled ||
+          followsAgentWorkState ||
+          flavor.reportsBackgroundTasks === true
             ? {
                 hasPendingBackgroundWork: Effect.gen(function* () {
                   const rootSessionId = yield* Ref.get(activeSessionId);
+                  if (
+                    flavor.reportsBackgroundTasks === true &&
+                    rootSessionId !== null &&
+                    backgroundWorkHoldsCompletion(
+                      (yield* Ref.get(providerThreadByNativeSessionId)).get(rootSessionId)
+                        ?.pendingBackgroundTasks ?? [],
+                    )
+                  )
+                    return true;
                   if (
                     followsAgentWorkState &&
                     rootSessionId !== null &&
@@ -9254,6 +9322,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         }
                       }
                       const context = interruptContext;
+                      // Between turns, Stop goes to an agent whose own roster holds the thread.
+                      if (
+                        context === null &&
+                        flavor.reportsBackgroundTasks === true &&
+                        turnInput.requestRuntimeRestart === true
+                      ) {
+                        yield* runtime.cancel.pipe(Effect.ignore);
+                        return undefined;
+                      }
                       if (context?.providerTurnId !== turnInput.providerTurnId) {
                         // Contain orphan runtimes on Stop; session-wide teardown must not touch another active turn.
                         const containOrphanRuntime =

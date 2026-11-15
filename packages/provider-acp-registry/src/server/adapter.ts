@@ -20,6 +20,8 @@ import {
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
+  OrchestrationV2PendingBackgroundTask,
+  SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
   SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MESSAGE_META,
@@ -125,13 +127,30 @@ export function registerMistralVibeAcpExtensions(context: AcpAdapterV2ExtensionC
 }
 
 const SandboxRequestsWithdrawn = Schema.Struct({ sessionId: Schema.String });
+const SandboxBackgroundWork = Schema.Struct({
+  sessionId: Schema.String,
+  tasks: Schema.Array(OrchestrationV2PendingBackgroundTask),
+});
 
-/** The sandbox bridge withdraws a request once it is answered on the sandbox, so both sides close it. */
+/**
+ * The sandbox bridge withdraws a request once it is answered on the sandbox, so both sides close
+ * it, and reports what the sandbox's thread still works on after a turn as the thread's roster.
+ */
 function registerSandboxBridgeExtensions(context: AcpAdapterV2ExtensionContext) {
-  return context.runtime.handleExtNotification(
-    SANDBOX_BRIDGE_WITHDRAW_METHOD,
-    SandboxRequestsWithdrawn,
-    (notice) => context.withdrawPendingRequests(notice.sessionId),
+  return Effect.all(
+    [
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_WITHDRAW_METHOD,
+        SandboxRequestsWithdrawn,
+        (notice) => context.withdrawPendingRequests(notice.sessionId),
+      ),
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
+        SandboxBackgroundWork,
+        context.reportBackgroundTasks,
+      ),
+    ],
+    { discard: true },
   );
 }
 
@@ -277,6 +296,7 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     ...(options.instanceId === SANDBOX_BRIDGE_INSTANCE_ID
       ? {
           registerExtensions: registerSandboxBridgeExtensions,
+          reportsBackgroundTasks: true,
           promptMeta: (message) => ({ [SANDBOX_BRIDGE_MESSAGE_META]: { ...message } }),
           // A steer restarts the host's turn; the sandbox's run, and its tasks, keep going.
           steerCancelMeta: { [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL },
