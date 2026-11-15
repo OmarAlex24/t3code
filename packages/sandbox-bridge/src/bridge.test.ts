@@ -652,6 +652,50 @@ describe("the sandbox's models", () => {
       codexSelection("gpt-5.5-mini"),
     );
   });
+
+  // A host pick that only spelled options differently, or left them out, reset the sandbox's effort.
+  it("compares options by meaning and keeps the sandbox's for any the host leaves out", () => {
+    const fastMode = { id: "fastMode", label: "Fast", type: "boolean" } as const;
+    const capabilities = { optionDescriptors: [effort, fastMode] };
+    const providers = [
+      {
+        instanceId: "codex",
+        models: [
+          { slug: "gpt-5.5", name: "GPT-5.5", isCustom: false, capabilities },
+          { slug: "gpt-5.5-pro", name: "GPT-5.5 Pro", isCustom: false, capabilities },
+        ],
+      },
+    ] as unknown as SandboxSession["providers"];
+    const high = { id: "effort", value: "high" };
+    const current = codexSelection("gpt-5.5", [high]);
+    for (const host of [
+      bridgeSelection("gpt-5.5", [high, { id: "fastMode", value: false }]),
+      bridgeSelection("gpt-5.5"),
+      bridgeSelection("gpt-5.5", [{ id: "fastMode", value: false }]),
+    ]) {
+      assert.isNull(sandboxSelectionFor(host, current, providers));
+    }
+    assert.deepStrictEqual(
+      sandboxSelectionFor(bridgeSelection("gpt-5.5-pro"), current, providers),
+      codexSelection("gpt-5.5-pro", [high]),
+    );
+    assert.deepStrictEqual(
+      sandboxSelectionFor(
+        bridgeSelection("gpt-5.5", [{ id: "fastMode", value: true }]),
+        current,
+        providers,
+      ),
+      codexSelection("gpt-5.5", [{ id: "fastMode", value: true }, high]),
+    );
+    assert.deepStrictEqual(
+      sandboxSelectionFor(
+        bridgeSelection("gpt-5.5", [{ id: "effort", value: "medium" }]),
+        current,
+        providers,
+      ),
+      codexSelection("gpt-5.5", [{ id: "effort", value: "medium" }]),
+    );
+  });
 });
 
 describe("forwarding a turn", () => {

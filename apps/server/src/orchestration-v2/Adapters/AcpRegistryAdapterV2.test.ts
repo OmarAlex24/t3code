@@ -1316,6 +1316,11 @@ describe("AcpRegistryAdapterV2", () => {
         "fixture-agent",
         SANDBOX_BRIDGE_INSTANCE_ID,
       );
+      // The bridge lists models only while the sandbox answers; a session opened without them
+      // still takes a model change.
+      assert.isTrue(
+        session.runtime.providerSession.capabilities.sessions.supportsModelSwitchInSession,
+      );
       // Only a steer's restart says so; a detach (force-stop, session replacement) asks for no
       // runtime restart and is still a Stop to the bridge.
       for (const [ordinal, marker, interrupt] of [
