@@ -2,6 +2,7 @@ import { threadKey } from "@t3tools/client-runtime/state/entities";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
+  isSandboxHostProjectRoot,
   type ModelSelection,
   type OrchestrationV2Subagent,
   type ProjectId,
@@ -12,6 +13,7 @@ import {
   type SandboxProviderKind,
   type SandboxRecord,
   type SandboxSetupSnapshot,
+  type ScopedProjectRef,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -450,6 +452,37 @@ export const sandboxMirrorOf = (
       };
 };
 
+/**
+ * Where a new thread from a project goes. A sandbox is one chat's machine, so its project stands for
+ * the project the sandbox was launched for, or null when that one is not listed here.
+ */
+export const newThreadProjectRef = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  projects: ReadonlyArray<{
+    readonly id: ProjectId;
+    readonly environmentId: EnvironmentId;
+    readonly workspaceRoot: string;
+    readonly archivedAt?: string | null | undefined;
+  }>,
+  ref: ScopedProjectRef,
+): ScopedProjectRef | null => {
+  const live = sandboxes.filter((sandbox) => sandbox.state !== "deleted");
+  const sandbox = live.find((candidate) => candidate.environmentId === ref.environmentId);
+  if (sandbox === undefined) return ref;
+  const candidates = projects.filter(
+    (project) =>
+      project.archivedAt == null &&
+      !isSandboxHostProjectRoot(project.workspaceRoot) &&
+      !live.some((candidate) => candidate.environmentId === project.environmentId),
+  );
+  // The launch records the picked project by id on whichever machine it was on.
+  for (const projectId of [sandbox.projectId, sandbox.hostProjectId]) {
+    const home = candidates.find((project) => project.id === projectId);
+    if (home !== undefined) return { environmentId: home.environmentId, projectId: home.id };
+  }
+  return null;
+};
+
 // The mirror's bridge run would run a command such as `/compact` on the host, where it fails;
 // only the sandbox's own thread can run it.
 const SLASH_COMMAND = /^\/[a-z][\w-]*(?::[\w-]+)?(?:\s|$)/iu;
@@ -573,6 +606,7 @@ export interface SandboxThreadHandlers {
   ) => Promise<void>;
   /** Confirms with the work check and deletes the sandbox, and any conversation only on it. */
   readonly deleteSandbox: (threadRef: ScopedThreadRef) => Promise<void>;
+  readonly newThreadProjectRef: (ref: ScopedProjectRef) => ScopedProjectRef | null;
 }
 
 let handlers: SandboxThreadHandlers | null = null;
@@ -583,6 +617,10 @@ export function registerSandboxThreadHandlers(next: SandboxThreadHandlers): () =
     if (handlers === next) handlers = null;
   };
 }
+
+/** Where a new thread from the project goes; see `newThreadProjectRef`. */
+export const resolveNewThreadProjectRef = (ref: ScopedProjectRef): ScopedProjectRef | null =>
+  handlers === null ? ref : handlers.newThreadProjectRef(ref);
 
 export const isSandboxThread = (threadRef: ScopedThreadRef) =>
   handlers?.isSandboxThread(threadRef) === true;

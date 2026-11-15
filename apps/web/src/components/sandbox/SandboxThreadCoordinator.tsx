@@ -16,6 +16,7 @@ import {
   type SandboxProviderInfo,
   type SandboxRecord,
   type SandboxSettleAction,
+  type ScopedProjectRef,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -24,7 +25,7 @@ import { useEffect, useRef, useState } from "react";
 import { environmentCatalog } from "~/connection/catalog";
 import { useThreadRouteRef } from "~/hooks/useThreadRouteTarget";
 import { useStableCallback } from "~/hooks/useStableCallback";
-import { useThreadShells } from "~/state/entities";
+import { readProjects, useThreadShells } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useSandboxConnectionsStore } from "~/state/sandboxConnections";
@@ -35,6 +36,7 @@ import {
   isBridgedSandbox,
   isHostThreadRef,
   newSettleDecisions,
+  newThreadProjectRef,
   registerSandboxThreadHandlers,
   sandboxMirrorOf,
   sandboxMirrorTitleUpdates,
@@ -693,6 +695,10 @@ export function SandboxThreadCoordinator() {
     return sandbox === undefined ? Promise.resolve() : startDelete(sandbox, threadRef, "menu");
   });
 
+  const newThreadProjectRefOf = useStableCallback((ref: ScopedProjectRef) =>
+    newThreadProjectRef(sandboxes, readProjects(), ref),
+  );
+
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- holds the module registry entry the thread actions call, until unmount
   useEffect(
     () =>
@@ -704,6 +710,7 @@ export function SandboxThreadCoordinator() {
         ensureRunning,
         deleteThreadAndSandbox,
         deleteSandbox: deleteOnly,
+        newThreadProjectRef: newThreadProjectRefOf,
       }),
     [
       isSandboxThread,
@@ -713,6 +720,7 @@ export function SandboxThreadCoordinator() {
       ensureRunning,
       deleteThreadAndSandbox,
       deleteOnly,
+      newThreadProjectRefOf,
     ],
   );
 
