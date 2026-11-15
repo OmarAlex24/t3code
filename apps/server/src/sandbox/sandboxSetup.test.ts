@@ -574,8 +574,8 @@ describe("sandboxKeepAliveScript", () => {
   const extendUrl = "https://boat.dev/api/v1/sandboxes/bx_abcdefgh";
 
   // Stand-ins for what the official T3 Code, curl and systemd do on a sandbox. curl logs each
-  // call with the headers it read from files; the MCP server answers with the statuses in
-  // `threads` and the newest thread in `latest`, or not at all when `down` exists.
+  // call with the headers it read from files; the MCP server pages through the threads in
+  // `threads`, or does not answer when `down` exists.
   const stubs = (home: string) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -629,11 +629,12 @@ if (call.url.endsWith("/mcp")) {
     body = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18" } });
     if (head) fs.writeFileSync(head, "HTTP/1.1 200 OK\\r\\nMcp-Session-Id: sid-1\\r\\n\\r\\n");
   } else if (data.includes("tools/call")) {
-    // Asked by status, the busy threads; otherwise the most recently updated one, if any.
-    const threads = JSON.parse(data).params.arguments.statuses === undefined
-      ? (fs.existsSync(home + "/latest") ? [JSON.parse(fs.readFileSync(home + "/latest", "utf8"))] : [])
-      : JSON.parse(fs.readFileSync(home + "/threads", "utf8")).map((status, index) => ({ threadId: "thread-" + index, status }));
-    body = JSON.stringify({ jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: JSON.stringify({ threads }) }], structuredContent: { threads, total: threads.length }, isError: false } });
+    // A page of the threads in \`threads\`, which the server lists newest-updated first.
+    const { cursor = 0, limit = 10 } = JSON.parse(data).params.arguments;
+    const all = fs.existsSync(home + "/threads") ? JSON.parse(fs.readFileSync(home + "/threads", "utf8")) : [];
+    const threads = all.slice(cursor, cursor + limit);
+    const result = { threads, nextCursor: cursor + limit < all.length ? cursor + limit : null, total: all.length };
+    body = JSON.stringify({ jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: false } });
   } else if (data.includes("notifications/initialized")) status = 202;
 }
 if (out) fs.writeFileSync(out, body);
@@ -701,16 +702,16 @@ if (format) process.stdout.write(String(status));
             `--user --quiet --collect --unit=t3-sandbox-keepalive sh ${dir}/loop.sh run\n`,
           );
 
-          // A subagent counts: the server is asked for every busy thread, subagents included.
-          yield* fs.writeFileString(`${home}/threads`, JSON.stringify(["running"]));
+          // A subagent counts: the server is asked for every thread, subagents included.
+          yield* fs.writeFileString(`${home}/threads`, JSON.stringify([{ status: "running" }]));
           yield* once(home);
           const calls = yield* curlCalls(home);
           const listed = calls.find((call) => call.data?.includes("tools/call"));
           expect(JSON.parse(listed!.data!).params.arguments).toEqual({
             allProjects: true,
             includeSubagents: true,
-            statuses: ["queued", "preparing", "starting", "running"],
-            limit: 1,
+            limit: 100,
+            cursor: 0,
           });
           expect(listed!.headers).toContain(`Authorization: Bearer ${mcpToken}`);
           expect(listed!.headers).toContain("mcp-session-id: sid-1");
@@ -731,15 +732,11 @@ if (format) process.stdout.write(String(status));
             expect(call.argv.join(" ")).not.toContain(mcpToken);
           }
 
-          // Idle, or waiting on the user (which the server filters out): Boat's deadline stands.
-          yield* fs.writeFileString(`${home}/threads`, JSON.stringify([]));
-          yield* once(home);
-          expect(yield* extends_(home)).toHaveLength(1);
-
-          // A server that ignores the filter answers with any thread; only a busy one counts, and
-          // the CLI's own list decides.
-          yield* fs.writeFileString(`${home}/threads`, JSON.stringify(["completed"]));
-          yield* fs.writeFileString(`${home}/cli-threads`, '[{"status":"waiting"}]');
+          // Idle, or waiting on the user: Boat's deadline stands.
+          yield* fs.writeFileString(
+            `${home}/threads`,
+            JSON.stringify([{ status: "waiting" }, { status: "completed" }]),
+          );
           yield* once(home);
           expect(yield* extends_(home)).toHaveLength(1);
 
@@ -780,27 +777,18 @@ if (format) process.stdout.write(String(status));
             projectRoot: "/home/boat/work/hello",
           }),
         );
-        yield* fs.writeFileString(`${home}/threads`, JSON.stringify([]));
         const lastCheck = (stamp: string) => fs.writeFileString(`${dir}/last-check`, `${stamp}\n`);
 
         // Nothing is busy now, but a turn ran from 18:03:54 to 18:07:22, after the 18:03:36 check.
         yield* lastCheck("20261113180336");
         yield* fs.writeFileString(
-          `${home}/latest`,
-          JSON.stringify({
-            threadId: "t",
-            status: "completed",
-            updatedAt: "2026-11-13T18:07:22.481Z",
-          }),
+          `${home}/threads`,
+          JSON.stringify([
+            { threadId: "t", status: "completed", updatedAt: "2026-11-13T18:07:22.481Z" },
+            { threadId: "u", status: "completed", updatedAt: "2026-11-13T17:00:00.000Z" },
+          ]),
         );
         yield* once(home);
-        const lists = (yield* curlCalls(home)).filter((call) => call.data?.includes("tools/call"));
-        // The newest thread by update, subagents included.
-        expect(JSON.parse(lists.at(-1)!.data!).params.arguments).toEqual({
-          allProjects: true,
-          includeSubagents: true,
-          limit: 1,
-        });
         expect(yield* extends_(home)).toEqual([
           expect.objectContaining({ method: "PATCH", data: '{"ttlSeconds":2100}' }),
         ]);
@@ -821,6 +809,100 @@ if (format) process.stdout.write(String(status));
         yield* lastCheck("20261113181336");
         yield* once(home);
         expect(yield* extends_(home)).toHaveLength(2);
+      }),
+    ),
+  );
+
+  it.live("counts background work an agent will wake for, and a dev server to the limit", () =>
+    withHome((home) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = `${home}/.t3/userdata/sandbox-keepalive`;
+        yield* stubs(home);
+        yield* runIn(
+          home,
+          sandboxKeepAliveScript({
+            key,
+            extend: { method: "PATCH", url: extendUrl },
+            ttlSeconds: 2100,
+            maxRunningMinutes: 60,
+            port: 3773,
+            projectRoot: "/home/boat/work/hello",
+          }),
+        );
+        yield* fs.writeFileString(`${dir}/last-check`, "20261113180336\n");
+        const log = fs.readFileString(`${dir}/log`).pipe(Effect.orElseSucceed(() => ""));
+        const startedAgo = (seconds: number) =>
+          runIn(home, `echo $(( $(date +%s) - ${seconds} )) >"${dir}/started"`);
+        const old = "2026-11-13T17:00:00.000Z";
+        const idle = (count: number) =>
+          Array.from({ length: count }, (_, index) => ({
+            threadId: `idle-${index}`,
+            status: "completed",
+            updatedAt: old,
+          }));
+
+        // Turns ended long ago: one waits on a background test run, one on a subagent whose
+        // own thread has no runs. Both found past the first page of threads.
+        yield* fs.writeFileString(
+          `${home}/threads`,
+          JSON.stringify([
+            ...idle(100),
+            {
+              threadId: "tests",
+              status: "completed",
+              updatedAt: old,
+              pendingBackgroundTasks: [{ taskId: "b1", kind: "command", awaited: true }],
+            },
+            {
+              threadId: "parent",
+              status: "waiting",
+              updatedAt: old,
+              pendingBackgroundTasks: [{ taskId: "a1", kind: "subagent", childThreadId: "child" }],
+            },
+            { threadId: "child", status: "idle", updatedAt: old },
+          ]),
+        );
+        yield* once(home);
+        expect(yield* extends_(home)).toEqual([
+          expect.objectContaining({ method: "PATCH", data: '{"ttlSeconds":2100}' }),
+        ]);
+        expect(yield* log).toMatch(/ busy pending=2 extend 200\n$/);
+
+        // A dev server no agent waits on runs on as it would on the user's computer, to the limit.
+        const devServer = JSON.stringify([
+          {
+            threadId: "dev",
+            status: "completed",
+            updatedAt: old,
+            pendingBackgroundTasks: [{ taskId: "d1", kind: "command" }],
+          },
+        ]);
+        yield* fs.writeFileString(`${home}/threads`, devServer);
+        yield* startedAgo(59 * 60);
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(2);
+        expect(yield* log).toMatch(/ background pending=1 extend 200\n$/);
+        yield* startedAgo(60 * 60);
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(2);
+        expect(yield* log).toMatch(/ background pending=1\n$/);
+
+        // The CLI's list of top-level threads carries the same work where the MCP endpoint is down.
+        yield* fs.writeFileString(`${home}/down`, "");
+        yield* fs.writeFileString(
+          `${home}/cli-threads`,
+          JSON.stringify([
+            {
+              status: "waiting",
+              updatedAt: old,
+              pendingBackgroundTasks: [{ taskId: "a1", kind: "subagent" }],
+            },
+          ]),
+        );
+        yield* once(home);
+        expect(yield* extends_(home)).toHaveLength(3);
+        expect(yield* log).toMatch(/ busy pending=1 extend 200\n$/);
       }),
     ),
   );
@@ -904,18 +986,13 @@ if (format) process.stdout.write(String(status));
         const lastCheck = (yield* fs.readFileString(`${dir}/last-check`)).trim();
         expect(lastCheck >= stamp(before) && lastCheck <= stamp(after)).toBe(true);
         yield* fs.writeFileString(`${dir}/boat-auth`, `Authorization: Bearer ${key}\n`);
-        yield* fs.writeFileString(`${home}/threads`, JSON.stringify([]));
         yield* fs.writeFileString(
-          `${home}/latest`,
-          JSON.stringify({
-            threadId: "t",
-            status: "completed",
-            updatedAt: iso(before - 60),
-          }),
+          `${home}/threads`,
+          JSON.stringify([{ threadId: "t", status: "completed", updatedAt: iso(before - 60) }]),
         );
         yield* once(home);
         expect(yield* extends_(home)).toHaveLength(0);
-        expect(yield* fs.readFileString(`${dir}/log`)).toMatch(/ idle\n$/);
+        expect(yield* fs.readFileString(`${dir}/log`)).toMatch(/ idle pending=0\n$/);
       }),
     ),
   );
