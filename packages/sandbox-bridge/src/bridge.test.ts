@@ -5,6 +5,7 @@ import {
   SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_STEER_CANCEL,
+  SANDBOX_BRIDGE_WAKE_METHOD,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
   SANDBOX_RESUME_STEP_SECONDS,
   type OrchestrationV2Command,
@@ -361,6 +362,8 @@ interface Harness {
   readonly withdrawals: Array<unknown>;
   /** The background rosters the bridge reported, in order. */
   readonly rosters: Queue.Queue<unknown>;
+  /** The runs the bridge asked the host for, in order. */
+  readonly wakes: Queue.Queue<unknown>;
 }
 
 const messages = (
@@ -435,11 +438,15 @@ const withBridge = <A, E>(
       elicitations: [],
       withdrawals: [],
       rosters: yield* Queue.unbounded<unknown>(),
+      wakes: yield* Queue.unbounded<unknown>(),
     };
     yield* acp.handleExtNotification(
       SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
       Schema.Unknown,
       (payload) => Queue.offer(harness.rosters, payload).pipe(Effect.asVoid),
+    );
+    yield* acp.handleExtNotification(SANDBOX_BRIDGE_WAKE_METHOD, Schema.Unknown, (payload) =>
+      Queue.offer(harness.wakes, payload).pipe(Effect.asVoid),
     );
     yield* acp.handleExtNotification(SANDBOX_BRIDGE_WITHDRAW_METHOD, Schema.Unknown, (payload) =>
       Effect.sync(() => void harness.withdrawals.push(payload)),
@@ -1668,6 +1675,153 @@ describe("forwarding a turn", () => {
           });
           assert.strictEqual(yield* Queue.size(rosters), 0);
         }),
+      );
+    }),
+  );
+
+  it.effect("shows a run the sandbox starts itself as a run of the host's, once", () =>
+    Effect.gen(function* () {
+      const reviewer = (status: string) =>
+        ({
+          id: "item-reviewer",
+          type: "subagent",
+          title: "Review the diff",
+          status,
+          ordinal: 3,
+          runId: "run-1",
+          childThreadId: "sandbox-child",
+          updatedAt: at(),
+        }) as never;
+      // The reviewer's result, which the sandbox's thread gives itself once the reviewer ends.
+      const wakeMessage = {
+        id: "wake-1",
+        role: "user",
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "Background task completed.",
+        notification: {
+          source: { kind: "subagent", childThreadId: "sandbox-child" },
+          outcome: "completed",
+          summary: "Review the diff finished",
+        },
+      } as never;
+      const wakeRun = (status: string) => run("wake-1" as MessageId, status, "run-2", 2);
+      const wakeItems = (reply: string) => [
+        reviewer("completed"),
+        userMessage("wake-1", 300, "run-2", 2_000),
+        assistant("wake-answer", reply, 301, "run-2", 2_001),
+      ];
+      const fake = yield* makeFakeSandbox({
+        existing: projection([]),
+        react: (command, sandbox) => {
+          if (command.type !== "message.dispatch") return Effect.void;
+          const ran = run(command.messageId!, "completed");
+          sandbox.settle(projection([reviewer("running")], [ran]));
+          return Effect.forEach(
+            [
+              event("run.created", run(command.messageId!, "running")),
+              event("turn-item.updated", reviewer("running")),
+              event("turn-item.updated", assistant("answer", "Started a reviewer", 2)),
+              event("run.updated", ran),
+            ],
+            sandbox.push,
+            { discard: true },
+          );
+        },
+      });
+      const subscribed = yield* Queue.unbounded<void>();
+      const counted: SandboxSession = {
+        ...fake.session,
+        subscribe: (id) =>
+          Stream.unwrap(
+            Queue.offer(subscribed, undefined).pipe(Effect.as(fake.session.subscribe(id))),
+          ),
+      };
+      yield* withBridge(
+        { fake, connect: () => Effect.succeed(counted) },
+        ({ acp, updates, rosters, wakes }) =>
+          Effect.gen(function* () {
+            const session = yield* openThread(acp);
+            const roster = (tasks: ReadonlyArray<unknown>) => ({
+              sessionId: session.sessionId,
+              tasks,
+            });
+            yield* say(acp, session.sessionId, "Review it in the background", {
+              messageId: "msg-1",
+            });
+            assert.deepStrictEqual(
+              yield* Queue.take(rosters),
+              roster([
+                { taskId: "item-reviewer", kind: "subagent", description: "Review the diff" },
+              ]),
+            );
+            // The reviewer ends before the run it wakes the sandbox's thread for begins.
+            yield* fake.push(event("turn-item.updated", reviewer("completed")));
+            assert.deepStrictEqual(yield* Queue.take(rosters), roster([]));
+            yield* fake.push(event("message.updated", wakeMessage));
+            yield* fake.push(event("run.created", wakeRun("running")));
+            // The host is asked for a run with the sandbox's message, its notice in host terms.
+            assert.deepStrictEqual(yield* Queue.take(wakes), {
+              sessionId: session.sessionId,
+              messageId: "wake-1",
+              text: "Background task completed.",
+              notification: {
+                source: { kind: "subagent" },
+                outcome: "completed",
+                summary: "Review the diff finished",
+              },
+            });
+            assert.deepStrictEqual(
+              yield* Queue.take(rosters),
+              roster([
+                {
+                  taskId: "sandbox-run:run-2",
+                  kind: "background_task",
+                  description: "Working on the sandbox",
+                },
+              ]),
+            );
+
+            // That run's prompt follows the sandbox's run: what it said so far, then the rest.
+            const before = updates.length;
+            fake.settle(
+              projection(wakeItems("Looks"), [
+                run("msg-1" as MessageId, "completed"),
+                wakeRun("running"),
+              ]),
+            );
+            const wake = yield* say(acp, session.sessionId, "Background task completed.", {
+              messageId: "wake-1",
+              createdBy: "agent",
+              creationSource: "provider",
+            }).pipe(Effect.forkScoped);
+            // The first turn, the follow after it, and this one.
+            yield* Effect.forEach([1, 2, 3], () => Queue.take(subscribed), { discard: true });
+            fake.settle(
+              projection(wakeItems("Looks good"), [
+                run("msg-1" as MessageId, "completed"),
+                wakeRun("completed"),
+              ]),
+            );
+            yield* fake.push(
+              event(
+                "turn-item.updated",
+                assistant("wake-answer", "Looks good", 301, "run-2", 2_002),
+              ),
+            );
+            yield* fake.push(event("run.updated", wakeRun("completed")));
+            assert.strictEqual((yield* Fiber.join(wake)).stopReason, "end_turn");
+            assert.deepStrictEqual(messages(updates.slice(before)), ["Looks", " good"]);
+            assert.deepStrictEqual(
+              fake.commands.flatMap((command) =>
+                command.type === "message.dispatch" ? [String(command.messageId)] : [],
+              ),
+              ["msg-1"],
+            );
+            // Following again after it, the bridge does not ask for that run a second time.
+            assert.deepStrictEqual(yield* Queue.take(rosters), roster([]));
+            assert.strictEqual(yield* Queue.size(wakes), 0);
+          }),
       );
     }),
   );

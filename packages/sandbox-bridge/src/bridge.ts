@@ -12,6 +12,7 @@ import {
   type ModelSelection,
   type OrchestrationV2Command,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2Notification,
   type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
@@ -33,6 +34,7 @@ import {
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_MODEL,
   SANDBOX_BRIDGE_STEER_CANCEL,
+  SANDBOX_BRIDGE_WAKE_METHOD,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
   SANDBOX_RESUME_WAIT_SECONDS,
   type SecretRequestAnswerInput,
@@ -1056,6 +1058,25 @@ const hostTask = (
     ...(awaited || task.awaited === true ? { awaited: true } : {}),
   }) as OrchestrationV2PendingBackgroundTask;
 
+// A notice's ids (tasks, child threads, pull requests) are the sandbox's; the host keeps its words.
+const hostNotification = (notification: OrchestrationV2Notification): OrchestrationV2Notification =>
+  ({
+    ...notification,
+    source: {
+      kind:
+        notification.source.kind === "delegated_task"
+          ? "background_task"
+          : notification.source.kind,
+    },
+  }) as OrchestrationV2Notification;
+
+/** A run the sandbox's thread started itself, which the host shows as a run of its own. */
+export interface SandboxWake {
+  readonly messageId: MessageId;
+  readonly text: string;
+  readonly notification?: OrchestrationV2Notification;
+}
+
 /**
  * What a sandbox thread still works on once the host's turn ended, as the host thread's roster:
  * runs the sandbox started itself (a wake, a queued message) and the background work its thread
@@ -1067,6 +1088,8 @@ export class SandboxWork {
   private readonly items = new Map<string, OrchestrationV2TurnItem>();
   private readonly providerThreads = new Map<string, OrchestrationV2ProviderThread>();
   private readonly wakeMessages = new Set<string>();
+  // Messages nobody typed: wakes, delegated results, scheduled tasks, the sandbox's own continue.
+  private readonly ownPrompts = new Map<string, OrchestrationV2ConversationMessage>();
   private activeProviderThreadId: string | null = null;
 
   /** Whether the item can change the roster. */
@@ -1140,6 +1163,41 @@ export class SandboxWork {
     ];
   }
 
+  /** The newest run over when following began; it and every run before it are history. */
+  get settledOrdinal(): number {
+    let newest = 0;
+    for (const run of this.runs.values()) {
+      if (isTerminalRun(run)) newest = Math.max(newest, run.ordinal);
+    }
+    return newest;
+  }
+
+  /** Runs after `ordinal` the sandbox's thread started itself, oldest first, once each began. */
+  wakesAfter(ordinal: number): ReadonlyArray<SandboxWake> {
+    return [...this.runs.values()]
+      .filter(
+        (run) =>
+          run.ordinal > ordinal &&
+          run.status !== "queued" &&
+          // Cancelled while it waited in the queue: it never ran, so there is nothing to show.
+          !(isTerminalRun(run) && run.startedAt === null),
+      )
+      .toSorted((left, right) => left.ordinal - right.ordinal)
+      .flatMap((run) => {
+        const message = this.ownPrompts.get(run.userMessageId);
+        if (message === undefined) return [];
+        return [
+          {
+            messageId: message.id,
+            text: message.text,
+            ...(message.notification === undefined
+              ? {}
+              : { notification: hostNotification(message.notification) }),
+          },
+        ];
+      });
+  }
+
   private keepItem(item: OrchestrationV2TurnItem): boolean {
     if (!BACKGROUND_ITEM_TYPES.has(item.type)) return false;
     if (isOrchestrationV2WorkActive(item.status)) this.items.set(item.id, item);
@@ -1148,6 +1206,15 @@ export class SandboxWork {
   }
 
   private noteMessage(message: OrchestrationV2ConversationMessage): boolean {
+    const own =
+      message.role === "user" &&
+      (message.createdBy !== "user" || message.scheduledTaskId !== undefined) &&
+      !this.ownPrompts.has(message.id);
+    if (own) this.ownPrompts.set(message.id, message);
+    return this.noteWakeMessage(message) || own;
+  }
+
+  private noteWakeMessage(message: OrchestrationV2ConversationMessage): boolean {
     const notification = message.notification;
     if (
       message.delegatedCompletion !== undefined ||
@@ -1204,8 +1271,11 @@ export const turnTargetOf = (
   const queued = Option.isSome(before)
     ? before.value.runs.some((run) => run.userMessageId === message.messageId)
     : false;
-  return queued
-    ? { _tag: "attach", messageId: message.messageId, replay: false }
+  if (queued) return { _tag: "attach", messageId: message.messageId, replay: false };
+  // The host's run for one the sandbox began itself (`SANDBOX_BRIDGE_WAKE_METHOD`): its notice
+  // only names that run, so it is never sent back.
+  return message.createdBy === "agent" && message.creationSource === "provider"
+    ? { _tag: "nothing" }
     : { _tag: "send", messageId: message.messageId };
 };
 /** The MCP credential the host put in a session's `mcpServers`, over stdio or HTTP. */
@@ -1264,6 +1334,8 @@ interface BridgeSession {
   link?: SandboxBridgeLink | undefined;
   /** Follows the sandbox thread's own work between turns; see `followSandboxWork`. */
   watch?: Fiber.Fiber<void>;
+  /** The newest sandbox run a host turn followed: a run it starts itself after that is a wake. */
+  followedOrdinal?: number;
 }
 
 type ThreadSnapshot = Extract<OrchestrationV2ThreadStreamItem, { readonly kind: "snapshot" }>;
@@ -1431,6 +1503,9 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       mcp,
       cancel: existing?.cancel ?? null,
       configOptions,
+      ...(existing?.followedOrdinal === undefined
+        ? {}
+        : { followedOrdinal: existing.followedOrdinal }),
     });
     return { configOptions } satisfies AcpSchema.ResumeSessionResponse;
   });
@@ -1492,12 +1567,13 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
   );
 
   /**
-   * After a turn, follows the sandbox thread while it still works (its subagents, background
-   * tasks, the runs it wakes itself for) and keeps the host thread's roster to that work, so every
-   * client of the host shows the chat Working until the sandbox's thread settles.
+   * Between turns, keeps the host thread's roster to the sandbox thread's work, and asks the host
+   * for a run of its own for each run that thread starts itself, which the next prompt follows.
+   * It follows past a settle, since a task's end and the wake it causes arrive apart.
    */
   const followSandboxWork = Effect.fn("SandboxBridge.followSandboxWork")(function* (
     sessionId: string,
+    session: BridgeSession,
     threadId: ThreadId,
     link: SandboxBridgeLink,
   ) {
@@ -1508,19 +1584,29 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     const work = new SandboxWork();
     // The host's adapter drops a roster it already has, so the first one always goes.
     let sent: string | null = null;
+    // Each wake is asked for once here; the host keeps one pending, and after its run this
+    // follow starts again and asks for the next.
+    const asked = new Set<string>();
     yield* Effect.gen(function* () {
       const sandbox = yield* reachSandbox(link);
       yield* sandbox.subscribe(threadId).pipe(
-        Stream.runForEachWhile((item) =>
+        Stream.runForEach((item) =>
           Effect.gen(function* () {
-            if (!work.apply(item)) return true;
+            if (!work.apply(item)) return;
+            session.followedOrdinal ??= work.settledOrdinal;
+            for (const wake of work.wakesAfter(session.followedOrdinal)) {
+              if (asked.has(wake.messageId)) continue;
+              asked.add(wake.messageId);
+              yield* agent.client
+                .extNotification(SANDBOX_BRIDGE_WAKE_METHOD, { sessionId, ...wake })
+                .pipe(Effect.ignore);
+            }
             const tasks = work.tasks;
             const key = rosterKey(tasks);
             if (key !== sent) {
               sent = key;
               yield* report(tasks);
             }
-            return tasks.length > 0;
           }),
         ),
       );
@@ -1566,6 +1652,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       if (session.threadId !== null && session.link !== undefined) {
         session.watch = yield* followSandboxWork(
           request.sessionId,
+          session,
           session.threadId,
           session.link,
         ).pipe(Effect.forkIn(bridgeScope));
@@ -2112,6 +2199,10 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       Effect.as("followed" as const),
       Effect.raceFirst(Deferred.await(cancel)),
     );
+    const followed = tracker.run;
+    if (followed !== undefined) {
+      session.followedOrdinal = Math.max(session.followedOrdinal ?? 0, followed.ordinal);
+    }
     // What a cancelled turn held back still shows, with the copies it already made.
     if (outcome !== "followed") yield* flushText(undefined, false);
     // A steer's cancel leaves the run and its tasks working; the steer follows as the next prompt.
