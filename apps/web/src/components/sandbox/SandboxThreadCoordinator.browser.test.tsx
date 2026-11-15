@@ -1,4 +1,6 @@
-import { AsyncResult } from "effect/reactivity";
+import { RegistryContext } from "@effect/atom-react";
+import * as Cause from "effect/Cause";
+import { type Atom, AsyncResult } from "effect/reactivity";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
 import {
@@ -13,7 +15,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import "~/index.css";
 
-import { fakeTimers, render } from "../../../test/render";
+import { act, fakeTimers, render } from "../../../test/render";
 
 const SANDBOX_ENV = "22222222-2222-4222-8222-222222222222";
 const HOST_ENV = "11111111-1111-4111-8111-111111111111";
@@ -31,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   settleThread: vi.fn(async () => AsyncResult.success(undefined)),
   unsettleThread: vi.fn(async () => AsyncResult.success(undefined)),
   removeEnvironment: vi.fn(async () => AsyncResult.success(undefined)),
+  retryEnvironment: vi.fn(async () => AsyncResult.success(undefined)),
   deleteSandboxThread: vi.fn(async () => AsyncResult.success(undefined)),
   renameThread: vi.fn(async () => AsyncResult.success(undefined)),
   pairLaunch: vi.fn(async () =>
@@ -48,6 +51,11 @@ const mocks = vi.hoisted(() => ({
   settled: true,
   // A sandbox deleted outside T3 Code leaves its server unreachable.
   sandboxConnected: true,
+  // Saved in this app once but not connected, as after a resume at a new address.
+  sandboxSaved: false,
+  route: null as ScopedThreadRef | null,
+  // This client's grant on the host, which a remote host's session loads after mount.
+  pairPermission: null as unknown as Atom.Writable<boolean>,
 }));
 
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
@@ -60,14 +68,16 @@ vi.mock(import("~/state/environments"), async (original) => ({
     environments: [
       ...(mocks.sandboxConnected
         ? [{ environmentId: SANDBOX_ENV, connection: { phase: "connected" }, serverConfig: {} }]
-        : []),
+        : mocks.sandboxSaved
+          ? [{ environmentId: SANDBOX_ENV, connection: { phase: "error" }, serverConfig: null }]
+          : []),
       { environmentId: HOST_ENV, connection: { phase: "connected" }, serverConfig: {} },
     ],
   })) as never,
 }));
 vi.mock(import("~/state/entities"), async (original) => ({
   ...(await original()),
-  useThreadShells: (() => {
+  useQuietCompleteThreadShells: (() => {
     const settledOverride = mocks.settled ? "settled" : null;
     return [
       { environmentId: SANDBOX_ENV, id: "thread-1", title: "Fix the login bug", settledOverride },
@@ -102,9 +112,9 @@ vi.mock(import("~/state/sandboxes"), async (original) => ({
   ...(await original()),
   useSandboxProvisionerEnvironmentId: (() => EnvironmentId.make(HOST_ENV)) as never,
 }));
-vi.mock(import("~/state/session"), async (original) => ({
+vi.mock(import("~/hooks/useThreadRouteTarget"), async (original) => ({
   ...(await original()),
-  readEnvironmentScope: (() => true) as never,
+  useThreadRouteRef: (() => mocks.route) as never,
 }));
 vi.mock(import("~/connection/catalog"), async (original) => {
   const actual = await original();
@@ -118,11 +128,15 @@ vi.mock(import("~/connection/catalog"), async (original) => {
         entries: new Map([["22222222-2222-4222-8222-222222222222", {}]]),
       }) as never,
       remove: mocks.removeEnvironment as never,
+      retryNow: mocks.retryEnvironment as never,
     },
   };
 });
 vi.mock(import("~/state/server"), async (original) => {
   const actual = await original();
+  const { Atom } = await import("effect/reactivity");
+  mocks.pairPermission = Atom.make(true);
+  const permission = { permissionAtom: () => mocks.pairPermission };
   return {
     ...actual,
     serverEnvironment: {
@@ -134,9 +148,9 @@ vi.mock(import("~/state/server"), async (original) => {
       sandboxesResume: mocks.resumeSandbox as never,
       sandboxesDelete: mocks.deleteSandbox as never,
       sandboxesCheckWork: mocks.checkWork as never,
-      sandboxesResolveSettle: mocks.resolveSettle as never,
       sandboxesSaveConfig: mocks.saveConfig as never,
-      sandboxesPairLaunch: mocks.pairLaunch as never,
+      sandboxesPairLaunch: Object.assign(mocks.pairLaunch, permission) as never,
+      sandboxesResolveSettle: Object.assign(mocks.resolveSettle, permission) as never,
     },
   };
 });
@@ -165,6 +179,7 @@ import {
   notifySandboxThreadUnsettled,
   threadSandboxUnavailableReason,
 } from "~/state/sandboxThreads";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useSandboxConnectionsStore } from "~/state/sandboxConnections";
 import { toastManager } from "../ui/toast";
 import { SETTLE_DELETE_DELAY_MS, SandboxThreadCoordinator } from "./SandboxThreadCoordinator";
@@ -232,6 +247,9 @@ function setup(
   mocks.hostTitle = options.hostTitle ?? "Fix the login bug";
   mocks.settled = true;
   mocks.sandboxConnected = true;
+  mocks.sandboxSaved = false;
+  mocks.route = null;
+  appAtomRegistry.set(mocks.pairPermission, true);
   mocks.sandboxes = [
     {
       ...sandbox,
@@ -241,13 +259,14 @@ function setup(
   ];
   mocks.configs = [config(onSettle)];
   mocks.work = work ?? { status: "clean", uncommittedFiles: 0, unpushedCommits: 0 };
-  useSandboxConnectionsStore.setState({ disconnected: [] });
+  useSandboxConnectionsStore.setState({ disconnected: [], attempts: new Map() });
   for (const mock of [
     mocks.deleteSandbox,
     mocks.stopSandbox,
     mocks.saveConfig,
     mocks.checkWork,
     mocks.removeEnvironment,
+    mocks.retryEnvironment,
     mocks.resumeSandbox,
     mocks.deleteSandboxThread,
     mocks.renameThread,
@@ -616,6 +635,34 @@ describe("SandboxThreadCoordinator", () => {
     });
   });
 
+  it("reconnects to a resumed sandbox at once, and again only when it starts anew", async () => {
+    setup("ask", undefined, { state: "stopped" });
+    mocks.sandboxConnected = false;
+    mocks.sandboxSaved = true;
+    const resumedAt = "2026-11-13T10:00:00.000Z";
+    const resumed = { ...sandbox, runningSince: resumedAt };
+    mocks.resumeSandbox.mockResolvedValueOnce(
+      AsyncResult.success({ sandbox: resumed, httpBaseUrl: sandbox.httpBaseUrl }) as never,
+    );
+    await using screen = await render(<SandboxThreadCoordinator />);
+
+    const running = ensureSandboxThreadRunning(threadRef);
+    // Not at the connection's next backoff, which can come after the wait gives up.
+    await vi.waitFor(() => expect(mocks.retryEnvironment).toHaveBeenCalledWith(SANDBOX_ENV));
+    mocks.sandboxes = [resumed];
+    await screen.rerender(<SandboxThreadCoordinator />);
+    expect(mocks.retryEnvironment).toHaveBeenCalledOnce();
+
+    // Started again, by the host's turn or another app, while this one still waits.
+    mocks.sandboxes = [{ ...sandbox, runningSince: "2026-11-13T10:05:00.000Z" }];
+    await screen.rerender(<SandboxThreadCoordinator />);
+    expect(mocks.retryEnvironment).toHaveBeenCalledTimes(2);
+
+    mocks.sandboxConnected = true;
+    await screen.rerender(<SandboxThreadCoordinator />);
+    await expect(running).resolves.toBe(true);
+  });
+
   describe("pairing", () => {
     const linked = {
       ...sandbox,
@@ -627,32 +674,74 @@ describe("SandboxThreadCoordinator", () => {
       },
     };
 
-    it("pairs with a sandbox the host finished launching, with no chat open", async () => {
+    // The chat's mirror is open and this app is not connected to its running sandbox.
+    const openChat = (saved: boolean) => {
       setup("ask", undefined, { bridged: true });
-      // Only the coordinator is mounted: nobody has the thread open.
       mocks.sandboxConnected = false;
+      mocks.sandboxSaved = saved;
       mocks.sandboxes = [linked];
+      mocks.route = hostRef;
       mocks.pairLaunch.mockClear();
       mocks.connectPairing.mockClear();
-      await using _screen = await render(<SandboxThreadCoordinator />);
+    };
+
+    it("connects to the open chat's sandbox at its current address, saved here or not", async () => {
+      for (const saved of [false, true]) {
+        openChat(saved);
+        await using _screen = await render(<SandboxThreadCoordinator />);
+
+        await vi.waitFor(() =>
+          expect(mocks.connectPairing).toHaveBeenCalledWith({
+            host: "https://bx.example.test",
+            pairingCode: "code-1",
+            expectedEnvironmentId: SANDBOX_ENV,
+          }),
+        );
+        expect(mocks.pairLaunch).toHaveBeenCalledWith({
+          environmentId: HOST_ENV,
+          input: { threadId: "thread-1" },
+        });
+        // One attempt, not one per render.
+        expect(mocks.pairLaunch).toHaveBeenCalledOnce();
+      }
+    });
+
+    it("connects once this client's grant on the host loads after mount", async () => {
+      openChat(false);
+      appAtomRegistry.set(mocks.pairPermission, false);
+      await using _screen = await render(
+        <RegistryContext.Provider value={appAtomRegistry}>
+          <SandboxThreadCoordinator />
+        </RegistryContext.Provider>,
+      );
+      expect(mocks.pairLaunch).not.toHaveBeenCalled();
+
+      await act(() => appAtomRegistry.set(mocks.pairPermission, true));
+      await vi.waitFor(() => expect(mocks.pairLaunch).toHaveBeenCalledOnce());
+    });
+
+    it("keeps a refused connect for the chat's action and does not retry it at once", async () => {
+      openChat(false);
+      using warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const refusal = new Error("The sandbox is not ready yet.");
+      mocks.pairLaunch.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(refusal)) as never);
+      await using screen = await render(<SandboxThreadCoordinator />);
 
       await vi.waitFor(() =>
-        expect(mocks.connectPairing).toHaveBeenCalledWith({
-          host: "https://bx.example.test",
-          pairingCode: "code-1",
-        }),
+        expect(
+          useSandboxConnectionsStore.getState().attempts.get(EnvironmentId.make(SANDBOX_ENV)),
+        ).toEqual({ connecting: false, failure: refusal }),
       );
-      expect(mocks.pairLaunch).toHaveBeenCalledWith({
-        environmentId: HOST_ENV,
-        input: { threadId: "thread-1" },
-      });
-      // One attempt, not one per render.
+      expect(warn).toHaveBeenCalledWith(expect.any(String), refusal);
+      await screen.rerender(<SandboxThreadCoordinator />);
       expect(mocks.pairLaunch).toHaveBeenCalledOnce();
+      expect(mocks.connectPairing).not.toHaveBeenCalled();
     });
 
     it("leaves a sandbox alone while it starts, once this app is paired, or when it is stopped", async () => {
       setup("ask", undefined, { bridged: true });
       mocks.pairLaunch.mockClear();
+      mocks.route = hostRef;
       // Paired already: its environment is in this app.
       mocks.sandboxes = [linked];
       await using _paired = await render(<SandboxThreadCoordinator />);
@@ -666,10 +755,7 @@ describe("SandboxThreadCoordinator", () => {
     });
 
     it("does not pair again with a sandbox this app was disconnected from", async () => {
-      setup("ask", undefined, { bridged: true });
-      mocks.sandboxConnected = false;
-      mocks.sandboxes = [linked];
-      mocks.pairLaunch.mockClear();
+      openChat(true);
       useSandboxConnectionsStore.setState({ disconnected: [EnvironmentId.make(SANDBOX_ENV)] });
       await using _screen = await render(<SandboxThreadCoordinator />);
       expect(mocks.pairLaunch).not.toHaveBeenCalled();

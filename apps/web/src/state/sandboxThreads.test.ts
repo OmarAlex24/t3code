@@ -26,6 +26,7 @@ import {
   isSandboxlessBridgeThread,
   movesToSandboxChatAlias,
   newSettleDecisions,
+  newThreadProjectRef,
   sandboxChatAliases,
   sandboxChatAliasTarget,
   sandboxChatPickPartner,
@@ -37,7 +38,7 @@ import {
   sandboxRowStates,
   sandboxRowThread,
   sandboxConnectOffer,
-  sandboxesToPair,
+  sandboxToPair,
   settleDecisionKeys,
   withSandboxHostMirrors,
 } from "./sandboxThreads";
@@ -229,8 +230,14 @@ describe("sandboxHostMirrors", () => {
 describe("sandboxChatAliases", () => {
   const linked = (fields: Partial<SandboxRecord> = {}) =>
     record({ hostProjectId: ProjectId.make("project-host"), ...fields });
-  const hostThread = { environmentId: HOST, id: threadId };
-  const sandboxThread = { environmentId: SANDBOX, id: threadId };
+  const shell = (environmentId: EnvironmentId, latestUserMessageAt: string | null) => ({
+    environmentId,
+    id: threadId,
+    latestUserMessageAt,
+  });
+  const hostThread = shell(HOST, "2026-11-10T00:00:00.000Z");
+  const sandboxThread = shell(SANDBOX, "2026-11-10T00:00:01.000Z");
+  const emptySandboxThread = shell(SANDBOX, null);
   const hostRef = { environmentId: HOST, threadId };
   const sandboxRef = { environmentId: SANDBOX, threadId };
   const both = [hostThread, sandboxThread];
@@ -242,7 +249,7 @@ describe("sandboxChatAliases", () => {
 
   it("shows the sandbox's own thread whatever the sandbox's state", () => {
     expect(aliases(linked())).toEqual(showsSandbox);
-    // A launch's thread opens on the sandbox as soon as it lists.
+    // A launch's thread opens on the sandbox as soon as it holds the first message.
     expect(aliases(linked({ state: "provisioning" }))).toEqual(showsSandbox);
     // Stopped or resuming, a send on its own thread resumes the sandbox and goes there.
     expect(aliases(linked({ state: "stopped" }))).toEqual(showsSandbox);
@@ -259,6 +266,13 @@ describe("sandboxChatAliases", () => {
     // Linked, but the bridge has not made the sandbox's thread yet.
     expect(aliases(linked(), [hostThread])).toEqual([]);
     expect(aliases(linked())).toEqual(showsSandbox);
+  });
+
+  // The sandbox makes its thread, then takes the message, which can fail and leave it empty.
+  it("keeps a launch's host thread as the chat while the sandbox's own thread has no message", () => {
+    for (const state of ["provisioning", "running", "stopped"] as const) {
+      expect(aliases(linked({ state }), [hostThread, emptySandboxThread])).toEqual(showsMirror);
+    }
   });
 
   it("sends a route on a stopped sandbox's thread that never listed to the mirror", () => {
@@ -340,6 +354,36 @@ describe("sandboxMirrorOf", () => {
     const linked = record({ hostProjectId: ProjectId.make("p") });
     expect(sandboxMirrorOf([linked], { environmentId: HOST, threadId }, HOST)).toBeNull();
     expect(sandboxMirrorOf([{ ...linked, state: "deleted" }], ref, HOST)).toBeNull();
+  });
+});
+
+describe("newThreadProjectRef", () => {
+  it("starts a sandbox project's new thread in the project the sandbox was launched for", () => {
+    const launchedFor = ProjectId.make("project-launched");
+    const placeholder = ProjectId.make("project-placeholder");
+    const projects = [
+      { id: launchedFor, environmentId: HOST, workspaceRoot: "/work/app" },
+      {
+        id: placeholder,
+        environmentId: HOST,
+        workspaceRoot: "/home/me/.t3/userdata/sandbox-projects/octo/app",
+      },
+      { id: ProjectId.make("clone"), environmentId: SANDBOX, workspaceRoot: "/work/app" },
+    ];
+    const onSandbox = { environmentId: SANDBOX, projectId: ProjectId.make("clone") };
+    const sandbox = record({ projectId: launchedFor, hostProjectId: placeholder });
+    expect(newThreadProjectRef([sandbox], projects, onSandbox)).toEqual({
+      environmentId: HOST,
+      projectId: launchedFor,
+    });
+    // Never the placeholder that only holds the phone's copy of the chat.
+    const unlisted = record({ projectId: ProjectId.make("gone"), hostProjectId: placeholder });
+    expect(newThreadProjectRef([unlisted], projects, onSandbox)).toBeNull();
+    const hostRef = { environmentId: HOST, projectId: launchedFor };
+    expect(newThreadProjectRef([sandbox], projects, hostRef)).toBe(hostRef);
+    expect(newThreadProjectRef([{ ...sandbox, state: "deleted" }], projects, onSandbox)).toBe(
+      onSandbox,
+    );
   });
 });
 
@@ -529,7 +573,7 @@ describe("sandboxChatPickPartner", () => {
   });
 });
 
-describe("sandboxesToPair", () => {
+describe("sandboxToPair", () => {
   const linked = (fields: Partial<SandboxRecord> = {}) =>
     record({
       hostProjectId: ProjectId.make("project-host"),
@@ -540,20 +584,48 @@ describe("sandboxesToPair", () => {
       },
       ...fields,
     });
+  const mirror = { environmentId: HOST, threadId };
+  const saved = (phase: string) => [{ environmentId: SANDBOX, connection: { phase } }];
+  const target = { instanceId: "instance-1", environmentId: SANDBOX, threadId };
 
-  it("pairs with a linked, running sandbox this app has not paired with", () => {
-    const sandbox = linked();
-    expect(sandboxesToPair([sandbox], HOST, new Set())).toEqual([sandbox]);
-    expect(sandboxesToPair([sandbox], HOST, new Set([SANDBOX]))).toEqual([]);
+  it("pairs with the open chat's linked, running sandbox this app is not connected to", () => {
+    expect(sandboxToPair([linked()], mirror, HOST, [], [])).toEqual(target);
+    expect(sandboxToPair([linked()], { environmentId: SANDBOX, threadId }, HOST, [], [])).toEqual(
+      target,
+    );
+    // Saved here once, but not connected: a resumed sandbox can answer at a new address.
+    for (const phase of ["available", "offline", "reconnecting", "error"]) {
+      expect(sandboxToPair([linked()], mirror, HOST, saved(phase), [])).toEqual(target);
+    }
+    for (const phase of ["connected", "connecting"]) {
+      expect(sandboxToPair([linked()], mirror, HOST, saved(phase), [])).toBeNull();
+    }
   });
 
-  it("waits for a launch to finish, a stopped sandbox to run, and a link to exist", () => {
-    expect(sandboxesToPair([linked({ state: "provisioning" })], HOST, new Set())).toEqual([]);
-    expect(sandboxesToPair([linked({ state: "stopped" })], HOST, new Set())).toEqual([]);
-    expect(sandboxesToPair([record()], HOST, new Set())).toEqual([]);
+  it("pairs only with the open chat's sandbox", () => {
+    const other = linked({ instanceId: "instance-2", threadId: ThreadId.make("thread-2") });
+    expect(sandboxToPair([other, linked()], mirror, HOST, [], [])).toEqual(target);
+    expect(sandboxToPair([linked()], null, HOST, [], [])).toBeNull();
+    expect(
+      sandboxToPair(
+        [linked()],
+        { environmentId: HOST, threadId: ThreadId.make("thread-2") },
+        HOST,
+        [],
+        [],
+      ),
+    ).toBeNull();
+  });
+
+  it("waits for a launch to finish, a stopped sandbox to run, a link, and the user's connect", () => {
+    expect(sandboxToPair([linked({ state: "provisioning" })], mirror, HOST, [], [])).toBeNull();
+    expect(sandboxToPair([linked({ state: "stopped" })], mirror, HOST, [], [])).toBeNull();
+    expect(sandboxToPair([record()], mirror, HOST, [], [])).toBeNull();
+    // One the user disconnected from stays so until they connect again.
+    expect(sandboxToPair([linked()], mirror, HOST, [], [SANDBOX])).toBeNull();
     // One that answers as the host, or with no host to pair through.
-    expect(sandboxesToPair([linked({ environmentId: HOST })], HOST, new Set())).toEqual([]);
-    expect(sandboxesToPair([linked()], null, new Set())).toEqual([]);
+    expect(sandboxToPair([linked({ environmentId: HOST })], mirror, HOST, [], [])).toBeNull();
+    expect(sandboxToPair([linked()], mirror, null, [], [])).toBeNull();
   });
 });
 

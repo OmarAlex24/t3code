@@ -10,22 +10,22 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
-  AuthSettingsWriteScope,
   type EnvironmentId,
   type SandboxCheckWorkResult,
   type SandboxEnvironmentConfig,
   type SandboxProviderInfo,
   type SandboxRecord,
   type SandboxSettleAction,
+  type ScopedProjectRef,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
-import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
+import { useThreadRouteRef } from "~/hooks/useThreadRouteTarget";
 import { useStableCallback } from "~/hooks/useStableCallback";
-import { useThreadShells } from "~/state/entities";
+import { readProjects, useQuietCompleteThreadShells } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useSandboxConnectionsStore } from "~/state/sandboxConnections";
@@ -36,20 +36,21 @@ import {
   isBridgedSandbox,
   isHostThreadRef,
   newSettleDecisions,
+  newThreadProjectRef,
   registerSandboxThreadHandlers,
   sandboxMirrorOf,
   sandboxMirrorTitleUpdates,
-  sandboxesToPair,
+  sandboxToPair,
   type SandboxSettleUndo,
   settleDecisionKeys,
   shortSandboxId,
 } from "~/state/sandboxThreads";
 import { serverEnvironment } from "~/state/server";
-import { readEnvironmentScope } from "~/state/session";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { describeSandboxFailure } from "../settings/SandboxStartLimits";
+import { RESUME_WAIT_MS, useConnectSandbox } from "./SandboxConnect";
 import {
   AlertDialog,
   AlertDialogDescription,
@@ -63,8 +64,6 @@ import { Checkbox } from "../ui/checkbox";
 import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
-// How long a resumed sandbox gets to answer again before a send or un-settle gives up.
-const RESUME_WAIT_MS = 4 * 60_000;
 // How long this app waits before it tries again to pair with a sandbox that refused.
 const PAIR_RETRY_MS = 2 * 60_000;
 // How long the host waits after a settle, with Undo, before a remembered delete (SandboxSettle).
@@ -166,10 +165,7 @@ export function SandboxThreadCoordinator() {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
-  const pairLaunch = useAtomCommand(serverEnvironment.sandboxesPairLaunch, {
-    reportFailure: false,
-  });
-  const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
+  const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const deleteRemoteThread = useOrchestrationCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
@@ -178,13 +174,20 @@ export function SandboxThreadCoordinator() {
   });
   const { entries } = useAtomValue(environmentCatalog.catalogValueAtom);
   const { environments } = useEnvironments();
-  const threads = useThreadShells();
+  const threads = useQuietCompleteThreadShells();
   const navigate = useNavigate();
   const [prompts, setPrompts] = useState<ReadonlyArray<Prompt>>([]);
   // The prompt that just closed, so the dialog keeps its text while it animates out.
   const [closing, setClosing] = useState<Prompt | null>(null);
   const nextId = useRef(0);
   const waiters = useRef(new Map<EnvironmentId, Array<() => void>>());
+  // The sandbox start each waiting environment was last retried for. The connection's backoff can
+  // run past a resume's whole wait, so each new start retries it at once, and only once.
+  const retriedStarts = useRef(new Map<EnvironmentId, string | null>());
+  const retryStart = (environmentId: EnvironmentId, runningSince: string | null) => {
+    retriedStarts.current.set(environmentId, runningSince);
+    void retryEnvironment(environmentId);
+  };
 
   const sandboxes = list.data?.sandboxes ?? [];
   const configs = configsQuery.data?.configs ?? [];
@@ -203,49 +206,50 @@ export function SandboxThreadCoordinator() {
     return environment?.connection.phase === "connected" && environment.serverConfig !== null;
   };
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- settles the promises a resume handed out once the sandbox's connection comes up
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- settles the promises a resume handed out once the sandbox's connection comes up, and retries it when the sandbox starts
   useEffect(() => {
     for (const [environmentId, resolve] of waiters.current) {
-      if (!isConnected(environmentId)) continue;
-      waiters.current.delete(environmentId);
-      for (const done of resolve) done();
+      if (isConnected(environmentId)) {
+        waiters.current.delete(environmentId);
+        retriedStarts.current.delete(environmentId);
+        for (const done of resolve) done();
+        continue;
+      }
+      const started = sandboxes.find(
+        (candidate) => candidate.environmentId === environmentId && candidate.state === "running",
+      );
+      if (started === undefined) continue;
+      if (retriedStarts.current.get(environmentId) === started.runningSince) continue;
+      retryStart(environmentId, started.runningSince);
     }
   });
 
   // When this app last tried to pair with each sandbox, so a refusal is not retried at once.
   const pairAttempts = useRef(new Map<string, number>());
-  const canManage =
-    provisionerEnvironmentId !== null &&
-    readEnvironmentScope(provisionerEnvironmentId, AuthSettingsWriteScope);
-  const canPair = canManage;
+  // A remote host's session loads after mount, so the grant is read where it updates.
+  const canManage = useAtomValue(
+    serverEnvironment.sandboxesResolveSettle.permissionAtom(provisionerEnvironmentId),
+  );
+  const canPair = useAtomValue(
+    serverEnvironment.sandboxesPairLaunch.permissionAtom(provisionerEnvironmentId),
+  );
+  const openThreadRef = useThreadRouteRef();
   const disconnected = useSandboxConnectionsStore((state) => state.disconnected);
-  const unpaired = canPair
-    ? sandboxesToPair(
-        sandboxes,
-        provisionerEnvironmentId,
-        // One the user disconnected from stays so until they connect again.
-        new Set([...environments.map((environment) => environment.environmentId), ...disconnected]),
-      )
-    : [];
-  const pair = useStableCallback(async (sandbox: SandboxRecord) => {
-    if (provisionerEnvironmentId === null || sandbox.threadId === undefined) return;
-    const paired = await pairLaunch({
-      environmentId: provisionerEnvironmentId,
-      input: { threadId: sandbox.threadId },
-    });
-    if (paired._tag === "Failure") return;
-    await connectPairing({ host: paired.value.httpBaseUrl, pairingCode: paired.value.pairingCode });
-  });
+  const connectSandbox = useConnectSandbox();
+  const toPair = canPair
+    ? sandboxToPair(sandboxes, openThreadRef, provisionerEnvironmentId, environments, disconnected)
+    : null;
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pairs this app with a sandbox the host finished launching, so its own thread opens here
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pairs this app with the open chat's running sandbox, so its own thread opens here
   useEffect(() => {
+    if (toPair === null) return;
     const now = Date.now();
-    for (const sandbox of unpaired) {
-      const last = pairAttempts.current.get(sandbox.instanceId);
-      if (last !== undefined && now - last < PAIR_RETRY_MS) continue;
-      pairAttempts.current.set(sandbox.instanceId, now);
-      void pair(sandbox);
-    }
+    const last = pairAttempts.current.get(toPair.instanceId);
+    if (last !== undefined && now - last < PAIR_RETRY_MS) return;
+    pairAttempts.current.set(toPair.instanceId, now);
+    void connectSandbox(toPair, false).then((failure) => {
+      if (failure !== null) console.warn("Could not connect to the chat's sandbox", failure);
+    });
   });
 
   // The rename last sent for each host mirror, as its title then and the title it was given, so
@@ -658,6 +662,7 @@ export function SandboxThreadCoordinator() {
       return true;
     }
     if (sandbox.state !== "stopped" && isConnected(threadRef.environmentId)) return true;
+    let runningSince = sandbox.runningSince;
     if (sandbox.state === "stopped") {
       const result = await resumeSandbox({
         environmentId: provisionerEnvironmentId,
@@ -668,8 +673,10 @@ export function SandboxThreadCoordinator() {
         if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not resume the sandbox");
         return false;
       }
+      runningSince = result.value.sandbox.runningSince;
     }
     if (isConnected(threadRef.environmentId)) return true;
+    retryStart(threadRef.environmentId, runningSince);
     return new Promise<boolean>((resolve) => {
       const timer = window.setTimeout(() => resolve(false), RESUME_WAIT_MS);
       const pending = waiters.current.get(threadRef.environmentId) ?? [];
@@ -706,6 +713,10 @@ export function SandboxThreadCoordinator() {
     return sandbox === undefined ? Promise.resolve() : startDelete(sandbox, threadRef, "menu");
   });
 
+  const newThreadProjectRefOf = useStableCallback((ref: ScopedProjectRef) =>
+    newThreadProjectRef(sandboxes, readProjects(), ref),
+  );
+
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- holds the module registry entry the thread actions call, until unmount
   useEffect(
     () =>
@@ -717,6 +728,7 @@ export function SandboxThreadCoordinator() {
         ensureRunning,
         deleteThreadAndSandbox,
         deleteSandbox: deleteOnly,
+        newThreadProjectRef: newThreadProjectRefOf,
       }),
     [
       isSandboxThread,
@@ -726,6 +738,7 @@ export function SandboxThreadCoordinator() {
       ensureRunning,
       deleteThreadAndSandbox,
       deleteOnly,
+      newThreadProjectRefOf,
     ],
   );
 
@@ -758,12 +771,7 @@ export function SandboxThreadCoordinator() {
             }
             providerLabel={providerLabel(prompt.sandbox)}
             retentionDays={providerOf(prompt.sandbox)?.diskRetentionDays}
-            rememberLabel={
-              provisionerEnvironmentId !== null &&
-              readEnvironmentScope(provisionerEnvironmentId, AuthSettingsWriteScope)
-                ? (configOf(prompt.sandbox)?.label ?? null)
-                : null
-            }
+            rememberLabel={canManage ? (configOf(prompt.sandbox)?.label ?? null) : null}
             onKeep={(rememberChoice) => {
               close(prompt.id);
               if (rememberChoice) void remember(prompt.sandbox, "snapshot");

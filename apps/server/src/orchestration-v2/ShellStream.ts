@@ -36,7 +36,6 @@ import * as Stream from "effect/Stream";
 
 import type * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { bufferLatestLiveStream } from "./LiveStreamBudget.ts";
-import { LATEST_ACTION_ITEM_TYPES } from "./latestAction.ts";
 import type { ActiveShellIndexEntry } from "./ProjectionStore.ts";
 
 type ShellDelta = Extract<OrchestrationV2ShellStreamItem, { readonly sequence: number }>;
@@ -555,22 +554,11 @@ export function shouldPublishShellApplicationEvent(
   return !(
     subagentThreadIds.has(event.threadId) &&
     (event.type === "node.updated" ||
-      (event.type === "turn-item.updated" && !changesChildShell(event.payload)) ||
+      event.type === "turn-item.updated" ||
       event.type === "provider-turn.updated" ||
       event.type === "message.updated")
   );
 }
-
-const LATEST_ACTION_TYPES: ReadonlySet<string> = new Set(LATEST_ACTION_ITEM_TYPES);
-
-/**
- * A secret or link card is the child's only record of waiting on you, so its parent must hear it.
- * A finished tool moves the child's latest action; streaming tool output does not.
- */
-const changesChildShell = (item: { readonly type: string; readonly status: string }) =>
-  item.type === "secret_request" ||
-  item.type === "link_request" ||
-  (LATEST_ACTION_TYPES.has(item.type) && item.status !== "running" && item.status !== "pending");
 
 /** Shell updates refetch an aggregate; drop transcript bodies before retaining an event. */
 export function toShellApplicationEvent(stored: ApplicationStoredEvent): ShellApplicationEvent {

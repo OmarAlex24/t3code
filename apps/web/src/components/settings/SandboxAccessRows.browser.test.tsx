@@ -113,6 +113,9 @@ const add = async (name: string) => {
   await userEvent.click(page.getByRole("button", { name: "Add integration" }));
   await userEvent.click(page.getByRole("menuitem", { name }));
 };
+// Connected integrations start folded into their icons.
+const expand = () =>
+  userEvent.click(page.getByRole("button", { name: /connected$/u, expanded: false }));
 const actions = async (name: string) =>
   userEvent.click(page.getByRole("button", { name: `More actions for ${name}` }));
 
@@ -265,6 +268,8 @@ describe("SandboxAccessRows", () => {
       githubAppPrivateKey: "••••••",
     });
     await using _screen = await render(rows());
+    await expect.element(connected()).not.toBeInTheDocument();
+    await expand();
 
     await expect
       .element(connected().getByRole("listitem", { name: "GitHub App" }))
@@ -287,6 +292,7 @@ describe("SandboxAccessRows", () => {
   it("saves and removes the shared Northflank token and the Maple admin key", async () => {
     setup({ ...NOTHING_SAVED, mapleAdminKey: "••••••" });
     await using _screen = await render(rows());
+    await expand();
 
     // Only what is connected is listed; the rest waits under Add integration.
     await expect
@@ -341,6 +347,7 @@ describe("SandboxAccessRows", () => {
       railwayWorkspaceName: "Omar's projects",
     });
     await using _screen = await render(rows());
+    await userEvent.click(page.getByRole("button", { name: "Railway · Omar's projects" }));
     await expect
       .element(connected().getByRole("listitem", { name: "Railway" }))
       .toHaveTextContent("RailwayOmar's projects");

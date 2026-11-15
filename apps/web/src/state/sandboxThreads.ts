@@ -2,6 +2,7 @@ import { threadKey } from "@t3tools/client-runtime/state/entities";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
+  isSandboxHostProjectRoot,
   type ModelSelection,
   type OrchestrationV2Subagent,
   type ProjectId,
@@ -12,6 +13,7 @@ import {
   type SandboxProviderKind,
   type SandboxRecord,
   type SandboxSetupSnapshot,
+  type ScopedProjectRef,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -123,27 +125,45 @@ export const sandboxRowStates = (
 };
 
 /**
- * Linked sandboxes this app is not paired with yet. The host's launch ends with its own bridge, so
- * each app pairs on its own afterwards, whether or not the chat is open; meanwhile the host thread
- * is the chat. A stopped sandbox waits until it runs again.
+ * The open chat's linked, running sandbox when this app should connect to it on its own: not
+ * connected or connecting, and not one the user disconnected from. A saved one still counts, since
+ * a resumed sandbox can answer at a new address. A stopped one waits for the user's connect or send.
  */
-export const sandboxesToPair = (
+export const sandboxToPair = (
   sandboxes: ReadonlyArray<SandboxRecord>,
+  openThreadRef: ScopedThreadRef | null,
   provisionerEnvironmentId: EnvironmentId | null,
-  pairedEnvironmentIds: ReadonlySet<EnvironmentId>,
-): ReadonlyArray<SandboxRecord> =>
-  provisionerEnvironmentId === null
-    ? []
-    : sandboxes.filter(
-        (sandbox) =>
-          sandbox.state === "running" &&
-          sandbox.threadId !== undefined &&
-          sandbox.hostProjectId !== undefined &&
-          sandbox.bridge !== undefined &&
-          sandbox.environmentId !== null &&
-          sandbox.environmentId !== provisionerEnvironmentId &&
-          !pairedEnvironmentIds.has(sandbox.environmentId),
-      );
+  environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly connection: { readonly phase: string };
+  }>,
+  disconnected: ReadonlyArray<EnvironmentId>,
+): {
+  readonly instanceId: string;
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+} | null => {
+  if (openThreadRef === null || provisionerEnvironmentId === null) return null;
+  const sandbox = findThreadSandbox(sandboxes, openThreadRef, provisionerEnvironmentId);
+  if (
+    sandbox === undefined ||
+    sandbox.state !== "running" ||
+    sandbox.threadId === undefined ||
+    sandbox.hostProjectId === undefined ||
+    sandbox.bridge === undefined ||
+    sandbox.environmentId === null ||
+    sandbox.environmentId === provisionerEnvironmentId ||
+    disconnected.includes(sandbox.environmentId)
+  ) {
+    return null;
+  }
+  const { environmentId } = sandbox;
+  const phase = environments.find((environment) => environment.environmentId === environmentId)
+    ?.connection.phase;
+  return phase === "connected" || phase === "connecting"
+    ? null
+    : { instanceId: sandbox.instanceId, environmentId, threadId: sandbox.threadId };
+};
 
 /**
  * Whether a sandbox chat's host mirror can offer to connect this client to its sandbox. The mirror
@@ -300,12 +320,13 @@ export const sandboxChatPickPartner = (
 
 /**
  * The thread of each sandbox chat that lists, the sidebar and the chat view leave out, by key, with
- * the one that stands for it. The sandbox's own thread is the chat whenever it lists, running or
- * not (a send there resumes it); the mirror stands in only for a stopped one never listed here.
+ * the one that stands for it. The sandbox's own thread is the chat once it holds the conversation,
+ * running or not (a send there resumes it). Until then the mirror, which holds the launch's message,
+ * stands for it, and it stands in for a stopped one never listed here.
  */
 export const sandboxChatAliases = (
   sandboxes: ReadonlyArray<SandboxRecord>,
-  threads: ReadonlyArray<ThreadEntry>,
+  threads: ReadonlyArray<ThreadEntry & { readonly latestUserMessageAt: string | null }>,
   provisionerEnvironmentId: EnvironmentId | null,
 ): ReadonlyMap<string, ScopedThreadRef> => {
   const aliases = new Map<string, ScopedThreadRef>();
@@ -314,9 +335,15 @@ export const sandboxChatAliases = (
     provisionerEnvironmentId,
   )) {
     if (!listed(threads, mirror)) continue;
-    if (listed(threads, real)) {
+    const realThread = threads.find(
+      (thread) => thread.environmentId === real.environmentId && thread.id === real.threadId,
+    );
+    if (realThread?.latestUserMessageAt != null) {
       aliases.set(threadKey(mirror), real);
-    } else if (sandbox.state !== "running" && sandbox.state !== "provisioning") {
+    } else if (
+      realThread !== undefined ||
+      (sandbox.state !== "running" && sandbox.state !== "provisioning")
+    ) {
       aliases.set(threadKey(real), mirror);
     }
   }
@@ -430,6 +457,37 @@ export const sandboxMirrorOf = (
         mirror: { environmentId: provisionerEnvironmentId, threadId: threadRef.threadId },
         hostProjectId: sandbox.hostProjectId,
       };
+};
+
+/**
+ * Where a new thread from a project goes. A sandbox is one chat's machine, so its project stands for
+ * the project the sandbox was launched for, or null when that one is not listed here.
+ */
+export const newThreadProjectRef = (
+  sandboxes: ReadonlyArray<SandboxRecord>,
+  projects: ReadonlyArray<{
+    readonly id: ProjectId;
+    readonly environmentId: EnvironmentId;
+    readonly workspaceRoot: string;
+    readonly archivedAt?: string | null | undefined;
+  }>,
+  ref: ScopedProjectRef,
+): ScopedProjectRef | null => {
+  const live = sandboxes.filter((sandbox) => sandbox.state !== "deleted");
+  const sandbox = live.find((candidate) => candidate.environmentId === ref.environmentId);
+  if (sandbox === undefined) return ref;
+  const candidates = projects.filter(
+    (project) =>
+      project.archivedAt == null &&
+      !isSandboxHostProjectRoot(project.workspaceRoot) &&
+      !live.some((candidate) => candidate.environmentId === project.environmentId),
+  );
+  // The launch records the picked project by id on whichever machine it was on.
+  for (const projectId of [sandbox.projectId, sandbox.hostProjectId]) {
+    const home = candidates.find((project) => project.id === projectId);
+    if (home !== undefined) return { environmentId: home.environmentId, projectId: home.id };
+  }
+  return null;
 };
 
 // The mirror's bridge run would run a command such as `/compact` on the host, where it fails;
@@ -555,6 +613,7 @@ export interface SandboxThreadHandlers {
   ) => Promise<void>;
   /** Confirms with the work check and deletes the sandbox, and any conversation only on it. */
   readonly deleteSandbox: (threadRef: ScopedThreadRef) => Promise<void>;
+  readonly newThreadProjectRef: (ref: ScopedProjectRef) => ScopedProjectRef | null;
 }
 
 let handlers: SandboxThreadHandlers | null = null;
@@ -565,6 +624,10 @@ export function registerSandboxThreadHandlers(next: SandboxThreadHandlers): () =
     if (handlers === next) handlers = null;
   };
 }
+
+/** Where a new thread from the project goes; see `newThreadProjectRef`. */
+export const resolveNewThreadProjectRef = (ref: ScopedProjectRef): ScopedProjectRef | null =>
+  handlers === null ? ref : handlers.newThreadProjectRef(ref);
 
 export const isSandboxThread = (threadRef: ScopedThreadRef) =>
   handlers?.isSandboxThread(threadRef) === true;

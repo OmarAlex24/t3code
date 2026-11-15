@@ -11,6 +11,10 @@ import {
   MessageId,
   type ModelSelection,
   type OrchestrationV2Command,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2Notification,
+  type OrchestrationV2PendingBackgroundTask,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ThreadLaunchInput,
@@ -30,6 +34,7 @@ import {
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_MODEL,
   SANDBOX_BRIDGE_STEER_CANCEL,
+  SANDBOX_BRIDGE_WAKE_METHOD,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
   SANDBOX_RESUME_WAIT_SECONDS,
   type SecretRequestAnswerInput,
@@ -37,7 +42,13 @@ import {
   type ServerProvider,
   ThreadId,
   type UploadChatAttachment,
+  isOrchestrationV2WorkActive,
+  SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
 } from "@t3tools/contracts";
+import {
+  derivePendingBackgroundWork,
+  monitorHoldsWakeCompletion,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -47,9 +58,11 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as RcMap from "effect/RcMap";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
+import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as AcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
@@ -85,7 +98,7 @@ export interface HostMcp {
   readonly authorization: string;
 }
 
-/** One open connection to a sandbox's T3 server, scoped to a single prompt. */
+/** One open connection to a sandbox's T3 server, which a session's turns share. */
 export interface SandboxSession {
   readonly threadStop: boolean;
   readonly defaultModelSelection: ModelSelection | null;
@@ -105,6 +118,7 @@ export interface SandboxSession {
     readonly messageId: MessageId;
     readonly attachments: ReadonlyArray<UploadChatAttachment>;
   }) => Effect.Effect<ReadonlyArray<ChatAttachment>, SandboxBridgeError>;
+  /** Opens with a snapshot, or ends at once with nothing when the sandbox has no such thread. */
   readonly subscribe: (
     threadId: ThreadId,
   ) => Stream.Stream<OrchestrationV2ThreadStreamItem, SandboxBridgeError>;
@@ -175,6 +189,8 @@ const MODEL_OPTION_VALUE = SANDBOX_BRIDGE_MODEL;
 const CATALOG_READ_TIMEOUT = "5 seconds";
 // The reply waits for an image's copy; past this it goes out with the sandbox's path.
 const IMAGE_COPY_TIMEOUT = "10 seconds";
+// A session's connection outlives its turn this long, so a follow-up skips the ticket and handshake.
+const CONNECTION_IDLE_TTL = "5 minutes";
 
 /** Sandbox chats are made only where the sandbox configs live; other clients continue them. */
 export const NOT_LINKED_MESSAGE =
@@ -293,22 +309,32 @@ export const withConfigValue = (
           : option,
   );
 
-const optionKey = (selection: ModelSelection) =>
+type OptionDescriptors = NonNullable<
+  NonNullable<ServerProvider["models"][number]["capabilities"]>["optionDescriptors"]
+>;
+
+const defaultOptionValue = (descriptor: OptionDescriptors[number]) =>
+  descriptor.type === "boolean"
+    ? (descriptor.currentValue ?? false)
+    : choiceOf(descriptor, undefined);
+
+// Options as the model runs them: one stated at its default reads as one left out.
+const optionKey = (options: ModelSelection["options"], descriptors: OptionDescriptors) =>
   JSON.stringify(
-    [...(selection.options ?? [])]
+    [...(options ?? [])]
+      .filter((option) => {
+        const descriptor = descriptors.find((candidate) => candidate.id === option.id);
+        return descriptor === undefined || defaultOptionValue(descriptor) !== option.value;
+      })
       .map((option) => [option.id, option.value] as const)
       .toSorted(([left], [right]) => left.localeCompare(right)),
   );
 
-const sameSelection = (left: ModelSelection, right: ModelSelection) =>
-  left.instanceId === right.instanceId &&
-  left.model === right.model &&
-  optionKey(left) === optionKey(right);
-
 /**
  * The model to give the sandbox's thread for a message sent from the host: the one picked there,
- * on the provider the sandbox's thread runs on. Null to keep the sandbox's own, as for the
- * bridge's `sandbox` value, a model the sandbox does not list, or one it already has.
+ * on the provider the sandbox's thread runs on, with the sandbox's own value for any option the
+ * host leaves out. Null to keep the sandbox's own, as for the bridge's `sandbox` value, a model the
+ * sandbox does not list, or one it already runs the same way.
  */
 export const sandboxSelectionFor = (
   host: ModelSelection | null,
@@ -324,13 +350,29 @@ export const sandboxSelectionFor = (
     return null;
   }
   const provider = providers.find((candidate) => candidate.instanceId === sandbox.instanceId);
-  if (provider?.models.some((model) => model.slug === host.model) !== true) return null;
-  const next = {
+  const model = provider?.models.find((candidate) => candidate.slug === host.model);
+  if (model === undefined) return null;
+  const descriptors = model.capabilities?.optionDescriptors ?? [];
+  const hostOptions = host.options ?? [];
+  const options = [
+    ...hostOptions,
+    ...(sandbox.options ?? []).filter(
+      (option) =>
+        !hostOptions.some((stated) => stated.id === option.id) &&
+        descriptors.some((descriptor) => descriptor.id === option.id),
+    ),
+  ];
+  if (
+    host.model === sandbox.model &&
+    optionKey(options, descriptors) === optionKey(sandbox.options, descriptors)
+  ) {
+    return null;
+  }
+  return {
     instanceId: sandbox.instanceId,
     model: host.model,
-    ...(host.options === undefined || host.options.length === 0 ? {} : { options: host.options }),
+    ...(options.length === 0 ? {} : { options }),
   } as ModelSelection;
-  return sameSelection(next, sandbox) ? null : next;
 };
 
 /** What a sandbox thread runs on when nothing names its model. */
@@ -439,6 +481,15 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set
 
 const isTerminalRun = (run: OrchestrationV2Run) => TERMINAL_RUN_STATUSES.has(run.status);
 
+/** Whether `modeSyncCommands` leaves a move to full access for after the sandbox's run ends. */
+export const holdsRuntimeMode = (
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  modes: { readonly runtimeMode: RuntimeMode },
+) =>
+  modes.runtimeMode === "full-access" &&
+  projection.thread.runtimeMode !== modes.runtimeMode &&
+  projection.runs.some((run) => !isTerminalRun(run));
+
 /**
  * Puts a sandbox's thread in the host thread's modes. Full access grants its waiting approvals
  * (not questions) now, but its runtime mode waits for the run to end: a sandbox cuts its agent's
@@ -450,10 +501,8 @@ export const modeSyncCommands = (
   commandId: () => CommandId,
 ): ReadonlyArray<OrchestrationV2Command> => {
   const threadId = projection.thread.id;
-  const holdRuntimeMode =
-    modes.runtimeMode === "full-access" && projection.runs.some((run) => !isTerminalRun(run));
   return [
-    ...(projection.thread.runtimeMode === modes.runtimeMode || holdRuntimeMode
+    ...(projection.thread.runtimeMode === modes.runtimeMode || holdsRuntimeMode(projection, modes)
       ? []
       : [
           {
@@ -747,7 +796,7 @@ export type TurnAction =
 /**
  * Follows a sandbox thread for one host turn, until the run carrying the message ends. Text and
  * tools last touched before the turn began (the newest `baseline` item, or the message when
- * `replay`) count as sent: the first read is a window while the stream's snapshot is the whole thread.
+ * `replay`) count as sent: the first read is a window, and a later snapshot may hold what it left out.
  * When `replay`, items begun before the message count as sent up to what the baseline holds.
  */
 export class TurnTracker {
@@ -984,9 +1033,207 @@ export class TurnTracker {
   }
 }
 
-/** Where a host turn picks up on the sandbox: a message already there, or a new one to send. */
+const BACKGROUND_ITEM_TYPES: ReadonlySet<OrchestrationV2TurnItem["type"]> = new Set([
+  "command_execution",
+  "dynamic_tool",
+  "subagent",
+]);
+const WAKE_SOURCE_KINDS: ReadonlySet<string> = new Set(["background_task", "command", "monitor"]);
+export const SANDBOX_RUN_TASK_PREFIX = "sandbox-run:";
+
+const rosterKey = (tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>) =>
+  JSON.stringify(tasks);
+
+// The ids of the sandbox's own records (child threads, items, instances) mean nothing on the host.
+const hostTask = (
+  task: OrchestrationV2PendingBackgroundTask,
+  awaited: boolean,
+): OrchestrationV2PendingBackgroundTask =>
+  ({
+    taskId: task.taskId,
+    kind: task.kind,
+    ...(task.description === undefined ? {} : { description: task.description }),
+    ...(task.command === undefined ? {} : { command: task.command }),
+    ...(task.parentTaskId === undefined ? {} : { parentTaskId: task.parentTaskId }),
+    ...(awaited || task.awaited === true ? { awaited: true } : {}),
+  }) as OrchestrationV2PendingBackgroundTask;
+
+// A notice's ids (tasks, child threads, pull requests) are the sandbox's; the host keeps its words.
+const hostNotification = (notification: OrchestrationV2Notification): OrchestrationV2Notification =>
+  ({
+    ...notification,
+    source: {
+      kind:
+        notification.source.kind === "delegated_task"
+          ? "background_task"
+          : notification.source.kind,
+    },
+  }) as OrchestrationV2Notification;
+
+/** A run the sandbox's thread started itself, which the host shows as a run of its own. */
+export interface SandboxWake {
+  readonly messageId: MessageId;
+  readonly text: string;
+  readonly notification?: OrchestrationV2Notification;
+}
+
+/**
+ * What a sandbox thread still works on once the host's turn ended, as the host thread's roster:
+ * runs the sandbox started itself (a wake, a queued message) and the background work its thread
+ * holds. Holding tasks keep the host's chat Working exactly while the sandbox's own thread is.
+ */
+export class SandboxWork {
+  private readonly runs = new Map<string, OrchestrationV2Run>();
+  // Only background work still going; nothing else decides the roster.
+  private readonly items = new Map<string, OrchestrationV2TurnItem>();
+  private readonly providerThreads = new Map<string, OrchestrationV2ProviderThread>();
+  private readonly wakeMessages = new Set<string>();
+  // Messages nobody typed: wakes, delegated results, scheduled tasks, the sandbox's own continue.
+  private readonly ownPrompts = new Map<string, OrchestrationV2ConversationMessage>();
+  private activeProviderThreadId: string | null = null;
+
+  /** Whether the item can change the roster. */
+  apply(item: OrchestrationV2ThreadStreamItem): boolean {
+    if (item.kind === "snapshot") {
+      const { thread, runs, turnItems, providerThreads, messages } = item.projection;
+      this.activeProviderThreadId = thread.activeProviderThreadId;
+      for (const run of runs) this.runs.set(run.id, run);
+      for (const turnItem of turnItems) this.keepItem(turnItem);
+      for (const providerThread of providerThreads) {
+        this.providerThreads.set(providerThread.id, providerThread);
+      }
+      for (const message of messages) this.noteMessage(message);
+      return true;
+    }
+    if (item.kind !== "event") return false;
+    const event = item.event;
+    switch (event.type) {
+      case "run.created":
+      case "run.updated":
+        this.runs.set(event.payload.id, event.payload);
+        return true;
+      case "turn-item.updated":
+        return this.keepItem(event.payload);
+      case "provider-thread.updated":
+        this.providerThreads.set(event.payload.id, event.payload);
+        return true;
+      case "thread.provider-switched":
+        this.activeProviderThreadId = event.payload.activeProviderThreadId;
+        return true;
+      case "message.updated":
+        return this.noteMessage(event.payload);
+      default:
+        return false;
+    }
+  }
+
+  get tasks(): ReadonlyArray<OrchestrationV2PendingBackgroundTask> {
+    const runs = [...this.runs.values()];
+    const live = runs.filter((run) => !isTerminalRun(run));
+    const latestRun = runs
+      .filter((run) => run.status !== "queued")
+      .reduce<OrchestrationV2Run | null>(
+        (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
+        null,
+      );
+    const held = derivePendingBackgroundWork({
+      latestRun,
+      providerThreads: [...this.providerThreads.values()],
+      turnItems: [...this.items.values()],
+      activeProviderThreadId: this.activeProviderThreadId,
+      hasActiveRun: false,
+      runs,
+    });
+    // As the sandbox's own shell: a monitor's progress wake keeps its thread working between lines.
+    const wakeHeld =
+      latestRun !== null &&
+      latestRun.userMessageId !== null &&
+      this.wakeMessages.has(latestRun.userMessageId) &&
+      monitorHoldsWakeCompletion({
+        latestRunBackgroundWake: true,
+        pendingBackgroundTasks: held,
+      });
+    return [
+      ...live.map((run): OrchestrationV2PendingBackgroundTask => ({
+        taskId: `${SANDBOX_RUN_TASK_PREFIX}${run.id}`,
+        kind: "background_task",
+        description: "Working on the sandbox",
+      })),
+      ...held.map((task) => hostTask(task, wakeHeld && task.kind === "monitor")),
+    ];
+  }
+
+  /** The newest run over when following began; it and every run before it are history. */
+  get settledOrdinal(): number {
+    let newest = 0;
+    for (const run of this.runs.values()) {
+      if (isTerminalRun(run)) newest = Math.max(newest, run.ordinal);
+    }
+    return newest;
+  }
+
+  /** Runs after `ordinal` the sandbox's thread started itself, oldest first, once each began. */
+  wakesAfter(ordinal: number): ReadonlyArray<SandboxWake> {
+    return [...this.runs.values()]
+      .filter(
+        (run) =>
+          run.ordinal > ordinal &&
+          run.status !== "queued" &&
+          // Cancelled while it waited in the queue: it never ran, so there is nothing to show.
+          !(isTerminalRun(run) && run.startedAt === null),
+      )
+      .toSorted((left, right) => left.ordinal - right.ordinal)
+      .flatMap((run) => {
+        const message = this.ownPrompts.get(run.userMessageId);
+        if (message === undefined) return [];
+        return [
+          {
+            messageId: message.id,
+            text: message.text,
+            ...(message.notification === undefined
+              ? {}
+              : { notification: hostNotification(message.notification) }),
+          },
+        ];
+      });
+  }
+
+  private keepItem(item: OrchestrationV2TurnItem): boolean {
+    if (!BACKGROUND_ITEM_TYPES.has(item.type)) return false;
+    if (isOrchestrationV2WorkActive(item.status)) this.items.set(item.id, item);
+    else if (!this.items.delete(item.id)) return false;
+    return true;
+  }
+
+  private noteMessage(message: OrchestrationV2ConversationMessage): boolean {
+    const own =
+      message.role === "user" &&
+      (message.createdBy !== "user" || message.scheduledTaskId !== undefined) &&
+      !this.ownPrompts.has(message.id);
+    if (own) this.ownPrompts.set(message.id, message);
+    return this.noteWakeMessage(message) || own;
+  }
+
+  private noteWakeMessage(message: OrchestrationV2ConversationMessage): boolean {
+    const notification = message.notification;
+    if (
+      message.delegatedCompletion !== undefined ||
+      notification?.outcome !== "updated" ||
+      !WAKE_SOURCE_KINDS.has(notification.source.kind)
+    ) {
+      return false;
+    }
+    this.wakeMessages.add(message.id);
+    return true;
+  }
+}
+
+/**
+ * Where a host turn picks up on the sandbox: a message already there, or a new one to send. An
+ * attach replays what the sandbox already did for the message, unless it is still only queued.
+ */
 export type TurnTarget =
-  | { readonly _tag: "attach"; readonly messageId: MessageId }
+  | { readonly _tag: "attach"; readonly messageId: MessageId; readonly replay: boolean }
   | { readonly _tag: "send"; readonly messageId: MessageId | null }
   | { readonly _tag: "nothing" };
 
@@ -1014,13 +1261,22 @@ export const turnTargetOf = (
     );
     return latest === undefined
       ? { _tag: "nothing" }
-      : { _tag: "attach", messageId: latest.messageId };
+      : { _tag: "attach", messageId: latest.messageId, replay: true };
   }
-  const existing =
-    message === null ? undefined : messages.find((item) => item.messageId === message.messageId);
-  return existing === undefined
-    ? { _tag: "send", messageId: message?.messageId ?? null }
-    : { _tag: "attach", messageId: existing.messageId };
+  if (message === null) return { _tag: "send", messageId: null };
+  if (messages.some((item) => item.messageId === message.messageId)) {
+    return { _tag: "attach", messageId: message.messageId, replay: true };
+  }
+  // A message queued behind a working run has its run before its item.
+  const queued = Option.isSome(before)
+    ? before.value.runs.some((run) => run.userMessageId === message.messageId)
+    : false;
+  if (queued) return { _tag: "attach", messageId: message.messageId, replay: false };
+  // The host's run for one the sandbox began itself (`SANDBOX_BRIDGE_WAKE_METHOD`): its notice
+  // only names that run, so it is never sent back.
+  return message.createdBy === "agent" && message.creationSource === "provider"
+    ? { _tag: "nothing" }
+    : { _tag: "send", messageId: message.messageId };
 };
 /** The MCP credential the host put in a session's `mcpServers`, over stdio or HTTP. */
 export const hostMcpOf = (
@@ -1074,7 +1330,23 @@ interface BridgeSession {
   configOptions: ReadonlyArray<AcpSchema.SessionConfigOption>;
   /** A host thread with no sandbox link: its sandbox was deleted. */
   readonly sandboxGone?: boolean;
+  /** The sandbox the last turn reached, whose connection a failed turn drops. */
+  link?: SandboxBridgeLink | undefined;
+  /** Follows the sandbox thread's own work between turns; see `followSandboxWork`. */
+  watch?: Fiber.Fiber<void>;
+  /** The newest sandbox run a host turn followed: a run it starts itself after that is a wake. */
+  followedOrdinal?: number;
 }
+
+type ThreadSnapshot = Extract<OrchestrationV2ThreadStreamItem, { readonly kind: "snapshot" }>;
+
+/** A turn's subscription to the sandbox thread: its snapshot, then whatever follows it. */
+interface FollowedThread {
+  readonly snapshot: Option.Option<ThreadSnapshot>;
+  readonly rest: Stream.Stream<OrchestrationV2ThreadStreamItem, SandboxBridgeError>;
+}
+
+const linkKey = (link: SandboxBridgeLink) => `${link.httpBaseUrl}\u0000${link.token}`;
 
 const END_OF_TURN = { _tag: "end" } as const;
 
@@ -1087,9 +1359,30 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
 ) {
   const agent = yield* AcpAgent.AcpAgent;
   const random = yield* SecureRandom.SecureRandom;
+  const bridgeScope = yield* Effect.scope;
   const sessions = new Map<string, BridgeSession>();
   let clientName: string | undefined;
   const newId = random.uuidV4().pipe(Effect.orDie);
+
+  // One connection per sandbox address, shared by the session's model read and its turns. A
+  // resumed sandbox has a new address, so its link names a new connection.
+  const linksByKey = new Map<string, SandboxBridgeLink>();
+  const connections = yield* RcMap.make({
+    lookup: (key: string) => {
+      const link = linksByKey.get(key);
+      return link === undefined ? Effect.die(`No sandbox link for ${key}`) : ports.connect(link);
+    },
+    idleTimeToLive: CONNECTION_IDLE_TTL,
+  });
+  // A failed connect is never kept, so the next attempt connects again.
+  const reachSandbox = (link: SandboxBridgeLink) => {
+    const key = linkKey(link);
+    linksByKey.set(key, link);
+    return RcMap.get(connections, key).pipe(
+      Effect.tapError(() => RcMap.invalidate(connections, key)),
+    );
+  };
+  const dropSandbox = (link: SandboxBridgeLink) => RcMap.invalidate(connections, linkKey(link));
 
   const update = (sessionId: string, value: AcpSchema.SessionUpdate) =>
     agent.client.sessionUpdate({ sessionId, update: value });
@@ -1126,7 +1419,7 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     function* (threadId: ThreadId) {
       const link = yield* ports.findLink(threadId);
       if (Option.isNone(link)) return [];
-      const sandbox = yield* ports.connect(link.value);
+      const sandbox = yield* reachSandbox(link.value);
       const thread = yield* sandbox.projection(threadId);
       const selection = Option.match(thread, {
         onNone: () => sandbox.defaultModelSelection,
@@ -1210,6 +1503,9 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       mcp,
       cancel: existing?.cancel ?? null,
       configOptions,
+      ...(existing?.followedOrdinal === undefined
+        ? {}
+        : { followedOrdinal: existing.followedOrdinal }),
     });
     return { configOptions } satisfies AcpSchema.ResumeSessionResponse;
   });
@@ -1230,30 +1526,110 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
   );
 
   yield* agent.handleCloseSession((request) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const session = sessions.get(request.sessionId);
       if (session?.cancel) Deferred.doneUnsafe(session.cancel, Effect.succeed("stop"));
       sessions.delete(request.sessionId);
+      if (session?.watch !== undefined) yield* Fiber.interrupt(session.watch);
       return {};
     }),
   );
 
   yield* agent.handleCancel((notification) =>
     Effect.suspend(() => {
-      const cancel = sessions.get(notification.sessionId)?.cancel;
-      return cancel === undefined || cancel === null
-        ? Effect.void
-        : Deferred.succeed(cancel, cancelReasonOf(notification._meta)).pipe(Effect.asVoid);
+      const session = sessions.get(notification.sessionId);
+      if (session?.cancel != null) {
+        return Deferred.succeed(session.cancel, cancelReasonOf(notification._meta)).pipe(
+          Effect.asVoid,
+        );
+      }
+      // Between turns, the host's Stop is for the work the sandbox's thread still does.
+      const link = session?.link;
+      const threadId = session?.threadId ?? null;
+      if (
+        session?.watch === undefined ||
+        link === undefined ||
+        threadId === null ||
+        cancelReasonOf(notification._meta) === "steer"
+      ) {
+        return Effect.void;
+      }
+      return Effect.gen(function* () {
+        const sandbox = yield* reachSandbox(link);
+        if (!sandbox.threadStop) return;
+        yield* sandbox.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make(yield* newId),
+          threadId,
+        });
+      }).pipe(Effect.scoped, Effect.ignore);
     }),
   );
+
+  /**
+   * Between turns, keeps the host thread's roster to the sandbox thread's work, and asks the host
+   * for a run of its own for each run that thread starts itself, which the next prompt follows.
+   * It follows past a settle, since a task's end and the wake it causes arrive apart.
+   */
+  const followSandboxWork = Effect.fn("SandboxBridge.followSandboxWork")(function* (
+    sessionId: string,
+    session: BridgeSession,
+    threadId: ThreadId,
+    link: SandboxBridgeLink,
+  ) {
+    const report = (tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>) =>
+      agent.client
+        .extNotification(SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD, { sessionId, tasks })
+        .pipe(Effect.ignore);
+    const work = new SandboxWork();
+    // The host's adapter drops a roster it already has, so the first one always goes.
+    let sent: string | null = null;
+    // Each wake is asked for once here; the host keeps one pending, and after its run this
+    // follow starts again and asks for the next.
+    const asked = new Set<string>();
+    yield* Effect.gen(function* () {
+      const sandbox = yield* reachSandbox(link);
+      yield* sandbox.subscribe(threadId).pipe(
+        Stream.runForEach((item) =>
+          Effect.gen(function* () {
+            if (!work.apply(item)) return;
+            session.followedOrdinal ??= work.settledOrdinal;
+            for (const wake of work.wakesAfter(session.followedOrdinal)) {
+              if (asked.has(wake.messageId)) continue;
+              asked.add(wake.messageId);
+              yield* agent.client
+                .extNotification(SANDBOX_BRIDGE_WAKE_METHOD, { sessionId, ...wake })
+                .pipe(Effect.ignore);
+            }
+            const tasks = work.tasks;
+            const key = rosterKey(tasks);
+            if (key !== sent) {
+              sent = key;
+              yield* report(tasks);
+            }
+          }),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.ignore);
+    // Settled, or no longer readable: either way the host stops showing work it cannot follow.
+    if (sent !== "[]") yield* report([]);
+  });
 
   yield* agent.handlePrompt((request) =>
     Effect.gen(function* () {
       const session = yield* sessionOf(request.sessionId);
+      if (session.watch !== undefined) yield* Fiber.interrupt(session.watch);
+      session.link = undefined;
       const cancel = yield* Deferred.make<CancelReason>();
       session.cancel = cancel;
       const stopReason = yield* runTurn(request, session, cancel).pipe(
         Effect.scoped,
+        // The next turn connects again rather than trust a connection that just failed.
+        Effect.tapError((error) =>
+          error._tag === "SandboxBridgeError" && session.link !== undefined
+            ? dropSandbox(session.link)
+            : Effect.void,
+        ),
         Effect.catchTags({
           SandboxBridgeError: (error) =>
             sayOnce(
@@ -1273,6 +1649,14 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         state: "idle",
         stopReason,
       });
+      if (session.threadId !== null && session.link !== undefined) {
+        session.watch = yield* followSandboxWork(
+          request.sessionId,
+          session,
+          session.threadId,
+          session.link,
+        ).pipe(Effect.forkIn(bridgeScope));
+      }
       return {} satisfies AcpSchema.PromptResponse;
     }),
   );
@@ -1298,12 +1682,29 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       Effect.orElseSucceed(() => Option.none<SandboxBridgeResumeFailure>()),
     );
 
+  // Subscribed before the turn sends anything, so its snapshot is the turn's baseline and no
+  // event falls between the two.
+  const followThread = Effect.fn("SandboxBridge.followThread")(function* (
+    sandbox: SandboxSession,
+    threadId: ThreadId,
+  ) {
+    const [first, rest] = yield* Stream.peel(sandbox.subscribe(threadId), Sink.head());
+    return {
+      snapshot: Option.filter(first, (item): item is ThreadSnapshot => item.kind === "snapshot"),
+      rest,
+    } satisfies FollowedThread;
+  });
+
   const connectWithRetry = Effect.fn("SandboxBridge.connect")(function* (
     sessionId: string,
     threadId: ThreadId,
     message: PromptMessage | null,
   ): Effect.fn.Return<
-    Option.Option<{ readonly link: SandboxBridgeLink; readonly sandbox: SandboxSession }>,
+    Option.Option<{
+      readonly link: SandboxBridgeLink;
+      readonly sandbox: SandboxSession;
+      readonly thread: FollowedThread;
+    }>,
     SandboxBridgeError | AcpError.AcpError,
     Scope.Scope
   > {
@@ -1312,31 +1713,40 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         ports.reconnectWindow ?? Duration.seconds(SANDBOX_RESUME_WAIT_SECONDS),
       ),
     );
-    const spacing = ports.reconnectSpacing ?? "5 seconds";
+    // Short, so a turn goes out soon after its sandbox answers; the window is in clock time, so a
+    // slow failing attempt does not stretch it.
+    const spacing = ports.reconnectSpacing ?? "2 seconds";
     const turnStartedAt = yield* Clock.currentTimeMillis;
-    let waited = 0;
     let announced = false;
     let lastLink: SandboxBridgeLink | null = null;
     while (true) {
       const link = yield* ports.findLink(threadId);
       if (Option.isNone(link)) return Option.none();
       lastLink = link.value;
-      const connected = yield* ports.connect(link.value).pipe(Effect.option);
+      // A connection kept from earlier may have dropped since; that one is replaced at once.
+      const reused = yield* RcMap.has(connections, linkKey(link.value));
+      const connected = yield* reachSandbox(link.value).pipe(Effect.option);
       if (Option.isSome(connected)) {
-        return Option.some({ link: link.value, sandbox: connected.value });
+        const read = followThread(connected.value, threadId).pipe(
+          Effect.tapError(() => dropSandbox(link.value)),
+        );
+        const thread = reused ? yield* Effect.option(read) : Option.some(yield* read);
+        if (Option.isNone(thread)) continue;
+        yield* Effect.annotateCurrentSpan({ "sandbox.connection_reused": reused });
+        return Option.some({ link: link.value, sandbox: connected.value, thread: thread.value });
       }
+      if (reused) continue;
       const failure = yield* resumeFailureFor(threadId, message, turnStartedAt);
       if (Option.isSome(failure)) {
         yield* sayOnce(sessionId, "message", resumeFailedMessage(link.value, failure.value.reason));
         return Option.none();
       }
-      if (waited >= window) break;
+      if ((yield* Clock.currentTimeMillis) - turnStartedAt >= window) break;
       if (!announced) {
         announced = true;
         yield* sayOnce(sessionId, "thought", waitingThought(link.value));
       }
       yield* Effect.sleep(spacing);
-      waited += Duration.toMillis(Duration.fromInputUnsafe(spacing));
     }
     yield* sayOnce(sessionId, "message", unreachableMessage(lastLink));
     return Option.none();
@@ -1357,6 +1767,11 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       );
       return "end_turn";
     }
+    const readHost = session.mcp
+      ? ports.readHostThread(session.mcp).pipe(Effect.option)
+      : Effect.succeedNone;
+    // The host thread's modes and pick, read while the sandbox connects.
+    const hostAtStart = yield* Effect.forkScoped(readHost);
     const connected = yield* connectWithRetry(
       sessionId,
       threadId,
@@ -1369,12 +1784,10 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       }
       return "end_turn";
     }
-    const { link, sandbox } = connected.value;
+    const { link, sandbox, thread } = connected.value;
+    session.link = link;
     const sandboxName = link.sandboxId || link.label;
-    const readHost = session.mcp
-      ? ports.readHostThread(session.mcp).pipe(Effect.option)
-      : Effect.succeedNone;
-    const before = yield* sandbox.projection(threadId);
+    const before = Option.map(thread.snapshot, (snapshot) => snapshot.projection);
     const content = promptContent(request.prompt);
     const target = turnTargetOf(before, promptMessageOf(request._meta), content.text);
     if (target._tag === "nothing") return "end_turn";
@@ -1387,14 +1800,22 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       onSome: (projection) => projection.thread.modelSelection,
     });
     if (target._tag === "attach") {
-      tracker = new TurnTracker(target.messageId, before, true);
+      tracker = new TurnTracker(target.messageId, before, target.replay);
     } else {
       if (content.skipped.length > 0) {
         yield* sayOnce(sessionId, "message", skippedAttachmentsMessage(content.skipped));
       }
       if (content.text === "" && content.images.length === 0) return "end_turn";
       const messageId = target.messageId ?? MessageId.make(yield* newId);
-      const host = yield* readHost;
+      const [host, attachments] = yield* Effect.all(
+        [
+          Fiber.join(hostAtStart),
+          content.images.length === 0
+            ? Effect.succeed([])
+            : sandbox.persistAttachments({ threadId, messageId, attachments: content.images }),
+        ],
+        { concurrency: "unbounded" },
+      );
       const runtimeMode = Option.match(host, {
         onNone: (): RuntimeMode => "approval-required",
         onSome: (thread) => thread.runtimeMode,
@@ -1403,14 +1824,6 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         onNone: (): ProviderInteractionMode => "default",
         onSome: (thread) => thread.interactionMode,
       });
-      const attachments =
-        content.images.length === 0
-          ? []
-          : yield* sandbox.persistAttachments({
-              threadId,
-              messageId,
-              attachments: content.images,
-            });
       const commandId = CommandId.make(yield* newId);
       // A model picked on the host (the phone's picker) goes with the message; none keeps the
       // sandbox's, such as one picked on the computer and already sent from there.
@@ -1459,11 +1872,14 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
           const commands = modeSyncCommands(before.value, { runtimeMode, interactionMode }, () =>
             CommandId.make(`${id}:${count++}`),
           );
-          for (const command of commands) {
-            yield* command.type === "runtime-request.respond"
-              ? respondQuietly(command)
-              : sandbox.dispatch(command);
-          }
+          yield* Effect.forEach(
+            commands,
+            (command) =>
+              command.type === "runtime-request.respond"
+                ? respondQuietly(command)
+                : sandbox.dispatch(command),
+            { concurrency: "unbounded", discard: true },
+          );
         }
         yield* dispatchMessage;
       }
@@ -1749,17 +2165,27 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
     // The stream keeps reading while an approval waits on the host, so an answer given on the
     // computer reaches it; actions run one at a time, in order.
     const actions = yield* Queue.unbounded<TurnAction | typeof END_OF_TURN>();
-    yield* Queue.offerAll(actions, target._tag === "attach" ? tracker.replay() : []);
+    // The snapshot owes the host what it holds from the message on, or, for a message just sent,
+    // only the requests already waiting.
+    yield* Queue.offerAll(
+      actions,
+      target._tag === "attach" && target.replay
+        ? tracker.replay()
+        : Option.match(thread.snapshot, {
+            onNone: () => [],
+            onSome: (item) => tracker.apply(item),
+          }),
+    );
+    // A thread the turn made has no subscription yet.
+    const live = Option.isSome(thread.snapshot) ? thread.rest : sandbox.subscribe(threadId);
     const reader = yield* (
       tracker.done
         ? Effect.void
-        : sandbox
-            .subscribe(threadId)
-            .pipe(
-              Stream.runForEachWhile((item) =>
-                Queue.offerAll(actions, tracker.apply(item)).pipe(Effect.map(() => !tracker.done)),
-              ),
-            )
+        : live.pipe(
+            Stream.runForEachWhile((item) =>
+              Queue.offerAll(actions, tracker.apply(item)).pipe(Effect.map(() => !tracker.done)),
+            ),
+          )
     ).pipe(Effect.ensuring(Queue.offer(actions, END_OF_TURN)), Effect.forkScoped);
     const performAll = Effect.gen(function* () {
       while (true) {
@@ -1773,6 +2199,10 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
       Effect.as("followed" as const),
       Effect.raceFirst(Deferred.await(cancel)),
     );
+    const followed = tracker.run;
+    if (followed !== undefined) {
+      session.followedOrdinal = Math.max(session.followedOrdinal ?? 0, followed.ordinal);
+    }
     // What a cancelled turn held back still shows, with the copies it already made.
     if (outcome !== "followed") yield* flushText(undefined, false);
     // A steer's cancel leaves the run and its tasks working; the steer follows as the next prompt.
@@ -1809,4 +2239,4 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
   });
 
   return yield* Effect.never;
-});
+}, Effect.scoped);

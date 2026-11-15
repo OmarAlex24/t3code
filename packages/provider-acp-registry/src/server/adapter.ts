@@ -7,6 +7,7 @@ import {
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,
   extractDevinSubagentUpdate,
+  devinAnswerablePermissionOptions,
 } from "./devinAcp.ts";
 import { extractDroidElicitationForm } from "./droidAcp.ts";
 import { extractOmpElicitationForm } from "./ompAcp.ts";
@@ -17,13 +18,18 @@ import {
   isCopilotLostSessionError,
   makeCopilotSubagentRouting,
 } from "./copilotAcp.ts";
+import { prefersHttpMcpTransport } from "./mcpTransport.ts";
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
+  OrchestrationV2Notification,
+  OrchestrationV2PendingBackgroundTask,
+  SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
   SANDBOX_BRIDGE_CANCEL_META,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MESSAGE_META,
   SANDBOX_BRIDGE_STEER_CANCEL,
+  SANDBOX_BRIDGE_WAKE_METHOD,
   SANDBOX_BRIDGE_WITHDRAW_METHOD,
 } from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
@@ -125,13 +131,42 @@ export function registerMistralVibeAcpExtensions(context: AcpAdapterV2ExtensionC
 }
 
 const SandboxRequestsWithdrawn = Schema.Struct({ sessionId: Schema.String });
+const SandboxBackgroundWork = Schema.Struct({
+  sessionId: Schema.String,
+  tasks: Schema.Array(OrchestrationV2PendingBackgroundTask),
+});
+const SandboxWake = Schema.Struct({
+  sessionId: Schema.String,
+  messageId: Schema.String,
+  text: Schema.String,
+  notification: Schema.optional(OrchestrationV2Notification),
+});
 
-/** The sandbox bridge withdraws a request once it is answered on the sandbox, so both sides close it. */
+/**
+ * The sandbox bridge withdraws a request once it is answered on the sandbox, so both sides close
+ * it, reports what the sandbox's thread still works on after a turn as the thread's roster, and
+ * asks for a run of the host thread's own when the sandbox's thread starts one by itself.
+ */
 function registerSandboxBridgeExtensions(context: AcpAdapterV2ExtensionContext) {
-  return context.runtime.handleExtNotification(
-    SANDBOX_BRIDGE_WITHDRAW_METHOD,
-    SandboxRequestsWithdrawn,
-    (notice) => context.withdrawPendingRequests(notice.sessionId),
+  return Effect.all(
+    [
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_WITHDRAW_METHOD,
+        SandboxRequestsWithdrawn,
+        (notice) => context.withdrawPendingRequests(notice.sessionId),
+      ),
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
+        SandboxBackgroundWork,
+        context.reportBackgroundTasks,
+      ),
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_WAKE_METHOD,
+        SandboxWake,
+        context.requestContinuation,
+      ),
+    ],
+    { discard: true },
   );
 }
 
@@ -240,6 +275,11 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
       }
     : options;
   const copilotRouting = isCopilot ? makeCopilotSubagentRouting() : undefined;
+  // Copilot CLI 1.0.105 rejects stdio MCP servers from the client, and Command Code cannot
+  // start the stdio bridge on Windows (it spawns MCP commands through cmd.exe, which splits
+  // the unquoted "T3 Code (Beta).exe" path). Both take T3's MCP endpoint over ACP HTTP.
+  const useHttpMcpServers =
+    copilotRouting !== undefined || prefersHttpMcpTransport(options.settings);
   const flavor: AcpAdapterV2Flavor = {
     driver: ACP_REGISTRY_PROVIDER,
     // Cancelling a Copilot prompt also kills the background agents it started.
@@ -277,11 +317,14 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     ...(options.instanceId === SANDBOX_BRIDGE_INSTANCE_ID
       ? {
           registerExtensions: registerSandboxBridgeExtensions,
+          reportsBackgroundTasks: true,
           promptMeta: (message) => ({ [SANDBOX_BRIDGE_MESSAGE_META]: { ...message } }),
           // A steer restarts the host's turn; the sandbox's run, and its tasks, keep going.
           steerCancelMeta: { [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL },
           // The bridge lists the sandbox's models only while the sandbox answers, and reads the
-          // pick from the thread when it sends, so a model it does not list now is no failure.
+          // pick from the thread when it sends, so a model it does not list now is no failure,
+          // and a session opened before it answered still takes a model change.
+          modelOptionArrivesLate: true,
           applyModelSelection: ({ runtime, modelSelection }) =>
             runtime.setConfigOption("model", modelSelection.model).pipe(
               Effect.as(modelSelection.model),
@@ -306,22 +349,24 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           normalizeSessionUpdate: normalizeDevinSessionUpdate,
           normalizeToolCall: normalizeDevinToolCall,
           extractSubagentUpdate: extractDevinSubagentUpdate,
+          answerablePermissionOptions: devinAnswerablePermissionOptions,
         }
       : {}),
     ...(copilotRouting === undefined
       ? {}
       : {
           clientCapabilitiesMeta: copilotClientCapabilitiesMeta,
-          // Copilot CLI 1.0.105 rejects stdio MCP servers from the client.
-          mcpOverHttp: true,
           deferMcpTools: true,
           registerExtensions: copilotRouting.registerExtensions,
           normalizeSessionUpdate: copilotRouting.normalizeSessionUpdate,
           extractSubagentUpdate: extractCopilotSubagentUpdate,
           restartRuntimeAfterPromptError: isCopilotLostSessionError,
+          // A finished background agent wakes the root after assistant.idle settled the run.
+          enablePostSettleContinuation: true,
           // session/new reports a built-in default, not the model Copilot runs (github/copilot-cli#5363).
           alwaysSetModel: true,
         }),
+    mcpOverHttp: useHttpMcpServers,
     makeRuntime: options.makeRuntime ?? makeAcpRegistryRuntime(runtimeOptions, catalog),
     ...(runtimeCoordinator === undefined
       ? {}

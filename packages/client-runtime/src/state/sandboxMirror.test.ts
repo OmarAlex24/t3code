@@ -7,6 +7,10 @@ import {
   type SandboxThreadMirror,
   type ServerProvider,
 } from "@t3tools/contracts";
+import {
+  buildExplicitProviderOptionSelectionsFromDescriptors,
+  getProviderOptionDescriptors,
+} from "@t3tools/shared/model";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -99,16 +103,47 @@ describe("sandboxMirrorPickerSource", () => {
     });
   });
 
-  // Picking the host's Claude on a stopped sandbox's mirror was refused by the host.
-  it("never offers the host's own providers while neither has read the sandbox", () => {
-    expect(sandboxMirrorPickerSource(input)).toEqual({
-      providers: [bridge],
-      modelSelection: mirrorSelection,
-      readOnly: true,
-    });
-    expect(
-      sandboxMirrorPickerSource({ ...input, hostMirror: { ...hostMirror, provider: null } }),
-    ).toEqual({ providers: [bridge], modelSelection: mirrorSelection, readOnly: true });
+  // Picking the host's Claude on a stopped sandbox's mirror was refused by the host. The bridge's
+  // own list (its probe's placeholder, or another chat's models) showed "Sandbox agent", and a send
+  // derived the mirror's options against it, dropping the sandbox's effort.
+  it("offers only the mirror's own model and options while neither has read the sandbox", () => {
+    const placeholderBridge = {
+      ...bridge,
+      models: [{ slug: "sandbox", name: "Sandbox agent", isCustom: false, capabilities: null }],
+    } as ServerProvider;
+    const picked = {
+      ...mirrorSelection,
+      options: [
+        { id: "effort", value: "xhigh" },
+        { id: "fastMode", value: true },
+      ],
+    } as ModelSelection;
+    for (const hostMirrorRead of [null, { ...hostMirror, provider: null }]) {
+      const source = sandboxMirrorPickerSource({
+        ...input,
+        hostMirror: hostMirrorRead,
+        mirrorSelection: picked,
+        hostProviders: [sandboxClaude, placeholderBridge, hostCodex],
+      });
+      expect(source.readOnly).toBe(true);
+      expect(source.modelSelection).toEqual(picked);
+      expect(source.providers.map((provider) => provider.instanceId)).toEqual(["sandboxes"]);
+      const models = source.providers[0]?.models ?? [];
+      expect(models.map(({ slug, name }) => ({ slug, name }))).toEqual([
+        { slug: "claude-opus-5-5", name: "Claude Opus 5.5" },
+      ]);
+      const caps = models[0]?.capabilities ?? {};
+      // What the composer sends: the options its descriptors keep.
+      expect(
+        buildExplicitProviderOptionSelectionsFromDescriptors(
+          getProviderOptionDescriptors({ caps, selections: picked.options }),
+          picked.options,
+        ),
+      ).toEqual(picked.options);
+    }
+    expect(sandboxMirrorPickerSource({ ...input, hostProviders: [hostCodex] }).providers).toEqual(
+      [],
+    );
   });
 });
 

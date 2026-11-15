@@ -24,17 +24,21 @@ import {
   bridgeResumeFailureSecretName,
   SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
+  SANDBOX_BRIDGE_TRACE_FILE_ENV,
   SandboxBridgeLinkJson,
   SandboxBridgeResumeFailureJson,
 } from "@t3tools/sandbox-bridge/link";
+import { makeLocalFileTracer } from "@t3tools/shared/observability";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as RcMap from "effect/RcMap";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Tracer from "effect/Tracer";
 import { FetchHttpClient } from "effect/http";
 import * as AcpAgent from "effect-acp/agent";
 
@@ -65,6 +69,8 @@ const decodeSecretResult = Schema.decodeUnknownEffect(
 const SECRET_CARD_TIMEOUT_MS = 280_000;
 const decodeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
 const decodeResumeFailure = Schema.decodeEffect(SandboxBridgeResumeFailureJson);
+// Opening an MCP session costs three requests and ending it a fourth; reads come every turn.
+const HOST_SESSION_IDLE_TTL = "10 minutes";
 
 const program = Effect.fn("SandboxBridgeCli.program")(function* (
   attachmentsDir: string | undefined,
@@ -72,6 +78,22 @@ const program = Effect.fn("SandboxBridgeCli.program")(function* (
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const hostMcpByKey = new Map<string, HostMcp>();
+  const hostSessions = yield* RcMap.make({
+    lookup: (key: string) => {
+      const mcp = hostMcpByKey.get(key);
+      return mcp === undefined
+        ? Effect.die("No host MCP credential for this session.")
+        : mcpToolSession({ ...mcp, clientName: "t3-sandbox-bridge" });
+    },
+    idleTimeToLive: HOST_SESSION_IDLE_TTL,
+  });
+  const callHostOnce = (key: string) =>
+    RcMap.get(hostSessions, key).pipe(
+      Effect.flatMap((session) => session.call("t3_thread_configure", {})),
+      Effect.tapError(() => RcMap.invalidate(hostSessions, key)),
+      Effect.scoped,
+    );
   // A file request hands back an owner-only file; the bridge takes the value and removes it.
   const takeSecretFile = (file: string) =>
     fileSystem.readFileString(file).pipe(
@@ -80,16 +102,19 @@ const program = Effect.fn("SandboxBridgeCli.program")(function* (
     );
   const ports: SandboxBridgePorts = {
     // The host's thread-scoped MCP credential answers for exactly the thread this process serves.
-    readHostThread: (mcp) =>
-      mcpToolSession({ ...mcp, clientName: "t3-sandbox-bridge" }).pipe(
-        Effect.flatMap((session) => session.call("t3_thread_configure", {})),
-        Effect.scoped,
+    // A session the host ended (a restart, its expiry) gets one retry on a new one.
+    readHostThread: (mcp) => {
+      const key = `${mcp.endpoint}\u0000${mcp.authorization}`;
+      hostMcpByKey.set(key, mcp);
+      return callHostOnce(key).pipe(
+        Effect.catch(() => callHostOnce(key)),
         Effect.flatMap(decodeHostThread),
         Effect.map((result) => result.structuredContent),
         Effect.mapError(
           (cause) => new SandboxBridgeError({ message: "Could not read the host thread.", cause }),
         ),
-      ),
+      );
+    },
     findLink: (threadId) =>
       secrets.get(bridgeLinkSecretName(threadId)).pipe(
         Effect.flatMap(
@@ -179,7 +204,25 @@ const program = Effect.fn("SandboxBridgeCli.program")(function* (
         }),
   };
   return yield* runSandboxBridge(ports);
-});
+}, Effect.scoped);
+
+/**
+ * The bridge's spans (a turn, its connect, each sandbox RPC and host read) in the server's trace
+ * format, in the file the host names; every bridge process appends to it. A file that cannot be
+ * opened leaves the bridge untraced rather than stopped.
+ */
+const layerTracer = (filePath: string | undefined) =>
+  filePath === undefined
+    ? Layer.empty
+    : Layer.effect(
+        Tracer.Tracer,
+        makeLocalFileTracer({
+          filePath,
+          maxBytes: 4 * 1024 * 1024,
+          maxFiles: 2,
+          batchWindowMs: 200,
+        }).pipe(Effect.catchCause(() => Effect.succeed(Tracer.nativeTracer))),
+      );
 
 export async function runSandboxBridgeCli(): Promise<void> {
   const secretsDir = process.env[SANDBOX_BRIDGE_SECRETS_DIR_ENV];
@@ -199,7 +242,13 @@ export async function runSandboxBridgeCli(): Promise<void> {
   );
   // The agent answers stdin as soon as it is built, so everything the handlers use is built first.
   const services = AcpAgent.layerStdio().pipe(
-    Layer.provideMerge(Layer.mergeAll(secrets, SecureRandom.layerWebCrypto)),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        secrets,
+        SecureRandom.layerWebCrypto,
+        layerTracer(process.env[SANDBOX_BRIDGE_TRACE_FILE_ENV] || undefined),
+      ),
+    ),
     Layer.provideMerge(NodeServices.layer),
   );
   const attachmentsDir = process.env[SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV] || undefined;

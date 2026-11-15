@@ -174,8 +174,8 @@ export function childThreadInputsTitle(
 
 const sameWireThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
 
-// While a run streams, the server bumps the shell's timestamps, item counts, latest
-// message and latest action several times a second. Only the zero crossing of the counts
+// While a run streams, the server bumps the shell's timestamps, item counts and
+// latest message several times a second. Only the zero crossing of the counts
 // says anything (whether the thread has started). Once the run stops every
 // field counts again, so snooze wakes and failure times read the current value.
 function sameApartFromStreaming(
@@ -201,8 +201,6 @@ function sameApartFromStreaming(
         itemCount: after.itemCount,
         visibleItemCount: after.visibleItemCount,
         latestVisibleMessage: after.latestVisibleMessage,
-        // Optional on the wire: an explicit undefined would not equal an absent key.
-        ...("latestAction" in after ? { latestAction: after.latestAction } : {}),
       },
       after,
     )
@@ -660,17 +658,32 @@ export function createEnvironmentThreadShellAtoms(input: {
     return next;
   }).pipe(Atom.withLabel("environment-visible-thread-shell-list"));
 
+  // Complete like threadShellsAtom, for code that asks whether a thread exists.
+  let previousQuietCompleteThreadShells: ReadonlyArray<EnvironmentThreadShell> = [];
+  const quietCompleteThreadShellsAtom = Atom.make((get) => {
+    const next: EnvironmentThreadShell[] = [];
+    for (const ref of get(threadRefsAtom)) {
+      const shell = get(quietThreadShellAtomFamily(threadKey(ref)));
+      if (shell !== null) next.push(shell);
+    }
+    if (arrayElementsEqual(previousQuietCompleteThreadShells, next)) {
+      return previousQuietCompleteThreadShells;
+    }
+    previousQuietCompleteThreadShells = next;
+    return next;
+  }).pipe(Atom.withLabel("environment-quiet-complete-thread-shell-list"));
+
   // Lists that arrange threads read this, so a running thread's streaming
   // ticks reach only what reads its live shell.
   let previousQuietThreadShells: ReadonlyArray<EnvironmentThreadShell> = [];
   const quietThreadShellsAtom = Atom.make((get) => {
-    const next: EnvironmentThreadShell[] = [];
+    const all = get(quietCompleteThreadShellsAtom);
     const hidden = get(hiddenThreadKeysAtom);
-    for (const ref of get(threadRefsAtom)) {
-      if (hidden.has(threadKey(ref))) continue;
-      const shell = get(quietThreadShellAtomFamily(threadKey(ref)));
-      if (shell !== null) next.push(shell);
-    }
+    if (hidden.size === 0) return all;
+    const next = all.filter(
+      (thread) =>
+        !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id })),
+    );
     if (arrayElementsEqual(previousQuietThreadShells, next)) return previousQuietThreadShells;
     previousQuietThreadShells = next;
     return next;
@@ -738,6 +751,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     hiddenThreadKeysAtom,
     anyEnvironmentHidingAtom,
     quietThreadShellsAtom,
+    quietCompleteThreadShellsAtom,
     navigationThreadShellsAtom,
     delegatedUnderParentAtom,
     pendingSubagentRequestsAtom,

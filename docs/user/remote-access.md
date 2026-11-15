@@ -134,9 +134,10 @@ can keep the conversation going from the phone.
 
 The small project is an empty folder, not the repository, so it offers no git actions, scripts,
 files, or terminal. The repository's files, diffs, terminals and previews are on the sandbox. This
-computer usually connects to it on its own; when it is not connected, **Connect to the sandbox**
-(in the side panel, the thread details, or the sandbox menu in the thread's header) connects it,
-resuming a stopped sandbox first, and the chat then shows the sandbox's own thread. The phone does
+computer connects to a running sandbox on its own when you open its chat; otherwise **Connect to
+the sandbox** (in the side panel, the thread details, or the sandbox menu in the thread's header)
+connects it, resuming a stopped sandbox first, and the chat then shows the sandbox's own thread. If
+a connection fails, the reason shows under that button. The phone does
 not connect to sandboxes, so there these are available only from a computer. **Settings →
 Connections → Sandboxes** has **Connect** and **Disconnect** for each chat's sandbox; after
 **Disconnect**, this device stays disconnected until you connect again, and the chat stays here.
@@ -149,8 +150,9 @@ Connections → Sandboxes** has **Connect** and **Disconnect** for each chat's s
   behind it. Once the sandbox is running and connected, the chat shows the sandbox's own thread
   again.
 - Attachments and images are not forwarded yet.
-- The thread under **Sandboxes** shows only what was sent through it; messages sent to the sandbox
-  directly appear on the sandbox's own thread.
+- The thread under **Sandboxes** shows what was sent through it, and the replies the sandbox's
+  agent gives on its own, such as when a background task or subagent finishes; messages sent to
+  the sandbox directly appear on the sandbox's own thread.
 - The **Sandboxes** provider shows only in projects that hold a sandbox thread.
 
 ### Settle or delete a sandbox chat
@@ -230,9 +232,14 @@ A thread's Boat sandbox has no running limit while its agents work. It stops on 
 have been idle for the config's **Stop when idle** time (30 minutes by default).
 
 - Every 5 minutes the sandbox checks whether any thread on it, subagents included, is queued,
-  starting or running, or has had any activity since the last check, such as a short turn or your
-  answer to a question. If so, it moves Boat's auto-stop to the idle time plus 5 minutes from now.
-  A thread left waiting on you, for an approval or an answer, counts as idle.
+  starting or running, is waiting on background work it will pick up again (a subagent, or a
+  command or monitor it waits on), or has had any activity since the last check, such as a short
+  turn or your answer to a question. If so, it moves Boat's auto-stop to the idle time plus 5
+  minutes from now. A thread left waiting on you, for an approval or an answer, counts as idle.
+- Background commands no agent waits on, such as a dev server, keep the sandbox on too, but only
+  for 8 hours after the sandbox last started.
+  The check log in `~/.t3/userdata/sandbox-keepalive/log` shows each decision and how many threads
+  had background work.
 - The sandbox does this itself, so it keeps working while this machine sleeps or the app is
   closed. With no work, nothing moves the auto-stop, and Boat stops the sandbox when it passes.
   Its disk stays, and sending a message resumes it.
@@ -445,6 +452,31 @@ connection. Pull request diffs and provider settings keep working after the
 previous credential expires. A failed renewal affects that request; it does not
 disconnect an otherwise healthy conversation.
 
+### Approve new devices
+
+By default, any device signed in to your T3 Connect account can open a linked
+machine. To require approval instead, turn on **Require approval for new
+devices** with the T3 Connect settings in **Settings → Sharing & access** on the
+host, or when you first set up T3 Connect. Then someone who takes over your T3
+Connect account cannot reach the machine from a new device without your
+approval. Review the devices that are already approved, described below.
+
+A new device waits and shows a code such as `K7QM-2XFD`. Approve it from a
+device that is already connected, using the prompt or **Settings → Sharing &
+access**. Check that the code matches the one on the waiting device. On a
+headless host, run `t3 auth connect-device list` and then
+`t3 auth connect-device approve K7QM-2XFD`. A request expires after 10 minutes,
+and the device asks again when it retries. Deny keeps that device out until its
+request expires.
+
+Each device is approved once. Revoke it from **T3 Connect devices** in the same
+settings page, or with `t3 auth connect-device revoke <code>`. With approval on,
+it has to ask again. With approval off, it can connect again on its own, so
+revoking in the app offers to turn approval on first. Devices that connected through T3 Connect while approval was off stay
+approved and appear in that list for you to review. A device that has not
+connected since you updated T3 Code asks for approval like a new one. Older apps
+cannot show the code, so update them before you turn approval on.
+
 ### Scripts and agents
 
 `t3 up` asks nothing when you name a choice: `--connect`, `--lan`, or their
@@ -578,6 +610,13 @@ Mobile keeps its manual environment selection.
 Join both devices to the same tailnet. In the desktop app, enable **Tailscale
 HTTPS** in **Settings → Sharing & access**. Turn it off there to remove that route.
 
+Your tailnet needs MagicDNS and HTTPS certificates enabled; see
+[Tailscale's HTTPS setup](https://tailscale.com/docs/how-to/set-up-https-certificates).
+On Linux, T3 Code also needs permission to manage Tailscale; see
+[operator permission](https://tailscale.com/docs/reference/troubleshooting/linux/linux-operator-permission)
+for non-root users. If any of these is missing, T3 Code still starts but can't
+add the HTTPS route.
+
 To start a command-line server with Tailscale HTTPS:
 
 ```bash
@@ -698,8 +737,10 @@ The server shows the exact line for how you started it, and keeps your `PATH`
 when you started it with `npx` and Node is installed only for your user. Where `t3` is not on your `PATH`, such as with only the
 desktop app installed, it names the full path of the app's own `t3` instead. It allows Chrome's sandbox with an AppArmor profile and installs
 any missing libraries and system fonts with apt; pages that load without text
-can mean the host has no fonts. It is safe to run again. Without `sudo`, it only
-reports what it would change.
+can mean the host has no fonts. It is safe to run again, and each run reloads
+the AppArmor profile: run it again if the browser reports a blocked sandbox on a
+host restored from an image or snapshot, where the profile can be on disk
+without being loaded. Without `sudo`, it only reports what it would change.
 
 The browser runs in Chrome's sandbox by default. Chrome cannot start that sandbox
 as root. If your T3 server runs as root, run it as a nonroot user to keep

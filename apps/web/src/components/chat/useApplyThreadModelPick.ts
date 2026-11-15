@@ -65,6 +65,12 @@ export function useApplyThreadModelPick() {
             input: { threadId: partner.ref.threadId, modelSelection: partner.modelSelection },
           }),
     ]);
+    if (partnerResult?._tag === "Failure" && !isAtomCommandInterrupted(partnerResult)) {
+      console.warn(
+        "The sandbox chat's other thread did not take the model pick; the next message carries it.",
+        squashAtomCommandFailure(partnerResult),
+      );
+    }
     // Until both threads have it, the composer keeps showing the pick and sends it.
     if (result._tag === "Success" && partnerResult?._tag !== "Failure") {
       useComposerDraftStore.getState().releaseModelSelection(target, pick);

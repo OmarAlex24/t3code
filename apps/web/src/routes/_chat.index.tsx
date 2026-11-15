@@ -20,6 +20,7 @@ import {
   useVisibleThreadShells,
 } from "../state/entities";
 import { useEnvironments } from "../state/environments";
+import { useSandboxEnvironmentIds } from "../state/sandboxes";
 import { isSandboxPlaceholderProject } from "../sidebarProjectGrouping";
 
 function ChatIndexRouteView() {
@@ -39,6 +40,7 @@ function IndexDraftLanding() {
   const threads = useVisibleThreadShells();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const handleNewThread = useNewThreadHandler();
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
   const router = useRouter();
   // Read at effect time; this page can stay mounted while the router is already navigating away.
   const isStillOnIndex = useEffectEvent(() => router.state.location.pathname === "/");
@@ -48,7 +50,10 @@ function IndexDraftLanding() {
   const mostRecentProject =
     sortScopedProjectsForSidebar(
       projects.filter(
-        (project) => project.archivedAt == null && !isSandboxPlaceholderProject(project),
+        (project) =>
+          project.archivedAt == null &&
+          !isSandboxPlaceholderProject(project) &&
+          !sandboxEnvironmentIds.has(project.environmentId),
       ),
       threads,
       "updated_at",

@@ -20,8 +20,10 @@ import {
   bridgeResumeFailureSecretName,
   SANDBOX_BRIDGE_ATTACHMENTS_DIR_ENV,
   SANDBOX_BRIDGE_SECRETS_DIR_ENV,
+  SANDBOX_BRIDGE_TRACE_FILE_ENV,
   SandboxBridgeResumeFailureJson,
 } from "@t3tools/sandbox-bridge/link";
+import type { SandboxSession } from "@t3tools/sandbox-bridge";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -147,6 +149,8 @@ interface Harness {
   hostRuns: Array<HostRun>;
   /** Set to make the next resumes fail with this reason. */
   resumeFails?: string | undefined;
+  /** Sandboxes the provider reports stopped, whatever their records say. */
+  readonly providerStopped: Set<string>;
   /** The name of every secret the bridge writes, once written. */
   readonly secretWrites: Queue.Queue<string>;
   /** Secrets the store holds before the bridge starts, as after a restart. */
@@ -185,6 +189,7 @@ const makeHarness = Effect.gen(function* () {
     projects: new Map(),
     events: yield* Queue.unbounded<OrchestrationV2DomainEvent>(),
     resumes: yield* Queue.unbounded<string>(),
+    providerStopped: new Set(),
     modeChanges: yield* Queue.unbounded<{
       readonly threadId: ThreadId;
       readonly runtimeMode: string;
@@ -219,6 +224,13 @@ const makeHarness = Effect.gen(function* () {
         return record({ hostProjectId: input.hostProjectId });
       }),
     removed: Stream.fromQueue(harness.removals),
+    refreshState: (onInstance) =>
+      Effect.sync(() =>
+        harness.providerStopped.has(onInstance)
+          ? "stopped"
+          : (harness.records.find((candidate) => candidate.instanceId === onInstance)?.state ??
+            "deleted"),
+      ),
     resume: (input) =>
       Effect.suspend(() => {
         harness.resumed.push(input.instanceId);
@@ -441,6 +453,11 @@ describe("SandboxBridge", () => {
           value: config.attachmentsDir,
           sensitive: false,
         });
+        expect(seeded?.environment).toContainEqual({
+          name: SANDBOX_BRIDGE_TRACE_FILE_ENV,
+          value: `${config.logsDir}/sandbox-bridge.trace.ndjson`,
+          sensitive: false,
+        });
 
         // A user's own changes survive a restart; a stale command is rewritten under them.
         yield* settings.updateProviderInstance({
@@ -657,6 +674,33 @@ describe("SandboxBridge", () => {
         yield* Queue.take(harness.resumes);
         yield* Queue.take(harness.resumes);
         expect(harness.resumed).toEqual(["sandbox-1", "sandbox-2"]);
+      }),
+    ),
+  );
+
+  it.effect("resumes a sandbox the provider stopped before the sweep told its record", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const autoStoppedThread = ThreadId.make("thread-auto-stopped");
+        harness.records.push(
+          record(),
+          record({ instanceId: "sandbox-2", threadId: autoStoppedThread }),
+        );
+        harness.providerStopped.add("sandbox-2");
+        yield* SandboxBridge.SandboxBridge;
+        const run = (onThread: ThreadId, id: string) =>
+          ({
+            type: "run.created",
+            threadId: onThread,
+            payload: { id, threadId: onThread, providerInstanceId: instanceId, status: "starting" },
+          }) as unknown as OrchestrationV2DomainEvent;
+        // Events are handled in order, so the second one's resume marks the end of the first.
+        yield* Queue.offerAll(harness.events, [
+          run(threadId, "run-1"),
+          run(autoStoppedThread, "run-2"),
+        ]);
+        yield* Queue.take(harness.resumes);
+        expect(harness.resumed).toEqual(["sandbox-2"]);
       }),
     ),
   );
@@ -958,5 +1002,70 @@ describe("SandboxBridge", () => {
         yield* nextDispatch(harness, "prepared-run.release");
       }),
     ),
+  );
+});
+
+describe("SandboxThreadRemote", () => {
+  it.effect("reaches the sandbox for new modes, or while a move waits on its run", () =>
+    Effect.gen(function* () {
+      const link = {
+        threadId,
+        instanceId: "sandbox-1",
+        sandboxId: "bx_1",
+        label: "hello on Boat",
+        httpBaseUrl: "https://sandbox.example",
+        sandboxProjectId: "project-remote",
+        token: "bearer",
+      };
+      const sandbox = { runtimeMode: "approval-required", runStatus: "running" };
+      const dispatched: Array<string> = [];
+      let connects = 0;
+      const connect = () =>
+        Effect.sync(() => {
+          connects++;
+          return {
+            projection: () =>
+              Effect.succeedSome({
+                thread: {
+                  id: threadId,
+                  runtimeMode: sandbox.runtimeMode,
+                  interactionMode: "default",
+                },
+                runs: [{ id: "run-1", status: sandbox.runStatus }],
+                runtimeRequests: [],
+              }),
+            dispatch: (command: { readonly type: string }) =>
+              Effect.sync(() => void dispatched.push(command.type)),
+          } as unknown as SandboxSession;
+        });
+      const remote = yield* SandboxBridge.SandboxThreadRemote.pipe(
+        Effect.provide(
+          SandboxBridge.layerThreadRemoteWith(connect).pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.succeed(ServerSecretStore.ServerSecretStore, {
+                  get: () => Effect.succeedSome(new TextEncoder().encode(JSON.stringify(link))),
+                } as unknown as ServerSecretStore.ServerSecretStore["Service"]),
+                NodeCrypto.layer,
+              ),
+            ),
+          ),
+        ),
+      );
+      const fullAccess = { runtimeMode: "full-access", interactionMode: "default" } as const;
+      // The sandbox's run is working, so the move waits; the end of a host run checks again.
+      yield* remote.setModes(threadId, fullAccess);
+      yield* remote.setModes(threadId, fullAccess);
+      expect({ connects, dispatched }).toEqual({ connects: 2, dispatched: [] });
+      sandbox.runStatus = "completed";
+      yield* remote.setModes(threadId, fullAccess);
+      expect({ connects, dispatched }).toEqual({
+        connects: 3,
+        dispatched: ["thread.runtime-mode.set"],
+      });
+      // Nothing waits any more, and the modes are the ones it was put in.
+      yield* remote.setModes(threadId, fullAccess);
+      expect(connects).toBe(3);
+    }),
   );
 });
