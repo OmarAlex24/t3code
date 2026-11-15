@@ -205,7 +205,6 @@ it.layer(layerTest)("a delegated task in a linked environment", (it) => {
         parentRunId: parent.runId,
         parentNodeId: parent.rootNodeId,
         task: "Run the suite there.",
-        group: "Backend",
         driver: ProviderDriverKind.make("remote"),
         modelSelection,
         remoteChild,
@@ -220,7 +219,6 @@ it.layer(layerTest)("a delegated task in a linked environment", (it) => {
       assert.deepEqual(task?.remoteChild, remoteChild);
       assert.deepEqual(task?.modelSelection, modelSelection);
       assert.equal(task?.status, "running");
-      assert.equal(task?.group, "Backend");
       const item = projection.turnItems.find((candidate) => candidate.type === "subagent");
       assert.deepEqual(item?.type === "subagent" ? item.remoteChild : undefined, remoteChild);
       // No thread was created here for the child.
