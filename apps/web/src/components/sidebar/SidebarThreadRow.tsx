@@ -337,7 +337,10 @@ function SidebarThreadTooltip({
               {sandboxPhase === "starting" ? (
                 <>
                   {" · "}
-                  <WorkingDuration startedAt={sandbox.resumingSince} />
+                  <WorkingDuration
+                    environmentId={thread.environmentId}
+                    startedAt={sandbox.resumingSince}
+                  />
                 </>
               ) : null}
             </div>
@@ -1627,7 +1630,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           {topStatus.label}
                           {sandboxPhase === "starting" ? (
                             <span aria-hidden>
-                              <WorkingDuration startedAt={props.sandbox?.resumingSince ?? null} />
+                              <WorkingDuration
+                                environmentId={thread.environmentId}
+                                startedAt={props.sandbox?.resumingSince ?? null}
+                              />
                             </span>
                           ) : status === "preparing" || status === "working" ? (
                             <span aria-hidden>
@@ -1750,7 +1756,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
   projectDisplayName: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
-  sandbox: SandboxRowState | null;
+  sandbox?: SandboxRowState | null;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
   isHighlighted: boolean;
   isRouteActive: boolean;
@@ -1929,7 +1935,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
           projectDisplayName={props.projectDisplayName}
           environmentLabel={props.environmentLabel}
           environmentMachine={props.environmentMachine}
-          sandbox={props.sandbox}
+          sandbox={props.sandbox ?? null}
           providerEntry={providerEntry}
           providerEntryByInstanceId={props.providerEntryByInstanceId}
           showInstanceBadge={showInstanceBadge}
