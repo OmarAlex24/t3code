@@ -41,7 +41,6 @@ import {
   OrchestrationV2DelegatedFrom,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
-  SubagentGroup,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
@@ -185,9 +184,6 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   target: Schema.optional(OrchestratorMcpDelegateTaskTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
-  group: Schema.optional(SubagentGroup).annotate({
-    description: "Parallel work stream, e.g. 'UI'.",
-  }),
   isolation: Schema.optional(
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
