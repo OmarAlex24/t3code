@@ -215,6 +215,7 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import {
   useSandboxChatAliases,
   useSandboxMirrorModelSource,
+  useSandboxEnvironmentIds,
   useSandboxlessBridgeThread,
   useThreadSandbox,
 } from "../state/sandboxes";
@@ -1056,6 +1057,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeThreadRef = useActiveThreadRef(activeThread);
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const activeSandbox = useThreadSandbox(activeThreadRef);
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
   // The host thread the sandbox bridge drives: its own server stays up, and the host resumes the
   // sandbox when a turn starts, so it sends like any other thread.
   const activeSandboxOnHost =
@@ -3391,6 +3393,7 @@ export default function ChatView(props: ChatViewProps) {
     waitingDraftId: workLocallyResendDraftId,
     draftId,
     isLocalDraftThread,
+    onSandbox: sandboxEnvironmentIds.has(environmentId),
     canOperateThread,
     isSendBusy,
     isRevertingCheckpoint,

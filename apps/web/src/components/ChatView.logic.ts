@@ -1600,15 +1600,15 @@ export function isThreadEnvironmentLocked(input: {
 }
 
 /**
- * Whether a message held back while its draft changed machines (worked locally, or handed off to
- * a sandbox) can be sent now. A send that fails a gate here is dropped, not retried, so this waits
- * for every condition the send itself checks, including the operate scope on the draft's machine:
- * a sandbox paired a moment ago can report its project before its session has loaded.
+ * Whether a message held back while its draft switched to working locally can be sent now. A send
+ * that fails a gate here is dropped, not retried. A draft on a sandbox also waits for the operate
+ * scope: a sandbox paired a moment ago can report its project before its session has loaded.
  */
 export function waitingMessageCanResend(input: {
   readonly waitingDraftId: string | null;
   readonly draftId: string | null;
   readonly isLocalDraftThread: boolean;
+  readonly onSandbox: boolean;
   readonly canOperateThread: boolean;
   readonly isSendBusy: boolean;
   readonly isRevertingCheckpoint: boolean;
@@ -1623,7 +1623,7 @@ export function waitingMessageCanResend(input: {
     input.waitingDraftId !== null &&
     input.waitingDraftId === input.draftId &&
     input.isLocalDraftThread &&
-    input.canOperateThread &&
+    (!input.onSandbox || input.canOperateThread) &&
     !input.isSendBusy &&
     !input.isRevertingCheckpoint &&
     !input.threadDetailLoading &&
