@@ -5,12 +5,14 @@ import {
   ProviderInstanceId,
   type RunId,
   SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_MODEL,
   type SandboxRecord,
   type SandboxThreadMirror,
   type ServerProvider,
   type ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
+import { formatModelSlugName } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -68,10 +70,43 @@ export const sandboxMirrorModelSourceOf = (mirror: SandboxThreadMirror | null) =
 export const SANDBOX_MIRROR_MODELS_PENDING_REASON =
   "The sandbox's models show once it has been reached.";
 
+// The sandbox's own labels are unknown here; these read as the providers name their efforts.
+const CHOICE_LABELS: Readonly<Record<string, string>> = { xhigh: "Extra High" };
+const labelOf = (id: string) =>
+  CHOICE_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1).replace(/(?=[A-Z])/g, " ");
+
+/**
+ * The mirror's own pick as the only model its bridge offers, each option a one-choice control at
+ * its value, so the picker names the sandbox's model and a send keeps the sandbox's options.
+ */
+const mirrorPickModel = (selection: ModelSelection): ServerProvider["models"][number] => ({
+  slug: selection.model,
+  name:
+    selection.model === SANDBOX_BRIDGE_MODEL
+      ? "Sandbox default"
+      : formatModelSlugName(selection.model),
+  isCustom: false,
+  capabilities: {
+    optionDescriptors: (selection.options ?? []).map(({ id, value }) =>
+      typeof value === "boolean"
+        ? { id, label: labelOf(id), type: "boolean" as const, currentValue: value }
+        : {
+            id,
+            label: labelOf(id),
+            type: "select" as const,
+            options: [{ id: value, label: labelOf(value), isDefault: true }],
+            currentValue: value,
+            ...(id === "effort" ? { role: "reasoning" as const } : {}),
+          },
+    ),
+  },
+});
+
 /**
  * Every picker on a sandbox chat's mirror: the sandbox's own thread where this client is paired
- * with it, else what the host last read of it. With neither, the mirror's pick on the bridge alone,
- * read-only: the bridge's shared list is another chat's, and the host refuses any other provider.
+ * with it, else what the host last read of it. With neither, the mirror's own pick alone,
+ * read-only: the bridge's shared list is its placeholder or another chat's, and the host refuses
+ * any other provider.
  */
 export const sandboxMirrorPickerSource = (input: {
   readonly paired: ReturnType<typeof sandboxMirrorModelSource>;
@@ -87,8 +122,10 @@ export const sandboxMirrorPickerSource = (input: {
   return source !== null
     ? { ...source, readOnly: false }
     : {
-        providers: input.hostProviders.filter(
-          (provider) => provider.instanceId === bridgeInstanceId,
+        providers: input.hostProviders.flatMap((provider) =>
+          provider.instanceId === bridgeInstanceId
+            ? [{ ...provider, models: [mirrorPickModel(input.mirrorSelection)] }]
+            : [],
         ),
         modelSelection: input.mirrorSelection,
         readOnly: true,
