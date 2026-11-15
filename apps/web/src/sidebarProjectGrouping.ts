@@ -217,7 +217,7 @@ export function buildSidebarProjectSnapshots(input: {
       displayName:
         representative === grouped
           ? group.label
-          : deriveProjectGroupLabel({ representative, members }),
+          : deriveProjectGroupLabel({ groupKey: group.key, representative, members }),
       groupedProjectCount: members.length,
       environmentPresence:
         hasLocal && hasRemote ? "mixed" : hasRemote ? "remote-only" : "local-only",

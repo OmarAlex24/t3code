@@ -8,7 +8,12 @@ import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environmen
 import { useSandboxFollowers } from "../../state/sandboxes";
 import { getProjectFileQueryAtom, optimisticFileAtom } from "../files/projectFilesQueryState";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
-import { resolveScopedSettingsTargets, selectScopedSettingsEnvironments } from "./scopedSettings";
+import {
+  applyPendingScopedWrites,
+  pendingScopedWritesAtom,
+  resolveScopedSettingsTargets,
+  selectScopedSettingsEnvironments,
+} from "./scopedSettings";
 import {
   normalizeSandboxScopeSearch,
   resolveSettingsScope,
@@ -89,12 +94,17 @@ function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironm
     : normalized;
   const scope = resolveSettingsScope(search, groups, availableEnvironments, sandboxes);
   const projectFiles = useMemberProjectFiles(scope);
+  const pendingWrites = useAtomValue(pendingScopedWritesAtom);
   const selected = selectScopedSettingsEnvironments(
     scope,
     availableEnvironments,
     primaryEnvironmentId,
   );
-  const targets = resolveScopedSettingsTargets(scope, selected.connectedEnvironments, projectFiles);
+  const targets = resolveScopedSettingsTargets(
+    scope,
+    applyPendingScopedWrites(selected.connectedEnvironments, pendingWrites),
+    projectFiles,
+  );
   const target =
     targets.find((candidate) => candidate.environmentId === selected.environment?.environmentId) ??
     targets[0] ??
