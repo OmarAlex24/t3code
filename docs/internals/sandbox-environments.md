@@ -430,14 +430,25 @@ without pairing with the sandbox.
   in any chat, also stops the thread's delegated tasks), else `run.interrupt`.
 - **Work after the turn.** A host turn ends with the sandbox run carrying its message, but the
   sandbox thread can keep working: subagents, background tasks, runs it wakes itself for. So the
-  bridge keeps following it between turns and sends what it still works on (its live runs, and
-  the pending work its own shell would hold for, by the shared pending-work rules) as
-  `SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD`, then an empty list once it settles. The host's ACP adapter
+  bridge keeps following it until the next prompt or the end of its process, not only until it
+  settles, since a task's end and the wake it causes arrive apart. It sends what the thread still
+  works on (its live runs, and the pending work its own shell would hold for, by the shared
+  pending-work rules) as `SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD`, an empty list once it settles. The host's ACP adapter
   (`reportsBackgroundTasks`) makes that the mirror's provider-thread roster, so the mirror's shell
   holds it Working on every client, the phone included, with no per-row subscription and no
   pairing with the sandbox. The roster belongs to the bridge process: a holding one keeps the
   process from idle release, and it is cleared when the process ends. Stop on the held mirror
   reaches the bridge as a plain cancel between turns, which stops the sandbox's thread.
+- **Wakes.** A run the sandbox's thread starts itself (on a message no user typed: a wake, a
+  delegated result, a scheduled task, its own continue) after the newest run a host turn followed goes to the host as
+  `SANDBOX_BRIDGE_WAKE_METHOD`, with the sandbox's message id, text and notification (without the
+  notification's sandbox ids). The host's ACP adapter offers it as a provider continuation
+  (`requestContinuation`), one pending at a time and none while a turn runs, so the mirror gets a
+  wake run as any T3 thread does, on every client. That run's prompt carries the sandbox's message
+  id, so the bridge follows it as a message the sandbox already has, and never sends a provider
+  continuation's text to the sandbox. Each wake is a host run of its own: once one ends, the
+  bridge follows again and asks for the next. A send during it steers or queues as on any running
+  thread, and a Stop stops the sandbox's thread.
 - **Credential.** After the launch hand-off the provisioner runs
   [`bridgeCredentialScript`](../../apps/server/src/sandbox/sandboxBridgeCredential.ts) on the
   sandbox: `t3 auth session issue` with `orchestration:read`, `orchestration:operate` and

@@ -150,8 +150,9 @@ Connections → Sandboxes** has **Connect** and **Disconnect** for each chat's s
   behind it. Once the sandbox is running and connected, the chat shows the sandbox's own thread
   again.
 - Attachments and images are not forwarded yet.
-- The thread under **Sandboxes** shows only what was sent through it; messages sent to the sandbox
-  directly appear on the sandbox's own thread.
+- The thread under **Sandboxes** shows what was sent through it, and the replies the sandbox's
+  agent gives on its own, such as when a background task or subagent finishes; messages sent to
+  the sandbox directly appear on the sandbox's own thread.
 - The **Sandboxes** provider shows only in projects that hold a sandbox thread.
 
 ### Settle or delete a sandbox chat
