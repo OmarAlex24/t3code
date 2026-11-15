@@ -84,6 +84,7 @@ import {
   beginBackgroundDraftSubmissionByRef,
   clearBackgroundDraftSubmissionByRef,
   finalizePromotedDraftThreadByRef,
+  handOverLaunchedDraft,
   markPromotedDraftThreadByRef,
   resolveDraftPromotionNavigationTarget,
   restoreFailedDraftThread,
@@ -1548,6 +1549,21 @@ describe("composerDraftStore draft promotion", () => {
     expect(state.getDraftSession(draftId)).toBeNull();
     expect(state.getPromotedDraftRedirect(draftId)).toEqual(threadRef);
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe("typed during setup");
+  });
+
+  it("leaves no launch message in the composer when the launch's thread promoted the draft first", async () => {
+    const h = draftPromotionHarness();
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setPrompt(draftId, "the launch message");
+    // The host makes the thread, message and all, before the launch request returns.
+    h.arrive(threadRef, { latestRun: null, latestUserMessageAt: "2026-03-29T00:00:00.000Z" });
+    h.flush();
+    await waitForDraftHeroTransition();
+    expect(useComposerDraftStore.getState().getPromotedDraftRedirect(draftId)).toEqual(threadRef);
+
+    handOverLaunchedDraft(draftId, threadRef);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt ?? "").toBe("");
   });
 
   it("holds a background submission on its draft until the send settles", async () => {
