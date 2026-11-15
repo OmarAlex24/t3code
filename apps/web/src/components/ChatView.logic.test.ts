@@ -1640,6 +1640,7 @@ describe("waitingMessageCanResend", () => {
     waitingDraftId: "draft-1",
     draftId: "draft-1",
     isLocalDraftThread: true,
+    onSandbox: true,
     canOperateThread: true,
     isSendBusy: false,
     isRevertingCheckpoint: false,
@@ -1657,8 +1658,11 @@ describe("waitingMessageCanResend", () => {
 
   // A sandbox paired a moment ago can show its project before its session grants this app any
   // scope; a send then would be dropped while the message no longer waits.
-  it("waits until the draft's machine lets this app start threads", () => {
+  it("waits until the draft's sandbox lets this app start threads", () => {
     expect(waitingMessageCanResend({ ...ready, canOperateThread: false })).toBe(false);
+    expect(waitingMessageCanResend({ ...ready, onSandbox: false, canOperateThread: false })).toBe(
+      true,
+    );
   });
 
   it("waits only for its own draft", () => {
