@@ -140,6 +140,7 @@ const layerFor = (calls: Calls, options: { readonly delegateFails?: boolean } = 
                   )
                 : Effect.succeed({ taskId });
             }),
+          runStatus: () => Effect.succeed(null),
         }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),

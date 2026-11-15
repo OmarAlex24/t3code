@@ -1435,19 +1435,18 @@ it.effect("a task on a subagent's sandbox ends that sandbox and says where its w
       yield* linkTo(a.links, b, "full-access");
       yield* seedParent(a);
 
-      const delegated = yield* delegateToBox(a);
+      // A cancelled one ends its sandbox, once, and keeps its result after that.
+      const cancelled = yield* delegateToBox(a);
       expect(settled).toEqual([]);
-      yield* Ref.set(thread.reply, "Built on the box.");
-      yield* Ref.set(thread.status, "completed");
-      yield* Deferred.succeed(thread.finished, undefined);
-      const task = yield* taskResult(a, delegated.taskId);
-      expect(task?.result).toBe(
-        "Built on the box.\n\n[Sub-sandbox] Its work is kept on the stopped sandbox Box.",
-      );
+      yield* a.call("task_cancel", { taskId: cancelled.taskId, reason: "Not needed" });
+      const ended = yield* taskResult(a, cancelled.taskId);
+      expect(ended?.status).toBe("cancelled");
+      expect(ended?.result).toContain("[Sub-sandbox]");
+      yield* a.call("task_cancel", { taskId: cancelled.taskId, clientRequestId: "again" });
       expect(settled).toEqual([box.environmentId]);
 
-      // A cancelled one ends its sandbox too, once, and keeps its result after that.
-      const cancelled = yield* a
+      // A finished one ends its sandbox too, and says where its work went.
+      const delegated = yield* a
         .call("delegate_task", {
           task: "Another one.",
           target: {
@@ -1455,14 +1454,16 @@ it.effect("a task on a subagent's sandbox ends that sandbox and says where its w
             providerInstanceId: instanceId,
             model: "gpt-5.4",
           },
-          clientRequestId: "cancelled-on-sub-sandbox",
+          clientRequestId: "completed-on-sub-sandbox",
         })
         .pipe(Effect.map((result) => result.structuredContent as { taskId: NodeId }));
-      yield* a.call("task_cancel", { taskId: cancelled.taskId, reason: "Not needed" });
-      const ended = yield* taskResult(a, cancelled.taskId);
-      expect(ended?.status).toBe("cancelled");
-      expect(ended?.result).toContain("[Sub-sandbox]");
-      yield* a.call("task_cancel", { taskId: cancelled.taskId, clientRequestId: "again" });
+      yield* Ref.set(thread.reply, "Built on the box.");
+      yield* Ref.set(thread.status, "completed");
+      yield* Deferred.succeed(thread.finished, undefined);
+      const task = yield* taskResult(a, delegated.taskId);
+      expect(task?.result).toBe(
+        "Built on the box.\n\n[Sub-sandbox] Its work is kept on the stopped sandbox Box.",
+      );
       expect(settled).toEqual([box.environmentId, box.environmentId]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
