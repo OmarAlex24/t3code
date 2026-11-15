@@ -25,7 +25,7 @@ import { useEffect, useRef, useState } from "react";
 import { environmentCatalog } from "~/connection/catalog";
 import { useThreadRouteRef } from "~/hooks/useThreadRouteTarget";
 import { useStableCallback } from "~/hooks/useStableCallback";
-import { readProjects, useThreadShells } from "~/state/entities";
+import { readProjects, useQuietCompleteThreadShells } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useSandboxConnectionsStore } from "~/state/sandboxConnections";
@@ -167,6 +167,7 @@ export function SandboxThreadCoordinator() {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
+  const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const deleteRemoteThread = useOrchestrationCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
@@ -175,13 +176,20 @@ export function SandboxThreadCoordinator() {
   });
   const { entries } = useAtomValue(environmentCatalog.catalogValueAtom);
   const { environments } = useEnvironments();
-  const threads = useThreadShells();
+  const threads = useQuietCompleteThreadShells();
   const navigate = useNavigate();
   const [prompts, setPrompts] = useState<ReadonlyArray<Prompt>>([]);
   // The prompt that just closed, so the dialog keeps its text while it animates out.
   const [closing, setClosing] = useState<Prompt | null>(null);
   const nextId = useRef(0);
   const waiters = useRef(new Map<EnvironmentId, Array<() => void>>());
+  // The sandbox start each waiting environment was last retried for. The connection's backoff can
+  // run past a resume's whole wait, so each new start retries it at once, and only once.
+  const retriedStarts = useRef(new Map<EnvironmentId, string | null>());
+  const retryStart = (environmentId: EnvironmentId, runningSince: string | null) => {
+    retriedStarts.current.set(environmentId, runningSince);
+    void retryEnvironment(environmentId);
+  };
 
   const sandboxes = list.data?.sandboxes ?? [];
   const configs = configsQuery.data?.configs ?? [];
@@ -200,12 +208,21 @@ export function SandboxThreadCoordinator() {
     return environment?.connection.phase === "connected" && environment.serverConfig !== null;
   };
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- settles the promises a resume handed out once the sandbox's connection comes up
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- settles the promises a resume handed out once the sandbox's connection comes up, and retries it when the sandbox starts
   useEffect(() => {
     for (const [environmentId, resolve] of waiters.current) {
-      if (!isConnected(environmentId)) continue;
-      waiters.current.delete(environmentId);
-      for (const done of resolve) done();
+      if (isConnected(environmentId)) {
+        waiters.current.delete(environmentId);
+        retriedStarts.current.delete(environmentId);
+        for (const done of resolve) done();
+        continue;
+      }
+      const started = sandboxes.find(
+        (candidate) => candidate.environmentId === environmentId && candidate.state === "running",
+      );
+      if (started === undefined) continue;
+      if (retriedStarts.current.get(environmentId) === started.runningSince) continue;
+      retryStart(environmentId, started.runningSince);
     }
   });
 
@@ -647,6 +664,7 @@ export function SandboxThreadCoordinator() {
       return true;
     }
     if (sandbox.state !== "stopped" && isConnected(threadRef.environmentId)) return true;
+    let runningSince = sandbox.runningSince;
     if (sandbox.state === "stopped") {
       const result = await resumeSandbox({
         environmentId: provisionerEnvironmentId,
@@ -657,8 +675,10 @@ export function SandboxThreadCoordinator() {
         if (!isAtomCommandInterrupted(result)) failureToast(result, "Could not resume the sandbox");
         return false;
       }
+      runningSince = result.value.sandbox.runningSince;
     }
     if (isConnected(threadRef.environmentId)) return true;
+    retryStart(threadRef.environmentId, runningSince);
     return new Promise<boolean>((resolve) => {
       const timer = window.setTimeout(() => resolve(false), RESUME_WAIT_MS);
       const pending = waiters.current.get(threadRef.environmentId) ?? [];

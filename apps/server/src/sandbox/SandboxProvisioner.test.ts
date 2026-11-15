@@ -5365,16 +5365,18 @@ describe("SandboxProvisioner per-thread launches", () => {
   const agentKeySecret = "boat_scoped_SECRET";
   const keepAliveKeySecret = "boat_keepalive_SECRET";
 
+  interface Holding {
+    readonly text: string;
+    readonly until: Deferred.Deferred<void>;
+    readonly reached?: Deferred.Deferred<void>;
+  }
+
   const boatFake = (
     options: {
       /** Commands containing this text fail with exit code 1, the given number of times. */
       readonly failing?: { readonly text: string; times: number };
       /** Commands containing this text wait on `until` before answering, after `reached`. */
-      readonly holding?: {
-        readonly text: string;
-        readonly until: Deferred.Deferred<void>;
-        readonly reached?: Deferred.Deferred<void>;
-      };
+      readonly holding?: Holding | ReadonlyArray<Holding>;
       readonly listed?: BoatFake["listed"];
       /** What the sandbox gets back from Claude's endpoint; `000` means it never connected. */
       readonly endpointStatus?: string;
@@ -5530,11 +5532,12 @@ describe("SandboxProvisioner per-thread launches", () => {
                     : pairOr(bodyTextOf(request), pairToken, "");
           return respond(request, { exitCode: 0, stdout, stderr: "" });
         });
-        return options.holding !== undefined && command.includes(options.holding.text)
-          ? (options.holding.reached === undefined
+        const held = [options.holding ?? []].flat().find((hold) => command.includes(hold.text));
+        return held !== undefined
+          ? (held.reached === undefined
               ? Effect.void
-              : Deferred.succeed(options.holding.reached, undefined)
-            ).pipe(Effect.andThen(Deferred.await(options.holding.until)), Effect.andThen(answer))
+              : Deferred.succeed(held.reached, undefined)
+            ).pipe(Effect.andThen(Deferred.await(held.until)), Effect.andThen(answer))
           : answer;
       }
       if (
@@ -6082,6 +6085,94 @@ describe("SandboxProvisioner per-thread launches", () => {
         expect(repository.records.get("resumed")?.resumingSince).toBeUndefined();
         expect(revisions).toEqual([1, 2]);
         yield* Fiber.interrupt(watching);
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
+  it.effect("writes a resumed sandbox's key, guidance and helper all at once, then starts T3", () =>
+    Effect.gen(function* () {
+      const released = yield* Deferred.make<void>();
+      const keyWriting = yield* Deferred.make<void>();
+      const guidanceWriting = yield* Deferred.make<void>();
+      const helperWriting = yield* Deferred.make<void>();
+      // Each write waits until all three are under way, so steps run one after another never end.
+      const fake = boatFake({
+        holding: [
+          { text: "T3_KEEPALIVE_CONFIG", until: released, reached: keyWriting },
+          { text: "SKILL.md.t3-tmp", until: released, reached: guidanceWriting },
+          { text: "mcp.mjs.tmp", until: released, reached: helperWriting },
+        ],
+      });
+      const config: SandboxEnvironmentConfig = {
+        ...configInput,
+        id: "config-concurrent",
+        idleMinutes: 45,
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+      };
+      const stopped: SandboxRecord = {
+        instanceId: "resumed",
+        environmentId: testEnvironmentId,
+        configId: config.id,
+        threadId,
+        provider: "boat",
+        sandboxId: boatSandboxId,
+        label: "hello on Boat small",
+        size: "small",
+        state: "stopped",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        httpBaseUrl: "https://boat.example/t3",
+        runningSince: null,
+        maxRunningMinutes: 480,
+      };
+      const repository = memoryRepository([stopped]);
+      yield* Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        const resuming = yield* provisioner
+          .resume({ instanceId: "resumed" })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(keyWriting);
+        yield* Deferred.await(guidanceWriting);
+        yield* Deferred.await(helperWriting);
+        expect(fake.commands.some((command) => command.includes("t3 serve"))).toBe(false);
+
+        yield* Deferred.succeed(released, undefined);
+        const resumed = yield* Fiber.join(resuming);
+        expect(resumed.warnings).toBeUndefined();
+        expect(repository.records.get("resumed")?.state).toBe("running");
+      }).pipe(
+        Effect.provide(
+          provisionerLayer(
+            { sandboxProviders: { boat: { apiKey: "boat_test" } } },
+            repository.layer,
+            { configs: memoryConfigs([config]).layer },
+          ),
+        ),
+        Effect.provideService(HttpClient.HttpClient, fake.client),
+      );
+    }),
+  );
+
+  it.effect("reads one sandbox's state from its provider before the sweep would", () =>
+    Effect.gen(function* () {
+      const fake = boatFake({ states: { [boatSandboxId]: "archived" } });
+      const repository = memoryRepository([runningRecord]);
+      yield* Effect.gen(function* () {
+        const provisioner = yield* SandboxProvisioner.SandboxProvisioner;
+        expect(yield* provisioner.refreshState(runningRecord.instanceId)).toBe("stopped");
+        expect(repository.records.get(runningRecord.instanceId)).toMatchObject({
+          state: "stopped",
+          runningSince: null,
+        });
       }).pipe(
         Effect.provide(
           provisionerLayer(

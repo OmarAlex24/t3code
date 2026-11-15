@@ -147,6 +147,8 @@ interface Harness {
   hostRuns: Array<HostRun>;
   /** Set to make the next resumes fail with this reason. */
   resumeFails?: string | undefined;
+  /** Sandboxes the provider reports stopped, whatever their records say. */
+  readonly providerStopped: Set<string>;
   /** The name of every secret the bridge writes, once written. */
   readonly secretWrites: Queue.Queue<string>;
   /** Secrets the store holds before the bridge starts, as after a restart. */
@@ -185,6 +187,7 @@ const makeHarness = Effect.gen(function* () {
     projects: new Map(),
     events: yield* Queue.unbounded<OrchestrationV2DomainEvent>(),
     resumes: yield* Queue.unbounded<string>(),
+    providerStopped: new Set(),
     modeChanges: yield* Queue.unbounded<{
       readonly threadId: ThreadId;
       readonly runtimeMode: string;
@@ -219,6 +222,13 @@ const makeHarness = Effect.gen(function* () {
         return record({ hostProjectId: input.hostProjectId });
       }),
     removed: Stream.fromQueue(harness.removals),
+    refreshState: (onInstance) =>
+      Effect.sync(() =>
+        harness.providerStopped.has(onInstance)
+          ? "stopped"
+          : (harness.records.find((candidate) => candidate.instanceId === onInstance)?.state ??
+            "deleted"),
+      ),
     resume: (input) =>
       Effect.suspend(() => {
         harness.resumed.push(input.instanceId);
@@ -657,6 +667,33 @@ describe("SandboxBridge", () => {
         yield* Queue.take(harness.resumes);
         yield* Queue.take(harness.resumes);
         expect(harness.resumed).toEqual(["sandbox-1", "sandbox-2"]);
+      }),
+    ),
+  );
+
+  it.effect("resumes a sandbox the provider stopped before the sweep told its record", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const autoStoppedThread = ThreadId.make("thread-auto-stopped");
+        harness.records.push(
+          record(),
+          record({ instanceId: "sandbox-2", threadId: autoStoppedThread }),
+        );
+        harness.providerStopped.add("sandbox-2");
+        yield* SandboxBridge.SandboxBridge;
+        const run = (onThread: ThreadId, id: string) =>
+          ({
+            type: "run.created",
+            threadId: onThread,
+            payload: { id, threadId: onThread, providerInstanceId: instanceId, status: "starting" },
+          }) as unknown as OrchestrationV2DomainEvent;
+        // Events are handled in order, so the second one's resume marks the end of the first.
+        yield* Queue.offerAll(harness.events, [
+          run(threadId, "run-1"),
+          run(autoStoppedThread, "run-2"),
+        ]);
+        yield* Queue.take(harness.resumes);
+        expect(harness.resumed).toEqual(["sandbox-2"]);
       }),
     ),
   );

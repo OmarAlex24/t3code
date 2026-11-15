@@ -1312,9 +1312,10 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         ports.reconnectWindow ?? Duration.seconds(SANDBOX_RESUME_WAIT_SECONDS),
       ),
     );
-    const spacing = ports.reconnectSpacing ?? "5 seconds";
+    // Short, so a turn goes out soon after its sandbox answers; the window is in clock time, so a
+    // slow failing attempt does not stretch it.
+    const spacing = ports.reconnectSpacing ?? "2 seconds";
     const turnStartedAt = yield* Clock.currentTimeMillis;
-    let waited = 0;
     let announced = false;
     let lastLink: SandboxBridgeLink | null = null;
     while (true) {
@@ -1330,13 +1331,12 @@ export const runSandboxBridge = Effect.fn("SandboxBridge.run")(function* (
         yield* sayOnce(sessionId, "message", resumeFailedMessage(link.value, failure.value.reason));
         return Option.none();
       }
-      if (waited >= window) break;
+      if ((yield* Clock.currentTimeMillis) - turnStartedAt >= window) break;
       if (!announced) {
         announced = true;
         yield* sayOnce(sessionId, "thought", waitingThought(link.value));
       }
       yield* Effect.sleep(spacing);
-      waited += Duration.toMillis(Duration.fromInputUnsafe(spacing));
     }
     yield* sayOnce(sessionId, "message", unreachableMessage(lastLink));
     return Option.none();

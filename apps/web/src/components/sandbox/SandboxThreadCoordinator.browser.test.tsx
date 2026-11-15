@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   settleThread: vi.fn(async () => AsyncResult.success(undefined)),
   unsettleThread: vi.fn(async () => AsyncResult.success(undefined)),
   removeEnvironment: vi.fn(async () => AsyncResult.success(undefined)),
+  retryEnvironment: vi.fn(async () => AsyncResult.success(undefined)),
   deleteSandboxThread: vi.fn(async () => AsyncResult.success(undefined)),
   renameThread: vi.fn(async () => AsyncResult.success(undefined)),
   pairLaunch: vi.fn(async () =>
@@ -76,7 +77,7 @@ vi.mock(import("~/state/environments"), async (original) => ({
 }));
 vi.mock(import("~/state/entities"), async (original) => ({
   ...(await original()),
-  useThreadShells: (() => {
+  useQuietCompleteThreadShells: (() => {
     const settledOverride = mocks.settled ? "settled" : null;
     return [
       { environmentId: SANDBOX_ENV, id: "thread-1", title: "Fix the login bug", settledOverride },
@@ -127,6 +128,7 @@ vi.mock(import("~/connection/catalog"), async (original) => {
         entries: new Map([["22222222-2222-4222-8222-222222222222", {}]]),
       }) as never,
       remove: mocks.removeEnvironment as never,
+      retryNow: mocks.retryEnvironment as never,
     },
   };
 });
@@ -264,6 +266,7 @@ function setup(
     mocks.saveConfig,
     mocks.checkWork,
     mocks.removeEnvironment,
+    mocks.retryEnvironment,
     mocks.resumeSandbox,
     mocks.deleteSandboxThread,
     mocks.renameThread,
@@ -630,6 +633,34 @@ describe("SandboxThreadCoordinator", () => {
       await expect(ensureSandboxThreadRunning(hostRef)).resolves.toBe(true);
       expect(mocks.resumeSandbox).toHaveBeenCalledOnce();
     });
+  });
+
+  it("reconnects to a resumed sandbox at once, and again only when it starts anew", async () => {
+    setup("ask", undefined, { state: "stopped" });
+    mocks.sandboxConnected = false;
+    mocks.sandboxSaved = true;
+    const resumedAt = "2026-11-13T10:00:00.000Z";
+    const resumed = { ...sandbox, runningSince: resumedAt };
+    mocks.resumeSandbox.mockResolvedValueOnce(
+      AsyncResult.success({ sandbox: resumed, httpBaseUrl: sandbox.httpBaseUrl }) as never,
+    );
+    await using screen = await render(<SandboxThreadCoordinator />);
+
+    const running = ensureSandboxThreadRunning(threadRef);
+    // Not at the connection's next backoff, which can come after the wait gives up.
+    await vi.waitFor(() => expect(mocks.retryEnvironment).toHaveBeenCalledWith(SANDBOX_ENV));
+    mocks.sandboxes = [resumed];
+    await screen.rerender(<SandboxThreadCoordinator />);
+    expect(mocks.retryEnvironment).toHaveBeenCalledOnce();
+
+    // Started again, by the host's turn or another app, while this one still waits.
+    mocks.sandboxes = [{ ...sandbox, runningSince: "2026-11-13T10:05:00.000Z" }];
+    await screen.rerender(<SandboxThreadCoordinator />);
+    expect(mocks.retryEnvironment).toHaveBeenCalledTimes(2);
+
+    mocks.sandboxConnected = true;
+    await screen.rerender(<SandboxThreadCoordinator />);
+    await expect(running).resolves.toBe(true);
   });
 
   describe("pairing", () => {

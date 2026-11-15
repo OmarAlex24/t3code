@@ -468,19 +468,28 @@ const make = Effect.gen(function* () {
   const resumeTurns = yield* Semaphore.make(1);
   const resumeFor = Effect.fn("SandboxBridge.resumeFor")(function* (threadId: ThreadId) {
     const { sandboxes } = yield* provisioner.list;
-    const stopped = sandboxes.find(
-      (record) => record.threadId === threadId && record.state === "stopped",
-    );
-    if (stopped === undefined) return;
+    const linked = sandboxes.filter((record) => record.threadId === threadId);
+    const sandbox =
+      linked.find((record) => record.state === "stopped") ??
+      linked.find((record) => record.state === "running" || record.state === "error");
+    if (sandbox === undefined) return;
+    // The sweep reads a machine's state once a minute, so a record can still say running after
+    // the provider stopped it; the bridge would wait out its whole window for nothing.
+    if (
+      sandbox.state !== "stopped" &&
+      (yield* provisioner.refreshState(sandbox.instanceId)) !== "stopped"
+    ) {
+      return;
+    }
     const started = yield* Effect.gen(function* () {
-      if (resuming.has(stopped.instanceId)) return false;
-      resuming.add(stopped.instanceId);
+      if (resuming.has(sandbox.instanceId)) return false;
+      resuming.add(sandbox.instanceId);
       // A new attempt: an earlier failure no longer speaks for the turns waiting now.
       yield* clearResumeFailure(threadId);
       return true;
     }).pipe(resumeTurns.withPermits(1));
     if (!started) return;
-    yield* provisioner.resume({ instanceId: stopped.instanceId }).pipe(
+    yield* provisioner.resume({ instanceId: sandbox.instanceId }).pipe(
       Effect.tapCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.void
@@ -494,11 +503,11 @@ const make = Effect.gen(function* () {
               Effect.catchCause((cause) =>
                 Effect.logWarning("Could not tell the sandbox bridge a resume failed", { cause }),
               ),
-              Effect.ensuring(Effect.sync(() => resuming.delete(stopped.instanceId))),
+              Effect.ensuring(Effect.sync(() => resuming.delete(sandbox.instanceId))),
               resumeTurns.withPermits(1),
             ),
       ),
-      Effect.ensuring(Effect.sync(() => resuming.delete(stopped.instanceId))),
+      Effect.ensuring(Effect.sync(() => resuming.delete(sandbox.instanceId))),
     );
   });
   const catchUpModes = Effect.fn("SandboxBridge.catchUpModes")(function* (threadId: ThreadId) {
