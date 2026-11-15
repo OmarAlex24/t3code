@@ -19,6 +19,8 @@ import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
 const CONNECT_FAILED = "Could not connect to the sandbox";
+// How long a resumed sandbox gets to answer again before a send, un-settle or open gives up.
+export const RESUME_WAIT_MS = 4 * 60_000;
 
 export interface SandboxConnect {
   /** What a surface that needs the sandbox says while this client is not connected to it. */
