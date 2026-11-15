@@ -269,6 +269,7 @@ const AS_ROOT = `as_root() {
 
 // `root` prefixes every system path, so tests can run the scripts without root.
 const tailscalePaths = (root: string) => ({
+  tun: `${root}/dev/net/tun`,
   run: `${root}/run/tailscale`,
   socket: `${root}/run/tailscale/tailscaled.sock`,
   pidFile: `${root}/run/tailscale/t3-tailscaled.pid`,
@@ -387,7 +388,7 @@ if answering; then
   fi
 fi
 if [ -z "$mode" ]; then
-  if [ -c /dev/net/tun ] && start kernel && has_tun; then
+  if [ -c ${paths.tun} ] && start kernel && has_tun; then
     mode=kernel
   else
     stop
