@@ -134,9 +134,10 @@ can keep the conversation going from the phone.
 
 The small project is an empty folder, not the repository, so it offers no git actions, scripts,
 files, or terminal. The repository's files, diffs, terminals and previews are on the sandbox. This
-computer usually connects to it on its own; when it is not connected, **Connect to the sandbox**
-(in the side panel, the thread details, or the sandbox menu in the thread's header) connects it,
-resuming a stopped sandbox first, and the chat then shows the sandbox's own thread. The phone does
+computer connects to a running sandbox on its own when you open its chat; otherwise **Connect to
+the sandbox** (in the side panel, the thread details, or the sandbox menu in the thread's header)
+connects it, resuming a stopped sandbox first, and the chat then shows the sandbox's own thread. If
+a connection fails, the reason shows under that button. The phone does
 not connect to sandboxes, so there these are available only from a computer. **Settings →
 Connections → Sandboxes** has **Connect** and **Disconnect** for each chat's sandbox; after
 **Disconnect**, this device stays disconnected until you connect again, and the chat stays here.
