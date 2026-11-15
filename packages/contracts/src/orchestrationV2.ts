@@ -921,9 +921,6 @@ export const OrchestrationV2RemoteTaskChild = Schema.Struct({
 });
 export type OrchestrationV2RemoteTaskChild = typeof OrchestrationV2RemoteTaskChild.Type;
 
-/** A coordinator-chosen work stream, such as "UI" or "Backend", that clients group agents by. */
-export const SubagentGroup = TrimmedNonEmptyString.check(Schema.isMaxLength(40));
-
 export const OrchestrationV2Subagent = Schema.Struct({
   id: NodeId,
   threadId: ThreadId,
@@ -957,7 +954,6 @@ export const OrchestrationV2Subagent = Schema.Struct({
   ]),
   progress: Schema.optional(Schema.String),
   workflow: Schema.optional(OrchestrationV2SubagentWorkflow),
-  group: Schema.optional(SubagentGroup),
   result: Schema.NullOr(Schema.String),
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
   completedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -2229,14 +2225,6 @@ export const OrchestrationV2LatestVisibleMessageSummary = Schema.Struct({
 export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
-/** The thread's most recent tool step, labeled as the chat's work log labels it. */
-export const OrchestrationV2LatestActionSummary = Schema.Struct({
-  summary: Schema.String,
-  detail: Schema.optional(Schema.String),
-  at: Schema.DateTimeUtc,
-});
-export type OrchestrationV2LatestActionSummary = typeof OrchestrationV2LatestActionSummary.Type;
-
 export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -2279,8 +2267,6 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   /** Guest messages waiting for the owner to send or dismiss. Absent from older servers. */
   pendingGuestMessageCount: Schema.optional(NonNegativeInt),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummary),
-  /** Absent from older servers. */
-  latestAction: Schema.optional(Schema.NullOr(OrchestrationV2LatestActionSummary)),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),
   /** Excludes wakes and agent messages that advance latestUserMessageAt through the user role. */
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2918,10 +2904,6 @@ export const OrchestrationV2LatestVisibleMessageSummaryJson =
 export type OrchestrationV2LatestVisibleMessageSummaryJson =
   typeof OrchestrationV2LatestVisibleMessageSummaryJson.Type;
 
-export const OrchestrationV2LatestActionSummaryJson = OrchestrationV2LatestActionSummary.mapFields(
-  (fields) => ({ ...fields, at: Schema.DateTimeUtcFromString }),
-);
-
 export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFields((fields) => ({
   ...fields,
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -2930,7 +2912,6 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummaryJson),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummaryJson),
-  latestAction: Schema.optional(Schema.NullOr(OrchestrationV2LatestActionSummaryJson)),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   createdAt: Schema.DateTimeUtcFromString,
@@ -3594,7 +3575,6 @@ export const OrchestrationV2Command = Schema.Union([
     parentNodeId: NodeId,
     task: TrimmedNonEmptyString,
     title: Schema.optional(TrimmedNonEmptyString),
-    group: Schema.optional(SubagentGroup),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
@@ -3738,7 +3718,6 @@ const OrchestrationV2InternalCommand = Schema.Union([
     parentNodeId: NodeId,
     task: TrimmedNonEmptyString,
     title: Schema.optional(TrimmedNonEmptyString),
-    group: Schema.optional(SubagentGroup),
     driver: ProviderDriverKind,
     modelSelection: ModelSelection,
     remoteChild: OrchestrationV2RemoteTaskChild,

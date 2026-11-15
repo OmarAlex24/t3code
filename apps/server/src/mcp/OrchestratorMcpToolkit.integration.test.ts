@@ -359,7 +359,6 @@ describe("orchestrator MCP toolkit", () => {
             providerInstanceId: codexInstanceId,
             model: codexModel,
           },
-          group: "Backend",
           mode: "async",
           clientRequestId: "delegate-codex-replay-1",
         });
@@ -466,11 +465,6 @@ describe("orchestrator MCP toolkit", () => {
         );
         expect(followupTasks).toHaveLength(2);
         expect(followupTasks.every((task) => task.result === null)).toBe(true);
-        const parentNow = yield* orchestrator.getThreadProjection(parentThreadId);
-        expect(parentNow.subagents.find((task) => task.id === delegated.taskId)).toMatchObject({
-          group: "Backend",
-        });
-        expect(followupTasks.map((task) => task.group)).toEqual(["Backend", "Backend"]);
         expect(followupTasks.map((task) => task.id)).toEqual([
           runningFollowup.taskId,
           queuedFollowup.taskId,
