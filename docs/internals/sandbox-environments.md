@@ -156,12 +156,12 @@ server except into the sandbox.
   and `t3 serve`, the provisioner merges the host's followed settings into the sandbox's
   `$HOME/.t3/userdata/settings.json`; Pi setup then merges its provider instance and default model
   into the same file, keeping them.
-  [`sandboxSettings.ts`](../../packages/contracts/src/sandboxSettings.ts) classifies every server
-  setting as followed or host-only, and its test fails when a new setting is in neither list, so a
-  new setting stays on the host until someone decides it can follow.
-  Host-only means secrets and secret references, host paths and hardware, the host's identity and
-  links, settings keyed by the host's project ids, the default and fallback models Pi setup sets,
-  and the thread environment mode. The seed holds only followed values that differ from the
+  [`sandboxSettings.ts`](../../packages/contracts/src/sandboxSettings.ts) lists the followed
+  settings; every other one stays on the host, so a setting upstream adds never reaches a sandbox
+  until someone lists it. Its test fails when a listed setting is renamed or removed. Never list
+  secrets and secret references, host paths and hardware, the host's identity and links, settings
+  keyed by the host's project ids, the default and fallback models Pi setup sets, or the thread
+  environment mode. The seed holds only followed values that differ from the
   defaults, so a sandbox on an older T3 that cannot decode a new value loses less. A failed seed
   is a warning on the create result.
 - **Setup runs before `t3 serve`.** The server's Claude status probe reads Claude's settings when

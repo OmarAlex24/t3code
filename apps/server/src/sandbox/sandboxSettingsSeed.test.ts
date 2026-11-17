@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { DEFAULT_SERVER_SETTINGS, SANDBOX_HOST_ONLY_SERVER_SETTING_KEYS } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -32,7 +32,6 @@ describe("sandboxSettingsSeed", () => {
       const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
       const seed = yield* sandboxSettingsSeed(settings);
       expect(seed).toEqual({ branchNamePrefix: "ada", defaultRuntimeMode: "approval-required" });
-      for (const key of SANDBOX_HOST_ONLY_SERVER_SETTING_KEYS) expect(seed).not.toHaveProperty(key);
       expect(JSON.stringify(seed)).not.toContain(SECRET);
       expect(JSON.stringify(seed)).not.toContain("/Users/ada");
     }).pipe(
