@@ -2,7 +2,6 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -202,8 +201,7 @@ const isWsl = Effect.fn("isWsl")(function* () {
  */
 const readConfiguredLabel = Effect.fn("readConfiguredLabel")(function* (baseDir: string) {
   const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const labelPath = path.join(baseDir, "environment-label");
+  const labelPath = `${baseDir}/environment-label`;
   const exists = yield* fileSystem.exists(labelPath).pipe(Effect.orElseSucceed(() => false));
   if (!exists) return null;
   return yield* fileSystem.readFileString(labelPath).pipe(
