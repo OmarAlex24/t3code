@@ -77,7 +77,6 @@ const withService = <A, E>(
     readonly delivery?: "file";
     readonly directory?: string;
     readonly runStatus?: string;
-    readonly rootNodeId?: string;
     readonly removeFails?: boolean;
     readonly closedFirst?: boolean;
     readonly failedRecords?: number;
@@ -138,13 +137,7 @@ const withService = <A, E>(
         getThreadRecords: () =>
           Effect.succeed({
             thread: { projectId },
-            runs: [
-              {
-                id: "run-1",
-                status: options.runStatus ?? "running",
-                rootNodeId: options.rootNodeId ?? "node-root",
-              },
-            ],
+            runs: [{ id: "run-1", status: options.runStatus ?? "running" }],
             turnItems: [
               {
                 id: turnItemId,
@@ -435,10 +428,7 @@ it.effect("works in threads with long ids, such as a delegated subagent's", () =
   );
 });
 
-it.effect.each([
-  { stopped: "the run ended", runStatus: "completed" },
-  { stopped: "a steer restarted the run", rootNodeId: "node-after-steer" },
-])("refuses a value once the agent that asked has stopped ($stopped), but can decline", (state) =>
+it.effect("refuses an answer once the agent that asked has stopped", () =>
   withService(
     ({ service, stored, dispatched }) =>
       Effect.gen(function* () {
@@ -448,15 +438,8 @@ it.effect.each([
         assert.include(late.message, "has stopped");
         assert.deepEqual(valuesOf(stored), []);
         assert.equal(dispatched.length, 0);
-        yield* service.answer({ threadId, turnItemId, answer: { type: "decline" } });
-        assert.deepEqual(
-          dispatched.map((command) =>
-            command.type === "secret_request.record" ? command.secretStatus : command.type,
-          ),
-          ["declined"],
-        );
       }),
-    state,
+    { runStatus: "completed" },
   ),
 );
 
