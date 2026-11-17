@@ -2,15 +2,18 @@
 
 import {
   type ChatAttachment,
+  MessageId,
   type ModelSelection,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2Notification,
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2PlanStep,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRetry,
   type OrchestrationV2ProviderSession,
+  type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ProviderTurn,
@@ -38,6 +41,7 @@ import { AgentScope, AgentScopeThreadId } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { HTML_RENDER_TOOL_NAME } from "@t3tools/shared/htmlRender";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { type SelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
 import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
 import {
@@ -316,6 +320,27 @@ export interface AcpAdapterV2ExtensionContext {
   >;
   readonly captureProposedPlan: (input: { readonly planMarkdown: string }) => Effect.Effect<void>;
   readonly lastProposedPlanMarkdown: Effect.Effect<string | undefined>;
+  /** Cancels the session's pending approvals and questions, for an agent whose request was answered elsewhere. */
+  readonly withdrawPendingRequests: (sessionId: string) => Effect.Effect<void>;
+  /** Replaces the session's background roster, for flavors with `reportsBackgroundTasks`. */
+  readonly reportBackgroundTasks: (notice: {
+    readonly sessionId: string;
+    readonly tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
+  }) => Effect.Effect<void>;
+  /**
+   * Asks for a provider continuation between turns, for an agent that starts work on its own. Its
+   * prompt carries the message, so the agent can tell which of its own runs to show there.
+   */
+  readonly requestContinuation: (
+    notice: { readonly sessionId: string } & AcpAdapterV2ContinuationMessage,
+  ) => Effect.Effect<void>;
+}
+
+/** The message a requested continuation starts its run with. */
+export interface AcpAdapterV2ContinuationMessage {
+  readonly messageId: string;
+  readonly text: string;
+  readonly notification?: OrchestrationV2Notification | undefined;
 }
 
 /**
@@ -630,6 +655,12 @@ export interface AcpAdapterV2Flavor {
     ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   };
   readonly runtimeHarness?: string;
+  /** Metadata a prompt carries in `_meta`, for agents that act on T3's message identity. */
+  readonly promptMeta?: (message: {
+    readonly messageId: string;
+    readonly createdBy: string;
+    readonly creationSource: string;
+  }) => NonNullable<EffectAcpSchema.PromptRequest["_meta"]>;
   readonly registerExtensions?: (
     context: AcpAdapterV2ExtensionContext,
   ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
@@ -694,6 +725,11 @@ export interface AcpAdapterV2Flavor {
    */
   readonly hasPendingReply?: (sessionId: string) => Effect.Effect<boolean>;
   readonly assertComplete?: Effect.Effect<void, EffectAcpErrors.AcpError>;
+  /**
+   * `session/cancel` `_meta` for a steer's restart (`steer` on the interrupt), so the agent can keep
+   * the work going. Every other interrupt, a detach or force-stop included, cancels plainly.
+   */
+  readonly steerCancelMeta?: NonNullable<EffectAcpSchema.CancelNotification["_meta"]>;
   /** Interrupt the local prompt fiber before `session/cancel` (Grok wedged prompts). */
   readonly interruptPromptOnCancel?: boolean;
   /**
@@ -729,6 +765,11 @@ export interface AcpAdapterV2Flavor {
   readonly wakeOnDetachedRequest?: boolean;
   /** Settle on native idle after the accepted user echo, only on negotiated ACP v2. */
   readonly followAgentWorkState?: boolean;
+  /**
+   * The agent reports its whole background roster through `reportBackgroundTasks`. A holding roster
+   * keeps its session open, and the roster ends with the agent's process.
+   */
+  readonly reportsBackgroundTasks?: boolean;
   /**
    * Grok CLI currently accepts and vision-processes image blocks while still
    * reporting the capability as false; without this override, screenshot turns
@@ -1983,6 +2024,11 @@ function acpSubagentStatusIsTerminal(status: OrchestrationV2Subagent["status"]):
 function acpSubagentStatusBlocksTurnSettlement(status: OrchestrationV2Subagent["status"]): boolean {
   return status === "running" || status === "pending";
 }
+
+const sameBackgroundRoster = (
+  left: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+  right: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+) => JSON.stringify(left) === JSON.stringify(right);
 
 function acpSubagentHasPendingBackgroundWork(subagent: ActiveAcpSubagent): boolean {
   return (
@@ -5272,7 +5318,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             });
           });
 
-        const offerContinuationRun = Effect.fnUntraced(function* (_sessionId: string) {
+        const offerContinuationRun = Effect.fnUntraced(function* (
+          _sessionId: string,
+          message?: AcpAdapterV2ContinuationMessage,
+        ) {
           if (continuationRequests === undefined) {
             return false;
           }
@@ -5297,7 +5346,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           );
           if (Option.isNone(pending)) return false;
           const { route, generation, reports } = pending.value;
-          const notification = backgroundWorkNotification([...reports.values()]);
+          const notification =
+            message?.notification ?? backgroundWorkNotification([...reports.values()]);
           yield* Effect.logInfo("orchestration-v2.acp-wake-turn-detected", {
             driver,
             providerSessionId: input.providerSessionId,
@@ -5308,7 +5358,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             threadId: route.threadId,
             providerThreadId: route.providerThreadId,
             driver,
-            detail: null,
+            detail: message?.text ?? null,
+            ...(message === undefined ? {} : { messageId: MessageId.make(message.messageId) }),
             ...(notification === null ? {} : { notification }),
             clearIfCurrent: () =>
               continuationPermit.withPermit(
@@ -6716,6 +6767,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (options.stopMcpCalls && runtimeMcpBridge !== undefined) {
             yield* runtimeMcpBridge.stopCalls;
           }
+          yield* cancelPendingRequestsOnly();
+        });
+
+        const cancelPendingRequestsOnly = Effect.fnUntraced(function* () {
           const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => [
             [...current.values()],
             new Map<string, PendingRuntimeRequest>(),
@@ -7708,6 +7763,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               requestUserInput,
               captureProposedPlan,
               lastProposedPlanMarkdown,
+              withdrawPendingRequests: (sessionId) =>
+                runRuntimeCallbackAtGeneration(
+                  handlerGeneration,
+                  Effect.gen(function* () {
+                    if ((yield* Ref.get(activeSessionId)) !== sessionId) return;
+                    yield* cancelPendingRequestsOnly();
+                  }),
+                ).pipe(Effect.asVoid),
               finishSubagent: (notice) =>
                 runRuntimeCallbackAtGeneration(
                   handlerGeneration,
@@ -7744,6 +7807,47 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       yield* Deferred.succeed(context.foregroundIdle, undefined);
                       yield* finalizeTurn(context, "completed");
                     }
+                  }),
+                ).pipe(Effect.asVoid),
+              reportBackgroundTasks: (notice) =>
+                runRuntimeCallbackAtGeneration(
+                  handlerGeneration,
+                  Effect.gen(function* () {
+                    if (flavor.reportsBackgroundTasks !== true) return;
+                    if ((yield* Ref.get(activeSessionId)) !== notice.sessionId) return;
+                    const known = (yield* Ref.get(providerThreadByNativeSessionId)).get(
+                      notice.sessionId,
+                    );
+                    if (
+                      known === undefined ||
+                      sameBackgroundRoster(known.pendingBackgroundTasks ?? [], notice.tasks)
+                    ) {
+                      return;
+                    }
+                    const providerThread: OrchestrationV2ProviderThread = {
+                      ...known,
+                      pendingBackgroundTasks: [...notice.tasks],
+                      updatedAt: yield* DateTime.now,
+                    };
+                    yield* Ref.update(providerThreadByNativeSessionId, (current) =>
+                      new Map(current).set(notice.sessionId, providerThread),
+                    );
+                    yield* emitProviderEvent({
+                      type: "provider_thread.updated",
+                      driver,
+                      providerThread,
+                    });
+                  }),
+                ).pipe(Effect.asVoid),
+              requestContinuation: ({ sessionId, ...message }) =>
+                runRuntimeCallbackAtGeneration(
+                  handlerGeneration,
+                  Effect.gen(function* () {
+                    if ((yield* Ref.get(activeSessionId)) !== sessionId) return;
+                    // A notice that crossed the next prompt belongs to that turn, not a new run.
+                    const context = yield* Ref.get(activeTurn);
+                    if (context !== null && !context.finalized) return;
+                    yield* offerContinuationRun(sessionId, message);
                   }),
                 ).pipe(Effect.asVoid),
               applyBackgroundTaskMutation: (incoming) =>
@@ -8766,6 +8870,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             threadId: context.input.threadId,
             providerTurn: turn,
           });
+          // An agent's own report can arrive before this settles; the turn's input is older.
+          const reportedRoster =
+            flavor.reportsBackgroundTasks === true
+              ? (yield* Ref.get(providerThreadByNativeSessionId)).get(context.nativeThreadId)
+                  ?.pendingBackgroundTasks
+              : undefined;
           const updatedProviderThread: OrchestrationV2ProviderThread = {
             ...context.input.providerThread,
             providerSessionId: input.providerSessionId,
@@ -8775,6 +8885,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               context.input.providerThread.firstRunOrdinal ?? context.input.runOrdinal,
             contextUsage: context.contextUsage,
             nativeMetadata: context.nativeMetadata,
+            ...(reportedRoster === undefined ? {} : { pendingBackgroundTasks: reportedRoster }),
             updatedAt: now,
           };
           yield* Ref.update(providerThreadByNativeSessionId, (current) =>
@@ -9915,7 +10026,22 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 compactSession === undefined
                   ? sendPromptWhenIdle(
                       context,
-                      () => runtime.prompt({ prompt: promptParts!.prompt }, promptOptions),
+                      () =>
+                        runtime.prompt(
+                          {
+                            prompt: promptParts!.prompt,
+                            ...(flavor.promptMeta === undefined
+                              ? {}
+                              : {
+                                  _meta: flavor.promptMeta({
+                                    messageId: turnInput.message.messageId,
+                                    createdBy: turnInput.message.createdBy,
+                                    creationSource: turnInput.message.creationSource,
+                                  }),
+                                }),
+                          },
+                          promptOptions,
+                        ),
                       superseded,
                     )
                   : Deferred.succeed(context.promptDispatched, undefined).pipe(
@@ -10178,11 +10304,23 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     : flavor.getModelContextWindow?.(selection, session);
                 },
               }),
-          ...(canReportBackgroundWork
+          ...(flavor.reportsBackgroundTasks === true
+            ? { backgroundTasksEndWithProcess: true as const }
+            : {}),
+          ...(canReportBackgroundWork || flavor.reportsBackgroundTasks === true
             ? {
                 hasPendingBackgroundWork: Effect.gen(function* () {
-                  if (!postSettleContinuationEnabled && !followsAgentWorkState) return false;
                   const rootSessionId = yield* Ref.get(activeSessionId);
+                  if (
+                    flavor.reportsBackgroundTasks === true &&
+                    rootSessionId !== null &&
+                    backgroundWorkHoldsCompletion(
+                      (yield* Ref.get(providerThreadByNativeSessionId)).get(rootSessionId)
+                        ?.pendingBackgroundTasks ?? [],
+                    )
+                  )
+                    return true;
+                  if (!postSettleContinuationEnabled && !followsAgentWorkState) return false;
                   if (
                     followsAgentWorkState &&
                     rootSessionId !== null &&
@@ -10612,6 +10750,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         }
                       }
                       const context = interruptContext;
+                      // Between turns, Stop goes to an agent whose own roster holds the thread.
+                      if (
+                        context === null &&
+                        flavor.reportsBackgroundTasks === true &&
+                        turnInput.requestRuntimeRestart === true
+                      ) {
+                        yield* runtime.cancel.pipe(Effect.ignore);
+                        return undefined;
+                      }
                       if (context?.providerTurnId !== turnInput.providerTurnId) {
                         // Contain orphan runtimes on Stop; session-wide teardown must not touch another active turn.
                         const containOrphanRuntime =
@@ -10769,7 +10916,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       } else {
                         // Settled soft interrupts have no prompt to cancel; cancel could kill background subagents.
                         if (!settledSoftInterrupt && (yield* promptStillRunsAfterHold(context))) {
-                          yield* runtime.cancel;
+                          const steerMeta =
+                            turnInput.steer === true ? flavor.steerCancelMeta : undefined;
+                          yield* steerMeta === undefined || runtime.cancelWith === undefined
+                            ? runtime.cancel
+                            : runtime.cancelWith(steerMeta);
                         }
                         if (restartRuntime && flavor.restartRuntimeAfterInterrupt === true) {
                           yield* Ref.set(runtimeRestartRequired, true);

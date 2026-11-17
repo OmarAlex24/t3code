@@ -41,6 +41,7 @@ import {
   unpinRepositoryFromThread,
   useThreadRepositoryPins,
 } from "../../../state/thread-repository-pins";
+import { useSandboxMirror } from "../../../state/sandbox-mirror";
 import { useThreadSelection } from "../../../state/use-thread-selection";
 import { useSelectedThreadGitActions } from "../../../state/use-selected-thread-git-actions";
 import { useSelectedThreadGitState } from "../../../state/use-selected-thread-git-state";
@@ -105,7 +106,20 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
   const isPinnedRepository =
     repository !== undefined &&
     pinnedRepositories.some((pin) => pin.repositoryPath === repository.key);
-  const linkedPrLines = useLinkedPullRequestLines(selectedThread, selectedEnvironmentRuntime);
+  // A sandbox chat's mirror shows the branch and pull requests of the sandbox's own thread, which
+  // act only there.
+  const sandboxMirror = useSandboxMirror(
+    selectedThread === null
+      ? null
+      : { environmentId: selectedThread.environmentId, threadId: selectedThread.id },
+    selectedThread,
+  );
+  const linkedPrLines = useLinkedPullRequestLines(
+    sandboxMirror !== null && selectedThread !== null
+      ? { ...selectedThread, pullRequests: sandboxMirror.pullRequests ?? [] }
+      : selectedThread,
+    selectedEnvironmentRuntime,
+  );
   const linkedPrActions = useLinkedPullRequestActions({
     thread: selectedThread,
     project: selectedThreadProject,
@@ -150,7 +164,10 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
           ((taskFolder === null ? null : selectedThread?.branch) ??
           selectedThreadProject?.title ??
           gt("Repositories"))
-        : (gitStatus.data?.refName ?? selectedThread?.branch ?? gt("Detached HEAD"));
+        : (gitStatus.data?.refName ??
+          sandboxMirror?.branch ??
+          selectedThread?.branch ??
+          gt("Detached HEAD"));
   const currentStatusSummary =
     repository !== undefined
       ? gitStatus.data?.isRepo
@@ -445,7 +462,7 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
                   )
                 }
               />
-              {linkedPrActions.canLink ? (
+              {linkedPrActions.canLink && sandboxMirror === null ? (
                 <ListRow
                   icon="link"
                   label={gt(
@@ -484,7 +501,7 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
               separator={index < linkedPrLines.length - 1}
               surfaceClassName="text-grouped-card"
               openPullRequest={openPullRequest}
-              actions={linkedPrActions}
+              actions={sandboxMirror === null ? linkedPrActions : null}
             />
           ))}
         </ListSection>

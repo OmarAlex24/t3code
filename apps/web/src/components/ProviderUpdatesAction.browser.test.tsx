@@ -25,6 +25,7 @@ const state = vi.hoisted(() => ({
   checks: [] as { environmentId: EnvironmentId; input: unknown }[],
   checkResult: null as AsyncResult.AsyncResult<unknown, unknown> | null,
   sessions: new Map<EnvironmentId, Atom.Writable<AsyncResult.AsyncResult<AuthSessionState>>>(),
+  sandboxIds: new Set<EnvironmentId>(),
 }));
 
 vi.mock(import("~/state/environments"), () => ({
@@ -43,6 +44,9 @@ vi.mock(import("@t3tools/client-runtime/state/session"), async (original) => {
     })) as typeof actual.createEnvironmentSessionAtoms,
   };
 });
+vi.mock(import("~/state/sandboxes"), () => ({
+  useSandboxEnvironmentIds: () => state.sandboxIds,
+}));
 vi.mock(import("~/state/server"), () => ({
   serverEnvironment: { updateProvider: "update", refreshProviders: "refresh" } as never,
 }));
@@ -105,6 +109,8 @@ function setup() {
     { environmentId: EnvironmentId.make("read-only"), label: "Read only" },
     { environmentId: EnvironmentId.make("writable"), label: "Writable" },
     { environmentId: EnvironmentId.make("unresolved"), label: "Unresolved" },
+    // A thread's sandbox grants management too, but its providers are the host's concern.
+    { environmentId: EnvironmentId.make("sandbox"), label: "zumith-v2 on Boat sandbox" },
   ].map((environment) => ({ ...environment, connection: { phase: "connected" } }));
   state.providers = new Map(
     state.environments.map(({ environmentId }) => [environmentId, [provider]]),
@@ -112,6 +118,7 @@ function setup() {
   state.requests = [];
   state.checks = [];
   state.checkResult = null;
+  state.sandboxIds = new Set([state.environments[3]!.environmentId]);
   const sessions = new Map<EnvironmentId, Atom.Writable<AsyncResult.AsyncResult<AuthSessionState>>>(
     [
       [state.environments[0]!.environmentId, Atom.make(session(["orchestration:read"]))],
@@ -122,13 +129,14 @@ function setup() {
           AsyncResult.initial<AuthSessionState>(),
         ),
       ],
+      [state.environments[3]!.environmentId, Atom.make(session([AuthProvidersManageScope]))],
     ],
   );
   state.sessions = sessions;
   return { sessions };
 }
 
-it("provider updates and checks exclude connections without a confirmed management grant", async () => {
+it("provider updates and checks exclude sandboxes and connections without a confirmed management grant", async () => {
   const fixture = setup();
   let updates!: ReturnType<typeof useProviderUpdates>;
   let check!: ReturnType<typeof useCheckProviderUpdates>;

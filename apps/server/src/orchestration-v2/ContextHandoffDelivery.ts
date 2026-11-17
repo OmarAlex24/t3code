@@ -1,6 +1,7 @@
-import type {
-  OrchestrationV2ContextHandoff,
-  OrchestrationV2ProviderThread,
+import {
+  type OrchestrationV2ContextHandoff,
+  type OrchestrationV2ProviderThread,
+  SANDBOX_BRIDGE_INSTANCE_ID,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { ContextHandoffBudgetError } from "@t3tools/provider-core/server/failure";
@@ -25,6 +26,10 @@ export const isSlashCommandMessage = (message: {
 export const withInlineContext = (context: string, userText: string): string =>
   context === "" ? userText : `${context}\n\nUser message:\n${userText}`;
 
+/** The sandbox bridge's agent keeps its own history on the sandbox; nothing replays it from here. */
+export const receivesContextHandoffs = (providerInstanceId: string): boolean =>
+  providerInstanceId !== SANDBOX_BRIDGE_INSTANCE_ID;
+
 /** Persist around injection; ambiguous delivery requires a fresh native thread. Call unsent if refused before prompt consumption. */
 export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextHandoffs")(
   function* <InjectError = never, PersistError = never, BudgetError = never>(input: {
@@ -41,9 +46,10 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     const nativeThreadId = input.providerThread.nativeThreadRef?.nativeId ?? undefined;
     const pending = input.handoffs.filter(
       (handoff) =>
-        nativeThreadId === undefined ||
-        handoff.delivery?.nativeThreadId !== nativeThreadId ||
-        handoff.delivery.status === "pending",
+        receivesContextHandoffs(input.providerThread.providerInstanceId) &&
+        (nativeThreadId === undefined ||
+          handoff.delivery?.nativeThreadId !== nativeThreadId ||
+          handoff.delivery.status === "pending"),
     );
     if (pending.length === 0 || (input.deferInline && input.inject === undefined))
       return { context: "", delivered: Effect.void, unsent: Effect.void, inlineHandoffs: [] };

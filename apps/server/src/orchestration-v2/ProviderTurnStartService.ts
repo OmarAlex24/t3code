@@ -64,6 +64,7 @@ import {
 import {
   deliverContextHandoffs,
   isSlashCommandMessage,
+  receivesContextHandoffs,
   withInlineContext,
 } from "./ContextHandoffDelivery.ts";
 import { isProviderCommand, outputInstructions } from "./runOutput.ts";
@@ -1250,7 +1251,7 @@ export const layer: Layer.Layer<
         function* (context: ReturnType<typeof handoffContextForThread>) {
           const { missedRunIds, coveredItemIds, missedRuns, acceptedAttempts } = context;
           const missedHistory =
-            missedRunIds.size === 0
+            missedRunIds.size === 0 || !receivesContextHandoffs(run.providerInstanceId)
               ? []
               : (yield* projectionStore.getTurnStartHistory(input.threadId, [
                   ...missedRunIds,
@@ -1580,12 +1581,14 @@ export const layer: Layer.Layer<
             }),
           );
         }
-        const uncertainDelivery = projection.contextHandoffs.some(
-          (handoff) =>
-            handoff.toProviderThreadId === providerThread.id &&
-            handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
-            handoff.delivery?.status === "pending",
-        );
+        const uncertainDelivery =
+          receivesContextHandoffs(run.providerInstanceId) &&
+          projection.contextHandoffs.some(
+            (handoff) =>
+              handoff.toProviderThreadId === providerThread.id &&
+              handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
+              handoff.delivery?.status === "pending",
+          );
         const rejectedHistory = yield* Effect.gen(function* () {
           if (session.driver !== "codex") return false;
           const acceptedAttemptIds = new Set(
@@ -1768,6 +1771,7 @@ export const layer: Layer.Layer<
           }),
         );
         if (replacement === undefined) return undefined;
+        if (!receivesContextHandoffs(run.providerInstanceId)) return replacement;
         if (
           replacement.nativeThreadRef?.nativeId != null &&
           replacement.nativeThreadRef.driver === providerThread.nativeThreadRef?.driver &&

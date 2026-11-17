@@ -295,6 +295,9 @@ function withVaryOrigin(
 export const layerBrowserApiCors = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    // Browsers reject a response with two Access-Control-Allow-Origin values, so when the proxy
+    // in front already answers CORS, this server must add none of its own.
+    if (config.proxyHandlesCors === true) return Layer.empty;
     const devOrigin = config.devUrl?.origin;
     // Credentialed dev requests need explicit Vite/Electron origins; originless desktop/native
     // requests and packaged servers use the non-credentialed wildcard.

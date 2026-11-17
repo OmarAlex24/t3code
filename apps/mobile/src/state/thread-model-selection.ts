@@ -1,3 +1,4 @@
+import { isSandboxMirrorThread } from "@t3tools/client-runtime/state/sandbox-mirror";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import {
@@ -12,6 +13,7 @@ import * as Dialog from "../components/ui/Dialog";
 import { msg } from "gt-react-native";
 import { m } from "../i18n/messages";
 import { appAtomRegistry } from "./atom-registry";
+import { serverEnvironment } from "./server";
 import { readEnvironmentScope } from "./session";
 import { environmentThreadShells, threadEnvironment } from "./threads";
 import {
@@ -37,11 +39,23 @@ export function selectThreadModel(
   ) {
     return;
   }
-  void runAtomCommand(
-    appAtomRegistry,
-    threadEnvironment.setModelSelection,
-    { environmentId: ref.environmentId, input: { threadId: ref.threadId, modelSelection } },
-    { label: "change model", reportFailure: true, reportDefect: true },
+  const input = { threadId: ref.threadId, modelSelection };
+  const options = { label: "change model", reportFailure: true, reportDefect: true };
+  // A sandbox chat's pick goes to the sandbox's own thread too, through the host.
+  void (
+    isSandboxMirrorThread(thread)
+      ? runAtomCommand(
+          appAtomRegistry,
+          serverEnvironment.sandboxesSetThreadModel,
+          { environmentId: ref.environmentId, input },
+          options,
+        )
+      : runAtomCommand(
+          appAtomRegistry,
+          threadEnvironment.setModelSelection,
+          { environmentId: ref.environmentId, input },
+          options,
+        )
   ).then((result) => {
     // Released on the reply, so a later change from another client shows.
     if (result._tag === "Success") {

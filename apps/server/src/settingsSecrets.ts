@@ -7,6 +7,9 @@ import {
   type ProviderInstanceConfig,
   type ServerSettings,
   type SettingsSecretValue,
+  SandboxSettings,
+  SandboxTailscaleSettings,
+  SandboxToolingSettings,
   SimlockDeviceHostConfig,
   TextGeneratorConfig,
   UsageLimitSourceConfig,
@@ -49,6 +52,9 @@ const providerSecretFields = new Map([
 const usageLimitSecretFields = secretSettingsFields(UsageLimitSourceConfig);
 const textGeneratorSecretFields = secretSettingsFields(TextGeneratorConfig);
 const voiceSecretFields = secretSettingsFields(CloudSpeechCredentials);
+const sandboxSecretFields = secretSettingsFields(SandboxSettings);
+const sandboxTailscaleSecretFields = secretSettingsFields(SandboxTailscaleSettings);
+const sandboxToolingSecretFields = secretSettingsFields(SandboxToolingSettings);
 const easDeviceHostSecretFields = secretSettingsFields(EasDeviceHostConfig);
 const simlockDeviceHostSecretFields = secretSettingsFields(SimlockDeviceHostConfig);
 const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url");
@@ -247,6 +253,29 @@ function mapSecretFieldGroups(
       ) as SimlockDeviceHostConfig,
   );
 
+  const sandboxProviders = Object.fromEntries(
+    Object.entries(settings.sandboxProviders).map(([kind, fields]) => [
+      kind,
+      mapFields(
+        fields,
+        sandboxSecretFields,
+        (field) => `sandbox-provider-${encode(kind)}-${encode(field)}`,
+      ),
+    ]),
+  ) as ServerSettings["sandboxProviders"];
+
+  const sandboxTailscale = mapFields(
+    settings.sandboxTailscale,
+    sandboxTailscaleSecretFields,
+    (field) => `sandbox-tailscale-${encode(field)}`,
+  ) as ServerSettings["sandboxTailscale"];
+
+  const sandboxTooling = mapFields(
+    settings.sandboxTooling,
+    sandboxToolingSecretFields,
+    (field) => `sandbox-tooling-${encode(field)}`,
+  ) as ServerSettings["sandboxTooling"];
+
   return {
     ...settings,
     cloudSpeechCredentials: mapFields(
@@ -256,6 +285,9 @@ function mapSecretFieldGroups(
     ) as ServerSettings["cloudSpeechCredentials"],
     providerInstances,
     sourceControlHosts,
+    sandboxProviders,
+    sandboxTailscale,
+    sandboxTooling,
     usageLimitSources,
     textGenerators,
     easDeviceHosts,

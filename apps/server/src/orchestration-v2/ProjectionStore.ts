@@ -1216,6 +1216,7 @@ export function applyToProjection(
         checkpoints: upsertById(base.checkpoints, event.payload),
       };
     case "checkpoint.rollback-requested":
+    case "thread.milestones-updated":
       return base;
     case "context-handoff.updated":
       return {
@@ -3286,6 +3287,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               break;
             }
             case "checkpoint.rollback-requested":
+            case "thread.milestones-updated":
               break;
             case "context-handoff.updated": {
               const payloadJson = yield* encodeContextHandoffPayload(event.payload);
@@ -6875,7 +6877,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       from: number,
       through: number,
     ) {
-      const [messages, renders, answerFiles] = yield* Effect.all([
+      const [messages, renders, answerFiles, milestonePosts] = yield* Effect.all([
         sql<{ id: string }>`
       SELECT DISTINCT json_extract(attachment.value, '$.id') AS id
       FROM orchestration_v2_projection_messages AS message,
@@ -6902,9 +6904,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         AND item.type = 'user_input_request'
         AND ${runOrdinalBetween("item.run_id", from, through)}
     `,
+        // Images posted through the removed milestones feature; deleting the thread removes them.
+        sql<{ id: string }>`
+      SELECT DISTINCT json_extract(attachment.value, '$.id') AS id
+      FROM orchestration_v2_projection_turn_items AS item,
+        json_each(item.payload_json, '$.attachments') AS attachment
+      WHERE item.thread_id = ${threadId}
+        AND item.type = 'milestone'
+        AND ${runOrdinalBetween("item.run_id", from, through)}
+    `,
       ]);
       return [
         ...messages.map((row) => row.id),
+        ...milestonePosts.map((row) => row.id),
         ...answerFiles.map((row) => row.id),
         ...threadHtmlRenderAttachmentIds(
           threadId,

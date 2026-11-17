@@ -39,6 +39,9 @@ export function ThreadHeader(props: {
           icon: "folder",
           selected: filesVisible,
           disabled: !props.gitControls.canOpenFiles,
+          ...(props.gitControls.unavailableReason === undefined
+            ? {}
+            : { subtitle: props.gitControls.unavailableReason }),
           separateBackground: false,
           onPress: filesVisible ? toggleAuxiliaryPane : props.onOpenFilesInspector,
         },

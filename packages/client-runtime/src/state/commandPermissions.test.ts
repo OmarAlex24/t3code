@@ -159,6 +159,11 @@ describe("command permissions", () => {
     { method: WS_METHODS.workspaceAddTaskFolderRepository, scope: AuthSourceControlWriteScope },
     { method: WS_METHODS.providerMcpSignInStart, scope: AuthProvidersManageScope },
     { method: WS_METHODS.providerMcpSignInComplete, scope: AuthProvidersManageScope },
+    // Sandbox writes start billable machines or change what the account keeps.
+    { method: WS_METHODS.sandboxesLaunch, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesResolveSettle, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesSaveTemplate, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesDeleteTemplate, scope: AuthSettingsWriteScope },
   ])("requires the destination $scope grant for $method", ({ method, scope }) =>
     Effect.gen(function* () {
       const registry = yield* setup;
@@ -225,12 +230,38 @@ describe("command permissions", () => {
     ),
   );
 
+  it.effect("requires the host's settings grant to connect this client to a chat's sandbox", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const connect = createCommandPermissions(runtime, WS_METHODS.sandboxesConnectThread);
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(connect.permissionAtom(env))).toBe(false);
+        expect((yield* connect.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthSettingsWriteScope],
+            permissions: [AuthSettingsWriteScope],
+          }),
+        );
+        expect(registry.get(connect.permissionAtom(env))).toBe(true);
+        yield* connect.authorize(registry, env);
+      }),
+    ),
+  );
+
   it.effect.each([
     WS_METHODS.scheduledTasksDelete,
     ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
     WS_METHODS.workflowsAnswer,
     WS_METHODS.workflowsResume,
     WS_METHODS.workflowsCancel,
+    // A sandbox chat's model pick, set through the host on both its threads.
+    WS_METHODS.sandboxesSetThreadModel,
   ])("uses the target grant for both availability and execution of %s", (method) =>
     Effect.gen(function* () {
       const registry = yield* setup;

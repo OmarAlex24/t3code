@@ -184,6 +184,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
           { key: "mod+x", command: "invalid.command" },
           { key: "mod+", command: "sidebar.toggle" },
           { key: "mod+a+++", command: "sidebar.toggle" },
+          { key: "mod+alt+m", command: "milestones.toggle" },
         ]),
       );
 

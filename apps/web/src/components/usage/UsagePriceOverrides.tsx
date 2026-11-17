@@ -7,6 +7,7 @@ import { useRef, useState } from "react";
 
 import { cn } from "../../lib/utils";
 import { environmentPresentations } from "../../state/presentation";
+import { useSandboxFollowers } from "../../state/sandboxes";
 import { serverEnvironment } from "../../state/server";
 import { environmentSession, readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -104,8 +105,12 @@ export function UsagePriceOverrides({
 }) {
   const gt = useGT();
   const messages = useMessages();
-  const environments = useAtomValue(priceTargetsAtom).map((target) =>
+  const sandboxes = useSandboxFollowers();
+  const allTargets = useAtomValue(priceTargetsAtom).map((target) =>
     target.unavailable === null ? target : { ...target, unavailable: messages(target.unavailable) },
+  );
+  const environments = allTargets.filter(
+    (target) => !sandboxes.environmentIds.has(target.environmentId),
   );
   const [selectedIds, setSelectedIds] = useState(initialSelectedEnvironmentIds);
   const selected = environments.filter(
@@ -266,6 +271,19 @@ export function UsagePriceOverrides({
       ]),
     }));
     let failed = false;
+    // The host's sandboxes price their usage the way the host does; they are never reported.
+    const followers = targets.some((target) => target.environmentId === sandboxes.hostEnvironmentId)
+      ? allTargets.filter((target) => sandboxes.environmentIds.has(target.environmentId))
+      : [];
+    const followerChanges = followers.map(
+      (target) => [target.environmentId, usagePriceTableChanges(target, edits).changes] as const,
+    );
+    void writeUsagePrices({
+      targets: followers,
+      changes: new Map(followerChanges),
+      write: (input) => updateSettings(input),
+      onResult: () => {},
+    });
     await writeUsagePrices({
       targets: targets.map((target) => ({
         ...target,

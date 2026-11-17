@@ -124,6 +124,7 @@ import { countPreparingComposerImages, holdComposerSend } from "./preparingCompo
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
 import { useLinkedEnvironments } from "../../state/peerLinks";
 import { readEnvironmentScope } from "../../state/session";
+import { useSandboxMirrorSend } from "./useSandboxMirrorSend";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
@@ -237,6 +238,8 @@ interface ComposerSendInput {
   readonly isRevertingCheckpoint: boolean;
   readonly threadDetailLoading: boolean;
   readonly activeEnvironmentUnavailable: boolean;
+  /** Set while the thread's own sandbox is stopped: a send resumes it and goes once it is back. */
+  readonly sendResumesSandbox: (() => void) | null;
   readonly isSendBusy: boolean;
   readonly sendQueuesBehindSetup: boolean;
   readonly isDraftHeroState: boolean;
@@ -336,6 +339,7 @@ export function useComposerSend(input: ComposerSendInput) {
     isRevertingCheckpoint,
     threadDetailLoading,
     activeEnvironmentUnavailable,
+    sendResumesSandbox,
     isSendBusy,
     sendQueuesBehindSetup,
     isDraftHeroState,
@@ -383,6 +387,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
+  const mirrorSandboxSend = useSandboxMirrorSend();
   const uploadThreadFeedback = useOrchestrationCommand(threadEnvironment.uploadFeedback, {
     reportFailure: false,
   });
@@ -446,6 +451,18 @@ export function useComposerSend(input: ComposerSendInput) {
           composerRef.current?.resetCursorState();
         }
       }
+      return;
+    }
+
+    // A stopped sandbox's server is off, so its session and thread cannot be read until it runs
+    // again. The resume goes first; ChatView sends the message once the server answers.
+    if (
+      activeEnvironmentUnavailable &&
+      sendResumesSandbox !== null &&
+      activeThread &&
+      !sendInFlightRef.current
+    ) {
+      sendResumesSandbox();
       return;
     }
 
@@ -1598,6 +1615,16 @@ export function useComposerSend(input: ComposerSendInput) {
             checkoutPullRequestUrl,
           );
         }
+        void mirrorSandboxSend(scopeThreadRef(environmentId, threadIdForSend), {
+          messageId: messageIdForSend,
+          text: outgoingMessageText,
+          attachmentCount: turnAttachmentsResult.value.length,
+          title,
+          runtimeMode,
+          interactionMode: DEFAULT_INTERACTION_MODE,
+          modelSelection: ctxSelectedModelSelection,
+          createdAt: messageCreatedAt,
+        });
         setKeepFullHistory(routeThreadKey, false);
         if (freshArm !== undefined) disarmFreshSession(routeThreadKey, freshArm);
         clearUsageLimitsFor(routeThreadKey);

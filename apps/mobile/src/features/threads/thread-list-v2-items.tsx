@@ -70,6 +70,7 @@ import {
   type ThreadPrPresentation,
 } from "../../state/thread-pr-presentation";
 import { useThreadPr } from "../../state/use-thread-pr";
+import { useSandboxSettleDecision } from "../../state/sandbox-settle";
 import { useSwipeRowDormant } from "../home/swipe-row-activation";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
@@ -147,6 +148,13 @@ const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> =
     className: "text-warning-foreground",
     iconTintClassName: "accent-warning-foreground",
   },
+};
+// The host waits for the user to keep or delete a settled sandbox chat's sandbox.
+const KEEP_SANDBOX_STATUS_LABEL: StatusLabel = {
+  label: msg("Keep sandbox?"),
+  icon: "cube",
+  className: "text-warning-foreground",
+  iconTintClassName: "accent-warning-foreground",
 };
 const DONE_STATUS_LABEL: StatusLabel = {
   label: msg("Done", { $context: "thread status, turn finished" }),
@@ -872,13 +880,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
   const workingLabel = STATUS_LABEL_BY_STATUS[status];
   const showsWoke = status === "ready" && props.wokeAt !== null;
+  const settleDecision = useSandboxSettleDecision(thread);
   const statusEntry =
-    (status === "working" && workingLabel !== undefined && thread.goal?.status === "active"
-      ? {
-          ...workingLabel,
-          label: msg("Goal", { $context: "thread status, working toward a goal" }),
-        }
-      : workingLabel) ?? (isUnread ? DONE_STATUS_LABEL : undefined);
+    settleDecision !== null
+      ? KEEP_SANDBOX_STATUS_LABEL
+      : ((status === "working" && workingLabel !== undefined && thread.goal?.status === "active"
+          ? {
+              ...workingLabel,
+              label: msg("Goal", { $context: "thread status, working toward a goal" }),
+            }
+          : workingLabel) ?? (isUnread ? DONE_STATUS_LABEL : undefined));
   const statusLabel = statusEntry && {
     ...statusEntry,
     label: statusEntry.label === null ? null : m(statusEntry.label),
@@ -1461,7 +1472,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 )}
               >
                 {statusLabel.label}
-                {status === "working" ? (
+                {settleDecision !== null ? null : status === "working" ? (
                   <ThreadListV2Duration
                     environmentId={thread.environmentId}
                     startedAt={resolveThreadWorkingStartedAt(thread)}

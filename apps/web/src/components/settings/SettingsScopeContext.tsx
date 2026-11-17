@@ -6,6 +6,7 @@ import { useMessages } from "gt-react";
 import { createContext, type ReactNode, useContext } from "react";
 
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
+import { useSandboxFollowers } from "../../state/sandboxes";
 import { getProjectFileQueryAtom, optimisticFileAtom } from "../files/projectFilesQueryState";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import {
@@ -14,7 +15,11 @@ import {
   resolveScopedSettingsTargets,
   selectScopedSettingsEnvironments,
 } from "./scopedSettings";
-import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope";
+import {
+  normalizeSandboxScopeSearch,
+  resolveSettingsScope,
+  type SettingsScopeSearch,
+} from "./settingsScope";
 import { selectSingleEnvironmentScope } from "./settingsScopeAxis";
 
 type ProjectFileMember = readonly [
@@ -61,20 +66,35 @@ function useMemberProjectFiles(scope: ReturnType<typeof resolveSettingsScope>) {
   );
 }
 
+/**
+ * A thread's sandbox is never a choice here: it is left out of every environment and project list
+ * and written to with its host (`scope.followers`).
+ */
 function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironment: boolean) {
-  const groups = useSettingsProjectGroups();
-  const { environments: availableEnvironments } = useEnvironments();
+  const sandboxes = useSandboxFollowers();
+  const { groups, withHidden } = useSettingsProjectGroups(sandboxes.environmentIds);
+  const { environments } = useEnvironments();
+  const availableEnvironments = environments.filter(
+    (environment) => !sandboxes.environmentIds.has(environment.environmentId),
+  );
+  // A stopped sandbox keeps what it had; a write to it would only wait for a reconnect.
+  const followerEnvironments = environments.filter(
+    (environment) =>
+      sandboxes.environmentIds.has(environment.environmentId) &&
+      environment.connection.phase === "connected",
+  );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const m = useMessages();
+  const normalized = normalizeSandboxScopeSearch(rawSearch, groups, withHidden, sandboxes);
   const search = singleEnvironment
     ? selectSingleEnvironmentScope(
-        rawSearch,
-        resolveSettingsScope(rawSearch, groups, availableEnvironments, m),
+        normalized,
+        resolveSettingsScope(normalized, groups, availableEnvironments, undefined, m),
         availableEnvironments,
         primaryEnvironmentId,
       )
-    : rawSearch;
-  const scope = resolveSettingsScope(search, groups, availableEnvironments, m);
+    : normalized;
+  const scope = resolveSettingsScope(search, groups, availableEnvironments, sandboxes, m);
   const projectFiles = useMemberProjectFiles(scope);
   const pendingWrites = useAtomValue(pendingScopedWritesAtom);
   const selected = selectScopedSettingsEnvironments(
@@ -91,7 +111,19 @@ function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironm
     targets.find((candidate) => candidate.environmentId === selected.environment?.environmentId) ??
     targets[0] ??
     null;
-  return { scope, groups, search, ...selected, targets, target };
+  return {
+    scope,
+    groups,
+    search,
+    ...selected,
+    targets,
+    target,
+    availableEnvironments,
+    followerEnvironments,
+    hostEnvironmentId: sandboxes.hostEnvironmentId,
+    sandboxFollowers: sandboxes.followers,
+    sandboxesKnown: sandboxes.known,
+  };
 }
 
 const SettingsScopeContext = createContext<

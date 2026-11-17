@@ -17,7 +17,7 @@ import { Command, Flag } from "effect/cli";
 
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import { rebuildMessageSearch } from "../src/orchestration-v2/messageSearchIndex.ts";
-import { runMigrations } from "../src/persistence/Migrations.ts";
+import { runAllMigrations } from "../src/persistence/ForkMigrations.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
@@ -684,7 +684,7 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
       const sql = yield* SqlClient.SqlClient;
       yield* sql.unsafe("PRAGMA foreign_keys = ON").unprepared;
       yield* forgetPeerLinksPreviewHistory();
-      return yield* runMigrations();
+      return yield* runAllMigrations();
     }).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
       wrapPhase("migrate", snapshotPath),

@@ -18,6 +18,7 @@ import type {
   ProviderOptionDescriptor,
   ProviderOptionSelection,
   RuntimeMode,
+  ServerConfig,
   ServerSettings,
   ThreadId,
 } from "@t3tools/contracts";
@@ -92,6 +93,8 @@ import {
 } from "../../state/use-composer-drafts";
 import { useQuietThreadStructure } from "../../state/use-thread-detail";
 import { activeComposerDraftKey, useQueuedRunEdit } from "../../state/queued-run-edit";
+import { SANDBOX_MIRROR_MODELS_PENDING_REASON } from "@t3tools/client-runtime/state/sandbox-mirror";
+import { sandboxMirrorPicker, useSandboxMirror } from "../../state/sandbox-mirror";
 import { selectThreadModel } from "../../state/thread-model-selection";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
@@ -292,6 +295,10 @@ type ThreadSettingsSessionProps = {
   readonly providerInstanceId?: ProviderInstanceId;
   readonly lockedProviderInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
+  /** The catalog "Manage hidden models" lists, when not the environment's own. */
+  readonly catalogConfig?: ServerConfig | null;
+  /** Lists no models, saying why. */
+  readonly modelsUnavailableReason?: string;
   readonly selectedModel: ModelSelection | null;
   readonly prompt: string;
   readonly onPromptChange: (prompt: string) => void;
@@ -315,6 +322,7 @@ type ThreadSettingsSessionValue = {
   readonly environmentId: EnvironmentId | null;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
+  readonly modelsUnavailableReason: string | undefined;
   readonly favoriteKeys: ReadonlySet<string>;
   readonly favoritesLoaded: boolean;
   readonly toggleFavorite: (option: ModelOption) => void;
@@ -360,8 +368,9 @@ function ThreadSettingsSessionProvider(
   const registry = use(RegistryContext);
   const preferences = useAtomValue(mobilePreferencesAtom);
   const configs = useAtomValue(environmentServerConfigsAtom);
-  const config = props.environmentId ? configs.get(props.environmentId) : undefined;
-  const settings = config?.settings;
+  const environmentConfig = props.environmentId ? configs.get(props.environmentId) : undefined;
+  const config = props.catalogConfig ?? environmentConfig;
+  const settings = environmentConfig?.settings;
   const connection = useEnvironmentQuery(
     props.environmentId ? environmentCatalog.stateAtom(props.environmentId) : null,
   ).data;
@@ -373,17 +382,19 @@ function ThreadSettingsSessionProvider(
   );
   const [pendingHiddenKeys, setPendingHiddenKeys] = useState<ReadonlySet<string>>(() => new Set());
   const providerGroups =
-    manageHidden && config
-      ? groupByProvider(
-          buildModelOptions(
-            serverConfigForCwd(config, props.cwd),
-            props.selectedModel,
-            props.lockedProviderInstanceId,
-            props.projectId,
-            true,
-          ),
-        )
-      : props.providerGroups;
+    props.modelsUnavailableReason !== undefined
+      ? []
+      : manageHidden && config
+        ? groupByProvider(
+            buildModelOptions(
+              serverConfigForCwd(config, props.cwd),
+              props.selectedModel,
+              props.lockedProviderInstanceId,
+              props.projectId,
+              true,
+            ),
+          )
+        : props.providerGroups;
   const legacyFavorites = AsyncResult.isSuccess(preferences)
     ? (preferences.value.modelFavorites ?? EMPTY_MODEL_FAVORITES)
     : EMPTY_MODEL_FAVORITES;
@@ -640,6 +651,7 @@ function ThreadSettingsSessionProvider(
     environmentId,
     providerInstanceId: props.providerInstanceId,
     providerGroups,
+    modelsUnavailableReason: props.modelsUnavailableReason,
     manageHidden,
     setManageHidden,
     toggleHidden,
@@ -1141,13 +1153,14 @@ function ThreadSettingsMainContent(props: {
       content = (
         <View className="items-center px-8 py-14">
           <Text className="text-center text-sm text-foreground-muted">
-            {session.favoritesOnly &&
-            session.providerFilter === null &&
-            session.searchQuery.trim().length === 0
-              ? gt("No favorite models")
-              : hasActiveCatalogFilter
-                ? gt("No matching models")
-                : gt("No available models")}
+            {session.modelsUnavailableReason ??
+              (session.favoritesOnly &&
+              session.providerFilter === null &&
+              session.searchQuery.trim().length === 0
+                ? gt("No favorite models")
+                : hasActiveCatalogFilter
+                  ? gt("No matching models")
+                  : gt("No available models"))}
           </Text>
         </View>
       );
@@ -1507,16 +1520,21 @@ export function ExistingThreadSettingsRouteScreen({
   // A queued edit can end while the sheet is open; the prompt then belongs to the thread's draft.
   const draftKey = activeComposerDraftKey(threadKey, route.params.draftKey, queuedRunEdit);
   const prompt = useComposerDraft(draftKey).text;
+  const sandboxMirror = useSandboxMirror(selectedThreadDetailRef, selectedThread);
 
   if (!selectedThread) {
     return <View className="flex-1 bg-sheet" />;
   }
 
-  const serverConfig = serverConfigForCwd(
-    selectedEnvironmentRuntime?.serverConfig ?? null,
-    selectedThreadCwd,
+  // A sandbox chat's mirror picks among the sandbox's own models, read through the host.
+  const mirrorPicker = sandboxMirrorPicker(
+    sandboxMirror,
+    serverConfigForCwd(selectedEnvironmentRuntime?.serverConfig ?? null, selectedThreadCwd),
+    selectedThread,
   );
-  const modelSelection = draftSettings.modelSelection ?? selectedThread.modelSelection;
+  const serverConfig = mirrorPicker.config;
+  const modelSelection =
+    draftSettings.modelSelection ?? mirrorPicker.modelSelection ?? selectedThread.modelSelection;
   const lockedProviderInstanceId = threadAllowsProviderSwitch({
     thread: selectedThread,
     projection: structure?.projection,
@@ -1546,6 +1564,10 @@ export function ExistingThreadSettingsRouteScreen({
       providerInstanceId={modelSelection.instanceId}
       {...(lockedProviderInstanceId ? { lockedProviderInstanceId } : {})}
       providerGroups={groupByProvider(modelOptions)}
+      catalogConfig={serverConfig}
+      {...(mirrorPicker.readOnly
+        ? { modelsUnavailableReason: SANDBOX_MIRROR_MODELS_PENDING_REASON }
+        : {})}
       selectedModel={modelSelection}
       prompt={prompt}
       onPromptChange={(text) => setComposerDraftText(draftKey, text)}

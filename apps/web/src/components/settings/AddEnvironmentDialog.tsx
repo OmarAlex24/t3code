@@ -1,7 +1,7 @@
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
 import { pipe } from "effect/Function";
-import { ChevronsLeftRightEllipsisIcon, PlusIcon, TerminalIcon } from "lucide-react";
+import { BoxIcon, ChevronsLeftRightEllipsisIcon, PlusIcon, TerminalIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { T, useGT, useMessages, Var } from "gt-react";
@@ -21,6 +21,7 @@ import * as Option from "effect/Option";
 
 import { cn } from "../../lib/utils";
 import { formatDesktopSshTarget } from "./EnvironmentRow";
+import { SandboxEnvironmentFields, useSandboxProvisioningLock } from "./SandboxEnvironmentFields";
 import { Input } from "../ui/input";
 import { CommandShortcut } from "../ui/command";
 import {
@@ -54,6 +55,7 @@ import { useEnvironmentQuery } from "~/state/query";
 import { desktopSshHostsStateAtom, filterDiscoveredSshHosts } from "~/state/desktopSshHosts";
 import { type EnvironmentPresentation, useRelayEnvironmentDiscovery } from "~/state/environments";
 import type { AddEnvironmentPrefill } from "~/state/linkedThreadView";
+import { useSandboxProvisionerEnvironmentId } from "~/state/sandboxes";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import {
@@ -108,6 +110,7 @@ export function AddEnvironmentDialog({
     reportFailure: false,
   });
   const relayDiscoveryState = useRelayEnvironmentDiscovery();
+  const provisionerEnvironmentId = useSandboxProvisionerEnvironmentId();
   const savedDesktopSshEnvironmentKeys = (() => {
     const keys = new Set<string>();
     for (const environment of savedEnvironments) {
@@ -125,7 +128,7 @@ export function AddEnvironmentDialog({
     }
     return keys;
   })();
-  const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
+  const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "sandbox" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState(prefill?.host ?? initialHost);
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
@@ -134,6 +137,7 @@ export function AddEnvironmentDialog({
   const [sshHostSuggestionsOpen, setSshHostSuggestionsOpen] = useState(false);
   const highlightedSshHostRef = useRef<DesktopDiscoveredSshHost | undefined>(undefined);
   const [isAddingSavedBackend, setIsAddingSavedBackend] = useState(false);
+  const sandboxProvisioning = useSandboxProvisioningLock();
   const savedBackendSessionRef = useRef(0);
   const isSshDiscoveryActive = desktopBridge !== undefined && open && savedBackendMode === "ssh";
   const desktopSshHosts = useEnvironmentQuery(
@@ -165,6 +169,9 @@ export function AddEnvironmentDialog({
     desktopBridge !== undefined &&
     (isLoadingDiscoveredSshHosts || unsavedDiscoveredSshHosts.length > 0);
   const handleOpenChange = (nextOpen: boolean) => {
+    // Provisioning a machine cannot be cancelled from here, so the dialog stays open until the
+    // create call settles instead of leaving an orphaned sandbox and a lost pairing step.
+    if (!nextOpen && sandboxProvisioning.lockedRef.current) return;
     if (!nextOpen) {
       savedBackendSessionRef.current += 1;
       setSavedBackendMode("remote");
@@ -378,7 +385,7 @@ export function AddEnvironmentDialog({
     setSavedBackendHost(value);
   };
   const renderConnectionModeCard = (input: {
-    readonly mode: "remote" | "ssh";
+    readonly mode: "remote" | "sandbox" | "ssh";
     readonly title: string;
     readonly description: string;
     readonly icon?: ReactNode;
@@ -392,7 +399,7 @@ export function AddEnvironmentDialog({
           "group flex min-h-24 items-start gap-3 rounded-lg border p-4 text-left",
           selected ? "border-primary/50 bg-primary/5" : "border-border/60 hover:bg-muted/40",
         )}
-        disabled={isAddingSavedBackend}
+        disabled={isAddingSavedBackend || sandboxProvisioning.isProvisioning}
         onClick={() => {
           if (!selected) onErrorChange(null);
           setSavedBackendMode(input.mode);
@@ -717,6 +724,14 @@ export function AddEnvironmentDialog({
                 description: gt("Enter a backend host and pairing code."),
                 icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
               })}
+              {provisionerEnvironmentId !== null && routeTarget === null
+                ? renderConnectionModeCard({
+                    mode: "sandbox",
+                    title: "Sandbox",
+                    description: "Give each thread its own cloud machine, made from a config.",
+                    icon: <BoxIcon aria-hidden className="size-4" />,
+                  })
+                : null}
               {desktopBridge
                 ? renderConnectionModeCard({
                     mode: "ssh",
@@ -727,7 +742,21 @@ export function AddEnvironmentDialog({
                 : null}
             </div>
             <AnimatedHeight>
-              {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}
+              {savedBackendMode === "sandbox" &&
+              provisionerEnvironmentId !== null &&
+              routeTarget === null ? (
+                <SandboxEnvironmentFields
+                  environmentId={provisionerEnvironmentId}
+                  error={error}
+                  onErrorChange={onErrorChange}
+                  onProvisioningChange={sandboxProvisioning.onProvisioningChange}
+                  onDone={() => handleOpenChange(false)}
+                />
+              ) : savedBackendMode === "ssh" ? (
+                renderSshFields()
+              ) : (
+                renderRemoteModeBody()
+              )}
             </AnimatedHeight>
           </div>
         </DialogPanel>

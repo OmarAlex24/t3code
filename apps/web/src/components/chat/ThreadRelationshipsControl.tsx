@@ -13,6 +13,7 @@ import {
   type RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import { isSandboxMirrorThread } from "@t3tools/client-runtime/state/sandbox-mirror";
 import { deriveProviderSubagentStatus } from "@t3tools/client-runtime/state/thread-execution";
 import {
   deriveThreadRelationshipGraph,
@@ -58,7 +59,7 @@ import {
   UnplugIcon,
 } from "lucide-react";
 import { msg, T, useGT, useMessages, Var } from "gt-react";
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 import type { MessageResolver } from "~/i18n/messages";
 
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
@@ -89,6 +90,10 @@ import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadR
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
 import { useSideThreadTrigger } from "../../hooks/useSideThreadTrigger";
 import { openSideThread, resolveThreadOpenRoute } from "../../lib/sideChatPane";
+import { useThreadSandbox } from "../../state/sandboxes";
+import { type SandboxMirrorAgent, sandboxMirrorLineage } from "../../state/sandboxThreads";
+import { SandboxMirrorAgentDialog } from "./SandboxMirrorAgentDialog";
+import { RESUME_WAIT_MS, useConnectSandbox, useSandboxConnect } from "../sandbox/SandboxConnect";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -159,11 +164,21 @@ type RemoteSubagent = OrchestrationV2Subagent & {
   readonly remoteChild: OrchestrationV2RemoteTaskChild;
 };
 
-/** A task delegated to a linked environment has no thread here, so it gets its own row kind. */
-type LineageRow = ThreadRelationshipWalkRow | { readonly remote: RemoteSubagent };
+/**
+ * A task delegated to a linked environment, and a sandbox chat's agent on its host mirror, have no
+ * thread here, so each gets its own row kind.
+ */
+type LineageRow =
+  | ThreadRelationshipWalkRow
+  | { readonly remote: RemoteSubagent }
+  | { readonly sandboxAgent: SandboxMirrorAgent };
 
 const lineageRowStatus = (row: LineageRow) =>
-  "remote" in row ? row.remote.status : row.edge.status;
+  "remote" in row
+    ? row.remote.status
+    : "sandboxAgent" in row
+      ? row.sandboxAgent.status
+      : row.edge.status;
 
 const isFinishedAgentStatus = (status: string | null | undefined) =>
   ["completed", "failed", "error", "cancelled", "interrupted", "idle"].includes(status ?? "");
@@ -367,6 +382,175 @@ function RemoteSubagentRow(props: {
 }
 
 /**
+ * A sandbox chat's agent, listed on its host mirror from what the host reads of the sandbox. It
+ * opens on the sandbox, connecting this client to it first, else read only through the host.
+ */
+function SandboxMirrorAgentRow(props: {
+  readonly agent: SandboxMirrorAgent;
+  readonly mirrorRef: ScopedThreadRef;
+  readonly available: boolean;
+}) {
+  const navigate = useNavigate();
+  const sandboxEnvironmentId = useThreadSandbox(props.mirrorRef)?.environmentId ?? null;
+  const environment = useEnvironment(sandboxEnvironmentId);
+  const connected = environment?.connection.phase === "connected";
+  const connect = useSandboxConnect(props.mirrorRef);
+  const connectSandbox = useConnectSandbox();
+  // Set by a click that connects first; the connect settles in the connection stores.
+  const [pending, setPending] = useState(false);
+  // Pairing replaces the environment's connection, so its phase before this one is stale.
+  const [sawConnecting, setSawConnecting] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const [reading, setReading] = useState(false);
+  const { agent } = props;
+  // A stopped sandbox's agent may have stopped with it; only its last known status is here.
+  const stale = !props.available && isOrchestrationV2WorkActive(agent.status);
+  const status = stale ? null : agent.status;
+  const failed = status === "failed";
+  const title = relationshipThreadTitle({ title: agent.title ?? "Subagent", isSubagent: true });
+  const phase = environment?.connection.phase;
+  if (pending && !sawConnecting && phase === "connecting") setSawConnecting(true);
+  const pairingFailed =
+    pending && connect !== null && !connect.connecting && connect.failure !== null;
+  const connectionFailed =
+    pending &&
+    !connected &&
+    !pairingFailed &&
+    (timedOut || (sawConnecting && phase !== "connecting"));
+  const opening = pending && !connected && !pairingFailed && !connectionFailed;
+  const openThread = (environmentId: EnvironmentId) =>
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(scopeThreadRef(environmentId, agent.childThreadId)),
+    });
+  const openConnectedThread = useEffectEvent(openThread);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the connect a click started finishes in the connection stores, after the handler returns
+  useEffect(() => {
+    if (pending && connected && sandboxEnvironmentId !== null) {
+      openConnectedThread(sandboxEnvironmentId);
+    }
+  }, [pending, connected, sandboxEnvironmentId]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- an interrupted connect leaves no phase change behind, so the wait ends on a timer
+  useEffect(() => {
+    if (!opening) return;
+    const timer = window.setTimeout(() => setTimedOut(true), RESUME_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [opening]);
+
+  // An explicit click is the user asking to connect, even to a sandbox they disconnected from.
+  const open = () => {
+    if (connected && sandboxEnvironmentId !== null) {
+      openThread(sandboxEnvironmentId);
+      return;
+    }
+    if (sandboxEnvironmentId === null || connect === null || !connect.allowed) {
+      setReading(true);
+      return;
+    }
+    if (opening) return;
+    setPending(true);
+    setSawConnecting(false);
+    setTimedOut(false);
+    if (connect.connecting) return;
+    void connectSandbox(
+      { environmentId: sandboxEnvironmentId, threadId: props.mirrorRef.threadId },
+      true,
+    );
+  };
+
+  const hint = opening
+    ? "Connecting to the sandbox to open its thread."
+    : connected
+      ? `Open on ${environment.label}`
+      : connect?.allowed
+        ? connect.resumes
+          ? "Connects to the sandbox to open its thread. The sandbox is stopped, so this starts it first."
+          : "Connects to the sandbox to open its thread."
+        : connect !== null
+          ? "Read its messages through this computer. This device is not allowed to connect to the sandbox."
+          : "Read its messages through this computer.";
+  return (
+    <li className="group relative flex h-8 items-center rounded-lg">
+      <Tooltip>
+        <TooltipTrigger
+          delay={200}
+          render={
+            <ThreadDetailsControl
+              size="sm"
+              variant="ghost"
+              part="row"
+              aria-busy={opening || undefined}
+              onClick={open}
+            />
+          }
+        >
+          <ThreadRelationshipIcon driver={agent.driver} fallbackIcon={BotIcon} status={status} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-left text-sm font-medium leading-4 text-foreground/85">
+              {title}
+            </span>
+          </span>
+          {opening ? (
+            <span className="flex shrink-0 items-center gap-1 text-2xs text-muted-foreground">
+              <Spinner className="size-3" />
+              Connecting
+            </span>
+          ) : (
+            <span
+              className={`shrink-0 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
+            >
+              {stale ? "Unreachable" : threadRelationshipStatusLabel(status)}
+            </span>
+          )}
+        </TooltipTrigger>
+        <TooltipPopup side="left">
+          <LineageTooltipContent
+            title={title}
+            hint={
+              stale && !opening
+                ? `Last seen ${threadRelationshipStatusLabel(agent.status).toLowerCase()}. The sandbox is stopped or not answering. ${hint}`
+                : hint
+            }
+          />
+        </TooltipPopup>
+      </Tooltip>
+      {reading || pairingFailed || connectionFailed ? (
+        <SandboxMirrorAgentDialog
+          environmentId={props.mirrorRef.environmentId}
+          threadId={props.mirrorRef.threadId}
+          childThreadId={agent.childThreadId}
+          title={title}
+          connect={
+            connect === null
+              ? null
+              : {
+                  ...connect,
+                  connecting: opening || connect.connecting,
+                  failure: connectionFailed
+                    ? {
+                        title: "Could not connect to the sandbox",
+                        description: environment?.connection.error ?? "The sandbox did not answer.",
+                      }
+                    : connect.failure,
+                  connect: () => {
+                    setReading(true);
+                    open();
+                  },
+                }
+          }
+          onClose={() => {
+            setReading(false);
+            setPending(false);
+          }}
+        />
+      ) : null}
+    </li>
+  );
+}
+
+/**
  * The thread on a linked environment whose agent delegated this one. It opens
  * there when this client is connected to that environment.
  */
@@ -495,6 +679,12 @@ export function ThreadRelationshipsPanel(props: {
     projection?.thread ??
     relationshipShells.find((thread) => thread.id === props.threadId) ??
     archivedShells?.find((thread) => thread.id === props.threadId);
+  // A sandbox chat's host mirror has none of its agents; the host reads them from the sandbox.
+  const sandboxMirror = useAtomValue(
+    serverEnvironment.sandboxesThreadMirrorValue(
+      currentThread !== undefined && isSandboxMirrorThread(currentThread) ? ref : null,
+    ),
+  );
   const parentThreadId =
     currentThread?.forkedFrom?.type === "run"
       ? currentThread.forkedFrom.threadId
@@ -640,6 +830,13 @@ export function ThreadRelationshipsPanel(props: {
       .map((remote) => ({ remote })),
     ({ remote }) => (isFinishedAgentStatus(remote.status) ? "remotePrevious" : "remoteActive"),
   );
+  const mirrorLineage = sandboxMirror ? sandboxMirrorLineage(sandboxMirror.subagents) : null;
+  const mirrorAvailable = sandboxMirror ? sandboxMirror.available : false;
+  const { mirrorActive = [], mirrorPrevious = [] } = groupBy(
+    (mirrorLineage?.agents ?? []).map((sandboxAgent) => ({ sandboxAgent })),
+    ({ sandboxAgent }) =>
+      isFinishedAgentStatus(sandboxAgent.status) ? "mirrorPrevious" : "mirrorActive",
+  );
   const groups: ReadonlyArray<{
     id: string;
     label: string | null;
@@ -647,18 +844,28 @@ export function ThreadRelationshipsPanel(props: {
     expanded: boolean;
   }> = [
     { id: "related", label: null, rows: related, expanded: true },
-    { id: "active", label: null, rows: [...active, ...remoteActive], expanded: true },
+    {
+      id: "active",
+      label: null,
+      rows: [...active, ...remoteActive, ...mirrorActive],
+      expanded: true,
+    },
     {
       id: "previous",
       label: gt("Previous agents"),
-      rows: [...previous, ...remotePrevious],
+      rows: [...previous, ...remotePrevious, ...mirrorPrevious],
       expanded: false,
     },
   ];
   const runningCount =
     (projection?.subagents.filter(
       (agent) => agent.childThreadId === null && agent.status === "running",
-    ).length ?? 0) + active.filter(({ edge }) => edge.status === "running").length;
+    ).length ?? 0) +
+    active.filter(({ edge }) => edge.status === "running").length +
+    (mirrorAvailable && mirrorLineage !== null
+      ? mirrorLineage.runningWithoutThread +
+        mirrorActive.filter(({ sandboxAgent }) => sandboxAgent.status === "running").length
+      : 0);
 
   // A linked environment's agent may have delegated this thread from there.
   const delegatedFrom = currentThread?.delegatedFrom;
@@ -671,6 +878,8 @@ export function ThreadRelationshipsPanel(props: {
       runningCount > 0 ||
       remoteActive.length > 0 ||
       remotePrevious.length > 0 ||
+      mirrorActive.length > 0 ||
+      mirrorPrevious.length > 0 ||
       delegatedFrom !== undefined ||
       // Disconnect lives in this heading, so a thread with only side chats still shows it.
       (canDetach && sideChats.length > 0));
@@ -1061,6 +1270,7 @@ export function ThreadRelationshipsPanel(props: {
             related.length > 0 ||
             active.length > 0 ||
             remoteActive.length > 0 ||
+            mirrorActive.length > 0 ||
             delegatedFrom !== undefined
           }
           data-thread-relationships-panel
@@ -1113,6 +1323,13 @@ export function ThreadRelationshipsPanel(props: {
                         .get(row.remote.remoteChild.environmentId)
                         ?.find((entry) => entry.instanceId === row.remote.providerInstanceId)}
                       anyInstanceBadge={hasInstanceBadge(providerEntries)}
+                    />
+                  ) : "sandboxAgent" in row ? (
+                    <SandboxMirrorAgentRow
+                      key={row.sandboxAgent.childThreadId}
+                      agent={row.sandboxAgent}
+                      mirrorRef={ref}
+                      available={mirrorAvailable}
                     />
                   ) : (
                     renderRelationshipRow(row)

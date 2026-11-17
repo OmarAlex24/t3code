@@ -55,6 +55,7 @@ import { addEnvironmentPrefillAtom } from "~/state/linkedThreadView";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { usePeerLinkHosts } from "~/state/peerLinks";
+import { useSandboxThreadEnvironmentIds } from "~/state/sandboxes";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
@@ -155,6 +156,7 @@ import {
   type ConnectDeviceRevokeRequest,
   RevokeConnectDeviceDialog,
 } from "./RevokeConnectDeviceDialog";
+import { SandboxManagementSection } from "./SandboxManagementSection";
 
 // Sessions T3 Connect minted for a device signed in to the linked account.
 const CLOUD_CONNECT_SESSION_SUBJECT = "cloud-connect";
@@ -292,8 +294,12 @@ function ConnectionsSettingsContent({
   const savedEnvironments = environments.filter(
     (environment) => environment.entry.target._tag !== "PrimaryConnectionTarget",
   );
+  const sandboxThreadEnvironmentIds = useSandboxThreadEnvironmentIds();
+  // A thread's own sandbox is listed under its config in the Sandboxes section.
   const listedEnvironments = savedEnvironments.filter(
-    (environment) => !isDesktopLocalConnectionTarget(environment.entry.target),
+    (environment) =>
+      !isDesktopLocalConnectionTarget(environment.entry.target) &&
+      !sandboxThreadEnvironmentIds.has(environment.environmentId),
   );
   const savedUpdateStates = useAtomValue(
     environmentUpdateStatesAtom(
@@ -1896,7 +1902,7 @@ function ConnectionsSettingsContent({
               <CloudRemoteEnvironmentRows
                 only={environmentId}
                 primaryEnvironmentId={primaryEnvironmentId}
-                savedEnvironments={savedEnvironments}
+                savedEnvironments={listedEnvironments}
               />
             )}
           />
@@ -1914,11 +1920,12 @@ function ConnectionsSettingsContent({
             ))}
             <CloudRemoteEnvironmentRows
               primaryEnvironmentId={primaryEnvironmentId}
-              savedEnvironments={savedEnvironments}
+              savedEnvironments={listedEnvironments}
             />
           </>
         )}
       </SettingsSection>
+      <SandboxManagementSection />
       {hasCloudPublicConfig() ? (
         <RemoveT3ConnectEnvironmentDialog
           environmentLabel={pendingT3ConnectRemoval?.label ?? null}

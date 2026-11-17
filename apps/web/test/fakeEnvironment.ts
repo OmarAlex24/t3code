@@ -21,6 +21,8 @@ import {
   TurnItemId,
   WS_METHODS,
   WsRpcGroup,
+  type SandboxRecord,
+  type SandboxSetupSnapshot,
   type VcsStatusStreamEvent,
   type ModelSelection,
   type OrchestrationProjectShell,
@@ -238,7 +240,7 @@ export interface FakeThread {
   readonly olderSettled?: true;
   readonly id: ThreadId;
   readonly title: string;
-  /** Defaults to GPT-5.4 on Codex. */
+  /** Defaults to GPT-5.4 on Codex; a sandbox chat uses the sandbox bridge's. */
   readonly modelSelection?: ModelSelection;
   /** The first is the thread's active provider thread. */
   readonly providerThreads?: ReadonlyArray<OrchestrationV2ProviderThread>;
@@ -246,6 +248,8 @@ export interface FakeThread {
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
   readonly runtimeRequests?: OrchestrationV2ThreadProjection["runtimeRequests"];
+  /** The shell's status, as the sidebar reads it; by default, from whether it has a run. */
+  readonly shellStatus?: OrchestrationV2ThreadShell["status"];
 }
 
 /** A thread of `turns` user prompts, each answered in markdown with a list and inline code. */
@@ -345,7 +349,7 @@ function shellOf(thread: FakeThread): OrchestrationV2ThreadShell {
     latestRunId: latest?.id ?? null,
     activeRunId: null,
     // Idle reads as waiting on the user, which shows a per-second duration in the sidebar.
-    status: latest ? "completed" : "idle",
+    status: thread.shellStatus ?? (latest ? "completed" : "idle"),
     pendingRuntimeRequest: null,
     latestVisibleMessage: null,
     latestUserMessageAt: AT,
@@ -434,6 +438,10 @@ let pendingDispatches: Array<{
   readonly reply: Deferred.Deferred<never, OrchestrationV2DispatchCommandError>;
 }> = [];
 let pendingAssetUrls: Array<Deferred.Deferred<AssetCreateUrlResult>> = [];
+let sandboxes: ReadonlyArray<SandboxRecord> = [];
+let launches: ReadonlyArray<SandboxSetupSnapshot> = [];
+let scopes: ReadonlyArray<string> = AuthStandardClientScopes;
+let projectWorkspaceRoot = project.workspaceRoot;
 let sequence = 1;
 let vcsStatusSubscriber: Queue.Queue<VcsStatusStreamEvent> | null = null;
 
@@ -501,7 +509,9 @@ const handlers: Record<string, (input: never) => unknown> = {
           snapshot: {
             schemaVersion: 1,
             snapshotSequence: sequence,
-            projects,
+            projects: projects.map((entry) =>
+              entry.id === project.id ? { ...entry, workspaceRoot: projectWorkspaceRoot } : entry,
+            ),
             threads: threads.filter((thread) => !thread.olderSettled).map(shellOf),
             archivedThreads: [],
           },
@@ -552,6 +562,11 @@ const handlers: Record<string, (input: never) => unknown> = {
     }),
   [WS_METHODS.subscribeServerConfig]: () =>
     subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig() }]),
+  // The host's Sandboxes list, for threads whose environment is a sandbox.
+  "sandboxes.list": () => Effect.succeed({ sandboxes, orphans: [] }),
+  // A sandbox chat's launch, which its host thread shows while the first message waits.
+  "sandboxes.subscribeLaunch": (input: { readonly threadId: ThreadId }) =>
+    subscribe([launches.find((launch) => launch.threadId === input.threadId) ?? null]),
 };
 
 // Unanswered calls stay pending, like a server that has not replied yet.
@@ -564,34 +579,50 @@ const client = new Proxy(handlers, {
     }),
 });
 
-const session: EnvironmentConnectionLease["session"] = {
-  client: client as unknown as WsRpcProtocolClient,
-  initialConfig: Effect.sync(serverConfig),
-  subscribeServerConfig: () =>
-    subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig() }]),
-  ready: Effect.void,
-  probe: Effect.void,
-  inboundFrames: Effect.succeed(0),
-  closed: Effect.never,
-};
+// The open session's close signal, and whether the server has gone away (see `takeFakeEnvironmentOffline`).
+// Every open session, since the app keeps a connection from an earlier test open.
+const openSessions = new Set<Deferred.Deferred<never, ConnectionAttemptError>>();
+let offline = false;
+// Released when the environment comes back, so a reconnect left waiting by a stopped server goes on.
+let backOnline = Deferred.makeUnsafe<void>();
+
+const openSession = Effect.sync((): EnvironmentConnectionLease["session"] => {
+  const closed = Deferred.makeUnsafe<never, ConnectionAttemptError>();
+  openSessions.add(closed);
+  return {
+    client: client as unknown as WsRpcProtocolClient,
+    initialConfig: Effect.sync(serverConfig),
+    subscribeServerConfig: () =>
+      subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig() }]),
+    ready: Effect.void,
+    probe: Effect.void,
+    inboundFrames: Effect.succeed(0),
+    closed: Deferred.await(closed),
+  };
+});
 
 /** Stands in for client-runtime's ConnectionDriver: every connection opens the session above. */
 export const fakeDriver = {
   connect: (
     entry: ConnectionCatalogEntry,
   ): Effect.Effect<EnvironmentConnectionLease, ConnectionAttemptError, Scope.Scope> =>
-    Effect.succeed({
-      prepared: {
-        environmentId: ENVIRONMENT_ID,
-        label: descriptor.label,
-        httpBaseUrl: window.location.origin,
-        socketUrl: window.location.origin.replace(/^http/, "ws"),
-        httpAuthorization: null,
-        target: entry.target,
-      },
-      session,
-      refusedRouteIds: [],
-    }),
+    // An offline server never answers, so a reconnect waits like one to a stopped machine.
+    Effect.suspend(() =>
+      offline ? Deferred.await(backOnline).pipe(Effect.andThen(openSession)) : openSession,
+    ).pipe(
+      Effect.map((session) => ({
+        prepared: {
+          environmentId: ENVIRONMENT_ID,
+          label: descriptor.label,
+          httpBaseUrl: window.location.origin,
+          socketUrl: window.location.origin.replace(/^http/, "ws"),
+          httpAuthorization: null,
+          target: entry.target,
+        },
+        session,
+        refusedRouteIds: [],
+      })),
+    ),
   preflight: () => Effect.succeed(true),
   checkHost: () => Effect.succeed<RouteCheck>("unchecked"),
 };
@@ -612,6 +643,13 @@ export function installFakeEnvironment(
     /** Commands left unanswered even when accepting, until `rejectPendingCommand`. */
     readonly holdCommand?: (command: OrchestrationV2Command) => boolean;
     readonly providers?: ReadonlyArray<unknown>;
+    readonly sandboxes?: ReadonlyArray<SandboxRecord>;
+    /** Sandbox launches the host runs, one per thread. */
+    readonly launches?: ReadonlyArray<SandboxSetupSnapshot>;
+    /** What the session grants; a scope left out is one this client cannot read as granted. */
+    readonly scopes?: ReadonlyArray<string>;
+    /** Where the one project lives, such as a sandbox's placeholder folder. */
+    readonly projectWorkspaceRoot?: string;
   },
 ): Disposable {
   threads = fixtures;
@@ -633,6 +671,10 @@ export function installFakeEnvironment(
     })),
   ];
   holdCommand = options?.holdCommand ?? (() => false);
+  sandboxes = options?.sandboxes ?? [];
+  launches = options?.launches ?? [];
+  scopes = options?.scopes ?? AuthStandardClientScopes;
+  projectWorkspaceRoot = options?.projectWorkspaceRoot ?? project.workspaceRoot;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
     if (url.origin !== window.location.origin) return realFetch(input, init);
@@ -641,7 +683,7 @@ export function installFakeEnvironment(
       return json({
         authenticated: true,
         auth,
-        scopes: AuthStandardClientScopes,
+        scopes,
         sessionMethod: "browser-session-cookie",
         expiresAt: "2099-01-01T00:00:00.000Z",
       });
@@ -661,6 +703,11 @@ export function installFakeEnvironment(
       holdCommand = () => false;
       pendingDispatches = [];
       pendingAssetUrls = [];
+      sandboxes = [];
+      launches = [];
+      scopes = AuthStandardClientScopes;
+      projectWorkspaceRoot = project.workspaceRoot;
+      bringFakeEnvironmentOnline();
     },
   };
 }
@@ -699,6 +746,27 @@ export async function answerAssetUrls(): Promise<void> {
 /** Commands the app dispatched to the environment, oldest first. */
 export function dispatchedCommands(): ReadonlyArray<OrchestrationV2Command> {
   return dispatched;
+}
+
+/** Drops the open session and leaves every reconnect waiting, as a stopped machine would. */
+export async function takeFakeEnvironmentOffline(): Promise<void> {
+  offline = true;
+  // Loaded here: this module stands in for that package's driver, so a top-level import would cycle.
+  const { ConnectionTransientError } = await import("@t3tools/client-runtime/connection");
+  const error = new ConnectionTransientError({
+    reason: "transport",
+    detail: "The server stopped.",
+  });
+  for (const closed of openSessions) await Effect.runPromise(Deferred.fail(closed, error));
+  openSessions.clear();
+}
+
+/** Lets the waiting reconnects through, as a resumed machine's server would. */
+export function bringFakeEnvironmentOnline(): void {
+  if (!offline) return;
+  offline = false;
+  Effect.runSync(Deferred.succeed(backOnline, undefined));
+  backOnline = Deferred.makeUnsafe<void>();
 }
 
 type ThreadEvent = Extract<OrchestrationV2ThreadStreamItem, { readonly kind: "event" }>["event"];

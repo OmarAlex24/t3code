@@ -1,4 +1,9 @@
-import { EnvironmentId, ThreadId, type OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  ThreadId,
+  type OrchestrationV2ThreadShell,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { expect, it, vi } from "vite-plus/test";
 
@@ -12,10 +17,11 @@ const { read, toast } = vi.hoisted(() => ({
 const childEnvironmentId = EnvironmentId.make("child-environment");
 const childThreadId = ThreadId.make("child-thread");
 const parentEnvironmentId = EnvironmentId.make("parent-environment");
-// The panel reads only identity, lineage and delegation from the current thread.
+// The panel reads only identity, model, lineage and delegation from the current thread.
 const child = {
   id: childThreadId,
   title: "Child",
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
   lineage: { rootThreadId: childThreadId, parentThreadId: null, relationshipToParent: null },
   forkedFrom: null,
   delegatedFrom: {

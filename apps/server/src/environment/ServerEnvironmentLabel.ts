@@ -9,6 +9,8 @@ import * as ProcessRunner from "../processRunner.ts";
 
 interface ResolveServerEnvironmentLabelInput {
   readonly cwdBaseName: string;
+  /** T3 home. Provisioned sandboxes and renamed desktop builds write `environment-label` here. */
+  readonly baseDir?: string;
 }
 
 const ServerEnvironmentLabelCommandProbe = Schema.Literals([
@@ -199,12 +201,39 @@ const labelOverride = Config.String("T3CODE_ENVIRONMENT_LABEL").pipe(
   Config.map(Option.flatMap((label) => Option.fromNullishOr(normalizeLabel(label)))),
 );
 
+/**
+ * A label file is the only mechanism that works on every provider without sudo, a systemd user
+ * session, or a writable `/etc/machine-info`, so provisioning writes it before starting the
+ * sandbox server.
+ */
+const readConfiguredLabel = Effect.fn("readConfiguredLabel")(function* (baseDir: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const labelPath = `${baseDir}/environment-label`;
+  const exists = yield* fileSystem.exists(labelPath).pipe(Effect.orElseSucceed(() => false));
+  if (!exists) return null;
+  return yield* fileSystem.readFileString(labelPath).pipe(
+    Effect.map(normalizeLabel),
+    Effect.catch((error) =>
+      Effect.logDebug("Failed to read the configured environment label.", error).pipe(
+        Effect.as(null),
+      ),
+    ),
+  );
+});
+
 export const resolveServerEnvironmentLabel = Effect.fn("resolveServerEnvironmentLabel")(function* (
   input: ResolveServerEnvironmentLabelInput,
 ) {
   const override = yield* labelOverride.pipe(Effect.orElseSucceed(() => Option.none<string>()));
   if (Option.isSome(override)) {
     return override.value;
+  }
+
+  if (input.baseDir !== undefined) {
+    const configuredLabel = yield* readConfiguredLabel(input.baseDir);
+    if (configuredLabel) {
+      return configuredLabel;
+    }
   }
 
   const friendlyHostLabel = yield* resolveFriendlyHostLabel();

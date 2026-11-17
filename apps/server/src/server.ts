@@ -93,11 +93,18 @@ import * as SecretResolver from "./secrets/SecretResolver.ts";
 import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
+import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
+import * as SandboxSettle from "./sandbox/SandboxSettle.ts";
+import * as SandboxMirror from "./sandbox/SandboxMirror.ts";
+import { layerGithubAppManifestRoute } from "./sandbox/githubAppManifestRoute.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as PeerClientPairing from "./peer/PeerClientPairing.ts";
 import * as PeerClientPairingHttp from "./peer/http.ts";
+import * as SubSandboxes from "./sandbox/SubSandboxes.ts";
+import * as SubSandboxRequests from "./sandbox/SubSandboxRequests.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
@@ -226,6 +233,7 @@ import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAcco
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
+import * as UsageSandboxShare from "./usage/UsageSandboxShare.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ThreadViewers from "./orchestration-v2/ThreadViewers.ts";
 import * as WorkflowForge from "./workflows/WorkflowForge.ts";
@@ -774,6 +782,15 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ProviderInstallation.layer,
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
+  SandboxProvisioner.layerSweep,
+  SandboxBridge.layerLive,
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const service = yield* SandboxSettle.SandboxSettle;
+      yield* service.start();
+    }),
+  ).pipe(Layer.provideMerge(SandboxSettle.layer.pipe(Layer.provide(SandboxMirror.layer)))),
+  SandboxMirror.layer,
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),
   // One hub, which the feeders above and the workflow store inside the runtime publish to.
@@ -782,6 +799,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(SecretCheck.layer),
+  Layer.provideMerge(SandboxProvisioner.layerRuntime),
   Layer.provideMerge(SecretResolver.layer),
   // Above the settings it writes when a theme is applied.
   Layer.provideMerge(EnvironmentTheme.layer),
@@ -860,6 +878,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
 
 const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(layerUsage),
+  Layer.provideMerge(UsageSandboxShare.layer),
   Layer.provideMerge(layerBackground),
   // The same layer the event sink uses; memoized, subscriptions and batch ranking share it.
   Layer.provideMerge(ThreadViewers.layer),
@@ -903,6 +922,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
     ServerHttp.layerOtlpTracesProxyRoute,
     ServerHttp.layerAssetRoute,
+    layerGithubAppManifestRoute,
     ServerHttp.layerAttachmentUploadRoute,
     GuestHttp.layer,
     LinkThreadHttp.layer,
@@ -922,12 +942,21 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
+  // Picks up what agents on this machine's sandboxes ask for through the helper installed there.
+  Layer.effectDiscard(
+    SubSandboxRequests.SubSandboxRequests.pipe(Effect.flatMap((requests) => requests.start())),
+  ),
 ).pipe(
   Layer.provide(
     PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
   ),
+  // Sub-sandbox requests from agents on sandboxes, started through the two layers below.
+  Layer.provide(SubSandboxRequests.layer),
   // delegate_task to a linked environment, from /mcp and the follower above.
   Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
+  // Sandboxes delegate_task starts for subagents, linked like any environment and ended with
+  // their tasks by the follower above.
+  Layer.provide(SubSandboxes.layer),
   // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.
   Layer.provide(PeerLinkRequests.layer),
   // Share the service so HTTP/WS clients single-flight reads and invalidate each other's cached patches.

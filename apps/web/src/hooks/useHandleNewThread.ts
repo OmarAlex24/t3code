@@ -57,6 +57,7 @@ import * as Schema from "effect/Schema";
 import { useAtomValue } from "@effect/atom-react";
 import { defaultProjectFallbackReadyAtom } from "../state/projects";
 import { useThreadRouteTarget } from "./useThreadRouteTarget";
+import { isSandboxPlaceholderProject } from "../sidebarProjectGrouping";
 import { readUnloadedThreadCount } from "../state/olderSettledShelf";
 import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
@@ -488,7 +489,9 @@ export function resolveDefaultProjectRef(
   );
   if (lastUsed) return scopeProjectRef(lastUsed.environmentId, lastUsed.id);
   if (!fallbackReady) return null;
-  const liveProjects = projects.filter((project) => project.archivedAt == null);
+  const liveProjects = projects.filter(
+    (project) => project.archivedAt == null && !isSandboxPlaceholderProject(project),
+  );
   const [firstProject] = orderItemsByPreferredIds({
     items: liveProjects,
     preferredIds: projectOrder,

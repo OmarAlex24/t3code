@@ -9,8 +9,12 @@ import { PlusIcon, ScaleIcon } from "lucide-react";
 import { memo } from "react";
 import { T, useGT } from "gt-react";
 
-import { ADD_TO_MACHINE_LABEL_CLASS, type EnvironmentOption } from "./BranchToolbar.logic";
-import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import {
+  ADD_TO_MACHINE_LABEL_CLASS,
+  type EnvironmentOption,
+  splitRunOnOptions,
+} from "./BranchToolbar.logic";
+import { EnvironmentOptionIcon } from "./EnvironmentOptionIcon";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import {
   Select,
@@ -18,6 +22,7 @@ import {
   SelectGroupLabel,
   SelectItem,
   SelectPopup,
+  SelectSeparator,
   SelectValue,
 } from "./ui/select";
 
@@ -29,11 +34,14 @@ interface BranchToolbarEnvironmentSelectorProps {
   availableEnvironments: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   onAddToMachine?: (() => void) | undefined;
+  /** Shown when no sandbox config exists yet; opens the dialog that makes one. */
+  onNewSandboxConfig?: (() => void) | undefined;
 }
 
 // Action values cannot collide with server-minted environment IDs.
 const AUTO_VALUE = "action:auto";
 const ADD_MACHINE_VALUE = "action:add-machine";
+const NEW_SANDBOX_CONFIG_VALUE = "action:new-sandbox-config";
 const environmentValue = (id: EnvironmentId) => `env:${id}`;
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
@@ -44,6 +52,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   availableEnvironments,
   onEnvironmentChange,
   onAddToMachine,
+  onNewSandboxConfig,
 }: BranchToolbarEnvironmentSelectorProps) {
   const gt = useGT();
   const composerFloatingLayerProps = useComposerMenuProps();
@@ -53,6 +62,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   );
   const activeEnvironment =
     availableEnvironments.find((env) => env.environmentId === environmentId) ?? null;
+  const { machines, sandboxes } = splitRunOnOptions(availableEnvironments);
 
   const environmentItems = [
     ...(onAutoEnvironment
@@ -63,20 +73,25 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       label: env.label,
     })),
     ...(onAddToMachine ? [{ value: ADD_MACHINE_VALUE, label: gt("Add to another machine") }] : []),
+    ...(onNewSandboxConfig
+      ? [{ value: NEW_SANDBOX_CONFIG_VALUE, label: gt("New sandbox config…") }]
+      : []),
   ];
 
   // Match the xs control's height and padding: the composer strip has no min-height,
   // and its glass seam assumes that height even when this label is the only control.
-  if (envLocked || (onEnvironmentChange === undefined && onAddToMachine === undefined)) {
+  if (
+    envLocked ||
+    (onEnvironmentChange === undefined &&
+      onAddToMachine === undefined &&
+      onNewSandboxConfig === undefined)
+  ) {
     const lockedRow = (
       <span
         className="inline-flex h-7 min-w-0 max-w-full items-center gap-1.5 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-sm sm:h-6 sm:text-xs"
         data-composer-context-control
       >
-        <EnvironmentMachineIcon
-          kind={activeEnvironment?.machine ?? "server"}
-          className="size-3 shrink-0"
-        />
+        <EnvironmentOptionIcon option={activeEnvironment} className="size-3 shrink-0" />
         <ComposerContextLabel>{activeEnvironment?.label ?? gt("Run on")}</ComposerContextLabel>
       </span>
     );
@@ -95,6 +110,8 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       onValueChange={(value) => {
         if (value === ADD_MACHINE_VALUE) {
           onAddToMachine?.();
+        } else if (value === NEW_SANDBOX_CONFIG_VALUE) {
+          onNewSandboxConfig?.();
         } else if (value === AUTO_VALUE) {
           onAutoEnvironment?.();
         } else if (value?.startsWith("env:")) {
@@ -118,10 +135,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
           {autoEnvironmentLabel ? (
             <ScaleIcon className="size-3 shrink-0" aria-hidden="true" />
           ) : (
-            <EnvironmentMachineIcon
-              kind={activeEnvironment?.machine ?? "server"}
-              className="size-3 shrink-0"
-            />
+            <EnvironmentOptionIcon option={activeEnvironment} className="size-3 shrink-0" />
           )}
           <ComposerContextLabel>
             <SelectValue />
@@ -150,14 +164,14 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
               </span>
             </SelectItem>
           )}
-          {availableEnvironments.map((env) => (
+          {machines.map((env) => (
             <SelectItem
               key={env.environmentId}
               value={environmentValue(env.environmentId)}
               disabled={onEnvironmentChange === undefined && env.environmentId !== environmentId}
             >
               <span className="inline-flex items-center gap-1.5">
-                <EnvironmentMachineIcon kind={env.machine} className="size-3" />
+                <EnvironmentOptionIcon option={env} className="size-3" />
                 {env.label}
               </span>
             </SelectItem>
@@ -171,6 +185,34 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             </SelectItem>
           ) : null}
         </SelectGroup>
+        {sandboxes.length > 0 || onNewSandboxConfig ? (
+          <>
+            <SelectSeparator />
+            <SelectGroup>
+              <SelectGroupLabel>Sandbox</SelectGroupLabel>
+              {sandboxes.map((env) => (
+                <SelectItem
+                  key={env.environmentId}
+                  value={environmentValue(env.environmentId)}
+                  disabled={onEnvironmentChange === undefined}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <EnvironmentOptionIcon option={env} className="size-3" />
+                    {env.label}
+                  </span>
+                </SelectItem>
+              ))}
+              {onNewSandboxConfig ? (
+                <SelectItem value={NEW_SANDBOX_CONFIG_VALUE}>
+                  <span className={ADD_TO_MACHINE_LABEL_CLASS}>
+                    <PlusIcon aria-hidden="true" className="size-3" />
+                    New sandbox config…
+                  </span>
+                </SelectItem>
+              ) : null}
+            </SelectGroup>
+          </>
+        ) : null}
       </SelectPopup>
     </Select>
   );

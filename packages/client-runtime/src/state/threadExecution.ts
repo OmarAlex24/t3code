@@ -11,6 +11,7 @@ import {
   isProviderNativeSubagentThread,
   latestProviderTurnForAttempt,
   PROVIDER_DISPLAY_NAMES,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   type ModelSelection,
   type OrchestrationV2NotificationSource,
   type OrchestrationV2PendingBackgroundTask,
@@ -142,10 +143,13 @@ function providerStarting(
     (session) => session.providerInstanceId === run.providerInstanceId,
   );
   const name = session === undefined ? undefined : PROVIDER_DISPLAY_NAMES[session.driver];
+  // The sandbox bridge runs on the generic ACP Registry driver; name the machine it starts.
   const label =
-    name === undefined
-      ? msg("Starting", { $context: "a provider is launching" })
-      : providerStartingPhase(session?.startupPhase, name);
+    run.providerInstanceId === SANDBOX_BRIDGE_INSTANCE_ID
+      ? msg("Starting sandbox")
+      : name === undefined
+        ? msg("Starting", { $context: "a provider is launching" })
+        : providerStartingPhase(session?.startupPhase, name);
   return {
     providerStartingLabel: markedTextEnglish([label]),
     providerStartingLabelMsg: label,
