@@ -275,6 +275,7 @@ import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
 import * as SandboxMirror from "./sandbox/SandboxMirror.ts";
+import * as DiyKit from "./diy/DiyKit.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
@@ -1932,6 +1933,7 @@ export const layerWsRpc = (
 
       const sandboxHandlers = yield* SandboxBridge.rpcHandlers;
       const sandboxMirrorHandlers = yield* SandboxMirror.rpcHandlers;
+      const diyHandlers = yield* DiyKit.rpcHandlers(currentSession);
       const handlers = ServerWsRpcGroup.of({
         [WS_METHODS.issuesList]: (input) => issues.list(input),
         [WS_METHODS.issuesDetail]: (input) => issues.detail(input),
@@ -3638,6 +3640,7 @@ export const layerWsRpc = (
           ),
         ...sandboxHandlers,
         ...sandboxMirrorHandlers,
+        ...diyHandlers,
       });
       const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
       const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =
