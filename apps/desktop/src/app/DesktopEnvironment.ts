@@ -73,6 +73,8 @@ export class DesktopEnvironment extends Context.Service<
     readonly otlpProtocol: OtlpProtocol;
     readonly branding: DesktopAppBranding;
     readonly displayName: string;
+    /** Set only by a renamed build; the backend names its environment after it. */
+    readonly displayNameOverride: Option.Option<string>;
     readonly appUserModelId: string;
     readonly linuxDesktopEntryName: string;
     readonly linuxApplicationsDir: string;
@@ -167,11 +169,15 @@ const make = Effect.fn("desktop.environment.make")(function* (
     input.isPackaged && input.platform === "win32"
       ? path.join(input.resourcesPath, "server.asar")
       : appRoot;
-  const branding = resolveDesktopAppBranding({
+  const resolvedBranding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
   });
-  const displayName = branding.displayName;
+  const displayName = Option.getOrElse(
+    config.displayNameOverride,
+    () => resolvedBranding.displayName,
+  );
+  const branding = { ...resolvedBranding, displayName };
   const stateDir = resolveDesktopStateDir({
     baseDir,
     isDevelopment,
@@ -227,6 +233,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     otlpProtocol: config.otlpProtocol,
     branding,
     displayName,
+    displayNameOverride: config.displayNameOverride,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
       isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
     ),
