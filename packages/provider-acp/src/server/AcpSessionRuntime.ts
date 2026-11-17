@@ -1178,6 +1178,10 @@ export class AcpSessionRuntime extends Context.Service<
       },
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     readonly cancel: Effect.Effect<void, EffectAcpErrors.AcpError>;
+    /** `cancel` with `_meta` for this one notification, merged over `cancelMeta`. */
+    readonly cancelWith?: (
+      meta: NonNullable<EffectAcpSchema.CancelNotification["_meta"]>,
+    ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
     readonly terminateProcessGroup?: Effect.Effect<void, AcpProcessGroupTerminationError>;
     readonly setMode: (
       modeId: string,
@@ -2409,12 +2413,15 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
       ),
     );
 
-  const cancel = Effect.gen(function* () {
+  const cancelWith = Effect.fnUntraced(function* (
+    meta?: EffectAcpSchema.CancelNotification["_meta"],
+  ) {
     const started = yield* getStartedState;
     const activePrompt = yield* Ref.get(activePromptRef);
+    const cancelMeta = meta === undefined ? options.cancelMeta : { ...options.cancelMeta, ...meta };
     const cancelPayload = {
       sessionId: started.sessionId,
-      ...(options.cancelMeta === undefined ? {} : { _meta: options.cancelMeta }),
+      ...(cancelMeta === undefined ? {} : { _meta: cancelMeta }),
     } satisfies EffectAcpSchema.CancelNotification;
     // An agent drops a cancel that reaches it before the prompt it targets, so the cancel waits
     // until the prompt is queued, for at most the cancel timeout.
@@ -2743,8 +2750,12 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     // the agent ahead of it and take the cancel meant for the prompt before.
     cancel:
       options.cancelBehavior === "wait-for-prompt" || options.interruptPromptOnCancel === false
-        ? promptDispatchSemaphore.withPermit(cancel)
-        : cancel,
+        ? promptDispatchSemaphore.withPermit(cancelWith())
+        : cancelWith(),
+    cancelWith: (meta) =>
+      options.cancelBehavior === "wait-for-prompt" || options.interruptPromptOnCancel === false
+        ? promptDispatchSemaphore.withPermit(cancelWith(meta))
+        : cancelWith(meta),
     ...(options.ownDetachedProcessGroup === true ? { terminateProcessGroup } : {}),
     // A session's mode is its `category: "mode"` config option. ACP v1 agents
     // that only advertise `modes` (gemini-cli) take `session/set_mode`

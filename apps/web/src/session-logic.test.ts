@@ -1221,7 +1221,7 @@ describe("native provider presentation in the v2 timeline", () => {
       .toEqual(expectedMessageIds);
   });
 
-  it("excludes checkpoint-only work from the timeline", () => {
+  it("excludes checkpoint-only work and retired milestone items from the timeline", () => {
     const message: OrchestrationV2TurnItem = {
       ...base,
       type: "assistant_message",
@@ -1237,8 +1237,17 @@ describe("native provider presentation in the v2 timeline", () => {
       scopeId: CheckpointScopeId.make("scope"),
       files: [],
     };
+    const milestone: OrchestrationV2TurnItem = {
+      ...base,
+      id: TurnItemId.make("milestone"),
+      type: "milestone",
+      title: "Swap the middleware",
+      event: "started",
+      milestoneId: "m2",
+      setId: "s1",
+    };
     const entries = deriveTimelineEntriesFromVisibleTurnItems({
-      visibleTurnItems: [visible(message), visible(checkpoint)],
+      visibleTurnItems: [visible(message), visible(checkpoint), visible(milestone)],
       optimisticMessages: [],
     });
     expect(entries.map((entry) => entry.kind)).toEqual(["message"]);

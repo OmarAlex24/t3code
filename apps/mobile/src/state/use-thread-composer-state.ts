@@ -104,7 +104,7 @@ import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime
 import { prepareTurnAttachments } from "../lib/attachmentUpload";
 import { DEFAULT_FOLLOW_UP_BEHAVIOR } from "../lib/followUpBehavior";
 import { mobilePreferencesAtom } from "./preferences";
-import { environmentThreadDetails } from "./threads";
+import { environmentThreadDetails, sandboxStartQueue } from "./threads";
 import {
   endQueuedRunEdit,
   getQueuedRunEdit,
@@ -214,6 +214,11 @@ export function useThreadComposerState(input: {
     selectedEnvironmentRuntime,
   } = useThreadSelection();
   const selectedThreadProjection = useSelectedThreadProjection();
+  // A message on a sandbox chat's mirror waits at the bridge while its sandbox starts; the next
+  // one queues behind it rather than steering it.
+  const sandboxStartRunId = useAtomValue(
+    sandboxStartQueue.sandboxStartRunId(selectedThreadDetailRef ?? null),
+  );
   const selectedThreadVisibleTurnItems = useSelectedThreadVisibleTurnItems();
   const acknowledgedMessages = useAtomValue(acknowledgedThreadMessagesAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
@@ -793,9 +798,11 @@ export function useThreadComposerState(input: {
       alternateModifier: followUpOverride !== undefined && followUpOverride !== activeTurnDefault,
       activeTurnDefault,
     });
-    const setupRunning = [selectedThreadActivityRun?.status, selectedThreadRuntime?.status].some(
-      (status) => status === "preparing" || status === "starting",
-    );
+    const setupRunning =
+      sandboxStartRunId !== null ||
+      [selectedThreadActivityRun?.status, selectedThreadRuntime?.status].some(
+        (status) => status === "preparing" || status === "starting",
+      );
     const followUpDispatchMode = setupRunning
       ? "queue"
       : followUpAction === "auto"

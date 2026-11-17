@@ -49,6 +49,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { suggestAppAccessForRemote } from "../sourceControlAppAccessToast";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { placeLinkedPrompt, warnAboutHiddenCharacters } from "./linkedPrompt";
+import { isSandboxPlaceholderProject } from "../../sidebarProjectGrouping";
 
 type LinkState =
   | { readonly status: "opening" }
@@ -123,7 +124,9 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
 
   const recentProjects = () =>
     sortScopedProjectsForSidebar(
-      projects.filter((project) => project.isScratch !== true),
+      projects.filter(
+        (project) => project.isScratch !== true && !isSandboxPlaceholderProject(project),
+      ),
       threads,
       "updated_at",
     );

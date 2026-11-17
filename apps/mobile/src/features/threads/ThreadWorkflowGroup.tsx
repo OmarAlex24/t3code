@@ -47,6 +47,8 @@ export function ThreadWorkflowGroup(props: {
   readonly subagent: OrchestrationV2Subagent;
   readonly group: SubagentWorkflowGroup;
   readonly onOpen: (threadId: ThreadId) => void;
+  /** A sandbox chat's agents, read through the host, which cannot stop them. */
+  readonly readOnly?: boolean;
 }) {
   const { group } = props;
   const provider = useEnvironmentServerConfig(props.environmentId)?.providers.find(
@@ -86,11 +88,13 @@ export function ThreadWorkflowGroup(props: {
               }
             />
           </RowPressable>
-          <SubagentStopButton
-            environmentId={props.environmentId}
-            subagent={props.subagent}
-            className="mr-2"
-          />
+          {props.readOnly ? null : (
+            <SubagentStopButton
+              environmentId={props.environmentId}
+              subagent={props.subagent}
+              className="mr-2"
+            />
+          )}
         </View>
         {rail.length > 0 ? (
           <ScrollView

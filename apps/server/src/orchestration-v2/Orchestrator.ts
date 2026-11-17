@@ -79,6 +79,9 @@ import {
   TurnItemId,
   TrimmedNonEmptyString,
   managedRuntimeModeCeilingMessage,
+  leavesSandboxBridge,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_SWITCH_REFUSAL,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
@@ -928,6 +931,12 @@ function legacyPullRequestLink(
 }
 
 const DELEGATED_RESULT_INLINE_BYTES = 16_000;
+// A sandbox chat's host thread can hold messages for days while its sandbox is away. Older than
+// this, they are not the user coming back; sending them would hand the sandbox's agent stale work.
+const SANDBOX_STALE_RUN_AGE_MS = 60 * 60 * 1000;
+const isStaleSandboxBridgeRun = (run: OrchestrationV2Run, now: DateTime.Utc) =>
+  run.providerInstanceId === SANDBOX_BRIDGE_INSTANCE_ID &&
+  DateTime.toEpochMillis(now) - DateTime.toEpochMillis(run.requestedAt) > SANDBOX_STALE_RUN_AGE_MS;
 
 function delegatedCompletionWakeDetail(
   taskIds: ReadonlyArray<string>,
@@ -2393,9 +2402,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : projection.runs.find(
               (run) => run.id === options.queuedRunId && run.status === "queued",
             );
+      const pickedAt = yield* DateTime.now;
       while (
         storedQueuedRun !== undefined &&
-        isStalePullRequestWatchWake(projection, storedQueuedRun)
+        (isStalePullRequestWatchWake(projection, storedQueuedRun) ||
+          (options?.userStarted !== true && isStaleSandboxBridgeRun(storedQueuedRun, pickedAt)))
       ) {
         yield* writeSystemEvents(
           queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
@@ -4137,6 +4148,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         commandType: command.type,
         cause: `Thread ${command.threadId} is deleted.`,
+      });
+    }
+    if (
+      (command.type === "thread.model-selection.set" || command.type === "provider.switch") &&
+      leavesSandboxBridge(thread.modelSelection, command.modelSelection)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: SANDBOX_BRIDGE_SWITCH_REFUSAL,
       });
     }
     if (
@@ -7574,6 +7595,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : [];
     const releasedAt = yield* DateTime.now;
     for (const held of heldRunsToRelease) {
+      if (isStaleSandboxBridgeRun(held, releasedAt)) {
+        yield* emitQueuedRunCancellation({
+          command,
+          events,
+          projection,
+          run: { ...held, queueHeld: false },
+          now: releasedAt,
+        });
+        continue;
+      }
       yield* emit(
         events,
         command,
@@ -12167,7 +12198,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     if (
       state === null ||
-      state.run.workspacePreparation === undefined ||
+      // A sandbox chat's first message waits on its sandbox's launch instead of a workspace; the
+      // host retries the launch and then this.
+      (state.run.workspacePreparation === undefined &&
+        state.run.providerInstanceId !== SANDBOX_BRIDGE_INSTANCE_ID) ||
       failureItem === undefined ||
       projection.thread.archivedAt !== null ||
       projection.thread.deletedAt !== null
@@ -15200,6 +15234,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "message.dispatch": {
         const thread = yield* refuseNativeSubagentMessage(command);
+        if (leavesSandboxBridge(thread.modelSelection, command.modelSelection)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: SANDBOX_BRIDGE_SWITCH_REFUSAL,
+          });
+        }
         const guestSend =
           command.guestMessageId === undefined
             ? undefined

@@ -278,6 +278,17 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
+import { useSandboxChatAliases, useSandboxRowStates } from "../state/sandboxes";
+import {
+  deleteSandboxThread,
+  deleteThreadSandbox,
+  isSandboxThread,
+  sandboxChatAliasTarget,
+  sandboxRowPhase,
+  sandboxRowThread,
+  threadSandboxUnavailableReason,
+  withSandboxHostMirrors,
+} from "../state/sandboxThreads";
 
 function sameSidebarProviderEntries(
   left: ReadonlyMap<string, SidebarProviderEntry>,
@@ -359,6 +370,11 @@ interface SidebarThreadPartitionInput {
   readonly connectedEnvironmentIds: readonly EnvironmentId[];
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly workingShelfEnabled: boolean;
+  /**
+   * Whether the thread's sandbox keeps it out of Working: a stopped sandbox's last run may still
+   * read as running, and a host mirror's leftover queue is no work (see `sandboxRowThread`).
+   */
+  readonly sandboxIdle: (thread: EnvironmentThreadShell) => boolean;
   /** Boring mode: folders list active threads by the user's latest message. */
   readonly sortActiveBySend: boolean;
   // Snooze wakes, the queued-turn grace and the Working shelf's exit grace depend
@@ -425,6 +441,7 @@ function useSidebarThreads(input: {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly sandboxIdle: (thread: EnvironmentThreadShell) => boolean;
   readonly routeRowThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
@@ -439,6 +456,7 @@ function useSidebarThreads(input: {
     optimisticDrop,
     threads,
     delegatedUnderParent,
+    sandboxIdle,
     routeRowThreadKey,
     folderGroups,
     keepEmptyFolders: keepEmpty,
@@ -489,6 +507,7 @@ function useSidebarThreads(input: {
     connectedEnvironmentIds,
     optimisticDrop,
     workingShelfEnabled,
+    sandboxIdle,
     sortActiveBySend: folderGroups !== null,
     clockKey: `${nowMinute}:${snoozeWakeClock}:${inboxReturnsVersion}`,
   });
@@ -624,6 +643,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     serverConfigs,
     optimisticDrop,
     workingShelfEnabled,
+    sandboxIdle,
     sortActiveBySend,
   } = input;
   const preciseNow = new Date().toISOString();
@@ -632,8 +652,11 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
   const working: EnvironmentThreadShell[] = [];
+  // A stopped sandbox's chat waits on the user, so it sits with the active threads, not Working;
+  // neither does a host mirror's leftover queue move a chat there.
   const inbox = (thread: EnvironmentThreadShell, manuallyMoved = false) =>
     workingShelfEnabled &&
+    !sandboxIdle(thread) &&
     (manuallyMoved ? isThreadWorking(thread) : inboxObservation.isWorking(thread))
       ? working
       : active;
@@ -914,7 +937,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  const delegatedUnderParent = useDelegatedUnderParent();
+  // A sandbox chat's other thread lists nowhere, like delegated tasks: one row stands for both.
+  const sandboxChatAliases = useSandboxChatAliases();
+  const delegatedUnderParent = withSandboxHostMirrors(
+    useDelegatedUnderParent(),
+    sandboxChatAliases,
+  );
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -998,6 +1026,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     routeTarget?.kind === "draft" ? store.getPromotedDraftRedirect(routeTarget.draftId) : null,
   );
   const environmentMachineById = useEnvironmentMachines();
+  // Each row's sandbox, its own or the one a host thread's bridge drives, looked up once per list.
+  const sandboxRowState = useSandboxRowStates();
   const projectGroupsRef = useRef(projectGroups);
   const persistedProjectScopeKeys = useUiStateStore((store) => store.sidebarProjectScopeKeys);
   const setPersistedProjectScopeKeys = useUiStateStore((store) => store.setSidebarProjectScopeKeys);
@@ -1108,10 +1138,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ? asLaunchingThread(thread)
             : thread,
         );
-  const routeRowThreadKey =
+  // A sandbox chat's other thread has no row; the one that stands for it is selected.
+  const routeRowThreadRef =
     routeThreadRef === null
       ? null
-      : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
+      : (sandboxChatAliasTarget(sandboxChatAliases, routeThreadRef) ?? routeThreadRef);
+  const routeRowThreadKey =
+    routeRowThreadRef === null
+      ? null
+      : scopedThreadKey(resolveListedAncestorThreadRef(routeRowThreadRef, threads));
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   // The open draft's first send names its thread in place; a finalized draft reached by
   // navigation resolves through its redirect instead, and still reveals.
@@ -1341,6 +1376,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     optimisticDrop,
     threads: listedThreads,
     delegatedUnderParent,
+    sandboxIdle: (thread) => {
+      const row = sandboxRowState(scopeThreadRef(thread.environmentId, thread.id));
+      return sandboxRowPhase(row) === "stopped" || sandboxRowThread(thread, row) !== thread;
+    },
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
       ? scopedProjectGroups.length === 0
@@ -2657,6 +2696,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 canShareWithGuestAtom(threadRef.environmentId),
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+              sandboxUnavailable: threadSandboxUnavailableReason(threadRef),
               supports: {
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -2850,7 +2890,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }
             return;
           }
+          case "delete-sandbox":
+            await deleteThreadSandbox(threadRef);
+            return;
           case "delete": {
+            // Its own confirmation names the sandbox that goes with it.
+            if (isSandboxThread(threadRef)) {
+              await deleteSandboxThread(threadRef, () => deleteThread(threadRef));
+              return;
+            }
             if (confirmThreadDelete) {
               const confirmed = await settlePromise(() =>
                 api.dialogs.confirm(
@@ -3243,6 +3291,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           environmentMachine={
                             environmentMachineById.get(thread.environmentId) ?? "server"
                           }
+                          sandbox={sandboxRowState(scopeThreadRef(thread.environmentId, thread.id))}
                           providerEntryByInstanceId={
                             providerEntriesByEnvironment.get(thread.environmentId) ??
                             EMPTY_PROVIDER_ENTRIES
@@ -3444,6 +3493,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             environmentMachine={
                               environmentMachineById.get(thread.environmentId) ?? "server"
                             }
+                            sandbox={sandboxRowState(
+                              scopeThreadRef(thread.environmentId, thread.id),
+                            )}
                             scratchMachineLabel={scratchMachineLabelFor(thread)}
                             project={
                               projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??

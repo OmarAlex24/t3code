@@ -29,6 +29,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   isProviderNativeSubagentThread,
+  isSandboxHostProjectRoot,
   MessageId,
   ThreadId,
   type ProjectScript,
@@ -129,9 +130,11 @@ import {
 } from "./thread-inspector-preview";
 import { useStartSideChat } from "./useStartSideChat";
 import { useThreadStatusAnnouncements } from "./useThreadStatusAnnouncements";
+import { sandboxMirrorPicker, useSandboxMirror } from "../../state/sandbox-mirror";
 import type { ThreadInspectorMode, ThreadInspectorTarget } from "./thread-inspector-navigation";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 
+const SANDBOX_WORKSPACE_ELSEWHERE = "Available from a computer connected to the sandbox";
 function firstRouteParam(value: string | string[] | undefined): string | null {
   const first = Array.isArray(value) ? value[0] : value;
   return first === undefined || first.trim().length === 0 ? null : first;
@@ -519,10 +522,18 @@ function ThreadRouteContent(
   const routeConnectionState =
     routeEnvironmentRuntime?.connectionState ?? (environmentId ? "available" : connectionState);
   const routeConnectionError = routeEnvironmentRuntime?.connectionError ?? null;
+  // A sandbox chat's mirror picks among the sandbox's own models, read through the host.
+  const sandboxMirror = useSandboxMirror(selectedThreadDetailRef, selectedThread);
+  const mirrorPicker = sandboxMirrorPicker(
+    sandboxMirror,
+    routeEnvironmentRuntime?.serverConfig ?? null,
+    selectedThread,
+  );
   const selectedThreadWithDraftSettings = selectedThread
     ? {
         ...selectedThread,
-        modelSelection: composer.modelSelection ?? selectedThread.modelSelection,
+        modelSelection:
+          composer.modelSelection ?? mirrorPicker.modelSelection ?? selectedThread.modelSelection,
         runtimeMode: composer.runtimeMode ?? selectedThread.runtimeMode,
         interactionMode: composer.interactionMode ?? selectedThread.interactionMode,
       }
@@ -803,6 +814,10 @@ function ThreadRouteContent(
       terminalId: targetTerminalId,
     });
   };
+  // A sandbox chat's mirror lives in an empty placeholder folder; its workspace is on the sandbox,
+  // which this phone never pairs with.
+  const onSandboxPlaceholder =
+    selectedThreadProject != null && isSandboxHostProjectRoot(selectedThreadProject.workspaceRoot);
   const threadGitControlProps = {
     environmentId: environmentIdRaw ?? "",
     threadId: threadId ?? "",
@@ -816,9 +831,12 @@ function ThreadRouteContent(
     gitStatus: gitStatus.data,
     gitOperationLabel: gitState.gitOperationLabel,
     canOpenTerminal:
-      Boolean(selectedThreadProject?.workspaceRoot) && (canReadTerminal || canOperateTerminal),
+      !onSandboxPlaceholder &&
+      Boolean(selectedThreadProject?.workspaceRoot) &&
+      (canReadTerminal || canOperateTerminal),
     canOperateTerminal,
-    canOpenFiles: Boolean(selectedThreadProject?.workspaceRoot),
+    canOpenFiles: !onSandboxPlaceholder && Boolean(selectedThreadProject?.workspaceRoot),
+    ...(onSandboxPlaceholder ? { unavailableReason: SANDBOX_WORKSPACE_ELSEWHERE } : {}),
     projectScripts: selectedThreadProject
       ? resolveProjectScripts(
           routeEnvironmentRuntime?.serverConfig?.settings ?? DEFAULT_SERVER_SETTINGS,
@@ -1003,7 +1021,7 @@ function ThreadRouteContent(
     );
   }
 
-  const serverConfig = routeEnvironmentRuntime?.serverConfig ?? null;
+  const serverConfig = mirrorPicker.config;
   const renderThreadRouteBody = () => (
     <>
       <GitActionProgressOverlay

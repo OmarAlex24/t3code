@@ -1,5 +1,6 @@
 import { createChildThreadApprovalsAtom } from "@t3tools/client-runtime/state/thread-requests";
 import { useAtomValue } from "@effect/atom-react";
+import { createSandboxStartQueueAtoms } from "@t3tools/client-runtime/state/sandbox-mirror";
 import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
 import { arrayElementsEqual } from "@t3tools/client-runtime/state/entities";
 import {
@@ -12,7 +13,13 @@ import {
   createThreadEnvironmentAtoms,
   createThreadFamilyAtoms,
 } from "@t3tools/client-runtime/state/threads";
-import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  OrchestrationV2ThreadShell,
+  RunId,
+  ScopedThreadRef,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
@@ -34,8 +41,13 @@ export const threadEnvironment = createThreadEnvironmentAtoms(
   threadFamilies.snapshotAtom,
 );
 const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
+// A sandbox chat's message reads as queued while its sandbox starts.
+export const sandboxStartQueue = createSandboxStartQueueAtoms({
+  threadStateAtom: environmentThreads.stateAtom,
+  sandboxesList: serverEnvironment.sandboxesList,
+});
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
-  environmentThreads.stateAtom,
+  sandboxStartQueue.threadStateAtom,
 );
 export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
@@ -57,7 +69,7 @@ export function useEnvironmentThread(
 ): EnvironmentThreadState {
   const result = useAtomValue(
     environmentId !== null && threadId !== null
-      ? environmentThreads.stateAtom(environmentId, threadId)
+      ? sandboxStartQueue.threadStateAtom(environmentId, threadId)
       : EMPTY_THREAD_STATE_ATOM,
   );
   const state = AsyncResult.getOrElse(result, () => EMPTY_ENVIRONMENT_THREAD_STATE);
@@ -131,3 +143,8 @@ export const runningThreadKeepAliveAtom = createRunningThreadKeepAliveAtom({
   threadsAtom: environmentThreadShells.environmentThreadsAtom,
   stateAtom: environmentThreads.stateAtom,
 });
+
+/** The run that reads as queued while this sandbox chat's sandbox starts; null for none. */
+export function useSandboxStartRunId(ref: ScopedThreadRef | null): RunId | null {
+  return useAtomValue(sandboxStartQueue.sandboxStartRunId(ref));
+}

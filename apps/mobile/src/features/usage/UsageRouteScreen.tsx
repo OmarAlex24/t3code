@@ -40,9 +40,10 @@ import { useWorkspaceSettledContentWidth } from "../layout/workspace-content-wid
 import { cn } from "../../lib/cn";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
 import { NativeWorkspaceTabActivityContext } from "../../native/v5-workspace-context";
-import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
+import { useUsage, useUsageSandboxShares, type EnvironmentUsageStatus } from "../../state/usage";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import { UsageDailyChart } from "./UsageDailyChart";
+import { UsageSandboxShareSection } from "./UsageSandboxShareSection";
 import { toggleUsageEnvironment } from "./usageEnvironmentSelection";
 import { useRefreshLimits } from "./UsageLimitsSection";
 import { UsageLimitsSection } from "./UsageLimitsPooled";
@@ -110,6 +111,7 @@ function UsageScreen(props: {
     selectedEnvironmentIds,
     !headerOnly,
   );
+  const sandboxShares = useUsageSandboxShares(selectedEnvironments, window.timeZone);
   const isFocused = useIsFocused();
   const limits = useRefreshLimits(
     selectedEnvironmentIds,
@@ -356,6 +358,13 @@ function UsageScreen(props: {
                           columns={width >= 900 ? 6 : wide ? 3 : 2}
                         />
                         <CostSection merged={merged} wide={wide} />
+                        {sandboxShares.map((share) => (
+                          <UsageSandboxShareSection
+                            key={share.environmentId}
+                            summary={share.summary}
+                            label={sandboxShares.length > 1 ? share.label : null}
+                          />
+                        ))}
                         <ModelsSection merged={merged} metric={metric} columns={wide ? 2 : 1} />
                       </UsageUpdating>
                     </>

@@ -47,13 +47,17 @@ import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
 import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
 import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { SANDBOX_MIRROR_MODELS_PENDING_REASON } from "@t3tools/client-runtime/state/sandbox-mirror";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { freshSessionBannerItem } from "./chat/ComposerFreshSession";
 import { armFreshSession, disarmFreshSession, useFreshSessionArmed } from "./chat/freshSessionArms";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
 import { useWorktreeSetup } from "./chat/useWorktreeSetup";
+import { useSandboxLaunch } from "./chat/useSandboxLaunch";
+import { useSandboxThreadSetup } from "./chat/useSandboxThreadSetup";
 import { useChatShortcuts } from "./chat/useChatShortcuts";
 import { ChatBannerLane } from "./chat/ChatBannerLane";
 import * as Schema from "effect/Schema";
@@ -66,11 +70,13 @@ import {
   type ResponseContextRecord,
   type ChatFileAttachment,
   isProviderNativeSubagentThread,
+  isSandboxHostProjectRoot,
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
+  type SandboxLaunchMessage,
   type ServerProvider,
   type ScopedThreadRef,
   type ThreadId,
@@ -205,8 +211,31 @@ import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { shortcutLabelForCommand } from "../keybindings";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
-import { toastManager } from "./ui/toast";
+import { stackedThreadToast, toastManager } from "./ui/toast";
+import {
+  useSandboxChatAliases,
+  useSandboxMirrorModelSource,
+  useSandboxEnvironmentIds,
+  useSandboxlessBridgeThread,
+  useThreadSandbox,
+} from "../state/sandboxes";
+import {
+  ensureSandboxThreadRunning,
+  isHostThreadRef,
+  movesToSandboxChatAlias,
+  sandboxChatAliasTarget,
+  shortSandboxId,
+} from "../state/sandboxThreads";
+import {
+  beginSandboxResend,
+  endSandboxResend,
+  isSandboxResendPending,
+  useSandboxResendPending,
+} from "../state/sandboxResends";
+import { CloudOffIcon } from "lucide-react";
+import { SandboxProviderLogo } from "./settings/SandboxProviderLogo";
 import { projectScriptIdFromCommand } from "~/projectScripts";
+import { readFileAsDataUrl } from "~/lib/imageCompression";
 import { newMessageId } from "~/lib/utils";
 import {
   isInSideChatPane,
@@ -244,6 +273,7 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
+  handOverLaunchedDraft,
   useComposerDraftStore,
   DraftId,
 } from "../composerDraftStore";
@@ -255,7 +285,7 @@ import { useEnvironmentQueryRefresh } from "../state/query";
 import { useEnvironmentScope } from "~/state/session";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "../state/server";
 import { hostEnvironmentIdAtom } from "../state/primaryEnvironment";
-import { threadEnvironment } from "../state/threads";
+import { threadEnvironment, useSandboxStartRunId } from "../state/threads";
 import {
   resolveProviderSkillsForCwd,
   resolveProvidersForCwd,
@@ -314,6 +344,7 @@ import {
 } from "./chat/PanelLayoutControls";
 import type { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { ThreadDetailsPanel } from "./chat/ThreadDetailsPanel";
+import { SandboxConnectAction, useSandboxConnect } from "./sandbox/SandboxConnect";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import {
   resolveEffectiveEnvMode,
@@ -337,6 +368,7 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { SandboxStartingTitle } from "./chat/SandboxStartingTitle";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
@@ -366,6 +398,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   shouldRefocusComposerOnWindowFocus,
   hasCompactableConversation,
+  waitingMessageCanResend,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
@@ -1023,6 +1056,46 @@ export default function ChatView(props: ChatViewProps) {
   })();
   const activeThreadRef = useActiveThreadRef(activeThread);
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
+  const activeSandbox = useThreadSandbox(activeThreadRef);
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
+  // The host thread the sandbox bridge drives: its own server stays up, and the host resumes the
+  // sandbox when a turn starts, so it sends like any other thread.
+  const activeSandboxOnHost =
+    activeSandbox !== undefined &&
+    activeThreadRef !== null &&
+    isHostThreadRef(activeSandbox, activeThreadRef);
+  // A sandbox chat opens on the sandbox's own thread, whatever its state, once that thread holds the
+  // conversation; until then the host's mirror stands in.
+  const sandboxChatAliases = useSandboxChatAliases();
+  const activeAliasTarget =
+    activeThreadRef === null
+      ? undefined
+      : sandboxChatAliasTarget(sandboxChatAliases, activeThreadRef);
+  const activeSandboxStopped = activeSandbox?.state === "stopped";
+  // On a sandbox chat's mirror, the surfaces that need the sandbox offer to connect to it.
+  const sandboxConnect = useSandboxConnect(activeThreadRef);
+  const sandboxSurfaceConnect =
+    sandboxConnect === null
+      ? null
+      : { reason: sandboxConnect.reason, action: <SandboxConnectAction state={sandboxConnect} /> };
+  // A chat whose sandbox was deleted keeps its conversation here, but has nowhere to send.
+  const sandboxDeleted = useSandboxlessBridgeThread(
+    activeThreadRef,
+    serverThread?.modelSelection.instanceId,
+  );
+  // A legacy sandbox thread's server is off on purpose, so the session cannot be read and the
+  // connection never comes up until a send or un-settle resumes it from this client.
+  const legacySandboxStopped = activeSandboxStopped && !activeSandboxOnHost;
+  // A run the sandbox was in when it stopped ended with its machine, though the thread's last
+  // known state still reads as running: until a resume brings the real state back, nothing
+  // works there, so it shows no live run and nothing to interrupt.
+  const sandboxRunHalted =
+    activeSandboxStopped && !activeSandboxOnHost && (activeSandbox?.resumingSince ?? null) === null;
+  // Per thread, since this view moves from thread to thread: each waits on its own sandbox.
+  const sandboxResendPending = useSandboxResendPending(activeThreadKey);
+  // A message on the host's mirror waits at the bridge while its sandbox starts, so it reads as
+  // queued and the next one queues behind it rather than steering it.
+  const sandboxStartRunId = useSandboxStartRunId(activeThreadRef);
   const activeEnvironmentServerBrowser = useEnvironmentSupportsServerBrowser(
     activeThreadRef?.environmentId ?? null,
   );
@@ -1136,12 +1209,19 @@ export default function ChatView(props: ChatViewProps) {
       ? scopeProjectRef(activeThreadEnvironmentId, activeThreadProjectId)
       : null;
   const activeProject = useProject(activeProjectRef);
+  // T3 made this project's folder only to hold sandbox threads: it is empty, not the repository, so
+  // nothing here offers git, scripts, files or a terminal on it.
+  const activeProjectIsSandboxPlaceholder =
+    activeProject !== null && isSandboxHostProjectRoot(activeProject.workspaceRoot);
   const activeProjectSettings = resolveProjectSettings(
     settings,
     activeProject?.id ?? null,
     activeProject ?? undefined,
   );
-  const activeProjectScripts = activeProject ? resolveProjectScripts(settings, activeProject) : [];
+  const activeProjectScripts =
+    activeProject && !activeProjectIsSandboxPlaceholder
+      ? resolveProjectScripts(settings, activeProject)
+      : [];
   const { projectCloneBannerItem, projectCloneSendBlockReason } =
     useProjectCloneBanner(activeProjectRef);
   const activeProjectDefaultModelSelection =
@@ -1223,11 +1303,75 @@ export default function ChatView(props: ChatViewProps) {
       activeProject,
       environmentById.get(activeProject.environmentId)?.serverConfig?.scratchWorkspaceRoot ?? null,
     );
-  const logicalProjectEnvironments = useLogicalProjectEnvironments(
+  const projectEnvironments = useLogicalProjectEnvironments(
     activeProject,
     activeProjectIsScratch && draftId !== null,
   );
+  // A sandbox chat's first message: the prompt and images, which the host keeps until it can send.
+  const readSandboxLaunchMessage = async (): Promise<SandboxLaunchMessage | string | null> => {
+    const context = composerRef.current?.getSendContext();
+    if (context === undefined) return null;
+    if (context.files.length > 0) {
+      return "Only images can go with a sandbox chat's first message. Remove the other files, or attach them once the chat has started.";
+    }
+    const text = promptRef.current.trim();
+    if (text === "" && context.images.length === 0) return null;
+    const attachments = await Promise.all(
+      context.images.map(async (image) => ({
+        type: "image" as const,
+        name: image.name,
+        mimeType: image.mimeType,
+        sizeBytes: image.sizeBytes,
+        dataUrl: await readFileAsDataUrl(image.file),
+      })),
+    );
+    return {
+      messageId: newMessageId(),
+      text,
+      attachments,
+      title: deriveThreadTitleSeed({ text, attachments: context.images }),
+      modelSelection: context.selectedModelSelection,
+      runtimeMode,
+      interactionMode: DEFAULT_INTERACTION_MODE,
+    };
+  };
+  const sandboxLaunch = useSandboxLaunch({
+    draftId,
+    threadId: draftId === null ? null : (activeThread?.id ?? null),
+    activeEnvironmentId: activeThread?.environmentId ?? null,
+    activeProject,
+    logicalProjectEnvironments: projectEnvironments,
+    envLocked: Boolean(activeThread && (activeMessageCount > 0 || activeRuntime !== null)),
+    readLaunchMessage: readSandboxLaunchMessage,
+    onLaunched: (threadRef) => {
+      if (draftId === null) return;
+      // The host thread holds the message now; the draft hands over to it like any sent draft.
+      promptRef.current = "";
+      handOverLaunchedDraft(draftId, threadRef);
+    },
+  });
+  // A sandbox chat's host thread shows its sandbox's setup while its first message waits.
+  const sandboxSetupCard = useSandboxThreadSetup(isServerThread ? routeThreadRef : null);
+  const logicalProjectEnvironments = sandboxLaunch.logicalProjectEnvironments;
+  // The thread's own sandbox shows its provider's mark rather than a generic machine.
+  const ownSandboxProvider =
+    activeSandbox !== undefined && !activeSandboxOnHost ? activeSandbox.provider : null;
+  const projectEnvironmentOptions =
+    ownSandboxProvider === null
+      ? logicalProjectEnvironments
+      : logicalProjectEnvironments.map((environment) =>
+          environment.environmentId === activeSandbox?.environmentId
+            ? { ...environment, sandboxProvider: ownSandboxProvider }
+            : environment,
+        );
+  const pickerEnvironments =
+    sandboxLaunch.options.length === 0
+      ? projectEnvironmentOptions
+      : [...projectEnvironmentOptions, ...sandboxLaunch.options];
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
+  // Sandbox configs, or the offer to make one, make the picker useful for a project on one machine.
+  const canPickEnvironment =
+    pickerEnvironments.length > 1 || sandboxLaunch.onNewConfig !== undefined;
   const canAutoBalanceEnvironments = hasMultipleEnvironments && !activeProjectIsScratch;
   const activeEnvironmentOption =
     logicalProjectEnvironments.find(
@@ -1235,7 +1379,7 @@ export default function ChatView(props: ChatViewProps) {
     ) ?? null;
   const showComposerEnvironmentIndicator = shouldShowEnvironmentIndicator({
     activeEnvironment: activeEnvironmentOption,
-    canPickEnvironment: hasMultipleEnvironments,
+    canPickEnvironment,
   });
 
   const pullRequestLinking = usePullRequestLinking(environmentId);
@@ -1261,18 +1405,23 @@ export default function ChatView(props: ChatViewProps) {
     : (primaryEnvironment?.serverConfig ?? null);
   const providerEnvironmentId = (activeThread ? activeEnvironment : primaryEnvironment)
     ?.environmentId;
-  const gitCwd = activeProject
-    ? projectScriptCwd({
-        project: { cwd: activeProject.workspaceRoot },
-        worktreePath: activeThread?.worktreePath ?? null,
-      })
-    : null;
-  const providerStatuses = resolveProvidersForCwd(
-    (providerEnvironmentId === undefined
-      ? undefined
-      : providersByEnvironment.get(providerEnvironmentId)) ?? EMPTY_PROVIDERS,
-    gitCwd,
-  );
+  const gitCwd =
+    activeProject && !activeProjectIsSandboxPlaceholder
+      ? projectScriptCwd({
+          project: { cwd: activeProject.workspaceRoot },
+          worktreePath: activeThread?.worktreePath ?? null,
+        })
+      : null;
+  // On a sandbox chat's host mirror, the sandbox's own provider and selection, never the host's.
+  const sandboxMirrorModelSource = useSandboxMirrorModelSource(activeThreadRef, serverThread);
+  const providerStatuses =
+    sandboxMirrorModelSource?.providers ??
+    resolveProvidersForCwd(
+      (providerEnvironmentId === undefined
+        ? undefined
+        : providersByEnvironment.get(providerEnvironmentId)) ?? EMPTY_PROVIDERS,
+      gitCwd,
+    );
   const composerModelSelectionApplies = draftModelSelectionApplies(
     { modelSelectionExplicit: composerModelSelectionExplicit },
     threadHasStarted(activeThread),
@@ -1312,7 +1461,7 @@ export default function ChatView(props: ChatViewProps) {
   // rule out a started thread: one whose machine is offline never loads its
   // messages, so it would otherwise be offered a machine picker that does nothing.
   const canChangeEnvironment =
-    hasMultipleEnvironments && !envLocked && draftId !== null && !draftThread?.promotedTo;
+    canPickEnvironment && !envLocked && draftId !== null && !draftThread?.promotedTo;
 
   const loadBalancingSettings = useClientSettings((settings) => ({
     loadBalancingEnabled: settings.loadBalancingEnabled,
@@ -1338,7 +1487,9 @@ export default function ChatView(props: ChatViewProps) {
   const systemComposerBannerItems = useSystemComposerBanners({
     activeEnvironment,
     activeEnvironmentUnavailable,
-    activeEnvironmentUnavailableState,
+    activeEnvironmentUnavailableState: legacySandboxStopped
+      ? null
+      : activeEnvironmentUnavailableState,
     activeThreadEnvironmentId: activeThread?.environmentId ?? null,
     serverConfig,
     hasMultipleRegisteredEnvironments: environments.length > 1,
@@ -1372,7 +1523,7 @@ export default function ChatView(props: ChatViewProps) {
     canOperateThread &&
     conversationProviderStatus !== null &&
     conversationProviderStatus.supportsConversationRollback !== false;
-  const phase = derivePhase(activeRuntime);
+  const phase = sandboxRunHalted ? "disconnected" : derivePhase(activeRuntime);
   const serverThreadId = serverThread?.id;
   const serverThreadEnvironmentId = serverThread?.environmentId;
   const setThreadError = makeThreadErrorSetter({
@@ -1503,7 +1654,7 @@ export default function ChatView(props: ChatViewProps) {
     phase,
     isSendBusy,
     isCompacting,
-    runlessWorkStartedAt,
+    runlessWorkStartedAt: sandboxRunHalted ? null : runlessWorkStartedAt,
   });
   const activeContextWindow = deriveLatestContextWindowSnapshot(
     serverVisibleTurnItems ?? [],
@@ -1516,7 +1667,8 @@ export default function ChatView(props: ChatViewProps) {
     runlessWorkStartedAt;
   const activeRunPreparing = activeActivityRun?.status === "preparing";
   const sendQueuesBehindSetup =
-    isServerThread && (activeRunPreparing || activeActivityRun?.status === "starting");
+    isServerThread &&
+    (activeRunPreparing || activeActivityRun?.status === "starting" || sandboxStartRunId !== null);
   const [setupQueueSendThreadKey, setSetupQueueSendThreadKey] = useState<string | null>(null);
   const downloadFileAttachment = async (attachment: ChatFileAttachment) => {
     const connection = readPreparedConnection(environmentId);
@@ -1637,7 +1789,7 @@ export default function ChatView(props: ChatViewProps) {
     isWorking,
     draftHeroDockRequested,
     backgroundSubmissionPending,
-    hasWorktreeSetupCard: worktreeSetup !== null,
+    hasWorktreeSetupCard: worktreeSetup !== null || sandboxSetupCard !== null,
   });
   const {
     transitionGroupRef: draftHeroTransitionGroupRef,
@@ -1688,13 +1840,15 @@ export default function ChatView(props: ChatViewProps) {
     useAtomValue(serverEnvironment.configValueAtom(openInEnvironmentId))?.availableEditors ?? [];
   const hostEnvironmentId = useAtomValue(hostEnvironmentIdAtom);
   const remoteOpenState = useRemoteOpenState(openInEnvironmentId);
-  const showOpenInPicker = shouldShowOpenInPicker({
-    activeProjectName: activeProject?.title,
-    activeThreadEnvironmentId: openInEnvironmentId,
-    primaryEnvironmentId: primaryEnvironment?.environmentId ?? null,
-    hostEnvironmentId,
-    remoteOpenMode: remoteOpenState.mode,
-  });
+  const showOpenInPicker =
+    !activeProjectIsSandboxPlaceholder &&
+    shouldShowOpenInPicker({
+      activeProjectName: activeProject?.title,
+      activeThreadEnvironmentId: openInEnvironmentId,
+      primaryEnvironmentId: primaryEnvironment?.environmentId ?? null,
+      hostEnvironmentId,
+      remoteOpenMode: remoteOpenState.mode,
+    });
   useOpenFavoriteEditorShortcut({
     enabled: showOpenInPicker && !backgroundThread,
     environmentId: openInEnvironmentId,
@@ -1763,7 +1917,9 @@ export default function ChatView(props: ChatViewProps) {
       rememberCheckoutIsRepo(environmentId, gitStatusCwd, liveIsGitRepo);
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
-  const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  const isGitRepo =
+    !activeProjectIsSandboxPlaceholder &&
+    (liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true);
   // Provider-native subagents cannot take messages; approvals and questions go to the top-level parent.
   const showProviderSubagentBar = isProviderSubagent;
   const composerMounted = !showProviderSubagentBar;
@@ -1853,11 +2009,19 @@ export default function ChatView(props: ChatViewProps) {
     projectGroupingSettings,
     sendInFlightRef,
   });
+  // A sandbox config is not a machine yet: picking one is remembered for the send.
+  const onPickEnvironmentStable = useStableCallback((nextEnvironmentId: EnvironmentId) => {
+    if (!sandboxLaunch.onEnvironmentChange(nextEnvironmentId)) {
+      onEnvironmentChangeStable(nextEnvironmentId);
+    }
+  });
 
   const { focusComposer: focusComposerStable, scheduleComposerFocus: scheduleComposerFocusStable } =
     useComposerFocus(composerRef);
   const canInterruptRunningThread =
-    canOperateThread && deriveCanInterruptRunningThread(activeThread !== undefined, activeRuntime);
+    canOperateThread &&
+    !sandboxRunHalted &&
+    deriveCanInterruptRunningThread(activeThread !== undefined, activeRuntime);
   const onInterrupt = async () => {
     if (
       !activeThread ||
@@ -2162,6 +2326,39 @@ export default function ChatView(props: ChatViewProps) {
     timelineAnchorMessageId,
     setTimelineAnchor,
   });
+  const [sentVisit, setSentVisit] = useState<{
+    readonly threadKey: string | null;
+    readonly sent: boolean;
+  }>({ threadKey: activeThreadKey, sent: false });
+  if (sentVisit.threadKey !== activeThreadKey) {
+    setSentVisit({ threadKey: activeThreadKey, sent: false });
+  }
+  const markSentThisVisit = () => {
+    if (!sentVisit.sent) setSentVisit({ threadKey: activeThreadKey, sent: true });
+  };
+  const holdAliasSwitch = !movesToSandboxChatAlias({
+    readingBack: showScrollToBottom,
+    sentThisVisit: sentVisit.sent,
+  });
+  const activeAliasTargetKey =
+    activeAliasTarget === undefined ? null : scopedThreadKey(activeAliasTarget);
+  const switchToAliasTarget = useStableCallback(() => {
+    if (activeAliasTarget === undefined || activeThreadRef === null) return;
+    useComposerDraftStore.getState().moveComposerContent(activeThreadRef, activeAliasTarget);
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: {
+        environmentId: activeAliasTarget.environmentId,
+        threadId: activeAliasTarget.threadId,
+      },
+      replace: true,
+    });
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the route to the thread that stands for this sandbox chat, taking the unsent draft along
+  useEffect(() => {
+    if (activeAliasTargetKey === null || holdAliasSwitch) return;
+    switchToAliasTarget();
+  }, [activeAliasTargetKey, holdAliasSwitch, switchToAliasTarget]);
 
   useFocusComposerOnThreadOpen(
     activeThreadRef,
@@ -2666,6 +2863,51 @@ export default function ChatView(props: ChatViewProps) {
       freshSessionAvailable && freshSessionArmed && activePendingApproval === null
         ? [freshSessionBannerItem(() => disarmFreshSession(routeThreadKey))]
         : [];
+    const sandboxStartingSince = activeSandbox?.resumingSince ?? null;
+    const sandboxItems: ComposerBannerStackItem[] =
+      activeSandbox !== undefined &&
+      (activeSandboxStopped || sandboxResendPending || sandboxStartingSince !== null)
+        ? [
+            {
+              id: `sandbox-stopped:${activeSandbox.instanceId}`,
+              variant: "default",
+              group: "environment",
+              icon: <SandboxProviderLogo kind={activeSandbox.provider} />,
+              // The server's resume says when it began, whoever started it (this client, another,
+              // or the bridge for a run on the host).
+              title:
+                sandboxStartingSince !== null ? (
+                  <SandboxStartingTitle
+                    sandboxId={activeSandbox.sandboxId}
+                    startedAt={sandboxStartingSince}
+                  />
+                ) : sandboxResendPending ? (
+                  `Resuming sandbox ${shortSandboxId(activeSandbox.sandboxId)}`
+                ) : (
+                  `Sandbox ${shortSandboxId(activeSandbox.sandboxId)} is stopped`
+                ),
+              description: sandboxResendPending
+                ? "Your message sends once it is running again."
+                : sandboxStartingSince !== null
+                  ? "It is coming back with its disk as it was. This can take a few minutes."
+                  : activeSandboxOnHost
+                    ? "Its disk is kept. Sending a message resumes it; the first answer can take a few minutes."
+                    : "Its disk is kept. Sending a message resumes it.",
+            },
+          ]
+        : sandboxDeleted
+          ? [
+              {
+                id: "sandbox-deleted",
+                variant: "default",
+                group: "environment",
+                icon: <CloudOffIcon />,
+                title: "This chat's sandbox was deleted",
+                description:
+                  "The conversation stays here to read. To keep working, start a new chat on this computer or in a new sandbox.",
+              },
+            ]
+          : [];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
@@ -2675,6 +2917,7 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...freshSessionItems,
+        ...sandboxItems,
         ...systemComposerBannerItems,
       ];
     }
@@ -2686,6 +2929,7 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...freshSessionItems,
+      ...sandboxItems,
       ...systemComposerBannerItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
@@ -2778,7 +3022,7 @@ export default function ChatView(props: ChatViewProps) {
           (env) => env.environmentId === currentId,
         );
         const next = logicalProjectEnvironments[(index + 1) % logicalProjectEnvironments.length];
-        if (next) onEnvironmentChangeStable(next.environmentId);
+        if (next) onPickEnvironmentStable(next.environmentId);
       },
       "thread.steerQueuedMessage": ({ event }) =>
         routeKind !== "draft" && queuedRunsControlRef.current?.steerNext(event.repeat) === true,
@@ -2927,6 +3171,56 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     setThreadError,
   });
+  // A thread kept as a stopped sandbox: its server is off, so a send resumes it and goes once it
+  // answers. The host never sees this thread's traffic, so the resume starts here.
+  // The message stays in this thread's composer until this thread's chat sends it, so it goes
+  // when the user is back on it, and a sandbox that does not come back loses nothing.
+  const resumeSandboxAndSend = useStableCallback(() => {
+    if (activeThreadRef === null || activeThreadKey === null) return;
+    const threadRef = activeThreadRef;
+    const threadKey = activeThreadKey;
+    const title = activeThread?.title ?? "this chat";
+    if (!beginSandboxResend(threadKey)) return;
+    toastManager.add(
+      stackedThreadToast({
+        type: "info",
+        title: "Resuming the sandbox",
+        description: "Your message sends once it is running again.",
+        data: { threadRef },
+      }),
+    );
+    const openChat = () =>
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
+      });
+    void ensureSandboxThreadRunning(threadRef).then((running) => {
+      const away = currentRouteThreadKeyRef.current !== threadKey;
+      if (!running) {
+        endSandboxResend(threadKey);
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Message not sent",
+            description: away
+              ? `The sandbox for “${title}” did not come back. The message is still in its composer.`
+              : "The sandbox did not come back. Resume it from the Sandboxes list.",
+            ...(away ? { actionProps: { children: "Open chat", onClick: openChat } } : {}),
+          }),
+        );
+        return;
+      }
+      if (!away || !isSandboxResendPending(threadKey)) return;
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: "Sandbox running again",
+          description: `Your message to “${title}” sends when you open it.`,
+          actionProps: { children: "Open chat", onClick: openChat },
+        }),
+      );
+    });
+  });
   const { onSend } = useComposerSend({
     environmentId,
     routeThreadKey,
@@ -2961,6 +3255,7 @@ export default function ChatView(props: ChatViewProps) {
     isRevertingCheckpoint,
     threadDetailLoading,
     activeEnvironmentUnavailable,
+    sendResumesSandbox: legacySandboxStopped ? resumeSandboxAndSend : null,
     isSendBusy,
     sendQueuesBehindSetup,
     isDraftHeroState,
@@ -3014,11 +3309,17 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const onWorktreeSetupWorkLocallyStable = useStableCallback(onWorktreeSetupWorkLocally);
-  const onComposerSendStable = useStableCallback(onSend);
+  // A draft on a sandbox config launches its machine first; the message waits in the composer.
+  const onComposerSendStable = useStableCallback((...args: Parameters<typeof onSend>) => {
+    if (sandboxLaunch.interceptSend()) return Promise.resolve();
+    markSentThisVisit();
+    return onSend(...args);
+  });
   const sendPreviewAnnotation = (
     annotation: PreviewAnnotationPayload,
     image: ComposerImageAttachment | null,
   ) => {
+    markSentThisVisit();
     void onSend(undefined, "auto", "foreground", { annotation, image });
   };
   const sendPreviewAnnotationStable = useStableCallback(sendPreviewAnnotation);
@@ -3088,18 +3389,21 @@ export default function ChatView(props: ChatViewProps) {
     void onComposerSendStable();
   };
   const resendAfterWorkLocallyStable = useStableCallback(resendAfterWorkLocally);
-  const workLocallyResendReady =
-    workLocallyResendDraftId !== null &&
-    workLocallyResendDraftId === draftId &&
-    isLocalDraftThread &&
-    !isSendBusy &&
-    !isRevertingCheckpoint &&
-    !threadDetailLoading &&
-    clientSettingsHydrated &&
-    !needsLoadBalancing &&
-    !activeEnvironmentUnavailable &&
-    !activePendingUserInput &&
-    !feedbackUploading;
+  const workLocallyResendReady = waitingMessageCanResend({
+    waitingDraftId: workLocallyResendDraftId,
+    draftId,
+    isLocalDraftThread,
+    onSandbox: sandboxEnvironmentIds.has(environmentId),
+    canOperateThread,
+    isSendBusy,
+    isRevertingCheckpoint,
+    threadDetailLoading,
+    clientSettingsHydrated,
+    needsLoadBalancing,
+    activeEnvironmentUnavailable,
+    hasPendingUserInput: Boolean(activePendingUserInput),
+    feedbackUploading,
+  });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- switches the draft to local mode, then resends the waiting message once sending is idle
   useEffect(() => {
     if (
@@ -3125,6 +3429,27 @@ export default function ChatView(props: ChatViewProps) {
     workLocallyResendReady,
   ]);
 
+  const sandboxResendReady =
+    sandboxResendPending &&
+    !activeEnvironmentUnavailable &&
+    canOperateThread &&
+    !isSendBusy &&
+    !threadDetailLoading;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends the message that resumed the sandbox once its server answers again
+  useEffect(() => {
+    if (!sandboxResendReady || activeThreadKey === null || sendInFlightRef.current) return;
+    // Only from the thread that waits: the send takes whichever composer the route shows.
+    if (currentRouteThreadKeyRef.current !== activeThreadKey) return;
+    endSandboxResend(activeThreadKey);
+    void onComposerSendStable();
+  }, [
+    activeThreadKey,
+    currentRouteThreadKeyRef,
+    onComposerSendStable,
+    sandboxResendReady,
+    sendInFlightRef,
+  ]);
+
   const shownThreadSyncPhase = activeEnvironmentUnavailable ? null : delayedThreadSyncPhase;
   const hasThreadNow =
     attentionNow !== null || workNow !== null || goalNow !== null || shownThreadSyncPhase !== null;
@@ -3145,12 +3470,16 @@ export default function ChatView(props: ChatViewProps) {
   // The end of the timeline holds the thread's present and next turns: what it is doing now,
   // its lifecycle status, guest messages awaiting you, then your queued messages.
   const timelineFooter =
+    sandboxSetupCard === null &&
     pendingHandoff === null &&
     !hasThreadNow &&
     threadStatusLine === null &&
     pendingGuestMessageCount === 0 &&
     !hasQueuedTurns ? null : (
       <>
+        {sandboxSetupCard === null ? null : (
+          <div className="chat-content-lane">{sandboxSetupCard}</div>
+        )}
         {pendingHandoff === null ? null : (
           <div className="chat-content-lane">
             <HandoffRow
@@ -3286,7 +3615,7 @@ export default function ChatView(props: ChatViewProps) {
     />
   ) : null;
   const panelToggleControlProps = {
-    terminalAvailable: activeProject !== null,
+    terminalAvailable: activeProject !== null && !activeProjectIsSandboxPlaceholder,
     terminalOpen: terminalUiState.terminalOpen,
     terminalShortcutLabel: shortcutLabelForCommand(keybindings, "terminal.toggle"),
     threadPanelOpen,
@@ -3629,7 +3958,7 @@ export default function ChatView(props: ChatViewProps) {
                             ) : null}
                             {!composerMounted ? null : (
                               <ChatComposer
-                                canOperateThread={canOperateThread}
+                                canOperateThread={canOperateThread || legacySandboxStopped}
                                 reportedModelSelection={reportedModelSelection}
                                 multipleModelSelections={multipleModelSelections}
                                 supportsMultipleModels={
@@ -3669,20 +3998,25 @@ export default function ChatView(props: ChatViewProps) {
                                 }
                                 canResume={canResume}
                                 isRevertingCheckpoint={isRevertingCheckpoint}
+                                readOnlyPlaceholder={
+                                  sandboxDeleted ? "This chat is read-only now" : null
+                                }
                                 sendDisabledReason={
-                                  !canOperateThread
+                                  !canOperateThread && !legacySandboxStopped
                                     ? "This connection cannot change threads."
-                                    : isEnvironmentChanging
-                                      ? "Preparing machine"
-                                      : isRevertingCheckpoint
-                                        ? "Rewinding conversation"
-                                        : feedbackUploading
-                                          ? "Sending feedback"
-                                          : threadDetailLoading
-                                            ? "Messages loading"
-                                            : worktreeSetupBlocksSend
-                                              ? "Preparing worktree"
-                                              : projectCloneSendBlockReason
+                                    : sandboxDeleted
+                                      ? "This chat's sandbox was deleted"
+                                      : isEnvironmentChanging
+                                        ? "Preparing machine"
+                                        : isRevertingCheckpoint
+                                          ? "Rewinding conversation"
+                                          : feedbackUploading
+                                            ? "Sending feedback"
+                                            : threadDetailLoading
+                                              ? "Messages loading"
+                                              : worktreeSetupBlocksSend
+                                                ? "Preparing worktree"
+                                                : projectCloneSendBlockReason
                                 }
                                 isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                                 bannerItems={
@@ -3705,7 +4039,9 @@ export default function ChatView(props: ChatViewProps) {
                                     ? openUsageLimits
                                     : undefined
                                 }
-                                environmentUnavailable={activeEnvironmentUnavailableState}
+                                environmentUnavailable={
+                                  legacySandboxStopped ? null : activeEnvironmentUnavailableState
+                                }
                                 activePendingApproval={activePendingApproval}
                                 pendingApprovals={pendingApprovals}
                                 onHeldRequestIdsChange={onHeldRequestIdsChange}
@@ -3717,10 +4053,18 @@ export default function ChatView(props: ChatViewProps) {
                                 lockedProvider={modelPickerLockedProvider}
                                 providerStatuses={providerStatuses as ServerProvider[]}
                                 providerCatalogKnown={serverConfig !== null}
+                                modelPickerReadOnlyReason={
+                                  sandboxMirrorModelSource?.readOnly
+                                    ? SANDBOX_MIRROR_MODELS_PENDING_REASON
+                                    : null
+                                }
                                 activeProjectDefaultModelSelection={
                                   activeProjectDefaultModelSelection
                                 }
-                                activeThreadModelSelection={activeThread?.modelSelection}
+                                activeThreadModelSelection={
+                                  sandboxMirrorModelSource?.modelSelection ??
+                                  activeThread?.modelSelection
+                                }
                                 activeProjectId={activeProject?.id ?? null}
                                 projectName={activeProject?.title}
                                 compactThreadUnavailable={compactThreadUnavailable}
@@ -3819,7 +4163,7 @@ export default function ChatView(props: ChatViewProps) {
                                     ? { onCheckoutPullRequestRequest: openPullRequestDialogStable }
                                     : {})}
                                   {...(canChangeEnvironment
-                                    ? { onEnvironmentChange: onEnvironmentChangeStable }
+                                    ? { onEnvironmentChange: onPickEnvironmentStable }
                                     : {})}
                                   autoEnvironmentLabel={autoEnvironmentLabel}
                                   onAutoEnvironment={
@@ -3830,7 +4174,9 @@ export default function ChatView(props: ChatViewProps) {
                                       ? onAutoEnvironmentStable
                                       : undefined
                                   }
-                                  availableEnvironments={logicalProjectEnvironments}
+                                  availableEnvironments={pickerEnvironments}
+                                  pickedEnvironmentId={sandboxLaunch.pickedEnvironmentId}
+                                  onNewSandboxConfig={sandboxLaunch.onNewConfig}
                                   {...(isServerThread
                                     ? {}
                                     : {
@@ -3891,6 +4237,9 @@ export default function ChatView(props: ChatViewProps) {
 
                 <ThreadDetailsPanel
                   anchor={threadPanelPopoverAnchorRef}
+                  sandboxConnect={
+                    sandboxConnect === null ? null : <SandboxConnectAction state={sandboxConnect} />
+                  }
                   handle={threadPanelPopoverHandle}
                   forceNewWorktree={multipleModelSelections !== null}
                   environmentId={activeThread.environmentId}
@@ -3901,7 +4250,11 @@ export default function ChatView(props: ChatViewProps) {
                   {...(draftId ? { draftId } : {})}
                   composerDraftTarget={composerDraftTarget}
                   activeProjectName={activeProject?.title}
-                  activeProjectScripts={activeProject ? activeProjectScripts : undefined}
+                  activeProjectScripts={
+                    activeProject && !activeProjectIsSandboxPlaceholder
+                      ? activeProjectScripts
+                      : undefined
+                  }
                   preferredScriptId={
                     activeProject ? (lastInvokedScriptByProjectId[activeProject.id] ?? null) : null
                   }
@@ -3919,7 +4272,9 @@ export default function ChatView(props: ChatViewProps) {
                   workspaceMutationId={workspaceMutationId}
                   isGitRepo={isGitRepo}
                   envLocked={envLocked}
-                  availableEnvironments={logicalProjectEnvironments}
+                  availableEnvironments={pickerEnvironments}
+                  pickedEnvironmentId={sandboxLaunch.pickedEnvironmentId}
+                  onNewSandboxConfig={sandboxLaunch.onNewConfig}
                   autoEnvironmentLabel={autoEnvironmentLabel}
                   onAutoEnvironment={
                     draftId &&
@@ -3930,7 +4285,7 @@ export default function ChatView(props: ChatViewProps) {
                       : undefined
                   }
                   {...(canChangeEnvironment
-                    ? { onEnvironmentChange: onEnvironmentChangeStable }
+                    ? { onEnvironmentChange: onPickEnvironmentStable }
                     : {})}
                   onEnvModeChange={onEnvModeChangeStable}
                   envMode={envMode}
@@ -3961,6 +4316,7 @@ export default function ChatView(props: ChatViewProps) {
                   }}
                 />
 
+                {sandboxLaunch.configDialog}
                 <PullRequestThreadDialogHost
                   threadKey={activeThreadKey}
                   environmentId={activeThread.environmentId}
@@ -4040,14 +4396,17 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
           browserAvailable={canOperatePreview && browserAvailable}
-          terminalAvailable={activeProject !== null && canOperateTerminal}
+          terminalAvailable={
+            activeProject !== null && !activeProjectIsSandboxPlaceholder && canOperateTerminal
+          }
           diffAvailable={isServerThread && isGitRepo}
-          filesAvailable={activeProject !== null}
+          filesAvailable={activeProject !== null && !activeProjectIsSandboxPlaceholder}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
           deviceAvailable={activeThreadRef !== null}
           sideChatAvailable={sideChat.available}
           sideChatDisabledReason={sideChatDisabledReason}
+          sandboxConnect={sandboxSurfaceConnect}
         >
           {rightPanelContent}
         </ChatRightPanel>

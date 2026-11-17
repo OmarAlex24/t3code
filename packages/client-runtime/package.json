@@ -311,6 +311,10 @@
       "types": "./src/state/usage.ts",
       "default": "./src/state/usage.ts"
     },
+    "./state/usage-sandbox-share": {
+      "types": "./src/state/usageSandboxShare.ts",
+      "default": "./src/state/usageSandboxShare.ts"
+    },
     "./state/usage-progress": {
       "types": "./src/state/usageProgress.ts",
       "default": "./src/state/usageProgress.ts"
@@ -406,6 +410,14 @@
     "./state/context-window": {
       "types": "./src/state/contextWindow.ts",
       "default": "./src/state/contextWindow.ts"
+    },
+    "./state/sandbox-mirror": {
+      "types": "./src/state/sandboxMirror.ts",
+      "default": "./src/state/sandboxMirror.ts"
+    },
+    "./state/sandbox-settle": {
+      "types": "./src/state/sandboxSettle.ts",
+      "default": "./src/state/sandboxSettle.ts"
     },
     "./state/thread-subagents": {
       "types": "./src/state/threadSubagents.ts",

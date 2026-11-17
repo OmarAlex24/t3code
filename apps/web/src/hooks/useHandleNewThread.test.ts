@@ -153,6 +153,7 @@ vi.mock("@t3tools/client-runtime/environment", () => ({
 vi.mock("@t3tools/contracts", () => ({
   DEFAULT_RUNTIME_MODE: "default",
   DEFAULT_SERVER_SETTINGS: {},
+  isSandboxHostProjectRoot: () => false,
 }));
 vi.mock("@t3tools/shared/projectSettings", () => ({
   resolveProjectSettings: (
@@ -204,6 +205,7 @@ vi.mock("../lib/chatThreadActions", async (importOriginal) => ({
   resolveNewThreadModelSelectionOverride: () => null,
 }));
 vi.mock("../providerInstances", () => ({ resolveDefaultProviderModelSelection: () => null }));
+vi.mock("../state/sandboxThreads", () => ({ resolveNewThreadProjectRef: <T>(ref: T) => ref }));
 vi.mock("../lib/t3ProjectFileDefaults", () => ({
   readT3ProjectFile: () => testState.projectFileRead,
 }));

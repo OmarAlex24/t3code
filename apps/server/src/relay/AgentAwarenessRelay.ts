@@ -139,6 +139,7 @@ function shouldPublishAgentAwarenessEvent(
       );
     case "message.updated":
     case "plan.updated":
+    case "thread.milestones-updated":
     case "checkpoint-scope.created":
     case "checkpoint.captured":
     case "checkpoint.rollback-requested":

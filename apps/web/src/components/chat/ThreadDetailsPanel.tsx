@@ -19,12 +19,13 @@ import ProjectScriptsControl, {
   type NewProjectScriptInput,
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
-import { memo, useState, type ComponentProps } from "react";
+import { memo, useState, type ComponentProps, type ReactNode } from "react";
 import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
+import { SandboxMirrorVersionControl } from "./SandboxMirrorVersionControl";
 import { ThreadServersPanel } from "./ThreadServersPanel";
 import {
   ThreadDetailsContext,
@@ -74,6 +75,8 @@ interface ThreadDetailsPanelProps extends Pick<
   autoEnvironmentLabel?: string | undefined;
   onAutoEnvironment?: (() => void) | undefined;
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  pickedEnvironmentId?: EnvironmentId | null;
+  onNewSandboxConfig?: (() => void) | undefined;
   onEnvModeChange: (mode: EnvMode) => void;
   envMode: EnvMode;
   activeThreadBranchOverride?: string | null;
@@ -91,6 +94,8 @@ interface ThreadDetailsPanelProps extends Pick<
   ) => Promise<ProjectScriptActionResult>;
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
   usage: ThreadDetailsUsageInput;
+  /** On a sandbox chat's mirror: connects this client to the sandbox, where its workspace is. */
+  sandboxConnect?: ReactNode;
 }
 
 export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
@@ -180,7 +185,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
         return (
           <>
             <div className="group/details-items">
-              {show.environment || show.openIn || show.scripts ? (
+              {show.environment || show.openIn || show.scripts || props.sandboxConnect ? (
                 <ThreadDetailsSection
                   headingId="thread-details-workspace-heading"
                   title="Workspace"
@@ -188,11 +193,16 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   showHeading={false}
                 >
                   <div className="flex flex-col">
+                    {props.sandboxConnect ? (
+                      <div className="px-3 py-2">{props.sandboxConnect}</div>
+                    ) : null}
                     {show.environment ? (
                       <BranchToolbar
                         layout="panel"
                         panelSection="workspace"
                         availableEnvironments={props.availableEnvironments}
+                        pickedEnvironmentId={props.pickedEnvironmentId ?? null}
+                        onNewSandboxConfig={props.onNewSandboxConfig}
                         {...(props.onEnvironmentChange
                           ? { onEnvironmentChange: props.onEnvironmentChange }
                           : {})}
@@ -260,6 +270,20 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                         {...(props.onOpenChanges ? { onOpenChanges: props.onOpenChanges } : {})}
                       />
                     ) : null}
+                  </div>
+                </ThreadDetailsSection>
+              ) : null}
+
+              {/* A sandbox chat's mirror has no repository here; its branch and PRs are the sandbox's. */}
+              {visible.branch && !show.branch && !props.draftId ? (
+                <ThreadDetailsSection
+                  headingId="thread-details-sandbox-version-control-heading"
+                  title="Version Control"
+                  showHeading={false}
+                  separated={density === "full"}
+                >
+                  <div className="flex flex-col">
+                    <SandboxMirrorVersionControl threadRef={activeThreadRef} />
                   </div>
                 </ThreadDetailsSection>
               ) : null}

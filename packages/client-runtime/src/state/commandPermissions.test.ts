@@ -155,6 +155,11 @@ describe("command permissions", () => {
   it.effect.each([
     { method: WS_METHODS.serverRunStorageCleanup, scope: AuthSettingsWriteScope },
     { method: WS_METHODS.serverReclaimDatabaseSpace, scope: AuthEnvironmentMaintainScope },
+    // Sandbox writes start billable machines or change what the account keeps.
+    { method: WS_METHODS.sandboxesLaunch, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesResolveSettle, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesSaveTemplate, scope: AuthSettingsWriteScope },
+    { method: WS_METHODS.sandboxesDeleteTemplate, scope: AuthSettingsWriteScope },
   ])("requires the destination $scope grant for $method", ({ method, scope }) =>
     Effect.gen(function* () {
       const registry = yield* setup;
@@ -221,21 +226,48 @@ describe("command permissions", () => {
     ),
   );
 
-  it.effect.each([WS_METHODS.scheduledTasksDelete, ORCHESTRATION_V2_WS_METHODS.stopWorkflow])(
-    "uses the target grant for both availability and execution of %s",
-    (method) =>
+  it.effect("requires the host's settings grant to connect this client to a chat's sandbox", () =>
+    Effect.scoped(
       Effect.gen(function* () {
         const registry = yield* setup;
-        const permissions = createCommandPermissions(runtime, method);
+        const connect = createCommandPermissions(runtime, WS_METHODS.sandboxesConnectThread);
         registry.set(sessions(env), AsyncResult.success(grant(true)));
-        expect(registry.get(permissions.permissionAtom(env))).toBe(true);
-        expect(permissions.permissionAtom(env)).toBe(permissions.permissionAtom(env));
-        yield* permissions.authorize(registry, env);
-        registry.set(sessions(other), AsyncResult.success(grant(false)));
-        expect(registry.get(permissions.permissionAtom(other))).toBe(false);
-        const denied = yield* permissions.authorize(registry, other).pipe(Effect.flip);
-        expect(denied._tag).toBe("EnvironmentAuthorizationError");
+        expect(registry.get(connect.permissionAtom(env))).toBe(false);
+        expect((yield* connect.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthSettingsWriteScope],
+            permissions: [AuthSettingsWriteScope],
+          }),
+        );
+        expect(registry.get(connect.permissionAtom(env))).toBe(true);
+        yield* connect.authorize(registry, env);
       }),
+    ),
+  );
+
+  it.effect.each([
+    WS_METHODS.scheduledTasksDelete,
+    ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
+    // A sandbox chat's model pick, set through the host on both its threads.
+    WS_METHODS.sandboxesSetThreadModel,
+  ])("uses the target grant for both availability and execution of %s", (method) =>
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      const permissions = createCommandPermissions(runtime, method);
+      registry.set(sessions(env), AsyncResult.success(grant(true)));
+      expect(registry.get(permissions.permissionAtom(env))).toBe(true);
+      expect(permissions.permissionAtom(env)).toBe(permissions.permissionAtom(env));
+      yield* permissions.authorize(registry, env);
+      registry.set(sessions(other), AsyncResult.success(grant(false)));
+      expect(registry.get(permissions.permissionAtom(other))).toBe(false);
+      const denied = yield* permissions.authorize(registry, other).pipe(Effect.flip);
+      expect(denied._tag).toBe("EnvironmentAuthorizationError");
+    }),
   );
   it.effect("waits for an initial grant", () =>
     Effect.gen(function* () {

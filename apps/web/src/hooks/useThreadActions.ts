@@ -60,6 +60,11 @@ import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
 import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
+import {
+  ensureSandboxThreadRunning,
+  notifySandboxThreadSettled,
+  notifySandboxThreadUnsettled,
+} from "../state/sandboxThreads";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
@@ -707,6 +712,8 @@ export function useThreadActions() {
   };
 
   const unsettleThread = async (target: ScopedThreadRef, restoreUnsettledAt?: string | null) => {
+    // A thread kept as a stopped sandbox lives on that sandbox's server, so it runs again first.
+    await ensureSandboxThreadRunning(target);
     if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
@@ -719,7 +726,7 @@ export function useThreadActions() {
     }
     ThreadUndo.invalidate("settle", scopedThreadKey(target));
     // reason "user" pins active until real activity, suppressing auto-settle.
-    return unsettleThreadMutation({
+    const result = await unsettleThreadMutation({
       environmentId: target.environmentId,
       input: {
         threadId: target.threadId,
@@ -727,6 +734,8 @@ export function useThreadActions() {
         ...(restoreUnsettledAt === undefined ? {} : { restoreUnsettledAt }),
       },
     });
+    if (result._tag === "Success") notifySandboxThreadUnsettled(target);
+    return result;
   };
 
   const setThreadAutoSettle = async (target: ScopedThreadRef, enabled: boolean) => {
@@ -762,13 +771,17 @@ export function useThreadActions() {
     // Pinning clears snooze, so older Settled or Snoozed undos would fight this pin.
     ThreadUndo.invalidate("settle", scopedThreadKey(target));
     ThreadUndo.invalidate("snooze", scopedThreadKey(target));
-    return pinThreadMutation({
+    const wasSettled = readThreadShell(target)?.settledOverride === "settled";
+    const result = await pinThreadMutation({
       environmentId: target.environmentId,
       input: {
         threadId: target.threadId,
         ...(orderKey !== undefined ? { orderKey } : {}),
       },
     });
+    // Pinning a settled thread un-settles it.
+    if (result._tag === "Success" && wasSettled) notifySandboxThreadUnsettled(target);
+    return result;
   };
 
   const pinThread = async (target: ScopedThreadRef, opts: { orderKey?: string } = {}) => {
@@ -840,12 +853,17 @@ export function useThreadActions() {
     if (wokeAt !== null) {
       markThreadVisited(scopedThreadKey(target), wokeAt);
     }
-    showThreadUndoNotice({
-      action: "Settled",
-      claim: action,
-      undo: () => runUndoPlan(target, undoPlan),
-      failureTitle: "Failed to undo settle",
-    });
+    const undo = () => runUndoPlan(target, undoPlan);
+    // A sandbox chat: the host applies its config. A remembered delete shows the settle's Undo in
+    // its own notice, so the plain one would be a second Undo.
+    if (!notifySandboxThreadSettled(target, { claim: action, undo })) {
+      showThreadUndoNotice({
+        action: "Settled",
+        claim: action,
+        undo,
+        failureTitle: "Failed to undo settle",
+      });
+    }
     return result;
   };
 

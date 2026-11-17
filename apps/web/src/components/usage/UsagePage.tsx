@@ -38,7 +38,8 @@ import { primaryServerKeybindingsAtom, serverEnvironment } from "../../state/ser
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { isModelPickerOpen } from "../../modelPickerVisibility";
 import { shortcutLabelForCommand } from "../../keybindings";
-import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
+import { useSandboxEnvironmentIds, withoutSandboxes } from "../../state/sandboxes";
+import { useUsage, useUsageSandboxShare, type EnvironmentUsageStatus } from "../../state/usage";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
   enumerateDays,
@@ -81,6 +82,7 @@ import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { UsageProviderChart } from "./UsageProviderChart";
 import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
+import { UsageSandboxShare } from "./UsageSandboxShare";
 import { UsageShareBar } from "./UsageShareBar";
 import {
   costTypeSegments,
@@ -209,6 +211,7 @@ export function UsagePage() {
     merged: answeredUsage,
     environments,
     selectedEnvironments,
+    countedEnvironments,
     shown,
     isPartial,
     refresh,
@@ -218,9 +221,15 @@ export function UsagePage() {
   const shownHourly = shownWindow.resolution === "hour";
   const refreshingUsage = isRefreshing && !showingLimits;
   const showingKept = shown !== null && shown.window !== window;
-  const presentations = useAtomValue(environmentPresentations.presentationsAtom);
-  const presentationsWithProviders = useAtomValue(
-    environmentPresentations.presentationsWithProvidersAtom,
+  // A sandbox's limits are its host's accounts, and it is never a choice of its own.
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
+  const presentations = withoutSandboxes(
+    useAtomValue(environmentPresentations.presentationsAtom),
+    sandboxEnvironmentIds,
+  );
+  const presentationsWithProviders = withoutSandboxes(
+    useAtomValue(environmentPresentations.presentationsWithProvidersAtom),
+    sandboxEnvironmentIds,
   );
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
@@ -555,7 +564,7 @@ export function UsagePage() {
       {showingLimits ? null : (
         <UsageModelDialogHost
           models={merged.models}
-          environments={selectedEnvironments}
+          environments={countedEnvironments}
           metric={metric === "tokens" ? "tokens" : "cost"}
           chartWindow={{
             days,
@@ -610,6 +619,7 @@ function UsageOverview({
   readonly onSelectModel: (key: string) => void;
 }) {
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
+  const sandboxShare = useUsageSandboxShare(selectedEnvironments, shownWindow.timeZone);
   const shownHourly = shownWindow.resolution === "hour";
   const loading = usageLoading(showingKept, selectedEnvironments, refreshingUsage, hiddenProviders);
   // Copy the primitive; JSX reads of loading.partial would merge all derivations into one compiler cache
@@ -841,6 +851,8 @@ function UsageOverview({
           )}
         </section>
       ) : null}
+
+      {sandboxShare?.hasSandboxActivity ? <UsageSandboxShare summary={sandboxShare} /> : null}
 
       <section className="flex flex-col gap-3">
         <div className="flex items-center justify-between gap-3">

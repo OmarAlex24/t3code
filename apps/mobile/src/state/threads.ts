@@ -1,5 +1,6 @@
 import { createChildThreadApprovalsAtom } from "@t3tools/client-runtime/state/thread-requests";
 import { useAtomValue } from "@effect/atom-react";
+import { createSandboxStartQueueAtoms } from "@t3tools/client-runtime/state/sandbox-mirror";
 import {
   createEnvironmentThreadDetailAtoms,
   createEnvironmentThreadShellAtoms,
@@ -39,8 +40,13 @@ export const threadEnvironment = createThreadEnvironmentAtoms(
   threadFamilies.snapshotAtom,
 );
 export const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
+// A sandbox chat's message reads as queued while its sandbox starts.
+export const sandboxStartQueue = createSandboxStartQueueAtoms({
+  threadStateAtom: environmentThreads.stateAtom,
+  sandboxesList: serverEnvironment.sandboxesList,
+});
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
-  environmentThreads.stateAtom,
+  sandboxStartQueue.threadStateAtom,
 );
 export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
@@ -102,7 +108,7 @@ export function useEnvironmentThread(
 ): EnvironmentThreadState {
   const result = useAtomValue(
     environmentId !== null && threadId !== null
-      ? environmentThreads.stateAtom(environmentId, threadId)
+      ? sandboxStartQueue.threadStateAtom(environmentId, threadId)
       : EMPTY_THREAD_STATE_ATOM,
   );
   const state = AsyncResult.getOrElse(

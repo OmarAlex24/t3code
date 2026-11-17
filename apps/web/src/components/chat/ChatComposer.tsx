@@ -385,6 +385,8 @@ export interface ChatComposerProps {
   canResume: boolean;
   isRevertingCheckpoint?: boolean;
   sendDisabledReason: string | null;
+  /** Replaces the prompt's placeholder when the chat cannot take messages at all. */
+  readOnlyPlaceholder?: string | null;
   isPreparingWorktree: boolean;
   canSteer: boolean;
   bannerItems: readonly ComposerBannerStackItem[];
@@ -414,6 +416,8 @@ export interface ChatComposerProps {
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
   providerCatalogKnown: boolean;
+  /** Shows the selection without letting it change, and why. */
+  modelPickerReadOnlyReason?: string | null;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
   reportedModelSelection?: ModelSelection | null;
@@ -517,6 +521,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     canResume,
     isRevertingCheckpoint = false,
     sendDisabledReason: externalSendDisabledReason,
+    readOnlyPlaceholder = null,
     isPreparingWorktree,
     canSteer,
     environmentUnavailable,
@@ -530,6 +535,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     lockedProvider,
     providerStatuses,
     providerCatalogKnown,
+    modelPickerReadOnlyReason = null,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     reportedModelSelection,
@@ -1968,7 +1974,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
         if (applied) {
           setComposerHighlightedItemId(null);
-          setIsComposerModelPickerOpen(true);
+          if (modelPickerReadOnlyReason === null) setIsComposerModelPickerOpen(true);
         }
         return;
       }
@@ -2180,7 +2186,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       submitAfterDictation(() => submitComposerRef.current(dispatchMode, submissionIntent));
       return false;
     }
-    if (submissionBlocked || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
+    if (
+      submissionBlocked ||
+      // `canOperateThread` alone is true for a stopped sandbox, whose session cannot be read until
+      // the send resumes it; the send checks the scope again once it runs.
+      (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) && !canOperateThread)
+    ) {
       event?.preventDefault();
       return false;
     }
@@ -2518,6 +2529,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       providerSetupInstanceId={providerSetupInstanceId}
       onOpenProviderSetup={onOpenProviderSetup}
       providerCatalogPending={providerCatalogPending}
+      modelPickerReadOnlyReason={modelPickerReadOnlyReason}
       isSendBusy={isSendBusy}
       multipleModelsEnabled={routeKind === "draft" && supportsMultipleModels}
       multipleModelSelections={multipleModelSelections}
@@ -3062,6 +3074,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, []);
 
   const openModelPicker = () => {
+    // The keybinding opens it here, past the disabled trigger.
+    if (modelPickerReadOnlyReason !== null) return;
     if (composerControlsHidden) {
       if (composerBlurFrameRef.current !== null) {
         window.cancelAnimationFrame(composerBlurFrameRef.current);
@@ -3122,7 +3136,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       },
       openModelPicker: openModelPickerStable,
       stepReasoningEffort: (direction) => {
-        if (noProviderAvailable || pendingUserInputs.length > 0 || isEditingQueuedMessage) {
+        if (
+          noProviderAvailable ||
+          modelPickerReadOnlyReason !== null ||
+          pendingUserInputs.length > 0 ||
+          isEditingQueuedMessage
+        ) {
           return;
         }
         const change = getComposerReasoningStep({
@@ -3697,7 +3716,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onCitationDraftSave={saveCitationDraftToPromptStable}
                     onPaste={onComposerPasteStable}
                     placeholder={
-                      isComposerApprovalState
+                      readOnlyPlaceholder ??
+                      (isComposerApprovalState
                         ? activePendingApproval?.supportsFeedback
                           ? "Send feedback to decline this request"
                           : "Send a message to decline and redirect the agent"
@@ -3711,10 +3731,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             ? "Choose a project above to start a thread"
                             : showProviderUnavailable
                               ? "Enable a provider in Settings to send a message"
-                              : (offeredPromptSuggestion ?? DEFAULT_COMPOSER_PLACEHOLDER)
+                              : (offeredPromptSuggestion ?? DEFAULT_COMPOSER_PLACEHOLDER))
                     }
                     placeholderSuffix={
-                      offeredPromptSuggestion !== null ? (
+                      readOnlyPlaceholder === null && offeredPromptSuggestion !== null ? (
                         <span className="ml-2 inline-flex align-[1px]">
                           <Kbd variant="outline">⇥ Tab</Kbd>
                         </span>

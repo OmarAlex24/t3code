@@ -11,7 +11,6 @@ import * as PeerLinks from "./peer/PeerLinks.ts";
 
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
-import * as Base64 from "effect/encoding/Base64";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -45,7 +44,6 @@ import {
   type OrchestrationV2Command,
   type GitActionProgressEvent,
   type GitManagerServiceError,
-  type MessageId,
   type AcpRegistryDeleteSessionInput,
   type AcpRegistryDisableProviderInput,
   type AcpRegistryListProvidersInput,
@@ -93,8 +91,6 @@ import {
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
   SOURCE_CONTROL_MEDIA_ASSET,
-  ChatAttachmentId,
-  PersistChatAttachmentsError,
   RpcClientId,
   EnvironmentAuthorizationError,
   ThreadId,
@@ -200,12 +196,7 @@ import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
-import {
-  attachmentRelativePath,
-  chatAttachmentStableKey,
-  createDeterministicAttachmentId,
-} from "./attachmentStore.ts";
-import { parseBase64DataUrl } from "./imageMime.ts";
+import { persistChatAttachments } from "./persistChatAttachments.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
@@ -246,6 +237,7 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { commandFeatureUsage, featureUsage } from "./telemetry/FeatureUsage.ts";
 import type { TelemetryOwner } from "./telemetry/Identify.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as UsageSandboxShare from "./usage/UsageSandboxShare.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as TriageService from "./triage/TriageService.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -266,6 +258,8 @@ import * as SourceControlProviderRegistry from "./sourceControl/SourceControlPro
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
+import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
+import * as SandboxMirror from "./sandbox/SandboxMirror.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
@@ -520,76 +514,6 @@ const withProviderStatusDeltas = (sent: ReadonlyArray<ServerProvider>) =>
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
 }
-
-const persistChatAttachments = Effect.fn("ws.assets.persistChatAttachments")(function* (input: {
-  readonly threadId: ThreadId;
-  readonly messageId: MessageId;
-  readonly attachments: ReadonlyArray<{
-    readonly type: "image";
-    readonly name: string;
-    readonly mimeType: string;
-    readonly sizeBytes: number;
-    readonly dataUrl: string;
-  }>;
-}) {
-  const config = yield* ServerConfig.ServerConfig;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  return yield* Effect.forEach(
-    input.attachments.map((attachment, index) => ({ attachment, index })),
-    Effect.fn("ws.assets.persistChatAttachment")(function* ({ attachment, index }) {
-      const parsed = parseBase64DataUrl(attachment.dataUrl);
-      if (parsed === null || parsed.mimeType !== attachment.mimeType.toLowerCase()) {
-        return yield* new PersistChatAttachmentsError({
-          message: `Attachment ${attachment.name} has an invalid image payload.`,
-        });
-      }
-      const bytes = yield* Effect.fromResult(Base64.decode(parsed.base64)).pipe(
-        Effect.mapError(
-          (cause) =>
-            new PersistChatAttachmentsError({
-              message: `Attachment ${attachment.name} is not valid base64.`,
-              cause,
-            }),
-        ),
-      );
-      if (bytes.byteLength !== attachment.sizeBytes) {
-        return yield* new PersistChatAttachmentsError({
-          message: `Attachment ${attachment.name} size does not match its payload.`,
-        });
-      }
-      const rawId = createDeterministicAttachmentId(
-        input.threadId,
-        chatAttachmentStableKey(input.messageId, index, bytes),
-      );
-      if (rawId === null) {
-        return yield* new PersistChatAttachmentsError({
-          message: "Could not allocate an attachment identifier.",
-        });
-      }
-      const persisted = {
-        type: "image" as const,
-        id: ChatAttachmentId.make(rawId),
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        sizeBytes: attachment.sizeBytes,
-      };
-      yield* fileSystem
-        .writeFile(path.join(config.attachmentsDir, attachmentRelativePath(persisted)!), bytes)
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new PersistChatAttachmentsError({
-                message: `Could not persist attachment ${attachment.name}.`,
-                cause,
-              }),
-          ),
-        );
-      return persisted;
-    }),
-    { concurrency: 2 },
-  );
-});
 
 function projectEntriesFailureContext(error: WorkspaceEntries.WorkspaceEntriesError): {
   readonly failure: ProjectEntriesFailure;
@@ -1511,6 +1435,7 @@ export const layerWsRpc = (
               Effect.orElseSucceed(() => null),
             );
       const usage = yield* UsageService.UsageService;
+      const usageSandboxShare = yield* UsageSandboxShare.UsageSandboxShare;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
@@ -1972,6 +1897,8 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
+      const sandboxHandlers = yield* SandboxBridge.rpcHandlers;
+      const sandboxMirrorHandlers = yield* SandboxMirror.rpcHandlers;
       const handlers = ServerWsRpcGroup.of({
         [WS_METHODS.issuesList]: (input) => issues.list(input),
         [WS_METHODS.issuesDetail]: (input) => issues.detail(input),
@@ -2731,6 +2658,7 @@ export const layerWsRpc = (
         [WS_METHODS.serverGetResourceTelemetryHistory]: (input) =>
           resourceTelemetry.readHistory(input),
         [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
+        [WS_METHODS.serverGetUsageSandboxShare]: (input) => usageSandboxShare.read(input),
         [WS_METHODS.serverRefreshUsageRates]: (_input) => usage.refreshRates,
         [WS_METHODS.serverRetryResourceTelemetry]: (_input) => resourceTelemetry.retry,
         [WS_METHODS.serverCheckOtlpEndpoint]: (input) => otlpEndpointCheck.check(input),
@@ -3577,6 +3505,8 @@ export const layerWsRpc = (
               Stream.concat(Stream.make(latest), changes),
             ),
           ),
+        ...sandboxHandlers,
+        ...sandboxMirrorHandlers,
       });
       const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
       const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =

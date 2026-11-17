@@ -208,6 +208,8 @@ export interface AcpRegistryLiveConfiguration {
   // A single model from an explicit select is the agent's deliberate catalog
   // (e.g. an entitlement change), not a cold-start placeholder.
   readonly modelsFromModelSelect?: boolean;
+  /** The sandbox bridge's: the model a sandbox chat gets when none is picked. */
+  readonly defaultModelId?: string;
 }
 
 export function normalizeAcpRegistryLiveConfiguration(

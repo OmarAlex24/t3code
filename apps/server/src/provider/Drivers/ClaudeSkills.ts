@@ -627,7 +627,7 @@ const discoverPluginSkillRoots = Effect.fn("discoverPluginSkillRoots")(function*
   return roots;
 });
 
-const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(function* (
+export const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(function* (
   config: Pick<ClaudeSettings, "homePath">,
   environment: NodeJS.ProcessEnv,
   cwd?: string,
@@ -648,6 +648,7 @@ const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(funct
 
 const SettingsEnv = Schema.Struct({
   ANTHROPIC_BASE_URL: Schema.optional(Schema.String),
+  ANTHROPIC_AUTH_TOKEN: Schema.optional(Schema.String),
   CLAUDE_CODE_ENTRYPOINT: Schema.optional(Schema.String),
   CLAUDE_CODE_PLUGIN_DIRS: Schema.optional(Schema.String),
   // Unquoted JSON values must not fail the decode and drop ANTHROPIC_BASE_URL with them.

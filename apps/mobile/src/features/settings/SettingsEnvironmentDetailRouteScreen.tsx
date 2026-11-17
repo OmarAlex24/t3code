@@ -4,6 +4,7 @@ import { useNavigation, type StaticScreenProps } from "@react-navigation/native"
 import {
   AuthProvidersManageScope,
   AuthOrchestrationReadScope,
+  isInternalProviderInstance,
   managedUpdatesDenial,
   type EnvironmentId,
   type ServerProvider,
@@ -328,7 +329,10 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                     }}
                   />
                   {config.providers
-                    .filter((provider) => provider.enabled)
+                    .filter(
+                      (provider) =>
+                        provider.enabled && !isInternalProviderInstance(provider.instanceId),
+                    )
                     .map((provider) => (
                       <View key={provider.instanceId}>
                         <View className="gap-1 p-4">

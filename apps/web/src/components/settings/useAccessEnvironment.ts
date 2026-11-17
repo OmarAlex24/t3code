@@ -1,6 +1,7 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
+import { useSandboxEnvironmentIds } from "../../state/sandboxes";
 import { resolveAccessEnvironmentId } from "./ConnectionsSettings.logic";
 import { settingsScopeEnvironmentLabel } from "./settingsScopeAxis";
 
@@ -12,11 +13,13 @@ import { settingsScopeEnvironmentLabel } from "./settingsScopeAxis";
 export function useAccessEnvironment(requested: EnvironmentId | null) {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
+  // A thread's sandbox is listed only when a link asks for it.
   const candidates = environments.filter(
     (environment) =>
       environment.environmentId === primaryEnvironmentId ||
       environment.environmentId === requested ||
-      environment.entry.enabled,
+      (environment.entry.enabled && !sandboxEnvironmentIds.has(environment.environmentId)),
   );
   const environmentId = resolveAccessEnvironmentId({
     primaryEnvironmentId,
