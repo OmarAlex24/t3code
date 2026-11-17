@@ -53,6 +53,7 @@ export const SANDBOX_FOLLOWED_SERVER_SETTING_KEYS = [
   "reviewGuideModelSelection",
   "reviewGuideInstructions",
   "pullRequestMergeMethod",
+  "usageHistoryRetentionDays",
   "usagePriceOverrides",
   "usageModelAliases",
   "usageModelFilter",
