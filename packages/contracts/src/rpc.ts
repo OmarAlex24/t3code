@@ -26,6 +26,7 @@ import {
   PeerLinkRequestError,
   PeerLinkSummary,
 } from "./peerLink.ts";
+import { DIY_WS_METHODS, DiyRpcs } from "./diy.ts";
 import { SANDBOX_WS_METHODS, SandboxRpcs } from "./sandboxRpc.ts";
 import {
   ChatGptReconnectProfileInput,
@@ -681,6 +682,7 @@ export const WS_METHODS = {
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
   ...SANDBOX_WS_METHODS,
+  ...DIY_WS_METHODS,
 } as const;
 
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -2508,4 +2510,5 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeCommandOutputRpc,
   WsOrchestrationV2SubscribePromptSuggestionRpc,
   ...SandboxRpcs,
+  ...DiyRpcs,
 ).middleware(RpcScopeAuthorization);

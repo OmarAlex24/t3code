@@ -93,6 +93,7 @@ import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
 import * as SandboxSettle from "./sandbox/SandboxSettle.ts";
 import * as SandboxMirror from "./sandbox/SandboxMirror.ts";
 import { layerGithubAppManifestRoute } from "./sandbox/githubAppManifestRoute.ts";
+import * as DiyKit from "./diy/DiyKit.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
@@ -755,6 +756,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(SecretCheck.layer),
   Layer.provideMerge(SandboxProvisioner.layerRuntime),
+  Layer.provideMerge(DiyKit.layer.pipe(Layer.provide(ProcessRunner.layer))),
   Layer.provideMerge(SecretResolver.layer),
   // Above the settings it writes when a theme is applied.
   Layer.provideMerge(EnvironmentTheme.layer),
