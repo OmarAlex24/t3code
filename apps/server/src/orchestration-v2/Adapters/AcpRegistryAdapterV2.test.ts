@@ -11,6 +11,12 @@ import {
   type ModelSelection,
   ProviderInstanceId,
   ProviderSessionId,
+  SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
+  SANDBOX_BRIDGE_CANCEL_META,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_MESSAGE_META,
+  SANDBOX_BRIDGE_STEER_CANCEL,
+  SANDBOX_BRIDGE_WAKE_METHOD,
   ThreadId,
 } from "@t3tools/contracts";
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -213,6 +219,7 @@ const openClaudeReplaySession = Effect.fn("openClaudeReplaySession")(function* (
   agentId: string | Record<string, unknown> = "claude-acp",
   replacementEntries?: ReadonlyArray<unknown>,
   runtimeMode: "approval-required" | "full-access" = "approval-required",
+  instance = "claude-lifecycle",
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -252,7 +259,7 @@ const openClaudeReplaySession = Effect.fn("openClaudeReplaySession")(function* (
         offers.push(request);
       }).pipe(Effect.andThen(Queue.offer(offered, undefined)), Effect.asVoid),
   };
-  const instanceId = ProviderInstanceId.make("claude-lifecycle");
+  const instanceId = ProviderInstanceId.make(instance);
   const outgoing = yield* Queue.unbounded<unknown>();
   let onTermination: NonNullable<
     AcpSessionRuntime.AcpSessionRuntimeOptions["onTermination"]
@@ -1477,6 +1484,271 @@ describe("AcpRegistryAdapterV2", () => {
         supportsSteeringByInterruptRestart: true,
       });
     }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("tells the sandbox bridge a steer's cancel from a Stop or a detach", () =>
+    Effect.gen(function* () {
+      const cancel = (meta?: Record<string, unknown>) => ({
+        type: "expect_outbound",
+        frame: {
+          kind: "notification",
+          method: "session/cancel",
+          params: {
+            sessionId: CLAUDE_ROOT_SESSION,
+            ...(meta === undefined ? {} : { _meta: meta }),
+          },
+        },
+      });
+      // The bridge takes the thread's model before each prompt.
+      const pickModel = [
+        {
+          type: "expect_outbound",
+          frame: { kind: "request", method: "session/set_config_option", params: "<any>" },
+        },
+        {
+          type: "emit_inbound",
+          frame: {
+            kind: "response",
+            method: "session/set_config_option",
+            result: { configOptions: [] },
+          },
+        },
+      ];
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          ...pickModel,
+          ...claudeFrames.prompt(1),
+          claudeMarker("steer"),
+          cancel({ [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL }),
+          claudeFrames.idle("cancelled"),
+          ...claudeFrames.prompt(2),
+          claudeMarker("detach"),
+          cancel(),
+          claudeFrames.idle("cancelled"),
+          ...claudeFrames.prompt(3),
+          claudeMarker("stop"),
+          cancel(),
+          claudeFrames.idle("cancelled"),
+          claudeFrames.closeRequest,
+          claudeFrames.closed,
+        ],
+        undefined,
+        false,
+        "fixture-agent",
+        undefined,
+        undefined,
+        SANDBOX_BRIDGE_INSTANCE_ID,
+      );
+      // The bridge lists models only while the sandbox answers; a session opened without them
+      // still takes a model change.
+      assert.isTrue(
+        session.runtime.providerSession.capabilities.sessions.supportsModelSwitchInSession,
+      );
+      // Only a steer's restart says so; a detach (force-stop, session replacement) asks for no
+      // runtime restart and is still a Stop to the bridge.
+      for (const [ordinal, marker, interrupt] of [
+        [1, "steer", { steer: true }],
+        [2, "detach", {}],
+        [3, "stop", { requestRuntimeRestart: true }],
+      ] as const) {
+        yield* session.runtime.startTurn(session.turnInput(ordinal));
+        const running = (yield* session.throughMarker(marker)).findLast(
+          (event) => event.type === "provider_turn.updated",
+        );
+        if (running?.type !== "provider_turn.updated") throw new Error("Missing active turn");
+        yield* session.runtime.interruptTurn({
+          providerThread: session.providerThread,
+          providerTurnId: running.providerTurn.id,
+          ...interrupt,
+        });
+        assert.equal((yield* session.terminal).status, "interrupted");
+      }
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.effect("keeps the roster the sandbox bridge reports after its turn, and stops it there", () =>
+    Effect.gen(function* () {
+      const roster = (tasks: ReadonlyArray<unknown>) => ({
+        type: "emit_inbound",
+        frame: {
+          kind: "notification",
+          method: SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
+          params: { sessionId: CLAUDE_ROOT_SESSION, tasks },
+        },
+      });
+      const reviewer = [
+        { taskId: "item-reviewer", kind: "subagent" as const, description: "Review the diff" },
+      ];
+      const gate = makeProviderReplayGate(["report", "settle"]);
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          {
+            type: "expect_outbound",
+            frame: { kind: "request", method: "session/set_config_option", params: "<any>" },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/set_config_option",
+              result: { configOptions: [] },
+            },
+          },
+          ...claudeFrames.prompt(1),
+          claudeFrames.idle("end_turn"),
+          { ...roster(reviewer), label: "report" },
+          roster(reviewer),
+          claudeMarker("held"),
+          {
+            type: "expect_outbound",
+            frame: {
+              kind: "notification",
+              method: "session/cancel",
+              params: { sessionId: CLAUDE_ROOT_SESSION },
+            },
+          },
+          { ...roster([]), label: "settle" },
+          claudeMarker("settled"),
+          claudeFrames.closeRequest,
+          claudeFrames.closed,
+        ],
+        gate,
+        false,
+        "fixture-agent",
+        undefined,
+        undefined,
+        SANDBOX_BRIDGE_INSTANCE_ID,
+      );
+      // The rosters a marker's events carry, the marker's own update left out.
+      const rosters = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+        events
+          .slice(0, -1)
+          .flatMap((event) =>
+            event.type === "provider_thread.updated"
+              ? [event.providerThread.pendingBackgroundTasks]
+              : [],
+          );
+      yield* session.runtime.startTurn(session.turnInput(1));
+      const ended = yield* session.until((event) => event.type === "turn.terminal");
+      const turn = ended.findLast((event) => event.type === "provider_turn.updated");
+      if (turn?.type !== "provider_turn.updated") throw new Error("Missing settled turn");
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+      // A repeated roster changes nothing, so it sends nothing on.
+      gate.release("report");
+      assert.deepEqual(rosters(yield* session.throughMarker("held")), [reviewer]);
+      assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+      // Stop on the held thread reaches the bridge, which stops the sandbox's thread.
+      yield* session.runtime.interruptTurn({
+        providerThread: session.providerThread,
+        providerTurnId: turn.providerTurn.id,
+        requestRuntimeRestart: true,
+      });
+      gate.release("settle");
+      assert.deepEqual(rosters(yield* session.throughMarker("settled")), [[]]);
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+      // The roster is the bridge's to keep, so a dead bridge leaves none behind.
+      assert.isTrue(session.runtime.backgroundTasksEndWithProcess);
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.effect("starts a run when the sandbox bridge reports one the sandbox began itself", () =>
+    Effect.gen(function* () {
+      const notification = {
+        source: { kind: "subagent" },
+        outcome: "completed",
+        summary: "Review the diff finished",
+      } as const;
+      const wake = {
+        type: "emit_inbound",
+        frame: {
+          kind: "notification",
+          method: SANDBOX_BRIDGE_WAKE_METHOD,
+          params: {
+            sessionId: CLAUDE_ROOT_SESSION,
+            messageId: "sandbox-wake-1",
+            text: "Background task completed.",
+            notification,
+          },
+        },
+      };
+      const gate = makeProviderReplayGate(["wake"]);
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          {
+            type: "expect_outbound",
+            frame: { kind: "request", method: "session/set_config_option", params: "<any>" },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/set_config_option",
+              result: { configOptions: [] },
+            },
+          },
+          ...claudeFrames.prompt(1),
+          claudeFrames.idle("end_turn"),
+          // Repeated while one is pending, it asks for nothing more.
+          { ...wake, label: "wake" },
+          wake,
+          claudeMarker("woke"),
+          // The bridge follows the sandbox's run by the message id its prompt carries.
+          {
+            type: "expect_outbound",
+            frame: {
+              kind: "request",
+              method: "session/prompt",
+              params: {
+                sessionId: CLAUDE_ROOT_SESSION,
+                prompt: "<any>",
+                _meta: {
+                  [SANDBOX_BRIDGE_MESSAGE_META]: {
+                    messageId: "sandbox-wake-1",
+                    createdBy: "agent",
+                    creationSource: "provider",
+                  },
+                },
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            frame: { kind: "response", method: "session/prompt", result: {} },
+          },
+          claudeFrames.idle("end_turn"),
+          claudeFrames.closeRequest,
+          claudeFrames.closed,
+        ],
+        gate,
+        true,
+        "fixture-agent",
+        undefined,
+        undefined,
+        SANDBOX_BRIDGE_INSTANCE_ID,
+      );
+      yield* session.runtime.startTurn(session.turnInput(1));
+      yield* session.terminal;
+      gate.release("wake");
+      yield* Queue.take(session.offered);
+      yield* session.throughMarker("woke");
+      assert.lengthOf(session.offers, 1);
+      const [offer] = session.offers;
+      assert.strictEqual(offer?.threadId, session.turnInput(1).threadId);
+      assert.strictEqual(offer?.providerThreadId, session.providerThread.id);
+      assert.strictEqual(offer?.messageId, "sandbox-wake-1");
+      assert.strictEqual(offer?.detail, "Background task completed.");
+      assert.deepEqual(offer?.notification, notification);
+      // The server dispatches the request as the host thread's message, whose run reaches here.
+      const turn = session.turnInput(2, { continuation: true });
+      yield* session.runtime.startTurn({
+        ...turn,
+        message: { ...turn.message, messageId: MessageId.make("sandbox-wake-1") },
+      });
+      assert.strictEqual((yield* session.terminal).status, "completed");
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("gives HTTP-capable agents T3's MCP server over HTTP", () =>

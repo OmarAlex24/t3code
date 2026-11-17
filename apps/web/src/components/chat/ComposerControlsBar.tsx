@@ -4,6 +4,7 @@ import type { ProviderInstanceEntry } from "../../providerInstances";
 import { type AppModelOption } from "../../modelSelection";
 import { useGT, useMessages } from "gt-react";
 import { CircleAlertIcon } from "lucide-react";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerControl } from "./ComposerControl";
 import {
@@ -69,6 +70,7 @@ export function ComposerControlsBar(props: {
   providerSetupInstanceId: ProviderInstanceId | undefined;
   onOpenProviderSetup: ChatComposerProps["onOpenProviderSetup"];
   providerCatalogPending: boolean;
+  modelPickerReadOnlyReason: string | null;
   isSendBusy: boolean;
   multipleModelsEnabled: boolean;
   multipleModelSelections: ChatComposerProps["multipleModelSelections"];
@@ -113,6 +115,7 @@ export function ComposerControlsBar(props: {
     providerSetupInstanceId,
     onOpenProviderSetup,
     providerCatalogPending,
+    modelPickerReadOnlyReason,
     isSendBusy,
     multipleModelsEnabled,
     multipleModelSelections,
@@ -192,7 +195,7 @@ export function ComposerControlsBar(props: {
       isComposerOwned
       // The trigger grows away from this edge when its model or effort label changes.
       popupAlign={composerControlsCollapsed ? "start" : "end"}
-      disabled={providerCatalogPending || isSendBusy}
+      disabled={providerCatalogPending || isSendBusy || modelPickerReadOnlyReason !== null}
       multipleModelsEnabled={multipleModelsEnabled}
       multipleModelSelections={multipleModelSelections}
       onMultipleModelSelectionsChange={onMultipleModelSelectionsChange}
@@ -248,6 +251,18 @@ export function ComposerControlsBar(props: {
       onOpenProviderSetup={onOpenProviderSetup}
     />
   );
+  // A disabled trigger shows no tooltip of its own.
+  const modelPickerControl =
+    modelPickerReadOnlyReason === null ? (
+      composerModelPicker
+    ) : (
+      <Tooltip>
+        <TooltipTrigger render={<span className="inline-flex min-w-0 shrink" />}>
+          {composerModelPicker}
+        </TooltipTrigger>
+        <TooltipPopup side="top">{modelPickerReadOnlyReason}</TooltipPopup>
+      </Tooltip>
+    );
   return showProviderUnavailable ? (
     <ComposerControl
       type="button"
@@ -265,7 +280,7 @@ export function ComposerControlsBar(props: {
     </ComposerControl>
   ) : (
     <>
-      {composerModelPicker}
+      {modelPickerControl}
 
       <>
         {restingBlockDefs.map((def, index) => {

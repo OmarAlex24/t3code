@@ -40,6 +40,7 @@ vi.mock(import("~/state/entities"), async (importOriginal) => ({
           projectId: "project",
           worktreePath: state.folder,
           branch: null,
+          modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
           pullRequests: state.pullRequests,
         }) as never,
   useServerConfigs: (() =>

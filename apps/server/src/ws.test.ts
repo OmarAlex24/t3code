@@ -124,6 +124,10 @@ import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as ReviewService from "./review/ReviewService.ts";
+import * as SandboxProvisioner from "./sandbox/SandboxProvisioner.ts";
+import * as SandboxBridge from "./sandbox/sandboxBridge.ts";
+import * as SandboxSettle from "./sandbox/SandboxSettle.ts";
+import * as SandboxMirror from "./sandbox/SandboxMirror.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
@@ -143,6 +147,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as UsageSandboxShare from "./usage/UsageSandboxShare.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
@@ -869,6 +874,10 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
   Layer.mock(ResourceTelemetry.ResourceTelemetry)({}),
   Layer.mock(ReviewService.ReviewService)({}),
+  Layer.mock(SandboxProvisioner.SandboxProvisioner)({}),
+  Layer.mock(SandboxBridge.SandboxBridge)({}),
+  Layer.mock(SandboxSettle.SandboxSettle)({}),
+  Layer.mock(SandboxMirror.SandboxMirror)({}),
   Layer.mock(ScheduledTasks.ScheduledTaskService)({}),
   Layer.mock(SecretRequests.SecretRequests)({}),
   Layer.mock(SecretResolver.SecretResolver)({}),
@@ -888,6 +897,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ThreadManagement.ThreadManagementService)({}),
   Layer.mock(ThreadSearch.ThreadSearch)({}),
   Layer.mock(UsageService.UsageService)({}),
+  Layer.mock(UsageSandboxShare.UsageSandboxShare)({}),
   Layer.mock(VcsProvisioningService.VcsProvisioningService)({}),
   Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
   Layer.mock(WorkspaceEntries.WorkspaceEntries)({}),

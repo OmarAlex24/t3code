@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { msg } from "gt-react";
 
 import type {
@@ -7,6 +7,7 @@ import type {
 } from "../../sidebarProjectGrouping";
 import { m, type MessageResolver } from "../../i18n/messages";
 import type { EnvironmentPresentation } from "../../state/environments";
+import type { SandboxFollowers } from "../../state/sandboxes";
 
 export interface SettingsScopeSearch {
   project?: string | undefined;
@@ -14,11 +15,44 @@ export interface SettingsScopeSearch {
   checkout?: string | undefined;
 }
 
+/** A hidden sandbox written to with the host: environment-wide, or its clone of a host project. */
+export interface ScopeFollowerTarget {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId | null;
+}
+
 type ScopeTargets = {
   label: string;
   members: readonly SidebarProjectGroupMember[];
   environmentIds: readonly EnvironmentId[];
+  followers: readonly ScopeFollowerTarget[];
 };
+
+type ScopeSandboxes = Pick<SandboxFollowers, "hostEnvironmentId" | "followers">;
+
+const NO_SANDBOXES: ScopeSandboxes = { hostEnvironmentId: null, followers: [] };
+
+function scopeFollowers(
+  sandboxes: ScopeSandboxes,
+  environmentIds: readonly EnvironmentId[],
+  members: readonly SidebarProjectGroupMember[] | null,
+): ScopeFollowerTarget[] {
+  const host = sandboxes.hostEnvironmentId;
+  if (host === null) return [];
+  if (members === null) {
+    return environmentIds.includes(host)
+      ? sandboxes.followers.map(({ environmentId }) => ({ environmentId, projectId: null }))
+      : [];
+  }
+  const hostProjects = new Set(
+    members.filter((member) => member.environmentId === host).map((member) => member.id),
+  );
+  return sandboxes.followers.flatMap(({ environmentId, hostProjectId, projectId }) =>
+    projectId !== null && hostProjectId !== null && hostProjects.has(hostProjectId)
+      ? [{ environmentId, projectId }]
+      : [],
+  );
+}
 
 export type ResolvedSettingsScope = ScopeTargets &
   (
@@ -56,11 +90,15 @@ export function validateSettingsScopeSearch(raw: Record<string, unknown>): Setti
   };
 }
 
-/** An unavailable selection never broadens a subsequent write. */
+/**
+ * An unavailable selection never broadens a subsequent write. `groups` and `environments` leave
+ * sandboxes out; `sandboxes` makes them followers of the host instead.
+ */
 export function resolveSettingsScope(
   search: SettingsScopeSearch,
   groups: readonly SidebarProjectSnapshot[],
   environments: readonly Pick<EnvironmentPresentation, "environmentId" | "label">[],
+  sandboxes: ScopeSandboxes = NO_SANDBOXES,
   resolve: MessageResolver = m,
 ): ResolvedSettingsScope {
   const unavailable = (
@@ -73,6 +111,7 @@ export function resolveSettingsScope(
     message,
     members: [],
     environmentIds: [],
+    followers: [],
   });
 
   if (search.checkout && !search.project) {
@@ -133,15 +172,18 @@ export function resolveSettingsScope(
         label: `${group.displayName} / ${checkoutEnvironment.label}${sharesEnvironment ? ` · ${checkout.workspaceRoot}` : ""}`,
         members,
         environmentIds: [checkout.environmentId],
+        followers: scopeFollowers(sandboxes, [checkout.environmentId], members),
       };
     }
+    const environmentIds = [...new Set(members.map((member) => member.environmentId))];
     return {
       kind: "project",
       group,
       environmentId: environment?.environmentId ?? null,
       label: `${group.displayName} / ${environment?.label ?? resolve(msg("All checkouts"))}`,
       members,
-      environmentIds: [...new Set(members.map((member) => member.environmentId))],
+      environmentIds,
+      followers: scopeFollowers(sandboxes, environmentIds, members),
     };
   }
   if (environment) {
@@ -151,12 +193,69 @@ export function resolveSettingsScope(
       label: environment.label,
       members: [],
       environmentIds: [environment.environmentId],
+      followers: scopeFollowers(sandboxes, [environment.environmentId], null),
     };
   }
+  const environmentIds = environments.map((candidate) => candidate.environmentId);
   return {
     kind: "all",
     label: resolve(msg("All environments")),
     members: [],
-    environmentIds: environments.map((candidate) => candidate.environmentId),
+    environmentIds,
+    followers: scopeFollowers(sandboxes, environmentIds, null),
   };
+}
+
+/**
+ * A link may still name a sandbox (`machine`, or a project or checkout that only a sandbox has):
+ * it opens its host and the host's project instead of an unavailable selection.
+ */
+export function normalizeSandboxScopeSearch(
+  search: SettingsScopeSearch,
+  groups: readonly SidebarProjectSnapshot[],
+  groupsWithSandboxes: () => readonly SidebarProjectSnapshot[],
+  sandboxes: ScopeSandboxes,
+): SettingsScopeSearch {
+  const host = sandboxes.hostEnvironmentId;
+  if (host === null || sandboxes.followers.length === 0) return search;
+  const isSandbox = (environmentId: string | undefined) =>
+    sandboxes.followers.some((follower) => follower.environmentId === environmentId);
+  const machine = isSandbox(search.machine) ? host : search.machine;
+  const visible = (key: string | undefined) =>
+    groups.find((candidate) => candidate.projectKey === key);
+  const hidden =
+    search.project === undefined
+      ? undefined
+      : groupsWithSandboxes().find((candidate) => candidate.projectKey === search.project);
+  const sandboxMember =
+    search.checkout === undefined
+      ? undefined
+      : hidden?.memberProjects.find(
+          (member) =>
+            member.physicalProjectKey === search.checkout && isSandbox(member.environmentId),
+        );
+  const needsHostProject = visible(search.project) === undefined || sandboxMember !== undefined;
+  if (!needsHostProject) {
+    return machine === search.machine ? search : { ...search, machine };
+  }
+  const hostProjectIds = new Set(
+    (sandboxMember ? [sandboxMember] : (hidden?.memberProjects ?? [])).flatMap((member) =>
+      sandboxes.followers.flatMap((follower) =>
+        follower.environmentId === member.environmentId &&
+        follower.projectId === member.id &&
+        follower.hostProjectId !== null
+          ? [follower.hostProjectId]
+          : [],
+      ),
+    ),
+  );
+  const hostGroup = groups.find((candidate) =>
+    candidate.memberProjects.some(
+      (member) => member.environmentId === host && hostProjectIds.has(member.id),
+    ),
+  );
+  if (hostGroup === undefined) return { ...search, ...(machine ? { machine } : {}) };
+  return sandboxMember || isSandbox(search.machine)
+    ? { project: hostGroup.projectKey, machine: host }
+    : { project: hostGroup.projectKey, ...(machine ? { machine } : {}) };
 }

@@ -10,6 +10,7 @@ import { useRef, useState } from "react";
 import { T, useGT } from "gt-react";
 
 import { useEnvironmentProviders, useEnvironments } from "~/state/environments";
+import { useSandboxEnvironmentIds } from "~/state/sandboxes";
 import { serverEnvironment } from "~/state/server";
 import { useEnvironmentsWithScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -23,11 +24,20 @@ import { Button } from "./ui/button";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
+/** Machines whose providers the user keeps; a thread's sandbox is not one. */
+function useProviderMachines() {
+  const { environments } = useEnvironments();
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
+  return environments.filter(
+    (environment) => !sandboxEnvironmentIds.has(environment.environmentId),
+  );
+}
+
 // `refreshModels` always drops the server's hour-long latest-version cache. `modelCatalogOnly`
 // drops it only when the model manifest changed.
 export function useCheckProviderUpdates() {
   const gt = useGT();
-  const { environments } = useEnvironments();
+  const environments = useProviderMachines();
   const manageableIds = useEnvironmentsWithScope(environments, AuthProvidersManageScope);
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
@@ -72,7 +82,7 @@ export function useCheckProviderUpdates() {
 }
 
 export function useProviderUpdates() {
-  const { environments } = useEnvironments();
+  const environments = useProviderMachines();
   const manageableIds = useEnvironmentsWithScope(environments, AuthProvidersManageScope);
   const providersByEnvironment = useEnvironmentProviders();
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider, {

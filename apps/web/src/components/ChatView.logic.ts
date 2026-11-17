@@ -1657,3 +1657,39 @@ export function isThreadEnvironmentLocked(input: {
 }): boolean {
   return input.messageCount > 0 || input.hasRuntime || input.activeProviderThreadId !== null;
 }
+
+/**
+ * Whether a message held back while its draft switched to working locally can be sent now. A send
+ * that fails a gate here is dropped, not retried. A draft on a sandbox also waits for the operate
+ * scope: a sandbox paired a moment ago can report its project before its session has loaded.
+ */
+export function waitingMessageCanResend(input: {
+  readonly waitingDraftId: string | null;
+  readonly draftId: string | null;
+  readonly isLocalDraftThread: boolean;
+  readonly onSandbox: boolean;
+  readonly canOperateThread: boolean;
+  readonly isSendBusy: boolean;
+  readonly isRevertingCheckpoint: boolean;
+  readonly threadDetailLoading: boolean;
+  readonly clientSettingsHydrated: boolean;
+  readonly needsLoadBalancing: boolean;
+  readonly activeEnvironmentUnavailable: boolean;
+  readonly hasPendingUserInput: boolean;
+  readonly feedbackUploading: boolean;
+}): boolean {
+  return (
+    input.waitingDraftId !== null &&
+    input.waitingDraftId === input.draftId &&
+    input.isLocalDraftThread &&
+    (!input.onSandbox || input.canOperateThread) &&
+    !input.isSendBusy &&
+    !input.isRevertingCheckpoint &&
+    !input.threadDetailLoading &&
+    input.clientSettingsHydrated &&
+    !input.needsLoadBalancing &&
+    !input.activeEnvironmentUnavailable &&
+    !input.hasPendingUserInput &&
+    !input.feedbackUploading
+  );
+}

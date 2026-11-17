@@ -63,6 +63,7 @@ import {
   SpeechModelUnloadTimeout,
   SpeechPostProcessingPromptSettings,
 } from "./speech.ts";
+import { SandboxServerSettingsFields, SandboxServerSettingsPatchFields } from "./sandbox.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
@@ -1578,6 +1579,7 @@ export const ServerSettings = Schema.Struct({
   offeredSourceControlProviders: Schema.Record(Schema.String, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  ...SandboxServerSettingsFields,
   // User-chosen ids preserve rows across edits; undecodable entries round-trip untouched.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1967,6 +1969,7 @@ export const ServerSettingsPatch = Schema.Struct({
   /** Merges per host, replacing patched fields whole; redaction markers retain secrets, empty secrets remove them. A non-empty token map keeps the saved tokens of hosts it omits; an empty map clears them all. */
   sourceControlHosts: Schema.optionalKey(Schema.Record(Schema.String, SourceControlHostSettings)),
   offeredSourceControlProviders: Schema.optionalKey(Schema.Record(Schema.String, Schema.Boolean)),
+  ...SandboxServerSettingsPatchFields,
   // Replace whole maps to avoid half-merged driver configs.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
   // Merge per source to avoid racing other edits; null removes an entry.

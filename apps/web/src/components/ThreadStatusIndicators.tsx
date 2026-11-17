@@ -22,7 +22,7 @@ import { msg, T, useGT, useMessages } from "gt-react";
 import { FolderGit2Icon, TerminalIcon } from "lucide-react";
 import { m, type MessageResolver } from "../i18n/messages";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
-import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { EnvironmentOptionIcon } from "./EnvironmentOptionIcon";
 import { useProject } from "../state/entities";
 import {
   pullRequestListLines,
@@ -38,6 +38,11 @@ import { cn } from "../lib/utils";
 import { revealThreadTerminal } from "../lib/revealThreadTerminal";
 
 import { useEnvironmentQuery } from "../state/query";
+import {
+  SANDBOX_STOPPED_HINT,
+  type SandboxRowState,
+  sandboxRowPhase,
+} from "../state/sandboxThreads";
 import { linkedPullRequestDetailAtom, useSharedPullRequestSummary } from "../state/pullRequests";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { vcsEnvironment } from "../state/vcs";
@@ -964,7 +969,17 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   );
 }
 
-export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSummary }) {
+export function ThreadRowTrailingStatus({
+  thread,
+  sandbox,
+}: {
+  thread: SidebarThreadSummary;
+  /**
+   * Set when the thread runs on a sandbox, its own or the one the bridge drives for this host
+   * thread: its machine is drawn as the provider's mark, with the sandbox's state.
+   */
+  sandbox: SandboxRowState | null;
+}) {
   const gt = useGT();
   const m = useMessages();
   const runningTerminalIds = useThreadRunningTerminalIds({
@@ -980,8 +995,17 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
     : null;
   const remoteMachine = resolveEnvironmentMachineKind(environment?.serverConfig ?? null);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds, m);
+  const sandboxPhase = sandboxRowPhase(sandbox);
+  // A host thread the bridge drives is local, but its machine is the sandbox.
+  const showsMachine = isRemoteThread || sandbox !== null;
+  const machineLabel =
+    sandboxPhase === "stopped"
+      ? SANDBOX_STOPPED_HINT
+      : sandboxPhase === "starting"
+        ? gt("Starting sandbox")
+        : (threadEnvironmentLabel ?? gt("Sandbox"));
 
-  if (!terminalStatus && !isRemoteThread) {
+  if (!terminalStatus && !showsMachine) {
     return null;
   }
 
@@ -1006,24 +1030,21 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
           <TooltipPopup side="top">{terminalStatus.label}</TooltipPopup>
         </Tooltip>
       ) : null}
-      {isRemoteThread ? (
+      {showsMachine ? (
         <Tooltip>
           <TooltipTrigger
             render={
-              <span
-                aria-label={
-                  threadEnvironmentLabel ?? gt("Remote", { $context: "machine location" })
-                }
-                className="inline-flex items-center justify-center"
-              />
+              <span aria-label={machineLabel} className="inline-flex items-center justify-center" />
             }
           >
-            <EnvironmentMachineIcon
-              kind={remoteMachine}
+            <EnvironmentOptionIcon
+              option={{ machine: remoteMachine, sandboxProvider: sandbox?.provider ?? null }}
+              sandboxPhase={sandboxPhase}
+              badgeRingClassName="ring-popover"
               className="size-3 text-muted-foreground/60"
             />
           </TooltipTrigger>
-          <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
+          <TooltipPopup side="top">{machineLabel}</TooltipPopup>
         </Tooltip>
       ) : null}
     </span>

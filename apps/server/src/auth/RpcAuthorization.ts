@@ -36,6 +36,8 @@ import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
+import { SANDBOX_RPC_REQUIRED_SCOPES } from "../sandbox/sandboxRpc.ts";
+
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 export const RPC_REQUIRED_SCOPES = {
@@ -114,6 +116,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverGetResourceTelemetryHistory]: AuthDiagnosticsReadScope,
   [WS_METHODS.serverRetryResourceTelemetry]: AuthDiagnosticsReadScope,
   [WS_METHODS.serverGetUsageSummary]: AuthDiagnosticsReadScope,
+  [WS_METHODS.serverGetUsageSandboxShare]: AuthDiagnosticsReadScope,
   [WS_METHODS.serverRefreshUsageRates]: AuthDiagnosticsReadScope,
   [WS_METHODS.serverSignalProcess]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
@@ -227,6 +230,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
+  ...SANDBOX_RPC_REQUIRED_SCOPES,
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {

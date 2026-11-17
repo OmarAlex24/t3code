@@ -1,10 +1,12 @@
-import type {
-  EnvironmentId,
-  ScopedProjectRef,
-  SidebarProjectGroupingMode,
+import {
+  isSandboxHostProjectRoot,
+  type EnvironmentId,
+  type ScopedProjectRef,
+  type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import {
   buildProjectGroups,
+  deriveProjectGroupLabel,
   derivePhysicalProjectKey,
   isPickableProjectMember,
   resolveScratchProjectScopeKey,
@@ -141,6 +143,13 @@ export function buildPhysicalToLogicalProjectKeyMap(input: {
   return mapping;
 }
 
+/**
+ * An empty folder the server made only so the phone has a home for a sandbox thread's host copy.
+ * This client shows the sandbox's own thread instead, so it offers no such project.
+ */
+export const isSandboxPlaceholderProject = (project: Pick<Project, "workspaceRoot">): boolean =>
+  isSandboxHostProjectRoot(project.workspaceRoot);
+
 export function buildSidebarProjectSnapshots(
   input: {
     projects: ReadonlyArray<Project>;
@@ -150,12 +159,17 @@ export function buildSidebarProjectSnapshots(
     resolveEnvironmentLabel: (environmentId: EnvironmentId) => string | null;
     isDesktopLocalEnvironment?: (environmentId: EnvironmentId) => boolean;
     isWslEnvironment?: (environmentId: EnvironmentId) => boolean;
+    /** Sandbox placeholder projects to list anyway, such as one still holding a visible thread. */
+    keepSandboxPlaceholder?: (project: Project) => boolean;
   },
   resolve: MessageResolver = m,
 ): SidebarProjectSnapshot[] {
+  const keepPlaceholder = input.keepSandboxPlaceholder ?? (() => false);
   return buildProjectGroups(
     {
-      projects: input.projects,
+      projects: input.projects.filter(
+        (project) => !isSandboxPlaceholderProject(project) || keepPlaceholder(project),
+      ),
       groupScratchProjects: input.groupScratchProjects ?? false,
       settings: input.settings,
       preferredEnvironmentId: input.primaryEnvironmentId,
@@ -169,12 +183,21 @@ export function buildSidebarProjectSnapshots(
         environmentLabel: input.resolveEnvironmentLabel(project.environmentId),
       }),
     );
-    const representative =
+    const grouped =
       members.find(
         (member) =>
           member.environmentId === group.representative.environmentId &&
           member.id === group.representative.id,
       ) ?? members[0]!;
+    // A placeholder never stands for a real checkout it is grouped with.
+    const representative = isSandboxPlaceholderProject(grouped)
+      ? (members.find(
+          (member) =>
+            member.environmentId === grouped.environmentId && !isSandboxPlaceholderProject(member),
+        ) ??
+        members.find((member) => !isSandboxPlaceholderProject(member)) ??
+        grouped)
+      : grouped;
 
     const hasLocal =
       input.primaryEnvironmentId !== null &&
@@ -201,7 +224,10 @@ export function buildSidebarProjectSnapshots(
     return {
       ...representative,
       projectKey: group.key,
-      displayName: group.label,
+      displayName:
+        representative === grouped
+          ? group.label
+          : deriveProjectGroupLabel({ groupKey: group.key, representative, members }),
       groupedProjectCount: members.length,
       environmentPresence:
         hasLocal && hasRemote ? "mixed" : hasRemote ? "remote-only" : "local-only",
@@ -219,10 +245,17 @@ export function buildSidebarProjectSnapshots(
 export function buildSidebarProjectPickerEntries(input: {
   groups: ReadonlyArray<SidebarProjectSnapshot>;
   preferredProjectRef: ScopedProjectRef | null;
+  /** Machines a new thread never starts on: each sandbox belongs to its own chat. */
+  hiddenEnvironmentIds?: ReadonlySet<EnvironmentId>;
 }) {
   const preferredProjectRef = input.preferredProjectRef;
+  const hidden = input.hiddenEnvironmentIds;
   const entries = input.groups.flatMap((group): SidebarProjectPickerEntry[] => {
-    const members = group.memberProjects.filter(isPickableProjectMember);
+    const members = group.memberProjects.filter(
+      (project) =>
+        isPickableProjectMember(project) &&
+        (hidden === undefined || !hidden.has(project.environmentId)),
+    );
     const isPreferred = preferredProjectRef
       ? group.memberProjectRefs.some(
           (projectRef) =>

@@ -244,6 +244,12 @@ describe("environment grouping", () => {
       title: "fallback",
       workspaceRoot: "/tmp/fallback",
     });
+    const remoteOnly = makeProject({
+      id: ProjectId.make("remote-only"),
+      environmentId: remoteEnvironmentId,
+      title: "remote-only",
+      workspaceRoot: "/remote/remote-only",
+    });
     const groups = buildSidebarProjectSnapshots({
       projects: [
         currentPrimary,
@@ -251,6 +257,7 @@ describe("environment grouping", () => {
         destinationPrimary,
         destinationRemote,
         fallbackPrimary,
+        remoteOnly,
       ],
       settings: defaultGroupingSettings,
       primaryEnvironmentId,
@@ -277,6 +284,20 @@ describe("environment grouping", () => {
       environmentId: primaryEnvironmentId,
       id: fallbackPrimary.id,
     });
+
+    // A sandbox's projects are never a target, even for the chat open on it.
+    const withoutRemote = buildSidebarProjectPickerEntries({
+      groups,
+      preferredProjectRef: { environmentId: remoteEnvironmentId, projectId: currentRemote.id },
+      hiddenEnvironmentIds: new Set([remoteEnvironmentId]),
+    });
+    expect(
+      withoutRemote.map((entry) => [entry.targetProject.id, entry.isPreferred] as const),
+    ).toEqual([
+      [currentPrimary.id, true],
+      [destinationPrimary.id, false],
+      [fallbackPrimary.id, false],
+    ]);
   });
 
   it("targets an open copy when the preferred project is archived", () => {

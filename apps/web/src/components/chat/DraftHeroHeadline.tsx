@@ -28,6 +28,7 @@ import {
   projectGroupsSpanEnvironments,
 } from "~/sidebarProjectGrouping";
 import { useProjects } from "~/state/entities";
+import { useSandboxEnvironmentIds } from "~/state/sandboxes";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { ProjectEnvironmentBadge } from "../ProjectEnvironmentBadge";
 import { ProjectFavicon } from "../ProjectFavicon";
@@ -69,6 +70,7 @@ export function DraftHeroHeadline({
 }: DraftHeroHeadlineProps) {
   const gt = useGT();
   const projects = useProjects();
+  const sandboxEnvironmentIds = useSandboxEnvironmentIds();
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -107,6 +109,7 @@ export function DraftHeroHeadline({
   const projectPickerEntries = buildSidebarProjectPickerEntries({
     groups: pickableProjectGroups(projectGroups),
     preferredProjectRef: activeProjectRef,
+    hiddenEnvironmentIds: sandboxEnvironmentIds,
   });
   const projectEntryByKey = new Map(
     projectPickerEntries.map((entry) => [entry.group.projectKey, entry] as const),

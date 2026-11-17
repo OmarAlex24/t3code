@@ -6,7 +6,7 @@ import { Fragment, useState, type ReactNode } from "react";
 import { T, useGT, useMessages, Var } from "gt-react";
 
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
-import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
+import type { EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { Button } from "../ui/button";
@@ -71,8 +71,13 @@ interface SettingsScopeMenuProps {
 export function SettingsScopeSentence() {
   const scope = useOptionalSettingsScope();
   const pathname = useLocation({ select: (location) => location.pathname });
-  const { environments } = useEnvironments();
   if (scope === null || SETTINGS_DEVICE_ONLY_PATHS.has(pathname)) return null;
+  // Until the host lists its sandboxes, one would read as a remote the user keeps.
+  const environments = scope.sandboxesKnown
+    ? scope.availableEnvironments
+    : scope.availableEnvironments.filter(
+        (environment) => environment.environmentId === scope.hostEnvironmentId,
+      );
   const props: SettingsScopeMenuProps = {
     value: scope.search,
     singleEnvironment: scope.singleEnvironment,
@@ -293,7 +298,7 @@ function EnvironmentScopeMenu({
 }: SettingsScopeMenuProps) {
   const messages = useMessages();
   const gt = useGT();
-  const resolved = resolveSettingsScope(value, groups, environments, messages);
+  const resolved = resolveSettingsScope(value, groups, environments, undefined, messages);
   const environmentValue = environmentAxisValue(
     value,
     resolved.kind === "checkout" ? resolved.environmentId : null,

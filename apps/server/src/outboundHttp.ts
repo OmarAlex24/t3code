@@ -10,20 +10,46 @@ const requireUndici = NodeModule.createRequire(import.meta.url);
 export const builtinFetchUsesHttp2 = (bundledUndiciVersion: string | undefined) =>
   Number.parseInt(bundledUndiciVersion ?? "", 10) >= 8;
 
+const globalDispatchers = [
+  Symbol.for("undici.globalDispatcher.2"),
+  Symbol.for("undici.globalDispatcher.1"),
+] as const;
+const globalSlots = globalThis as unknown as Record<symbol, unknown>;
+
+// Loading undici 8 installs its own agent as the dispatcher Node 22's fetch reads, which would drop
+// the EnvHttpProxyAgent that --use-env-proxy put there, so that one is put back.
+function loadUndici(): typeof Undici {
+  const legacy = globalDispatchers[1];
+  const before = globalSlots[legacy];
+  const undici = requireUndici("undici") as typeof Undici;
+  if (before !== undefined) globalSlots[legacy] = before;
+  return undici;
+}
+
+// Node's agent comes from its internal undici copy, so `instanceof` against the npm class is false.
+const usesEnvProxy = () =>
+  globalDispatchers.some(
+    (slot) =>
+      (globalSlots[slot] as { constructor?: { name?: string } } | undefined)?.constructor?.name ===
+      "EnvHttpProxyAgent",
+  );
+
+/** A dispatcher of npm undici that keeps the env proxy agent and never negotiates HTTP/2. */
+export function makeHttp1Dispatcher(): Undici.Dispatcher {
+  const undici = loadUndici();
+  return usesEnvProxy()
+    ? new undici.EnvHttpProxyAgent({
+        allowH2: false,
+        // ProxyAgent's connector forces h2 and ignores allowH2; replace it for HTTPS proxies.
+        clientFactory: (origin) => new undici.Pool(origin, { allowH2: false }),
+      })
+    : new undici.Agent({ allowH2: false });
+}
+
 /** Preserves the EnvHttpProxyAgent installed by --use-env-proxy / NODE_USE_ENV_PROXY. */
 export function installHttp1FetchDispatcher(): void {
-  const undici = requireUndici("undici") as typeof Undici;
-  // Node's agent comes from its internal undici copy, so `instanceof` against the npm class is false.
-  const usesEnvProxy = undici.getGlobalDispatcher().constructor.name === "EnvHttpProxyAgent";
-  undici.setGlobalDispatcher(
-    usesEnvProxy
-      ? new undici.EnvHttpProxyAgent({
-          allowH2: false,
-          // ProxyAgent's connector forces h2 and ignores allowH2; replace it for HTTPS proxies.
-          clientFactory: (origin) => new undici.Pool(origin, { allowH2: false }),
-        })
-      : new undici.Agent({ allowH2: false }),
-  );
+  const dispatcher = makeHttp1Dispatcher();
+  loadUndici().setGlobalDispatcher(dispatcher);
 }
 
 /** Avoids uncaught idle-timeout errors on h2 streams (https://github.com/nodejs/undici/issues/5936). */

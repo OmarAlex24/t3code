@@ -1,0 +1,4957 @@
+import {
+  assessSandboxStart,
+  DEFAULT_SANDBOX_IDLE_MINUTES,
+  DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
+  DEFAULT_SANDBOX_TAILSCALE_TAG,
+  ExecutionEnvironmentDescriptor,
+  isSecretReference,
+  ProjectId,
+  WS_METHODS,
+  type EnvironmentId,
+  type SandboxAccess,
+  type SandboxCheckWorkResult,
+  type SandboxConfigsResult,
+  type SandboxConnectGithubAppInput,
+  type SandboxConnectRailwayInput,
+  type SandboxConnectRailwayResult,
+  type SandboxRailwayWorkspace,
+  type SandboxConnectGithubAppResult,
+  type SandboxCreateInput,
+  type SandboxCreateResult,
+  type SandboxCredentialEnvironment,
+  type SandboxCredentialEnvironmentsInput,
+  type SandboxCredentialEnvironmentsResult,
+  type SandboxDeleteConfigInput,
+  type SandboxDeleteInput,
+  type SandboxDeleteResult,
+  type SandboxEnvironmentConfig,
+  type SandboxHostAccess as SandboxHostAccessFacts,
+  type SandboxLaunchCancelResult,
+  type SandboxLaunchInput,
+  type SandboxLaunchPairResult,
+  type SandboxLaunchResult,
+  type SandboxLaunchThreadInput,
+  type SandboxTailscaleCheckInput,
+  type SandboxTailscaleCheckResult,
+  SANDBOX_TAILSCALE_SCOPES,
+  tailscaleClientIdFromSecret,
+  type SandboxOrphan,
+  type SandboxSaveConfigInput,
+  type SandboxSaveConfigResult,
+  type SandboxSetupSnapshot,
+  type SandboxSetupStageId,
+  type SandboxSetupState,
+  type ServerSettings as ServerSettingsValue,
+  settingsSecretLiteral,
+  type ThreadId,
+  type UsageLimitSourceConfig,
+  UsageLimitSourceId,
+  type SandboxLifecycleInput,
+  type SandboxLimitsInput,
+  type SandboxLimitsResult,
+  type SandboxListResult,
+  type SandboxRecord,
+  type SandboxResumeResult,
+  type SandboxSaveTemplateInput,
+  type SandboxSaveTemplateResult,
+  type SandboxDeleteTemplateInput,
+  type SandboxStopResult,
+  type SandboxTemplatesInput,
+  type SandboxTemplatesResult,
+  SandboxProviderError,
+  type SandboxProviderInfo,
+  type SandboxProviderKind,
+  type SandboxProvidersResult,
+  githubRepositoryOf,
+  SANDBOX_RESUME_STEP_SECONDS,
+  type WorktreeSetupStageStatus,
+} from "@t3tools/contracts";
+import { COPYABLE_FILE_MAX_BYTES, isDefaultCopiedFile } from "@t3tools/shared/copiedFiles";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+import * as Context from "effect/Context";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
+import * as Redacted from "effect/Redacted";
+import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import { HttpClient, HttpClientRequest } from "effect/http";
+
+import { forkParked } from "../serverActivation.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as SandboxRecords from "../persistence/SandboxRecords.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
+import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { requireSettingsSecret } from "../secrets/settingsSecretValue.ts";
+import { type CliproxyHub, makeCliproxyApi } from "../usage/cliproxyApi.ts";
+import * as SandboxHostAccess from "./SandboxHostAccess.ts";
+import { SUB_SANDBOX_HELPER_SCRUB, subSandboxHelperScript } from "./subSandboxHelper.ts";
+import {
+  CLAUDE_SETTINGS_SCRUB,
+  claudeSettingsScript,
+  endpointReachScript,
+  ENSURE_TOOLS_SCRIPT,
+  parseEndpointReach,
+  parseMissingTools,
+  parseRepositoryReport,
+  parseTailscaleReport,
+  parseWorkCheck,
+  repositoryScript,
+  type SandboxScript,
+  type SandboxTool,
+  GITHUB_LOGIN_SCRUB,
+  githubAppLoginScript,
+  githubLoginScript,
+  gitIdentityScript,
+  KEEP_ALIVE_INTERVAL_SECONDS,
+  KEEP_ALIVE_SCRUB,
+  keepAliveStart,
+  MCP_SERVERS_SCRUB,
+  mcpServersScript,
+  NORTHFLANK_LOGIN_SCRUB,
+  northflankLoginScript,
+  parseRailwayCli,
+  RAILWAY_LOGIN_SCRUB,
+  railwayLoginScript,
+  parseSetupScriptReport,
+  sandboxAgentGuidanceScript,
+  sandboxKeepAliveScript,
+  setupScriptScript,
+  TAILSCALE_PROXY_URL,
+  tailscaleProxyEnv,
+  tailscaleScript,
+  t3SettingsSeedScript,
+  tailscaleScrub,
+  workCheckScript,
+  writeFileScript,
+} from "./sandboxSetup.ts";
+import { sandboxSettingsSeed } from "./sandboxSettingsSeed.ts";
+import { makePairingKey, pairScript, type PairReport, readPairReport } from "./sandboxPairing.ts";
+import {
+  fetchHubModels,
+  hubAgentModels,
+  PI_SETTINGS_SCRUB,
+  piHubProvider,
+  piSetupScript,
+} from "./sandboxPi.ts";
+import {
+  type BridgeCredentialReport,
+  BRIDGE_CREDENTIAL_SCOPES,
+  bridgeCredentialScript,
+  readBridgeCredential,
+} from "./sandboxBridgeCredential.ts";
+import {
+  bridgeLinkSecretName,
+  type SandboxBridgeLink,
+  SandboxBridgeLinkJson,
+} from "@t3tools/sandbox-bridge/link";
+import { makeSandboxLaunchTracker, type SandboxLaunchLifecycle } from "./sandboxLaunches.ts";
+import { makeTailscaleApi, type TailscaleOAuthClient } from "./tailscaleApi.ts";
+import { GithubAppApiError, type GithubAppCredentials, makeGithubAppApi } from "./githubAppApi.ts";
+import { makeMapleApi, mapleApiBaseUrl } from "./mapleApi.ts";
+import { makeRailwayApi, railwayCredentialsOf, railwaySandboxTokenName } from "./railwayApi.ts";
+import { describeHostMcpServer } from "./sandboxHostTooling.ts";
+import {
+  type AgentEnvironment,
+  layerHttpClient,
+  requestJson,
+  type SandboxAgentAccess,
+  shellQuote,
+  type SandboxExecResult,
+  type SandboxKeepAlive,
+  type SandboxProviderConfig,
+  type SandboxProviderDriver,
+  type SandboxProviderStatus,
+  type SandboxUsage,
+} from "./SandboxProvider.ts";
+import { SANDBOX_PROVIDER_DRIVERS } from "./providers/index.ts";
+
+const SERVE_ENVIRONMENT_NAME = /^[A-Z_][A-Z0-9_]*$/u;
+
+const serveEnvironmentPrefix = (environment: Readonly<Record<string, string>> | undefined) => {
+  const entries = Object.entries(environment ?? {});
+  if (entries.length === 0) return "";
+  for (const [name] of entries) {
+    if (!SERVE_ENVIRONMENT_NAME.test(name)) {
+      throw new Error(`Invalid sandbox serve environment variable name '${name}'.`);
+    }
+  }
+  return `env ${entries.map(([name, value]) => `${name}=${shellQuote(value)}`).join(" ")} `;
+};
+
+// Starts `t3 serve` only when nothing answers on its port, then waits for it. Shared by install and
+// resume because providers without systemd do not bring the server back after a stop. The service
+// unit cannot carry a serve environment, so a driver that sets one always runs under nohup.
+const serveScript = (serveEnvironment: Readonly<Record<string, string>> | undefined) => {
+  const nohup = `nohup ${serveEnvironmentPrefix(serveEnvironment)}t3 serve --host 0.0.0.0 --port 3773 >"$HOME/.t3/sandbox-server.log" 2>&1 &
+    echo "$!" >"$HOME/.t3/sandbox-server.pid"`;
+  const start =
+    Object.keys(serveEnvironment ?? {}).length > 0
+      ? `  ${nohup}`
+      : `  if command -v systemctl >/dev/null 2>&1 && t3 service install >/dev/null 2>&1; then
+    sudo -n loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+    t3 service restart >/dev/null 2>&1 || true
+  else
+    ${nohup}
+  fi`;
+  return `if ! curl -fsS http://127.0.0.1:3773/.well-known/t3/environment >/dev/null 2>&1; then
+${start}
+fi
+i=0
+while [ "$i" -lt 90 ]; do
+  if curl -fsS http://127.0.0.1:3773/.well-known/t3/environment >/dev/null 2>&1; then
+    exit 0
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+# Headless serve logs a pairing token, URL, and QR code; providers keep this output.
+tail -50 "$HOME/.t3/sandbox-server.log" | grep -v -i -e token -e pair -e 'app link' -e '█' -e '▀' -e '▄' >&2 || true
+exit 1`;
+};
+
+const installScript = (label: string) => `set -eu
+export PATH="$HOME/.local/bin:$PATH"
+# The label file is read by \`t3 serve\` itself, so it works on providers without sudo, systemd,
+# or a writable /etc/machine-info. The hostname is only a convenience for the machine's UI.
+mkdir -p "$HOME/.t3"
+printf '%s\n' ${shellQuote(label)} >"$HOME/.t3/environment-label"
+if command -v hostnamectl >/dev/null 2>&1; then
+  sudo -n hostnamectl set-hostname --pretty ${shellQuote(label)} 2>/dev/null || true
+fi
+if ! command -v t3 >/dev/null 2>&1; then
+  installer="$(mktemp)"
+  trap 'rm -f "$installer"' EXIT
+  curl -fsSL -o "$installer" https://t3.codes/install.sh
+  sh "$installer"
+  rm -f "$installer"
+  trap - EXIT
+fi
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v t3 >/dev/null 2>&1; then
+  echo "The t3 CLI did not install." >&2
+  exit 1
+fi`;
+
+// Also starts the keep-alive loop, which a stop ends: every resume runs this, whether T3 itself
+// comes back through systemd or nohup.
+const startScript = (
+  driver: Pick<SandboxProviderDriver, "serveEnvironment" | "serverPort">,
+) => `set -eu
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v t3 >/dev/null 2>&1; then
+  echo "The t3 CLI is missing." >&2
+  exit 1
+fi
+${keepAliveStart(driver.serverPort)}
+${serveScript(driver.serveEnvironment)}`;
+
+// A template copies the disk, and T3's userdata holds the environment id, auth sessions, and secrets:
+// a sandbox started from it would answer as the source with the source's valid bearer sessions.
+// So the server stops, by the PID it started or the owner of its port, and its state is removed.
+// The installed binary stays, so install on the new sandbox skips the download.
+const SCRUB_SCRIPT = `set -eu
+export PATH="$HOME/.local/bin:$PATH"
+answering() { curl -fsS http://127.0.0.1:3773/.well-known/t3/environment >/dev/null 2>&1; }
+# Uninstalling the unit also keeps it from starting T3 on every sandbox made from the template.
+if command -v t3 >/dev/null 2>&1; then
+  t3 service uninstall >/dev/null 2>&1 || true
+fi
+pids=""
+if command -v ss >/dev/null 2>&1; then
+  pids="$(ss -H -ltnp 'sport = :3773' 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 || true)"
+fi
+if [ -f "$HOME/.t3/sandbox-server.pid" ]; then
+  pids="$pids $(cat "$HOME/.t3/sandbox-server.pid")"
+fi
+for pid in $pids; do
+  if tr '\\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q 'serve'; then
+    kill "$pid" 2>/dev/null || true
+  fi
+done
+i=0
+while answering; do
+  i=$((i + 1))
+  if [ "$i" -ge 30 ]; then
+    echo "T3 Code is still running, so its state was not removed." >&2
+    exit 1
+  fi
+  sleep 1
+done
+${KEEP_ALIVE_SCRUB}
+${SUB_SANDBOX_HELPER_SCRUB}
+rm -rf "$HOME/.t3/userdata" "$HOME/.t3/environment-label" "$HOME/.t3/usage-host-id"
+${CLAUDE_SETTINGS_SCRUB}
+${GITHUB_LOGIN_SCRUB}
+${MCP_SERVERS_SCRUB}
+${NORTHFLANK_LOGIN_SCRUB}
+${RAILWAY_LOGIN_SCRUB}
+${PI_SETTINGS_SCRUB}
+${tailscaleScrub()}
+rm -f "$HOME/.t3/sandbox-server.log" "$HOME/.t3/sandbox-server.pid"`;
+
+// Lowercase words joined by dashes, so a hub key says which sandbox it belongs to.
+const labelSlug = (label: string) =>
+  label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+/u, "")
+    .slice(0, 32)
+    .replace(/-+$/u, "") || "sandbox";
+
+const TOOL_LABELS: Record<SandboxTool, string> = {
+  git: "git",
+  gh: "The GitHub CLI",
+  claude: "Claude Code",
+};
+
+// Long enough for git on a large clone, short enough that a delete never waits on a stuck machine.
+const WORK_CHECK_SECONDS = 10;
+
+const tailnetHostname = (label: string) => `t3-sandbox-${labelSlug(label)}`;
+
+const unreachableEndpointWarning = (
+  baseUrl: string,
+  isPrivate: boolean,
+  tailnetTag: string | undefined,
+) => {
+  const host = URL.parse(baseUrl)?.host ?? baseUrl;
+  if (tailnetTag !== undefined) {
+    return `The sandbox joined your tailnet but cannot reach ${host}. Check that your tailnet policy lets ${tailnetTag} reach it.`;
+  }
+  return isPrivate
+    ? `The sandbox cannot reach ${host}. It is only reachable from your private network or tailnet; let the sandbox join your tailnet, expose it publicly (for example with Tailscale Funnel or Cloudflare Tunnel), or use another endpoint.`
+    : `The sandbox cannot reach ${host}. Check that it accepts connections from the internet, or use another endpoint.`;
+};
+
+// The join handles the key, so a failure keeps neither the driver's detail nor its output.
+const TAILNET_JOIN_FAILED = "The sandbox could not join your tailnet.";
+
+interface TailnetJoin {
+  readonly client: TailscaleOAuthClient;
+  readonly token: Redacted.Redacted<string>;
+}
+
+interface TailnetJoined {
+  readonly deviceId: string;
+  readonly proxy: boolean;
+  readonly ip: string | undefined;
+}
+
+interface HubKey {
+  readonly sourceId: string;
+  readonly hub: CliproxyHub;
+  readonly value: Redacted.Redacted<string>;
+}
+
+const asScript = (script: string | SandboxScript): SandboxScript =>
+  typeof script === "string" ? { command: script } : script;
+
+const PAIR_FAILURES: Record<Exclude<PairReport, { _tag: "token" }>["reason"], string> = {
+  seal: "The sandbox has neither the openssl CLI nor Node.js, which T3 Code needs to receive its pairing code safely. Install openssl in the sandbox image.",
+  pair: "t3 pair failed on the sandbox.",
+  token: "The sandbox did not return a pairing code.",
+  unreadable: "The sandbox did not return a pairing code.",
+};
+
+const BRIDGE_FAILURES: Record<
+  Exclude<BridgeCredentialReport, { _tag: "issued" }>["reason"],
+  string
+> = {
+  seal: "The sandbox has neither the openssl CLI nor Node.js, which T3 Code needs to receive the bridge's credential safely.",
+  issue: "t3 auth session issue failed on the sandbox.",
+  token: "The sandbox did not return a credential for the bridge.",
+  unreadable: "The sandbox did not return a credential for the bridge.",
+};
+
+const decodeBridgeLink = Schema.decodeEffect(SandboxBridgeLinkJson);
+const encodeBridgeLink = Schema.encodeEffect(SandboxBridgeLinkJson);
+
+// A bridge credential this close to its expiry is replaced the next time it is linked or resumed.
+const BRIDGE_RENEW_BEFORE_MS = 30 * 24 * 60 * 60 * 1000;
+
+// How long a stage that failed but kept its machine waits for a retry before the launch gives up
+// and releases the machine. Every retry starts the wait again.
+const LAUNCH_RETRY_WAIT = "10 minutes";
+const LAUNCH_RETRY_TIMEOUT =
+  "Nothing retried this sandbox's setup for 10 minutes, so T3 Code deleted it. Start a new sandbox to try again.";
+const LAUNCH_DELETED_OUTSIDE =
+  "The sandbox was deleted outside T3 Code before it finished starting. Start a new sandbox to try again.";
+// A record left `provisioning` with no launch to finish it: T3 Code stopped mid-launch.
+const LAUNCH_ABANDONED =
+  "T3 Code stopped before this sandbox finished starting. Start a new sandbox to replace it, or delete it under Settings → Connections → Sandboxes.";
+
+// An empty value is an unset field, which drivers see as absent.
+const withSettings = (
+  config: SandboxProviderConfig,
+  overrides: Readonly<Record<string, string>> = {},
+): SandboxProviderConfig => ({
+  apiKey: config.apiKey,
+  settings: Object.fromEntries(
+    Object.entries({ ...config.settings, ...overrides }).filter(([, value]) => value !== ""),
+  ),
+});
+
+// `starting` has no record state, and an `error` record means T3 is not serving on a machine the
+// provider reports running, so neither overwrites what the record says.
+const reconcileState = (
+  current: SandboxRecord["state"],
+  status: SandboxProviderStatus | null,
+): SandboxRecord["state"] =>
+  status === null || status === "starting" || (current === "error" && status === "running")
+    ? current
+    : status;
+
+const findDriver = (kind: SandboxProviderKind): SandboxProviderDriver => {
+  const driver = SANDBOX_PROVIDER_DRIVERS.find((candidate) => candidate.info.kind === kind);
+  if (driver === undefined) {
+    throw new Error(`No sandbox provider driver is registered for '${kind}'.`);
+  }
+  return driver;
+};
+
+interface ClaudeAccess {
+  readonly baseUrl: string;
+  readonly token: Redacted.Redacted<string>;
+  readonly hubKey: HubKey | undefined;
+}
+
+/** Everything a create needs, settled before anything bills. */
+interface Prepared {
+  readonly input: SandboxCreateInput;
+  readonly driver: SandboxProviderDriver;
+  readonly config: SandboxProviderConfig;
+  readonly label: string;
+  readonly size: string;
+  readonly maxRunningMinutes: number;
+  /** With keep-alive: the provider stops the sandbox this long after its work ends. */
+  readonly idleMinutes: number;
+  readonly runningCapMinutes: number | undefined;
+  /** The longest auto-stop the provider's plan allows, when it says. */
+  readonly maxTtlMinutes: number | undefined;
+  readonly template: string | undefined;
+  readonly access: SandboxAccess;
+  readonly installCommand: string;
+  readonly startCommand: string;
+  readonly claude: ClaudeAccess | undefined;
+  /** Where the hub key is kept, so the record written right after create can name it. */
+  readonly hubKeySecret: string | undefined;
+  readonly githubToken: Redacted.Redacted<string> | undefined;
+  readonly tailnet: TailnetJoin | undefined;
+  /** Set when the agent gets its own provider key; checked before anything bills. */
+  readonly agentAccess: SandboxAgentAccess | undefined;
+}
+
+/** What a provisioning attempt made so far; a failure or cancel releases all of it. */
+interface Owned {
+  sandbox?: { readonly id: string; readonly config: SandboxProviderConfig };
+  deviceId?: string;
+  agentEnvironment?: AgentEnvironment;
+  agentKeyId?: string;
+  githubToken?: GithubToken;
+  mapleKey?: { readonly keyId: string; readonly apiBaseUrl: string };
+  railwayToken?: NonNullable<SandboxRecord["railwayToken"]>;
+  keepAliveKeyId?: string;
+}
+
+/** An installation token minted for one sandbox, kept as a server secret named by `secret`. */
+interface GithubToken {
+  readonly installationId: number;
+  readonly repository: string;
+  readonly token: Redacted.Redacted<string>;
+  readonly secret: string;
+  readonly expiresAt: string;
+}
+
+/** What a thread's launch adds to provisioning: its config's tooling and its repository. */
+interface LaunchTooling {
+  readonly config: SandboxEnvironmentConfig;
+  readonly repository: { readonly owner: string; readonly name: string };
+}
+
+// The marker only has to tell one script's text from another's on the same machine.
+const scriptHash = (script: string) => {
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let index = 0; index < script.length; index += 1) {
+    const code = script.charCodeAt(index);
+    a = Math.imul(a ^ code, 0x01000193) >>> 0;
+    b = Math.imul(b ^ code, 0x5bd1e995) >>> 0;
+  }
+  return `${a.toString(16).padStart(8, "0")}${b.toString(16).padStart(8, "0")}${script.length.toString(16)}`;
+};
+
+// A minted Maple key also expires on its own, in case a revoke never reaches Maple.
+const MAPLE_KEY_SECONDS = 30 * 24 * 60 * 60;
+const SUB_SANDBOX_HELPER_WARNING =
+  "T3 Code's sub-sandbox helper could not be added, so agents on this sandbox cannot ask this computer for a sandbox of their own.";
+
+const SANDBOX_AGENT_GUIDANCE_WARNING =
+  "T3 Code's sandbox instructions could not be written, so agents on this sandbox may not know that a stop empties /tmp and the sandbox is deleted when its chat ends.";
+// A sandbox's GitHub token is replaced this long before it expires.
+const GITHUB_TOKEN_REFRESH_MS = 20 * 60 * 1000;
+// A keep-alive key outlives any one running stretch and is replaced on a resume once it is close
+// to expiry, so a sandbox stopped for weeks comes back with a working one.
+const KEEP_ALIVE_KEY_MINUTES = 30 * 24 * 60;
+const KEEP_ALIVE_RENEW_BEFORE_MS = 7 * 24 * 60 * 60 * 1000;
+// How far past its idle window a sandbox's auto-stop may sit before the sweep resets it.
+const AUTO_STOP_SLACK_MINUTES = 10;
+
+/**
+ * The auto-stop a sandbox that keeps itself up gets: its idle window plus one check, so work that
+ * ends just after a check still gets the whole window. A plan's maximum lowers it.
+ */
+const keepAliveTtlMinutes = (idleMinutes: number, maxTtlMinutes: number | undefined) =>
+  Math.min(idleMinutes + KEEP_ALIVE_INTERVAL_SECONDS / 60, maxTtlMinutes ?? Infinity);
+
+const formatRunningLimit = (minutes: number) =>
+  minutes % 60 === 0 ? `${minutes / 60} h` : `${minutes} min`;
+
+// Only a key that got minted makes a sandbox keep itself up; a bare name is a mint that never ended.
+const keepsItselfUp = (record: SandboxRecord) => record.keepAliveKey?.id !== undefined;
+
+interface Reporter {
+  readonly stage: (
+    id: SandboxSetupStageId,
+    status: WorktreeSetupStageStatus,
+    detail?: string | null,
+  ) => Effect.Effect<void>;
+  readonly warn: (warning: string) => Effect.Effect<void>;
+}
+
+const silentReporter: Reporter = { stage: () => Effect.void, warn: () => Effect.void };
+
+type RecordExtras = Pick<
+  SandboxRecord,
+  "configId" | "threadId" | "parentThreadId" | "projectId" | "projectTitle"
+>;
+
+interface Machine {
+  readonly prepared: Prepared;
+  readonly sandboxId: string;
+  readonly config: SandboxProviderConfig;
+  readonly httpBaseUrl: string;
+  readonly environmentId: EnvironmentId;
+  readonly setup: SandboxCreateResult["setup"];
+  readonly run: (
+    script: string | SandboxScript,
+    timeoutSeconds: number,
+  ) => Effect.Effect<SandboxExecResult, SandboxProviderError>;
+  readonly record: () => SandboxRecord;
+  /** Merges `patch` into the record and removes the `drop` keys. */
+  readonly save: (
+    patch: Partial<SandboxRecord>,
+    drop?: ReadonlyArray<keyof SandboxRecord>,
+  ) => Effect.Effect<SandboxRecord>;
+}
+
+/** The https clone URL of a github.com remote, or null; a credential in the URL is dropped. */
+const githubCloneUrl = (remoteUrl: string) => {
+  const repository = githubRepositoryOf(remoteUrl);
+  return repository === null
+    ? null
+    : { url: repository.cloneUrl, name: repository.name, owner: repository.owner };
+};
+
+const sameDirectory = (path: string) =>
+  path.length > 0 && !path.startsWith("/") && !path.split("/").some((part) => part === "..");
+
+export class SandboxProvisioner extends Context.Service<
+  SandboxProvisioner,
+  {
+    readonly providers: Effect.Effect<SandboxProvidersResult>;
+    /**
+     * Creates a sandbox that belongs to no thread, such as the one a template is saved from, and
+     * returns a pairing code for the client that asked.
+     */
+    readonly create: (
+      input: SandboxCreateInput,
+    ) => Effect.Effect<SandboxCreateResult, SandboxProviderError>;
+    /**
+     * Creates a sandbox for one subagent of `parentThreadId`, with `project` cloned and set up
+     * from `config` as a thread's launch would, but no chat of its own. The record is `instanceId`
+     * from the start, so a caller counting its sandboxes can hold the place beforehand. The
+     * pairing code is for whoever links it.
+     */
+    readonly createSubSandbox: (input: {
+      readonly instanceId: string;
+      readonly config: SandboxEnvironmentConfig;
+      readonly project: SandboxLaunchInput["project"];
+      readonly parentThreadId: ThreadId;
+      readonly size: string;
+    }) => Effect.Effect<SandboxCreateResult, SandboxProviderError>;
+    readonly delete: (
+      input: SandboxDeleteInput,
+    ) => Effect.Effect<SandboxDeleteResult, SandboxProviderError>;
+    /**
+     * Each record removed with its sandbox, by any path: a delete, the sweep, or a new launch
+     * replacing an abandoned one. The bridge keeps the chat of a linked one.
+     */
+    readonly removed: Stream.Stream<SandboxRecord>;
+    /**
+     * A revision that moves when records change with no client action: a resume starting or
+     * ending, or the sweep seeing a provider stop. Clients refetch the list on each.
+     */
+    readonly listChanges: Stream.Stream<number>;
+    readonly environments: (
+      input: SandboxCredentialEnvironmentsInput,
+    ) => Effect.Effect<SandboxCredentialEnvironmentsResult, SandboxProviderError>;
+    readonly limits: (
+      input: SandboxLimitsInput,
+    ) => Effect.Effect<SandboxLimitsResult, SandboxProviderError>;
+    readonly list: Effect.Effect<SandboxListResult, SandboxProviderError>;
+    readonly stop: (
+      input: SandboxLifecycleInput,
+    ) => Effect.Effect<SandboxStopResult, SandboxProviderError>;
+    readonly resume: (
+      input: SandboxLifecycleInput,
+    ) => Effect.Effect<SandboxResumeResult, SandboxProviderError>;
+    readonly checkWork: (
+      input: SandboxLifecycleInput,
+    ) => Effect.Effect<SandboxCheckWorkResult, SandboxProviderError>;
+    /**
+     * Records or clears the decision a settled chat waits on, and with `handled` marks that settle
+     * applied in the same write; false when the record is gone.
+     */
+    readonly setSettlePending: (
+      instanceId: string,
+      pending: SandboxRecord["settlePending"],
+      handled?: string,
+    ) => Effect.Effect<boolean>;
+    /**
+     * Runs one of T3 Code's own scripts on a running sandbox through its provider, as the poll for
+     * its agents' sub-sandbox requests does. Fails when the sandbox is gone or not running.
+     */
+    readonly runScript: (input: {
+      readonly instanceId: string;
+      readonly script: SandboxScript;
+      readonly timeoutSeconds: number;
+    }) => Effect.Effect<SandboxExecResult, SandboxProviderError>;
+    readonly templates: (
+      input: SandboxTemplatesInput,
+    ) => Effect.Effect<SandboxTemplatesResult, SandboxProviderError>;
+    /**
+     * Resets T3 on the sandbox, saves its disk as a template, and deletes it: the sandbox's T3
+     * identity is gone, so it could only come back as a different environment.
+     */
+    readonly saveTemplate: (
+      input: SandboxSaveTemplateInput,
+    ) => Effect.Effect<SandboxSaveTemplateResult, SandboxProviderError>;
+    readonly deleteTemplate: (
+      input: SandboxDeleteTemplateInput,
+    ) => Effect.Effect<void, SandboxProviderError>;
+    readonly configs: Effect.Effect<SandboxConfigsResult, SandboxProviderError>;
+    readonly saveConfig: (
+      input: SandboxSaveConfigInput,
+    ) => Effect.Effect<SandboxSaveConfigResult, SandboxProviderError>;
+    readonly deleteConfig: (
+      input: SandboxDeleteConfigInput,
+    ) => Effect.Effect<void, SandboxProviderError>;
+    /**
+     * Starts provisioning a thread's sandbox on this server and returns at once. With a host
+     * project, the launch ends with the host's bridge linked for that project's thread.
+     */
+    readonly launch: (
+      input: SandboxLaunchInput,
+      options?: { readonly hostProjectId?: ProjectId },
+    ) => Effect.Effect<SandboxLaunchResult, SandboxProviderError>;
+    /** Each launch beginning and ending, for the host thread that waits on it. */
+    readonly launchLifecycle: Stream.Stream<SandboxLaunchLifecycle>;
+    /** Whether a launch for the thread is still working. */
+    readonly launching: (threadId: ThreadId) => Effect.Effect<boolean>;
+    /**
+     * Shows a lost launch as failed, with a new sandbox as the way back: T3 Code stopped while it
+     * ran. Nothing changes when the thread already shows a launch.
+     */
+    readonly markLaunchLost: (input: SandboxLaunchInput) => Effect.Effect<void>;
+    readonly subscribeLaunch: (
+      input: SandboxLaunchThreadInput,
+    ) => Stream.Stream<SandboxSetupSnapshot | null>;
+    /** Stops a launch and deletes what it made, or dismisses one that already failed. */
+    readonly cancelLaunch: (
+      input: SandboxLaunchThreadInput,
+    ) => Effect.Effect<SandboxLaunchCancelResult>;
+    /** False when this server holds no launch for the thread, as after a restart. */
+    readonly retryLaunch: (
+      input: SandboxLaunchThreadInput,
+    ) => Effect.Effect<boolean, SandboxProviderError>;
+    /**
+     * Runs `t3 pair` on a thread's sandbox once its launch is done, for a client that has not
+     * paired with it yet; the code goes only to the caller.
+     */
+    readonly pairLaunch: (
+      input: SandboxLaunchThreadInput,
+    ) => Effect.Effect<SandboxLaunchPairResult, SandboxProviderError>;
+    /**
+     * Pairs a client with a chat's sandbox on request, as `pairLaunch` does, resuming a stopped
+     * one first; for a client that has none of the chat's surfaces until it is connected.
+     */
+    readonly connectThread: (
+      input: SandboxLaunchThreadInput,
+    ) => Effect.Effect<SandboxLaunchPairResult, SandboxProviderError>;
+    /** Signs in with a Tailscale OAuth client and says whether it can do what T3 needs. */
+    readonly checkTailscale: (
+      input: SandboxTailscaleCheckInput,
+    ) => Effect.Effect<SandboxTailscaleCheckResult>;
+    /** Turns the manifest flow's code into the sandboxes' GitHub App and saves it on this server. */
+    readonly connectGithubApp: (
+      input: SandboxConnectGithubAppInput,
+    ) => Effect.Effect<SandboxConnectGithubAppResult, SandboxProviderError>;
+    /** Checks a Railway token and the workspace it mints in, and saves both when they work. */
+    readonly connectRailway: (
+      input: SandboxConnectRailwayInput,
+    ) => Effect.Effect<SandboxConnectRailwayResult, SandboxProviderError>;
+    /** Stops sandboxes past their running limit and syncs every other record with its provider. */
+    readonly sweep: Effect.Effect<void>;
+    /**
+     * Reads one sandbox's state from its provider now instead of at the next sweep, and saves it
+     * when it changed. A resume in flight, or a provider that cannot say, keeps the record's state.
+     */
+    readonly refreshState: (
+      instanceId: string,
+    ) => Effect.Effect<SandboxRecord["state"], SandboxProviderError>;
+    /**
+     * Readies the host's sandbox bridge for a launched thread: keeps (or mints) the bearer it uses
+     * on the sandbox and records the host project the thread is served from.
+     */
+    readonly linkBridge: (input: {
+      readonly threadId: ThreadId;
+      readonly hostProjectId: ProjectId;
+    }) => Effect.Effect<SandboxRecord, SandboxProviderError>;
+  }
+>()("t3/sandbox/SandboxProvisioner") {}
+
+/**
+ * Only `setSettlePending` writes a record's settle fields. Any other write may carry a record read
+ * before a step that takes minutes (a resume, a stop), so it keeps the settle fields stored now.
+ */
+const keepingStoredSettle = (repository: SandboxRecords.SandboxRecordRepository["Service"]) => ({
+  ...repository,
+  put: (record: SandboxRecord) =>
+    repository.get(record.instanceId).pipe(
+      Effect.flatMap((stored) => {
+        if (Option.isNone(stored)) return repository.put(record);
+        const { settlePending: _settlePending, settleHandled: _settleHandled, ...rest } = record;
+        const { settlePending, settleHandled } = stored.value;
+        return repository.put({
+          ...rest,
+          ...(settlePending === undefined ? {} : { settlePending }),
+          ...(settleHandled === undefined ? {} : { settleHandled }),
+        });
+      }),
+    ),
+});
+
+const make = Effect.gen(function* () {
+  const settings = yield* ServerSettings.ServerSettingsService;
+  const repository = yield* SandboxRecords.SandboxRecordRepository;
+  const records = keepingStoredSettle(repository);
+  const configStore = yield* SandboxRecords.SandboxConfigRepository;
+  const environmentIdentity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+  const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+  const workspaceFiles = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+  const projectStore = yield* ProjectStore.ProjectStoreV2;
+  // Launches outlive the request that started them: a client disconnecting must not strand a
+  // half-made machine, so they run in the server's own scope.
+  const launchScope = yield* Effect.scope;
+  const tracker = yield* makeSandboxLaunchTracker;
+  const httpClient = yield* HttpClient.HttpClient;
+  const secureRandom = yield* SecureRandom.SecureRandom;
+  const hostAccess = yield* SandboxHostAccess.SandboxHostAccess;
+  const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const secretResolver = yield* SecretResolver.SecretResolver;
+  const hubApi = yield* makeCliproxyApi;
+  const tailscaleApi = yield* makeTailscaleApi;
+  const githubAppApi = yield* makeGithubAppApi;
+  const mapleApi = yield* makeMapleApi;
+  const railwayApi = yield* makeRailwayApi;
+  const onHttp = Effect.provideService(HttpClient.HttpClient, httpClient);
+
+  // A settings patch needs the key, and merges `settings` per field, so a save writes the key and
+  // every declared field; an empty value is how a field is cleared.
+  const resolveConfig = Effect.fn("SandboxProvisioner.resolveConfig")(function* (
+    driver: SandboxProviderDriver,
+    provided: {
+      readonly apiKey?: string | undefined;
+      readonly settings?: Readonly<Record<string, string>> | undefined;
+    } = {},
+  ) {
+    const provider = driver.info.kind;
+    const saved = (yield* settings.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new SandboxProviderError({
+            provider,
+            stage: "config",
+            detail: "Could not read the provider API key from this server's settings.",
+            cause,
+          }),
+      ),
+    )).sandboxProviders[provider];
+    const providedKey = provided.apiKey?.trim() ?? "";
+    const apiKey = providedKey || (saved?.apiKey.trim() ?? "");
+    const fields = driver.info.settingsFields ?? [];
+    const savedValue = (id: string) => saved?.settings[id]?.trim() ?? "";
+    const values = Object.fromEntries(
+      fields.map((field) => [
+        field.id,
+        (provided.settings?.[field.id] ?? savedValue(field.id)).trim(),
+      ]),
+    );
+    if (apiKey === "") {
+      return yield* new SandboxProviderError({
+        provider,
+        stage: "config",
+        detail: `Add a ${driver.info.label} API key to create this sandbox.`,
+      });
+    }
+    if (providedKey !== "" || fields.some((field) => values[field.id] !== savedValue(field.id))) {
+      yield* settings
+        .updateSettings({ sandboxProviders: { [provider]: { apiKey, settings: values } } })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new SandboxProviderError({
+                provider,
+                stage: "config",
+                detail: "Could not save the provider API key on this server.",
+                cause,
+              }),
+          ),
+        );
+    }
+    return withSettings({ apiKey, settings: {} }, values);
+  });
+
+  // A sandbox stays where it was created (Vercel's team and project) after the settings change;
+  // a record without settings follows the current ones.
+  const recordConfig = (driver: SandboxProviderDriver, record: SandboxRecord) =>
+    resolveConfig(driver).pipe(
+      Effect.map((config) => withSettings(config, record.providerSettings)),
+    );
+
+  const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+  const readRecord = (instanceId: string) =>
+    records
+      .get(instanceId)
+      .pipe(
+        Effect.orDie,
+        Effect.map(
+          Option.getOrThrowWith(() => new Error(`No sandbox record exists for ${instanceId}.`)),
+        ),
+      );
+
+  // A key named by a secret reference that cannot be read fails, so Claude never falls back to a
+  // copy of this machine's token.
+  const cliproxyHub = (source: UsageLimitSourceConfig) =>
+    requireSettingsSecret(secretResolver, source.managementKey).pipe(
+      Effect.map((managementKey): CliproxyHub => ({ url: source.url, managementKey })),
+    );
+
+  const hasManagementKey = (source: UsageLimitSourceConfig) =>
+    isSecretReference(source.managementKey) || settingsSecretLiteral(source.managementKey) !== "";
+
+  // The first enabled CLIProxyAPI usage source with a management key is the hub new Claude keys go on.
+  const hubSource = (value: ServerSettingsValue) =>
+    Object.entries(value.usageLimitSources).find(
+      ([, source]) => source.enabled && source.kind === "cliproxy" && hasManagementKey(source),
+    );
+
+  const tailscaleClient = (value: ServerSettingsValue): TailscaleOAuthClient | undefined => {
+    const { clientSecret, tag } = value.sandboxTailscale;
+    // The one-field form leaves the ID to the secret it is part of.
+    const clientId =
+      value.sandboxTailscale.clientId || (tailscaleClientIdFromSecret(clientSecret) ?? "");
+    if (clientId === "" || clientSecret === "") return undefined;
+    return {
+      clientId,
+      clientSecret: Redacted.make(clientSecret),
+      tag: tag === "" ? DEFAULT_SANDBOX_TAILSCALE_TAG : tag,
+    };
+  };
+
+  const tailscaleToken = (client: TailscaleOAuthClient) => tailscaleApi.accessToken(client);
+
+  const githubAppOf = (value: ServerSettingsValue): GithubAppCredentials | undefined => {
+    const tooling = value.sandboxTooling;
+    if (tooling.githubAppId === "" || tooling.githubAppPrivateKey === "") return undefined;
+    return {
+      appId: tooling.githubAppId,
+      slug: tooling.githubAppSlug,
+      privateKey: Redacted.make(tooling.githubAppPrivateKey),
+    };
+  };
+
+  const githubInstallUrl = (slug: string) =>
+    `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
+
+  // Finds the installation through the sandbox's repository; the token then covers every repository
+  // that installation does. Null when the app is not installed on the repository, which only the
+  // user can change.
+  const mintGithubToken = Effect.fn("SandboxProvisioner.mintGithubToken")(function* (
+    app: GithubAppCredentials,
+    repository: { readonly owner: string; readonly name: string },
+    knownInstallation?: number,
+  ) {
+    const installationId =
+      knownInstallation ?? (yield* githubAppApi.repositoryInstallation(app, repository));
+    if (installationId === null) return null;
+    const minted = yield* githubAppApi.createInstallationToken(app, installationId);
+    const secret = `sandbox-github-token-${yield* secureRandom.uuidV4()}`;
+    yield* secrets.set(secret, new TextEncoder().encode(Redacted.value(minted.token))).pipe(
+      Effect.tapError(() => githubAppApi.revokeInstallationToken(minted.token).pipe(Effect.ignore)),
+      Effect.mapError(
+        () =>
+          new GithubAppApiError({
+            detail: "Could not save the sandbox's GitHub token on this server.",
+          }),
+      ),
+    );
+    return {
+      installationId,
+      repository: `${repository.owner}/${repository.name}`,
+      token: minted.token,
+      secret,
+      expiresAt: minted.expiresAt,
+    } satisfies GithubToken;
+  });
+
+  const dropGithubToken = (token: Pick<GithubToken, "token" | "secret">) =>
+    githubAppApi
+      .revokeInstallationToken(token.token)
+      .pipe(Effect.ignore, Effect.andThen(secrets.remove(token.secret).pipe(Effect.ignore)));
+
+  const githubRecordOf = (token: GithubToken): NonNullable<SandboxRecord["githubApp"]> => ({
+    installationId: token.installationId,
+    repository: token.repository,
+    secret: token.secret,
+    expiresAt: token.expiresAt,
+  });
+
+  // Never blocks a delete. A token past its expiry is dead already, so only its secret goes.
+  const releaseGithubToken = Effect.fn("SandboxProvisioner.releaseGithubToken")(function* (
+    record: Pick<SandboxRecord, "label" | "githubApp">,
+  ) {
+    const reference = record.githubApp;
+    if (reference === undefined) return null;
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const stored = yield* secrets.get(reference.secret).pipe(Effect.orElseSucceed(Option.none));
+    const expired = now >= Date.parse(reference.expiresAt);
+    const revoked =
+      expired || Option.isNone(stored)
+        ? null
+        : yield* githubAppApi
+            .revokeInstallationToken(Redacted.make(new TextDecoder().decode(stored.value)))
+            .pipe(
+              Effect.tapError((error) =>
+                Effect.logWarning("sandbox github token revoke failed", { detail: error.detail }),
+              ),
+              Effect.exit,
+            );
+    yield* secrets.remove(reference.secret).pipe(Effect.ignore);
+    if (expired) return null;
+    return revoked !== null && Exit.isSuccess(revoked)
+      ? null
+      : `T3 Code could not revoke the GitHub token it made for ${record.label}. It stops working on its own within the hour.`;
+  });
+
+  // Never blocks a delete: a key that cannot be revoked becomes a warning naming it.
+  const releaseMapleKey = Effect.fn("SandboxProvisioner.releaseMapleKey")(function* (
+    record: Pick<SandboxRecord, "label" | "mapleKey">,
+  ) {
+    const reference = record.mapleKey;
+    if (reference === undefined) return null;
+    const warning = `T3 Code could not revoke the Maple key it made for ${record.label}. Revoke the key starting with t3-sandbox-${labelSlug(record.label)}- in Maple.`;
+    const adminKey = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
+      ?.sandboxTooling.mapleAdminKey;
+    if (adminKey === undefined || adminKey === "") return warning;
+    const revoked = yield* mapleApi
+      .revokeKey(Redacted.make(adminKey), reference.apiBaseUrl, reference.keyId)
+      .pipe(
+        Effect.tapError((error) =>
+          Effect.logWarning("sandbox maple key revoke failed", { detail: error.detail }),
+        ),
+        Effect.exit,
+      );
+    return Exit.isSuccess(revoked) ? null : warning;
+  });
+
+  const savedRailway = settings.getSettings.pipe(
+    Effect.map((value) => railwayCredentialsOf(value.sandboxTooling)),
+    Effect.orElseSucceed(() => undefined),
+  );
+
+  // Never blocks a delete: a token that cannot be revoked becomes a warning naming it. Revoking
+  // looks the token up by name, so it works however long the record outlived it.
+  const releaseRailwayToken = Effect.fn("SandboxProvisioner.releaseRailwayToken")(function* (
+    record: Pick<SandboxRecord, "label" | "railwayToken">,
+  ) {
+    const reference = record.railwayToken;
+    if (reference === undefined) return null;
+    yield* secrets.remove(reference.secret).pipe(Effect.ignore);
+    const warning = `T3 Code could not revoke the Railway token it made for ${record.label}. Delete the token named ${reference.name} in Railway's workspace settings.`;
+    const saved = yield* savedRailway;
+    if (saved === undefined) return warning;
+    const revoked = yield* railwayApi
+      .deleteTokensNamed(saved.token, reference.workspaceId, reference.name)
+      .pipe(
+        Effect.tapError((error) =>
+          Effect.logWarning("sandbox railway token revoke failed", { detail: error.detail }),
+        ),
+        Effect.exit,
+      );
+    return Exit.isSuccess(revoked) ? null : warning;
+  });
+
+  // Never blocks a delete: a key that cannot be revoked becomes a warning naming it.
+  const releaseKeepAliveKey = Effect.fn("SandboxProvisioner.releaseKeepAliveKey")(function* (
+    driver: SandboxProviderDriver,
+    config: Option.Option<SandboxProviderConfig>,
+    record: Pick<SandboxRecord, "label" | "keepAliveKey">,
+  ) {
+    const reference = record.keepAliveKey;
+    if (reference === undefined) return null;
+    const name = driver.info.label;
+    const warning = `T3 Code could not revoke the ${name} key ${record.label} kept itself running with. Revoke the key named ${reference.name} in ${name}.`;
+    if (reference.id === undefined || driver.keepAlive === undefined || Option.isNone(config)) {
+      return warning;
+    }
+    const revoked = yield* onHttp(
+      driver.keepAlive.revokeKey({ config: config.value, keyId: reference.id }),
+    ).pipe(
+      Effect.tapError((error) =>
+        Effect.logWarning("sandbox keep-alive key revoke failed", { detail: error.detail }),
+      ),
+      Effect.exit,
+    );
+    return Exit.isSuccess(revoked) ? null : warning;
+  });
+
+  // Unique per key, so a key Boat lists says which sandbox it keeps up.
+  const keepAliveKeyName = Effect.fn("SandboxProvisioner.keepAliveKeyName")(function* (
+    label: string,
+  ) {
+    const hex = (yield* secureRandom.uuidV4()).replaceAll("-", "");
+    return `t3-keepalive-${labelSlug(label)}-${hex.slice(0, 8)}`;
+  });
+
+  /**
+   * Mints a key scoped to the sandbox and writes it, the idle window, and the loop that uses them
+   * on the sandbox, which starts the loop. Null when either fails; a key that did not get onto the
+   * sandbox is revoked. T3 never keeps the key itself, only its id to revoke it.
+   */
+  const mintKeepAlive = Effect.fn("SandboxProvisioner.mintKeepAlive")(function* (input: {
+    readonly driver: SandboxProviderDriver;
+    readonly keepAlive: SandboxKeepAlive;
+    readonly config: SandboxProviderConfig;
+    readonly sandboxId: string;
+    readonly name: string;
+    readonly ttlMinutes: number;
+    readonly maxRunningMinutes: number;
+    readonly projectRoot: string | undefined;
+    readonly run: (
+      script: SandboxScript,
+      timeoutSeconds: number,
+    ) => Effect.Effect<SandboxExecResult, SandboxProviderError>;
+    readonly owned?: Owned | undefined;
+  }) {
+    const { keepAlive, config, sandboxId } = input;
+    const minted = yield* onHttp(
+      keepAlive.mintKey({
+        config,
+        sandboxId,
+        name: input.name,
+        ttlMinutes: KEEP_ALIVE_KEY_MINUTES,
+      }),
+    ).pipe(
+      Effect.tapError((error) =>
+        Effect.logWarning("sandbox keep-alive key mint failed", { detail: error.detail }),
+      ),
+      Effect.option,
+    );
+    if (Option.isNone(minted)) return null;
+    const keyId = minted.value.id;
+    if (input.owned !== undefined) input.owned.keepAliveKeyId = keyId;
+    const expiresAt = DateTime.formatIso(
+      DateTime.makeUnsafe(
+        DateTime.toEpochMillis(yield* DateTime.now) + KEEP_ALIVE_KEY_MINUTES * 60_000,
+      ),
+    );
+    const written = yield* input
+      .run(
+        sandboxKeepAliveScript({
+          key: Redacted.value(minted.value.secret),
+          extend: keepAlive.extendRequest(sandboxId),
+          ttlSeconds: input.ttlMinutes * 60,
+          maxRunningMinutes: input.maxRunningMinutes,
+          port: input.driver.serverPort,
+          projectRoot: input.projectRoot,
+        }),
+        SANDBOX_RESUME_STEP_SECONDS.keepAlive,
+      )
+      .pipe(Effect.exit);
+    if (Exit.isFailure(written)) {
+      yield* onHttp(keepAlive.revokeKey({ config, keyId })).pipe(Effect.ignore);
+      if (input.owned !== undefined) delete input.owned.keepAliveKeyId;
+      return null;
+    }
+    return { name: input.name, id: keyId, expiresAt } satisfies NonNullable<
+      SandboxRecord["keepAliveKey"]
+    >;
+  });
+
+  const keepAliveFailed = (maxRunningMinutes: number) =>
+    `This sandbox could not be set up to stay on while its agents work, so it stops ${formatRunningLimit(maxRunningMinutes)} after it starts.`;
+
+  // An untracked sandbox has no record to name its token, but the name is the sandbox's own.
+  const releaseOrphanRailwayToken = Effect.fn("SandboxProvisioner.releaseOrphanRailwayToken")(
+    function* (sandboxId: string) {
+      const saved = yield* savedRailway;
+      if (saved === undefined) return null;
+      const name = railwaySandboxTokenName(sandboxId);
+      const revoked = yield* railwayApi
+        .deleteTokensNamed(saved.token, saved.workspaceId, name)
+        .pipe(Effect.exit);
+      return Exit.isSuccess(revoked)
+        ? null
+        : `T3 Code could not check Railway for a token it made for ${sandboxId}. Delete any token named ${name} in Railway's workspace settings.`;
+    },
+  );
+
+  /**
+   * Replaces a sandbox's GitHub token with a fresh one: mint, write it on the sandbox, then revoke
+   * the old one. A failure keeps the old token and says why.
+   */
+  const refreshGithubToken = Effect.fn("SandboxProvisioner.refreshGithubToken")(function* (
+    record: SandboxRecord,
+    run: (
+      script: string | SandboxScript,
+      timeoutSeconds: number,
+    ) => Effect.Effect<SandboxExecResult, SandboxProviderError>,
+  ): Effect.fn.Return<{
+    readonly githubApp: SandboxRecord["githubApp"];
+    readonly warning: string | null;
+  }> {
+    const reference = record.githubApp;
+    if (reference === undefined) return { githubApp: undefined, warning: null };
+    const keep = (warning: string) => ({ githubApp: reference, warning });
+    const app = githubAppOf(yield* settings.getSettings.pipe(Effect.orDie));
+    if (app === undefined) {
+      return keep("The GitHub App is no longer connected, so this sandbox's GitHub token expires.");
+    }
+    const [owner = "", name = ""] = reference.repository.split("/");
+    const minted = yield* mintGithubToken(app, { owner, name }, reference.installationId).pipe(
+      Effect.option,
+    );
+    if (Option.isNone(minted) || minted.value === null) {
+      return keep("GitHub would not renew this sandbox's token, so it expires within the hour.");
+    }
+    const token = minted.value;
+    const written = yield* run(githubAppLoginScript(Redacted.value(token.token)), 60).pipe(
+      Effect.exit,
+    );
+    if (Exit.isFailure(written)) {
+      yield* dropGithubToken(token);
+      return keep("The sandbox's GitHub token could not be renewed on the sandbox.");
+    }
+    yield* releaseGithubToken({ label: record.label, githubApp: reference });
+    return { githubApp: githubRecordOf(token), warning: null };
+  });
+
+  const connectGithubApp = Effect.fn("SandboxProvisioner.connectGithubApp")(function* (
+    input: SandboxConnectGithubAppInput,
+  ) {
+    const app = yield* githubAppApi
+      .convertManifest(input.code)
+      .pipe(
+        Effect.mapError((error) =>
+          launchConfigError(
+            error.status === 404 || error.status === 422
+              ? "GitHub no longer accepts this code. Create the app again from Settings."
+              : `Could not create the GitHub App. ${error.detail}`,
+          ),
+        ),
+      );
+    yield* settings
+      .updateSettings({
+        sandboxTooling: {
+          githubAppId: app.appId,
+          githubAppSlug: app.slug,
+          githubAppOwner: app.owner,
+          githubAppPrivateKey: Redacted.value(app.privateKey),
+        },
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new SandboxProviderError({
+              stage: "config",
+              detail: "Could not save the GitHub App on this server.",
+              cause,
+            }),
+        ),
+      );
+    return {
+      slug: app.slug,
+      owner: app.owner,
+      installUrl: githubInstallUrl(app.slug),
+    } satisfies SandboxConnectGithubAppResult;
+  });
+
+  // A workspace token reaches one workspace and an account token several, so the user picks only
+  // when there is a choice. Nothing is saved until Railway answers for the workspace.
+  const connectRailway = Effect.fn("SandboxProvisioner.connectRailway")(function* (
+    input: SandboxConnectRailwayInput,
+  ) {
+    const token = Redacted.make(input.token);
+    const refused = (problem: string, workspaces: ReadonlyArray<SandboxRailwayWorkspace> = []) =>
+      ({ workspaces, problem }) satisfies SandboxConnectRailwayResult;
+    let workspaceId: string;
+    if (input.workspaceId !== undefined) {
+      workspaceId = input.workspaceId;
+    } else {
+      const reached = yield* railwayApi.tokenWorkspaces(token).pipe(Effect.result);
+      if (reached._tag === "Failure") {
+        return refused(
+          reached.failure.unauthorized === true
+            ? "Railway did not accept this token. Make a workspace token in Railway's workspace settings, under Tokens."
+            : `${reached.failure.detail} If you know the workspace ID, enter it and save again.`,
+        );
+      }
+      if (reached.success.length !== 1) {
+        return refused(
+          reached.success.length === 0
+            ? "This token reaches no workspace. Enter the workspace ID, or make a workspace token."
+            : "This token reaches several workspaces. Pick the one sandboxes get tokens in.",
+          reached.success,
+        );
+      }
+      workspaceId = reached.success[0]!.id;
+    }
+    const name = yield* railwayApi.workspaceName(token, workspaceId).pipe(Effect.result);
+    if (name._tag === "Failure") {
+      return refused(
+        name.failure.unauthorized === true
+          ? "Railway did not let this token read that workspace. Check the workspace ID, or use a token made in that workspace."
+          : name.failure.detail,
+      );
+    }
+    yield* settings
+      .updateSettings({
+        sandboxTooling: {
+          railwayToken: input.token,
+          railwayWorkspaceId: workspaceId,
+          railwayWorkspaceName: name.success,
+        },
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new SandboxProviderError({
+              stage: "config",
+              detail: "Could not save the Railway token on this server.",
+              cause,
+            }),
+        ),
+      );
+    return {
+      saved: { id: workspaceId, name: name.success },
+      workspaces: [],
+      problem: null,
+    } satisfies SandboxConnectRailwayResult;
+  });
+
+  const checkTailscale = Effect.fn("SandboxProvisioner.checkTailscale")(function* (
+    input: SandboxTailscaleCheckInput,
+  ) {
+    const clientId = input.clientId ?? tailscaleClientIdFromSecret(input.clientSecret);
+    if (clientId === null) {
+      return {
+        clientId: "",
+        scopes: [],
+        problem:
+          "This does not look like a Tailscale OAuth client secret (tskey-client-…). If yours has another form, enter its client ID under Advanced.",
+      } satisfies SandboxTailscaleCheckResult;
+    }
+    const tag = input.tag ?? DEFAULT_SANDBOX_TAILSCALE_TAG;
+    const signedIn = yield* tailscaleApi
+      .signIn({ clientId, clientSecret: Redacted.make(input.clientSecret) }, [tag])
+      .pipe(Effect.result);
+    if (signedIn._tag === "Failure") {
+      // The steps refer to the setup guide in the Tailscale card.
+      const problem =
+        signedIn.failure.status === 400
+          ? `Tailscale won't give this client ${tag}. Add the tag to tagOwners in your policy file (step 1), then make an OAuth client with it selected for both scopes (step 2).`
+          : signedIn.failure.status === 401
+            ? "Tailscale did not accept this secret. Copy it again, or make a new OAuth client (step 2)."
+            : signedIn.failure.detail;
+      return { clientId, scopes: [], problem };
+    }
+    const { scopes } = signedIn.success;
+    // `all` is the older scope that covers every other, and `devices` the older `devices:core`.
+    const granted = (id: string) =>
+      scopes.includes("all") ||
+      scopes.includes(id) ||
+      (id === "devices:core" && scopes.includes("devices"));
+    // Named the way Tailscale's Scopes step shows them; Read alone cannot mint keys.
+    const missing = SANDBOX_TAILSCALE_SCOPES.filter((scope) => !granted(scope.id)).map(
+      (scope) =>
+        `${scope.label}: Write${scopes.includes(`${scope.id}:read`) ? " (it has Read)" : ""}`,
+    );
+    return {
+      clientId,
+      scopes,
+      problem:
+        missing.length === 0
+          ? null
+          : `Missing ${missing.join(" and ")} for ${tag}. Make an OAuth client that has ${missing.length === 1 ? "it" : "them"} (step 2) and paste its secret.`,
+    } satisfies SandboxTailscaleCheckResult;
+  });
+
+  // Mints a single-use key and runs the join. A warning means it did not end up connected; `joined`
+  // is set whenever the sandbox registered, so a failure can still remove the device.
+  const joinTailnet = Effect.fn("SandboxProvisioner.joinTailnet")(function* (
+    join: TailnetJoin,
+    label: string,
+    run: (
+      script: string | SandboxScript,
+      timeoutSeconds: number,
+    ) => Effect.Effect<{ readonly stdout: string }, SandboxProviderError, HttpClient.HttpClient>,
+  ): Effect.fn.Return<
+    { readonly joined: TailnetJoined | null; readonly warning: string | null },
+    never,
+    HttpClient.HttpClient
+  > {
+    const authKey = yield* tailscaleApi
+      .createAuthKey(join.token, {
+        tag: join.client.tag,
+        description: `T3 Code sandbox ${labelSlug(label)}`.slice(0, 50),
+      })
+      .pipe(Effect.result);
+    if (authKey._tag === "Failure") {
+      return { joined: null, warning: `${TAILNET_JOIN_FAILED} ${authKey.failure.detail}` };
+    }
+    const report = yield* run(
+      tailscaleScript({
+        authKey: Redacted.value(authKey.success),
+        hostname: tailnetHostname(label),
+      }),
+      420,
+    ).pipe(
+      Effect.map((result) => parseTailscaleReport(result.stdout)),
+      Effect.orElseSucceed(() => null),
+    );
+    const nodeId = report?.nodeId;
+    const joined =
+      nodeId === undefined
+        ? null
+        : { deviceId: nodeId, proxy: report?.mode === "userspace", ip: report?.ip };
+    if (report?.state === "Running" && joined !== null) return { joined, warning: null };
+    const reason =
+      report?.error === "root"
+        ? " Installing Tailscale needs root or passwordless sudo on the sandbox."
+        : report?.error === "install"
+          ? " Tailscale did not install."
+          : report?.error === "start"
+            ? " tailscaled did not start."
+            : "";
+    return { joined, warning: `${TAILNET_JOIN_FAILED}${reason}` };
+  });
+
+  // An ephemeral node is removed once it has been offline for a while, so a resumed sandbox may
+  // need a new one. tailscaled is restarted first; only a sandbox that is not connected gets a key.
+  const rejoinTailnet = Effect.fn("SandboxProvisioner.rejoinTailnet")(function* (
+    record: SandboxRecord,
+    run: (
+      script: string | SandboxScript,
+      timeoutSeconds: number,
+    ) => Effect.Effect<{ readonly stdout: string }, SandboxProviderError, HttpClient.HttpClient>,
+  ): Effect.fn.Return<
+    { readonly tailscale: SandboxRecord["tailscale"]; readonly warning: string | null },
+    never,
+    HttpClient.HttpClient
+  > {
+    const current = record.tailscale;
+    if (current === undefined) return { tailscale: undefined, warning: null };
+    const status = yield* run(
+      tailscaleScript({ hostname: tailnetHostname(record.label) }),
+      SANDBOX_RESUME_STEP_SECONDS.tailnetRejoin,
+    ).pipe(
+      Effect.map((result) => parseTailscaleReport(result.stdout)),
+      Effect.orElseSucceed(() => null),
+    );
+    if (status?.state === "Running") return { tailscale: current, warning: null };
+    const client = tailscaleClient(yield* settings.getSettings.pipe(Effect.orDie));
+    if (client === undefined) {
+      return {
+        tailscale: current,
+        warning:
+          "The sandbox is no longer on your tailnet, and no Tailscale OAuth client is saved to rejoin it.",
+      };
+    }
+    const token = yield* tailscaleToken(client).pipe(Effect.result);
+    if (token._tag === "Failure") {
+      return {
+        tailscale: current,
+        warning: `The sandbox could not rejoin your tailnet. ${token.failure.detail}`,
+      };
+    }
+    const join = yield* joinTailnet({ client, token: token.success }, record.label, run);
+    if (join.joined === null) return { tailscale: current, warning: join.warning };
+    if (join.joined.deviceId !== current.deviceId) {
+      yield* tailscaleApi.deleteDevice(token.success, current.deviceId).pipe(Effect.ignore);
+    }
+    return { tailscale: { deviceId: join.joined.deviceId }, warning: join.warning };
+  });
+
+  // Never blocks a delete: a device that cannot be removed becomes a warning naming it.
+  const releaseTailnetDevice = Effect.fn("SandboxProvisioner.releaseTailnetDevice")(function* (
+    record: Pick<SandboxRecord, "label" | "tailscale">,
+  ) {
+    const deviceId = record.tailscale?.deviceId;
+    if (deviceId === undefined) return null;
+    const warning = `T3 Code could not remove ${tailnetHostname(record.label)} from your tailnet. Remove it in the Tailscale admin console.`;
+    const client = tailscaleClient(yield* settings.getSettings.pipe(Effect.orDie));
+    if (client === undefined) return warning;
+    const removed = yield* tailscaleToken(client).pipe(
+      Effect.flatMap((token) => tailscaleApi.deleteDevice(token, deviceId)),
+      Effect.tapError((error) =>
+        Effect.logWarning("sandbox tailnet device removal failed", { detail: error.detail }),
+      ),
+      Effect.exit,
+    );
+    return Exit.isSuccess(removed) ? null : warning;
+  });
+
+  const hostAccessFacts = Effect.gen(function* () {
+    const claude = yield* hostAccess.claude;
+    const current = yield* settings.getSettings.pipe(Effect.orDie);
+    const hub = hubSource(current);
+    const github = Option.isSome(yield* hostAccess.githubToken);
+    const tailscale = tailscaleClient(current) !== undefined;
+    const app = githubAppOf(current);
+    const tooling = {
+      ...(app === undefined
+        ? {}
+        : { githubApp: { slug: app.slug, owner: current.sandboxTooling.githubAppOwner } }),
+      northflank: current.sandboxTooling.northflankToken !== "",
+      maple: current.sandboxTooling.mapleAdminKey !== "",
+      railway: railwayCredentialsOf(current.sandboxTooling) !== undefined,
+      tooling: yield* hostAccess.tooling,
+    };
+    if (claude.baseUrl === undefined || (hub === undefined && claude.authToken === undefined)) {
+      return { github, tailscale, ...tooling } satisfies SandboxHostAccessFacts;
+    }
+    const tailnetAddress = yield* hostAccess.endpointTailnetAddress(claude.baseUrl);
+    // What a sandbox's Pi would list, read with this machine's own key; only a hub gives Pi a key.
+    const piModels =
+      hub === undefined || claude.authToken === undefined
+        ? []
+        : yield* onHttp(fetchHubModels(claude.baseUrl, Redacted.value(claude.authToken))).pipe(
+            Effect.map(hubAgentModels),
+            Effect.orElseSucceed((): ReadonlyArray<string> => []),
+          );
+    return {
+      claude: {
+        baseUrl: claude.baseUrl,
+        key: hub === undefined ? "copy" : "hub",
+        privateNetwork: yield* hostAccess.endpointIsPrivate(claude.baseUrl),
+        ...(tailnetAddress === null ? {} : { tailnetAddress }),
+      },
+      github,
+      tailscale,
+      ...tooling,
+      ...(piModels.length === 0 ? {} : { piModels }),
+    } satisfies SandboxHostAccessFacts;
+  });
+
+  const providers = Effect.gen(function* () {
+    const value = yield* settings.getSettings.pipe(Effect.orDie);
+    return {
+      providers: SANDBOX_PROVIDER_DRIVERS.map((driver): SandboxProviderInfo => ({
+        ...driver.info,
+        defaultSize: driver.defaultSize,
+        configured: (value.sandboxProviders[driver.info.kind]?.apiKey.trim() ?? "") !== "",
+        ...(driver.info.settingsFields === undefined
+          ? {}
+          : { settings: value.sandboxProviders[driver.info.kind]?.settings ?? {} }),
+        capabilities: {
+          limits: driver.limits !== undefined,
+          stopResume: driver.stop !== undefined && driver.resume !== undefined,
+          credentialEnvironments: driver.listEnvironments !== undefined,
+          templates:
+            driver.saveTemplate !== undefined &&
+            driver.listTemplates !== undefined &&
+            driver.deleteTemplate !== undefined &&
+            driver.stop !== undefined,
+          agentProviderAccess: driver.agentAccess !== undefined,
+          keepAlive: driver.keepAlive !== undefined,
+        },
+      })),
+      host: yield* hostAccessFacts,
+    } satisfies SandboxProvidersResult;
+  });
+
+  // Refuses a start the provider would refuse or that cannot fit, before anything bills. Limits that
+  // cannot be read never block: the provider stays the authority and reports its own error.
+  const preflightStart = Effect.fn("SandboxProvisioner.preflightStart")(function* (
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+    size: string | undefined,
+  ) {
+    if (driver.limits === undefined) return null;
+    const limits = yield* onHttp(driver.limits({ config })).pipe(Effect.orElseSucceed(() => null));
+    if (limits === null) return null;
+    const { blocked } = assessSandboxStart(limits, {
+      providerLabel: driver.info.label,
+      nowMillis: DateTime.toEpochMillis(yield* DateTime.now),
+      ...(size === undefined ? {} : { size }),
+    });
+    if (blocked !== null) {
+      return yield* new SandboxProviderError({
+        provider: driver.info.kind,
+        stage: "config",
+        code: blocked.code,
+        detail: blocked.reason,
+        ...(blocked.retryAfterSeconds === undefined
+          ? {}
+          : { retryAfterSeconds: blocked.retryAfterSeconds }),
+      });
+    }
+    return limits;
+  });
+
+  const configError = (provider: SandboxProviderKind, detail: string) =>
+    new SandboxProviderError({ provider, stage: "config", detail });
+
+  // The agent's key needs an environment of the sandbox's own, which passes no credentials.
+  const agentAccessRefusal = (driver: SandboxProviderDriver, environment: string | undefined) =>
+    driver.agentAccess === undefined
+      ? `${driver.info.label} cannot give a sandbox's agent a key of its own.`
+      : environment !== undefined
+        ? `Letting the agent use ${driver.info.label} needs a sandbox without a ${driver.info.label} environment. Pick No credentials, or turn it off.`
+        : null;
+
+  // One name for the sandbox's environment and its key, so either says which sandbox it is for.
+  const agentAccessName = Effect.fn("SandboxProvisioner.agentAccessName")(function* (
+    label: string,
+  ) {
+    const hex = (yield* secureRandom.uuidV4()).replaceAll("-", "");
+    return `t3-sandbox-${labelSlug(label)}-${hex.slice(0, 8)}`;
+  });
+
+  // Named after the sandbox so the hub's key list says where each key went.
+  const mintHubKey = Effect.fn("SandboxProvisioner.mintHubKey")(function* (
+    provider: SandboxProviderKind,
+    label: string,
+    [sourceId, source]: readonly [string, UsageLimitSourceConfig],
+  ) {
+    const hex = (yield* secureRandom.uuidV4()).replaceAll("-", "");
+    // A UUIDv4's version and variant digits are fixed, so they are left out.
+    const random = `${hex.slice(0, 12)}${hex.slice(13, 16)}${hex.slice(17, 18)}`;
+    const value = `t3-sandbox-${labelSlug(label)}-${random}`;
+    const failed = (detail: string) =>
+      configError(
+        provider,
+        `Could not add a key for this sandbox on the CLIProxyAPI hub. ${detail}`,
+      );
+    const hub = yield* cliproxyHub(source).pipe(Effect.mapError((error) => failed(error.message)));
+    yield* hubApi.addApiKey(hub, value).pipe(Effect.mapError((error) => failed(error.detail)));
+    return { sourceId, hub, value: Redacted.make(value) } satisfies HubKey;
+  });
+
+  const revokeHubKey = (key: HubKey) =>
+    hubApi.removeApiKey(key.hub, Redacted.value(key.value)).pipe(
+      Effect.tapError((error) =>
+        Effect.logWarning("sandbox hub key revoke failed", {
+          sourceId: key.sourceId,
+          detail: error.detail,
+        }),
+      ),
+    );
+
+  const resolveClaudeAccess = Effect.fn("SandboxProvisioner.resolveClaudeAccess")(function* (
+    input: SandboxCreateInput,
+    label: string,
+  ): Effect.fn.Return<ClaudeAccess | undefined, SandboxProviderError> {
+    const requested = input.agentAccess?.claude;
+    if (requested === undefined) return undefined;
+    const endpoint = URL.parse(requested.baseUrl);
+    if (endpoint === null || (endpoint.protocol !== "https:" && endpoint.protocol !== "http:")) {
+      return yield* configError(input.provider, "Enter an http or https URL for Claude.");
+    }
+    const hub = hubSource(yield* settings.getSettings.pipe(Effect.orDie));
+    // With a hub, every sandbox gets its own key, so deleting one never cuts off this machine.
+    if (hub !== undefined) {
+      const hubKey = yield* mintHubKey(input.provider, label, hub);
+      return { baseUrl: requested.baseUrl, token: hubKey.value, hubKey };
+    }
+    const host = yield* hostAccess.claude;
+    if (host.authToken === undefined) {
+      return yield* configError(input.provider, "This server has no Claude token to share.");
+    }
+    return { baseUrl: requested.baseUrl, token: host.authToken, hubKey: undefined };
+  });
+
+  const resolveTailnet = Effect.fn("SandboxProvisioner.resolveTailnet")(function* (
+    provider: SandboxProviderKind,
+  ) {
+    const client = tailscaleClient(yield* settings.getSettings.pipe(Effect.orDie));
+    if (client === undefined) {
+      return yield* configError(
+        provider,
+        "Add a Tailscale OAuth client under Sandboxes in Settings → Connections first.",
+      );
+    }
+    const token = yield* tailscaleToken(client).pipe(
+      Effect.mapError((error) =>
+        configError(provider, `Could not sign in to Tailscale. ${error.detail}`),
+      ),
+    );
+    return { client, token } satisfies TailnetJoin;
+  });
+
+  const storeHubKey = Effect.fn("SandboxProvisioner.storeHubKey")(function* (
+    provider: SandboxProviderKind,
+    key: HubKey,
+  ) {
+    const failed = () =>
+      configError(provider, "Could not save the sandbox's hub key on this server.");
+    const secret = `sandbox-hub-key-${yield* secureRandom.uuidV4()}`;
+    yield* secrets
+      .set(secret, new TextEncoder().encode(Redacted.value(key.value)))
+      .pipe(Effect.mapError(failed));
+    return secret;
+  });
+
+  // Every check that can refuse a create runs here, before the provider bills anything.
+  const prepare = Effect.fn("SandboxProvisioner.prepare")(function* (input: SandboxCreateInput) {
+    const driver = findDriver(input.provider);
+    const config = yield* resolveConfig(driver, { apiKey: input.apiKey, settings: input.settings });
+    const label = input.label?.trim() || `${driver.info.label} sandbox`;
+    if (input.environment !== undefined && input.allowCredentials !== true) {
+      return yield* configError(
+        input.provider,
+        "This sandbox would receive the credential environment's secrets. Confirm that explicitly first.",
+      );
+    }
+    const agentAccess = input.agentProviderAccess === true ? driver.agentAccess : undefined;
+    if (input.agentProviderAccess === true) {
+      const refusal = agentAccessRefusal(driver, input.environment);
+      if (refusal !== null) return yield* configError(input.provider, refusal);
+    }
+    const access = input.access ?? "public";
+    if (access === "tailnet" && input.joinTailnet !== true) {
+      return yield* configError(
+        input.provider,
+        "A tailnet-only sandbox has to join your tailnet to be reachable.",
+      );
+    }
+    const template = input.template?.trim() || undefined;
+    let size = input.size?.trim() || driver.defaultSize;
+    if (template !== undefined) {
+      if (driver.listTemplates === undefined) {
+        return yield* configError(
+          input.provider,
+          "This provider cannot start a sandbox from a template.",
+        );
+      }
+      // Fails before anything bills when the template is gone, and the template decides the size.
+      const listed = yield* onHttp(driver.listTemplates({ config }));
+      const found = listed.templates.find((candidate) => candidate.name === template);
+      if (found === undefined) {
+        return yield* new SandboxProviderError({
+          provider: input.provider,
+          stage: "template",
+          code: "not_found",
+          detail: `${driver.info.label} has no template named ${template}.`,
+        });
+      }
+      size = found.size ?? size;
+    }
+    const limits = yield* preflightStart(driver, config, size);
+    // A key that cannot mint the agent's key is refused here, not after a machine is billed.
+    if (agentAccess !== undefined) yield* onHttp(agentAccess.check({ config }));
+    // The provider's own auto-stop is the backstop, so a plan maximum below the limit lowers it.
+    const maxRunningMinutes = Math.min(
+      input.maxRunningMinutes ?? DEFAULT_SANDBOX_MAX_RUNNING_MINUTES,
+      limits?.maxTtlMinutes ?? Infinity,
+    );
+    // Built before the machine exists, so a bad driver definition cannot strand a billed sandbox.
+    const installCommand = installScript(label);
+    const startCommand = startScript(driver);
+    const githubToken =
+      input.passGithubToken === true ? yield* hostAccess.githubToken : Option.none();
+    if (input.passGithubToken === true && Option.isNone(githubToken)) {
+      return yield* configError(input.provider, "This server has no GitHub token to share.");
+    }
+    // Signed in before anything bills, so a bad OAuth client costs nothing. The key itself is minted
+    // just before the join, since it expires in minutes.
+    const tailnet = input.joinTailnet === true ? yield* resolveTailnet(input.provider) : undefined;
+    // Pi runs on the key the sandbox gets for Claude, which only a hub mints.
+    if (
+      input.agentAccess?.pi !== undefined &&
+      (input.agentAccess.claude === undefined ||
+        hubSource(yield* settings.getSettings.pipe(Effect.orDie)) === undefined)
+    ) {
+      return yield* configError(
+        input.provider,
+        "Pi uses the key each sandbox gets on your CLIProxyAPI hub, so it needs this machine's Claude setup on a hub with a management key. Turn off Pi for this config, or add the hub's management key.",
+      );
+    }
+    // Minted before anything bills, so a hub that refuses costs nothing; revoked on any failure.
+    const claude = yield* resolveClaudeAccess(input, label);
+    const hubKey = claude?.hubKey;
+    const hubKeySecret =
+      hubKey === undefined
+        ? undefined
+        : yield* storeHubKey(input.provider, hubKey).pipe(
+            Effect.tapError(() => revokeHubKey(hubKey).pipe(Effect.ignore)),
+          );
+    return {
+      input,
+      driver,
+      config,
+      label,
+      size,
+      maxRunningMinutes,
+      idleMinutes: input.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES,
+      runningCapMinutes: input.runningCapMinutes,
+      maxTtlMinutes: limits?.maxTtlMinutes,
+      template,
+      access,
+      installCommand,
+      startCommand,
+      claude,
+      hubKeySecret,
+      githubToken: Option.getOrUndefined(githubToken),
+      tailnet,
+      agentAccess,
+    } satisfies Prepared;
+  });
+
+  // A step that fails warns and leaves Claude as it was; the model list is read here, with the
+  // sandbox's own key, so Pi lists exactly what that key reaches.
+  const setUpPi = Effect.fn("SandboxProvisioner.setUpPi")(function* (
+    claude: ClaudeAccess,
+    startModel: string | undefined,
+    run: (
+      script: SandboxScript,
+      timeoutSeconds: number,
+    ) => Effect.Effect<SandboxExecResult, SandboxProviderError>,
+    warn: (warning: string) => Effect.Effect<void>,
+  ) {
+    const listed = yield* onHttp(fetchHubModels(claude.baseUrl, Redacted.value(claude.token))).pipe(
+      Effect.option,
+    );
+    const models = Option.isNone(listed) ? [] : hubAgentModels(listed.value);
+    const first = models[0];
+    if (first === undefined) {
+      return yield* warn(
+        Option.isNone(listed)
+          ? "T3 Code could not read your hub's models, so Pi was not set up on the sandbox."
+          : "Your hub lists no models besides Claude's, so Pi was not set up on the sandbox.",
+      );
+    }
+    const model = startModel !== undefined && models.includes(startModel) ? startModel : first;
+    if (startModel !== undefined && model !== startModel) {
+      yield* warn(`Your hub no longer lists ${startModel}, so Pi starts on ${model} instead.`);
+    }
+    yield* run(
+      piSetupScript({
+        provider: piHubProvider({
+          claudeBaseUrl: claude.baseUrl,
+          apiKey: Redacted.value(claude.token),
+          models,
+        }),
+        model,
+        startsChats: startModel !== undefined,
+      }),
+      300,
+    ).pipe(Effect.catch(() => warn("Pi could not be installed or set up on the sandbox.")));
+  });
+
+  // Instances with a fiber still provisioning them; the sweep leaves their records alone.
+  const liveInstances = new Map<string, Fiber.Fiber<unknown, unknown>>();
+
+  // A machine that costs money must not survive a failure or an interruption, and neither may the
+  // hub key, the tailnet device, or the record that point at it.
+  const releaseOwned = (prepared: Prepared, owned: Owned, instanceId: string) =>
+    Effect.all(
+      [
+        // The sandbox's own environment goes only once the sandbox in it is gone.
+        Effect.gen(function* () {
+          const destroyed =
+            owned.sandbox === undefined
+              ? true
+              : Exit.isSuccess(
+                  yield* onHttp(
+                    prepared.driver.destroy({
+                      config: owned.sandbox.config,
+                      sandboxId: owned.sandbox.id,
+                    }),
+                  ).pipe(
+                    // Deleted outside T3 Code: it is gone all the same.
+                    Effect.catchIf(
+                      (error) => error.code === "not_found",
+                      () => Effect.void,
+                    ),
+                    Effect.exit,
+                  ),
+                );
+          if (
+            destroyed &&
+            prepared.agentAccess !== undefined &&
+            owned.agentEnvironment !== undefined
+          ) {
+            yield* onHttp(
+              prepared.agentAccess.deleteEnvironment({
+                config: prepared.config,
+                environmentId: owned.agentEnvironment.id,
+              }),
+            ).pipe(Effect.ignore);
+          }
+        }),
+        prepared.agentAccess === undefined || owned.agentKeyId === undefined
+          ? Effect.void
+          : onHttp(
+              prepared.agentAccess.revokeKey({ config: prepared.config, keyId: owned.agentKeyId }),
+            ).pipe(Effect.ignore),
+        prepared.claude?.hubKey === undefined
+          ? Effect.void
+          : revokeHubKey(prepared.claude.hubKey).pipe(Effect.ignore),
+        prepared.hubKeySecret === undefined
+          ? Effect.void
+          : secrets.remove(prepared.hubKeySecret).pipe(Effect.ignore),
+        prepared.tailnet === undefined || owned.deviceId === undefined
+          ? Effect.void
+          : tailscaleApi.deleteDevice(prepared.tailnet.token, owned.deviceId).pipe(Effect.ignore),
+        owned.githubToken === undefined ? Effect.void : dropGithubToken(owned.githubToken),
+        owned.mapleKey === undefined
+          ? Effect.void
+          : releaseMapleKey({ label: prepared.label, mapleKey: owned.mapleKey }),
+        owned.railwayToken === undefined
+          ? Effect.void
+          : releaseRailwayToken({ label: prepared.label, railwayToken: owned.railwayToken }),
+        prepared.driver.keepAlive === undefined || owned.keepAliveKeyId === undefined
+          ? Effect.void
+          : onHttp(
+              prepared.driver.keepAlive.revokeKey({
+                config: owned.sandbox?.config ?? prepared.config,
+                keyId: owned.keepAliveKeyId,
+              }),
+            ).pipe(Effect.ignore),
+        records.remove(instanceId).pipe(Effect.ignore),
+      ],
+      { concurrency: "unbounded", discard: true },
+    );
+
+  // Create through start: the record exists from the moment the provider made the machine.
+  const provisionMachine = Effect.fn("SandboxProvisioner.provisionMachine")(function* (
+    prepared: Prepared,
+    context: {
+      readonly instanceId: string;
+      readonly owned: Owned;
+      readonly report: Reporter;
+      readonly extras: RecordExtras;
+      /**
+       * Fails instead of warning when the sandbox cannot reach Claude's endpoint: a thread handed
+       * a sandbox like that would sit on Thinking while Claude retries.
+       */
+      readonly requireClaudeReach?: boolean;
+      /** A thread's launch: its config's GitHub and git identity choices, and its repository. */
+      readonly launch?: LaunchTooling;
+    },
+  ) {
+    const { driver, config, label, size, input, claude, githubToken, tailnet } = prepared;
+    const { report, owned } = context;
+    const hostEnvironmentId = yield* environmentIdentity.getEnvironmentId;
+
+    yield* report.stage("create", "running");
+    // Made for this sandbox alone and passing no credentials, so its forks land there.
+    const agentEnvironment =
+      prepared.agentAccess === undefined
+        ? undefined
+        : yield* onHttp(
+            prepared.agentAccess.createEnvironment({
+              config,
+              name: yield* agentAccessName(label),
+            }),
+          );
+    if (agentEnvironment !== undefined) owned.agentEnvironment = agentEnvironment;
+    const sandbox = yield* onHttp(
+      driver.create({
+        config,
+        name: label,
+        size,
+        ttlMinutes: prepared.maxRunningMinutes,
+        environment: agentEnvironment?.name ?? input.environment,
+        idempotencyKey: yield* secureRandom.uuidV4(),
+        template: prepared.template,
+        tags: { host: hostEnvironmentId, instance: context.instanceId },
+        publishPort: prepared.access === "public",
+      }),
+    );
+    const sandboxConfig = withSettings(config, sandbox.settings);
+    owned.sandbox = { id: sandbox.id, config: sandboxConfig };
+    const createdAt = yield* nowIso;
+    let record: SandboxRecord = {
+      instanceId: context.instanceId,
+      environmentId: null,
+      ...context.extras,
+      provider: input.provider,
+      sandboxId: sandbox.id,
+      label,
+      size,
+      state: "provisioning",
+      createdAt,
+      updatedAt: createdAt,
+      httpBaseUrl: prepared.access === "public" ? (sandbox.publicUrl ?? "") : "",
+      access: prepared.access,
+      runningSince: createdAt,
+      maxRunningMinutes: prepared.maxRunningMinutes,
+      // A thread's sandbox and a subagent's keep themselves up while they work; others never do.
+      ...(driver.keepAlive === undefined ||
+      (context.extras.threadId === undefined && context.extras.parentThreadId === undefined)
+        ? {}
+        : {
+            idleMinutes: prepared.idleMinutes,
+            ...(prepared.runningCapMinutes === undefined
+              ? {}
+              : { runningCapMinutes: prepared.runningCapMinutes }),
+          }),
+      ...(input.environment === undefined ? {} : { credentialEnvironment: input.environment }),
+      ...(prepared.template === undefined ? {} : { template: prepared.template }),
+      ...(Object.keys(sandboxConfig.settings).length === 0
+        ? {}
+        : { providerSettings: sandboxConfig.settings }),
+      ...(claude?.hubKey === undefined || prepared.hubKeySecret === undefined
+        ? {}
+        : { claudeHubKey: { sourceId: claude.hubKey.sourceId, secret: prepared.hubKeySecret } }),
+      ...(agentEnvironment === undefined
+        ? {}
+        : {
+            agentProviderAccess: {
+              environmentId: agentEnvironment.id,
+              environmentName: agentEnvironment.name,
+            },
+          }),
+    };
+    yield* records.put(record).pipe(Effect.orDie);
+    // A launch's host thread lists before this record; clients read it as deleted until they hear.
+    yield* listChanged;
+    const save = (patch: Partial<SandboxRecord>, drop: ReadonlyArray<keyof SandboxRecord> = []) =>
+      nowIso.pipe(
+        Effect.map((updatedAt) => {
+          const next: Record<string, unknown> = { ...record, ...patch, updatedAt };
+          for (const key of drop) delete next[key];
+          record = next as SandboxRecord;
+          return record;
+        }),
+        Effect.tap((next) => records.put(next).pipe(Effect.orDie)),
+      );
+    const run = (script: string | SandboxScript, timeoutSeconds: number) =>
+      onHttp(
+        driver.execute({
+          config: sandboxConfig,
+          sandboxId: sandbox.id,
+          timeoutSeconds,
+          ...asScript(script),
+        }),
+      );
+
+    const publicUrl =
+      prepared.access === "tailnet"
+        ? null
+        : (sandbox.publicUrl ??
+          (yield* onHttp(
+            driver.exposePort({
+              config: sandboxConfig,
+              sandboxId: sandbox.id,
+              port: driver.serverPort,
+            }),
+          )));
+    yield* report.stage("create", "done");
+
+    yield* report.stage("install", "running");
+    yield* run(prepared.installCommand, 600);
+    // Tools and agent setup run before T3 starts, so T3's first provider check already sees them.
+    // A step that fails leaves a working sandbox and a warning; a command that carried a secret
+    // keeps neither its request nor its output.
+    const warnings: Array<string> = [];
+    const warn = (warning: string) =>
+      Effect.sync(() => warnings.push(warning)).pipe(Effect.andThen(report.warn(warning)));
+    const missingTools = yield* run(ENSURE_TOOLS_SCRIPT, 300).pipe(
+      Effect.map((result) => parseMissingTools(result.stdout)),
+      Effect.orElseSucceed(() => null),
+    );
+    if (missingTools === null) {
+      yield* warn("T3 Code could not check the sandbox for git, the GitHub CLI, and Claude Code.");
+    } else {
+      for (const tool of missingTools) {
+        yield* warn(`${TOOL_LABELS[tool]} could not be installed on the sandbox.`);
+      }
+    }
+    yield* report.stage("install", "done");
+    const missing = (tool: SandboxTool) => missingTools?.includes(tool) === true;
+
+    yield* report.stage("credentials", "running");
+    const credentialWarnings = warnings.length;
+    // Before Pi, whose instance and default model the seed never carries, and before `t3 serve`.
+    const seed = yield* settings.getSettings.pipe(
+      Effect.flatMap(sandboxSettingsSeed),
+      Effect.option,
+    );
+    if (Option.isNone(seed)) {
+      yield* warn("T3 Code could not read this machine's settings to copy them to the sandbox.");
+    } else if (Object.keys(seed.value).length > 0) {
+      yield* run(t3SettingsSeedScript(seed.value), 60).pipe(
+        Effect.catch(() =>
+          warn("This machine's T3 Code settings could not be copied to the sandbox."),
+        ),
+      );
+    }
+    // Joined before Claude's settings are written, since a userspace tailnet needs Claude's proxy.
+    const tailnetJoin =
+      tailnet === undefined ? null : yield* onHttp(joinTailnet(tailnet, label, run));
+    if (tailnetJoin !== null && tailnetJoin.joined !== null) {
+      owned.deviceId = tailnetJoin.joined.deviceId;
+      yield* save({ tailscale: { deviceId: tailnetJoin.joined.deviceId } });
+    }
+    if (tailnetJoin !== null && tailnetJoin.warning !== null) yield* warn(tailnetJoin.warning);
+    const tailnetJoined =
+      tailnetJoin !== null && tailnetJoin.warning === null ? tailnetJoin.joined : null;
+    const tailscaleState: SandboxSetupState =
+      tailnet === undefined ? "skipped" : tailnetJoined === null ? "failed" : "ready";
+    const viaProxy = tailnetJoined?.proxy === true;
+
+    const claudeWritten: SandboxSetupState =
+      claude === undefined
+        ? "skipped"
+        : yield* run(
+            claudeSettingsScript({
+              ANTHROPIC_BASE_URL: claude.baseUrl,
+              ANTHROPIC_AUTH_TOKEN: Redacted.value(claude.token),
+              ...(viaProxy ? tailscaleProxyEnv : {}),
+            }),
+            60,
+          ).pipe(
+            Effect.as<SandboxSetupState>("ready"),
+            Effect.catch(() =>
+              warn(
+                "Claude's settings could not be written on the sandbox. Set up Claude in its Providers settings.",
+              ).pipe(Effect.as<SandboxSetupState>("failed")),
+            ),
+          );
+    // The settings still go in without Claude Code, so installing it by hand later just works.
+    const claudeInstalled: SandboxSetupState =
+      claudeWritten === "ready" && missing("claude") ? "failed" : claudeWritten;
+    // A private endpoint (a tailnet or LAN address) passes every check on this machine and then
+    // times out in the sandbox. The hub key stays: fixing the network makes it work as is.
+    let unreachableClaude: string | null = null;
+    const claudeState: SandboxSetupState =
+      claude === undefined || claudeInstalled !== "ready"
+        ? claudeInstalled
+        : yield* run(
+            endpointReachScript(claude.baseUrl, viaProxy ? TAILSCALE_PROXY_URL : undefined),
+            60,
+          ).pipe(
+            Effect.map((result) => parseEndpointReach(result.stdout)),
+            Effect.orElseSucceed(() => null),
+            Effect.flatMap((reach) =>
+              reach !== "unreachable"
+                ? Effect.succeed<SandboxSetupState>("ready")
+                : hostAccess.endpointIsPrivate(claude.baseUrl).pipe(
+                    Effect.flatMap((isPrivate) => {
+                      unreachableClaude = unreachableEndpointWarning(
+                        claude.baseUrl,
+                        isPrivate,
+                        tailnetJoined === null ? undefined : tailnet?.client.tag,
+                      );
+                      return warn(unreachableClaude);
+                    }),
+                    Effect.as<SandboxSetupState>("failed"),
+                  ),
+            ),
+          );
+    const piRequest = input.agentAccess?.pi;
+    if (piRequest !== undefined && claude?.hubKey !== undefined) {
+      yield* setUpPi(claude, piRequest.startModel, run, warn);
+    }
+    const launchTooling = context.launch;
+    const signInGithubApp = Effect.fn("SandboxProvisioner.signInGithubApp")(function* (
+      repository: LaunchTooling["repository"],
+    ) {
+      if (missing("gh")) return "failed" as const;
+      const app = githubAppOf(yield* settings.getSettings.pipe(Effect.orDie));
+      if (app === undefined) {
+        yield* warn(
+          "Connect the GitHub App under Sandboxes in Settings so sandboxes can use GitHub.",
+        );
+        return "failed" as const;
+      }
+      const label = `${repository.owner}/${repository.name}`;
+      const minted = yield* mintGithubToken(app, repository).pipe(Effect.result);
+      if (minted._tag === "Failure") {
+        yield* warn(`GitHub would not give this sandbox a token for ${label}.`);
+        return "failed" as const;
+      }
+      if (minted.success === null) {
+        yield* warn(
+          `The GitHub App isn't installed on ${label}. Install it at ${githubInstallUrl(app.slug)}`,
+        );
+        return "failed" as const;
+      }
+      const token = minted.success;
+      owned.githubToken = token;
+      yield* save({ githubApp: githubRecordOf(token) });
+      const login = yield* run(githubAppLoginScript(Redacted.value(token.token)), 60).pipe(
+        Effect.exit,
+      );
+      if (Exit.isSuccess(login)) return "ready" as const;
+      yield* dropGithubToken(token);
+      delete owned.githubToken;
+      yield* save({}, ["githubApp"]);
+      yield* warn("GitHub could not be signed in on the sandbox. T3 Code revoked its token.");
+      return "failed" as const;
+    });
+    const githubState: SandboxSetupState =
+      launchTooling?.config.githubApp === true
+        ? yield* signInGithubApp(launchTooling.repository)
+        : githubToken === undefined
+          ? "skipped"
+          : missing("gh")
+            ? "failed"
+            : yield* run(githubLoginScript(Redacted.value(githubToken)), 60).pipe(
+                Effect.as<SandboxSetupState>("ready"),
+                Effect.catch(() =>
+                  warn(
+                    "GitHub could not be signed in on the sandbox. Run gh auth login in its terminal.",
+                  ).pipe(Effect.as<SandboxSetupState>("failed")),
+                ),
+              );
+    // Without a name and email git refuses to commit, so GitHub alone would not let the agent push.
+    const identity =
+      launchTooling?.config.gitIdentity ??
+      (githubState === "ready" ? yield* hostAccess.gitIdentity : null);
+    if (identity !== null && !missing("git")) {
+      yield* run(gitIdentityScript(identity), 30).pipe(
+        Effect.catch(() =>
+          warn("Git's name and email could not be set on the sandbox, so commits may fail."),
+        ),
+      );
+    } else if (githubState === "ready" && identity === null) {
+      yield* warn(
+        "This machine has no git name and email to copy. Set them in the sandbox config so the agent can commit.",
+      );
+    }
+    if (context.requireClaudeReach === true && unreachableClaude !== null) {
+      return yield* new SandboxProviderError({
+        provider: input.provider,
+        stage: "start",
+        detail: unreachableClaude,
+      });
+    }
+    // The key is scoped to this sandbox's id, so it is minted only now. T3 never keeps it: the
+    // CLI's own config on the sandbox does, and the record names it by id to revoke it.
+    if (prepared.agentAccess !== undefined && agentEnvironment !== undefined) {
+      const agentAccess = prepared.agentAccess;
+      const environment = {
+        environmentId: agentEnvironment.id,
+        environmentName: agentEnvironment.name,
+      };
+      const minted = yield* onHttp(
+        agentAccess.mintKey({
+          config: sandboxConfig,
+          name: agentEnvironment.name,
+          sandboxId: sandbox.id,
+          environmentId: agentEnvironment.id,
+          ttlMinutes: prepared.maxRunningMinutes,
+        }),
+      ).pipe(Effect.option);
+      if (Option.isNone(minted)) {
+        yield* warn(
+          `T3 Code could not make a ${driver.info.label} key for the agent, so it cannot use ${driver.info.label} on this sandbox.`,
+        );
+      } else {
+        owned.agentKeyId = minted.value.id;
+        yield* save({ agentProviderAccess: { ...environment, keyId: minted.value.id } });
+        const login = yield* run(
+          agentAccess.loginScript(Redacted.value(minted.value.secret)),
+          120,
+        ).pipe(Effect.exit);
+        if (Exit.isFailure(login)) {
+          yield* onHttp(
+            agentAccess.revokeKey({ config: sandboxConfig, keyId: minted.value.id }),
+          ).pipe(Effect.ignore);
+          delete owned.agentKeyId;
+          yield* save({ agentProviderAccess: environment });
+          yield* warn(
+            `The ${driver.info.label} CLI could not be signed in on the sandbox, so the agent cannot use ${driver.info.label}. T3 Code revoked its key.`,
+          );
+        }
+      }
+    }
+    // A tailnet-only sandbox has no other address, so without the join nothing can reach it.
+    const tailnetIp = tailnetJoined?.ip;
+    if (prepared.access === "tailnet" && tailnetIp === undefined) {
+      return yield* new SandboxProviderError({
+        provider: input.provider,
+        stage: "start",
+        detail:
+          "The sandbox did not join your tailnet, so a tailnet-only sandbox cannot be reached. Check the Tailscale setup in Settings and try again.",
+      });
+    }
+    const httpBaseUrl = publicUrl ?? `http://${tailnetIp}:${driver.serverPort}`;
+    yield* report.stage(
+      "credentials",
+      warnings.length > credentialWarnings ? "warning" : "done",
+      warnings.length > credentialWarnings ? "Finished with warnings" : null,
+    );
+
+    yield* report.stage("start", "running");
+    yield* run(prepared.startCommand, 180);
+    // A sandbox that answers with an id T3 already tracks was cloned with another environment's
+    // identity and sessions; it must never be paired.
+    const descriptor = yield* onHttp(
+      requestJson({
+        provider: input.provider,
+        stage: "pair",
+        schema: ExecutionEnvironmentDescriptor,
+        request: HttpClientRequest.get(
+          `${httpBaseUrl.replace(/\/+$/, "")}/.well-known/t3/environment`,
+        ),
+      }),
+    );
+    const existing = yield* records
+      .findByEnvironmentId(descriptor.environmentId)
+      .pipe(Effect.orDie);
+    if (Option.isSome(existing) && existing.value.instanceId !== context.instanceId) {
+      return yield* new SandboxProviderError({
+        provider: input.provider,
+        stage: "pair",
+        detail:
+          "The new sandbox answered as an environment that already exists, so it was deleted. Save the template again from a sandbox T3 Code set up.",
+      });
+    }
+    yield* save({ environmentId: descriptor.environmentId, httpBaseUrl });
+    yield* report.stage("start", "done");
+    return {
+      prepared,
+      sandboxId: sandbox.id,
+      config: sandboxConfig,
+      httpBaseUrl,
+      environmentId: descriptor.environmentId,
+      setup: { claude: claudeState, github: githubState, tailscale: tailscaleState, warnings },
+      run,
+      record: () => record,
+      save,
+    } satisfies Machine;
+  });
+
+  const pairMachine = (machine: Machine) => pairWith(machine.run, machine.prepared.input.provider);
+
+  const pairWith = Effect.fn("SandboxProvisioner.pairWith")(function* (
+    run: Machine["run"],
+    provider: SandboxProviderKind,
+  ) {
+    const key = yield* makePairingKey;
+    const paired = yield* run(pairScript(key.publicKeyPem), 60);
+    const report = readPairReport(paired.stdout, key.privateKey);
+    if (report._tag === "token") return report.token;
+    const status = report.exitCode === undefined ? "" : ` It exited with ${report.exitCode}.`;
+    return yield* new SandboxProviderError({
+      provider,
+      stage: "pair",
+      detail: `${PAIR_FAILURES[report.reason]}${status}`,
+      ...(report.stderr === undefined ? {} : { cause: new Error(report.stderr) }),
+    });
+  });
+
+  const runOnRecord =
+    (record: SandboxRecord) => (script: string | SandboxScript, timeoutSeconds: number) => {
+      const driver = findDriver(record.provider);
+      return recordConfig(driver, record).pipe(
+        Effect.flatMap((config) =>
+          onHttp(
+            driver.execute({
+              config,
+              sandboxId: record.sandboxId,
+              timeoutSeconds,
+              ...asScript(script),
+            }),
+          ),
+        ),
+      );
+    };
+
+  /**
+   * Writes the link the host's sandbox bridge reads for `record`'s thread. The bearer it carries is
+   * minted on the sandbox only when there is none, its secret is gone, it is near expiry, or it
+   * lacks a scope the bridge now uses; the link itself is rewritten every time, since a resumed
+   * sandbox can come back at a new address.
+   */
+  const ensureBridge = Effect.fn("SandboxProvisioner.ensureBridge")(function* (
+    record: SandboxRecord,
+    run: Machine["run"],
+  ) {
+    const failed = (detail: string, cause?: unknown) =>
+      new SandboxProviderError({
+        provider: record.provider,
+        stage: "pair",
+        detail,
+        ...(cause === undefined ? {} : { cause }),
+      });
+    if (record.threadId === undefined || record.sandboxProjectId === undefined) {
+      return yield* failed("This sandbox was not launched for a thread.");
+    }
+    const secret = bridgeLinkSecretName(record.threadId);
+    const stored =
+      record.bridge === undefined
+        ? Option.none<SandboxBridgeLink>()
+        : yield* secrets.get(secret).pipe(
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.succeedNone,
+                onSome: (bytes) =>
+                  decodeBridgeLink(new TextDecoder().decode(bytes)).pipe(Effect.asSome),
+              }),
+            ),
+            Effect.orElseSucceed(Option.none<SandboxBridgeLink>),
+          );
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const fresh =
+      record.bridge !== undefined &&
+      Option.isSome(stored) &&
+      Date.parse(record.bridge.expiresAt) - now > BRIDGE_RENEW_BEFORE_MS &&
+      BRIDGE_CREDENTIAL_SCOPES.every((scope) => record.bridge?.scopes?.includes(scope) === true);
+    let token: string;
+    let bridge: NonNullable<SandboxRecord["bridge"]>;
+    if (fresh && Option.isSome(stored) && record.bridge !== undefined) {
+      token = stored.value.token;
+      bridge = record.bridge;
+    } else {
+      const key = yield* makePairingKey;
+      const minted = yield* run(
+        bridgeCredentialScript(key.publicKeyPem, record.bridge?.sessionId),
+        60,
+      );
+      const report = readBridgeCredential(minted.stdout, key.privateKey);
+      if (report._tag === "failed") {
+        const status = report.exitCode === undefined ? "" : ` It exited with ${report.exitCode}.`;
+        return yield* failed(
+          `${BRIDGE_FAILURES[report.reason]}${status}`,
+          report.stderr === undefined ? undefined : new Error(report.stderr),
+        );
+      }
+      token = report.token;
+      bridge = {
+        sessionId: report.sessionId,
+        secret,
+        expiresAt: report.expiresAt,
+        scopes: [...BRIDGE_CREDENTIAL_SCOPES],
+      };
+    }
+    const link: SandboxBridgeLink = {
+      threadId: record.threadId,
+      instanceId: record.instanceId,
+      sandboxId: record.sandboxId,
+      label: record.label,
+      httpBaseUrl: record.httpBaseUrl,
+      sandboxProjectId: record.sandboxProjectId,
+      token,
+    };
+    const encoded = yield* encodeBridgeLink(link).pipe(Effect.orDie);
+    yield* secrets
+      .set(secret, new TextEncoder().encode(encoded))
+      .pipe(
+        Effect.mapError((cause) =>
+          failed("Could not save the sandbox bridge's credential on this server.", cause),
+        ),
+      );
+    return bridge;
+  });
+
+  // Fiber bookkeeping for one provisioning attempt: the sweep skips its record while it runs.
+  const tracked = Effect.fn("SandboxProvisioner.tracked")(function* <A, E>(
+    instanceId: string,
+    effect: Effect.Effect<A, E>,
+  ) {
+    const fiber = yield* effect.pipe(
+      Effect.ensuring(Effect.sync(() => liveInstances.delete(instanceId))),
+      Effect.forkIn(launchScope),
+    );
+    // A fiber that already finished has run its `ensuring`, so it is not live.
+    if (fiber.pollUnsafe() === undefined) liveInstances.set(instanceId, fiber);
+    return fiber;
+  });
+
+  /**
+   * Lets a thread's new sandbox keep itself up while its threads work. The record names the key
+   * before it is minted, so a crash in between still says which key to revoke. The auto-stop stays
+   * at the running limit through setup; `keepAliveFromNow` moves it to the idle window after that.
+   * False, after a warning, when it cannot: the sandbox keeps the running limit.
+   */
+  const setUpKeepAlive = Effect.fn("SandboxProvisioner.setUpKeepAlive")(function* (
+    machine: Machine,
+    owned: Owned,
+    projectRoot: string | undefined,
+    warn: (warning: string) => Effect.Effect<void>,
+  ) {
+    const { driver, label, idleMinutes, maxTtlMinutes, maxRunningMinutes } = machine.prepared;
+    const keepAlive = driver.keepAlive;
+    if (keepAlive === undefined) return false;
+    const name = yield* keepAliveKeyName(label);
+    yield* machine.save({ keepAliveKey: { name } });
+    const installed = yield* mintKeepAlive({
+      driver,
+      keepAlive,
+      config: machine.config,
+      sandboxId: machine.sandboxId,
+      name,
+      ttlMinutes: keepAliveTtlMinutes(idleMinutes, maxTtlMinutes),
+      maxRunningMinutes,
+      projectRoot,
+      run: machine.run,
+      owned,
+    });
+    if (installed === null) {
+      yield* machine.save({}, ["keepAliveKey"]);
+      yield* warn(keepAliveFailed(maxRunningMinutes));
+      return false;
+    }
+    yield* machine.save({ keepAliveKey: installed });
+    return true;
+  });
+
+  // A failure leaves the running limit's auto-stop, which the sandbox's own checks still move.
+  const keepAliveFromNow = (
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+    sandboxId: string,
+    ttlMinutes: number,
+  ) =>
+    driver.keepAlive === undefined
+      ? Effect.void
+      : onHttp(driver.keepAlive.extend({ config, sandboxId, ttlMinutes })).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("sandbox keep-alive auto-stop update failed", {
+              sandboxId,
+              detail: error.detail,
+            }),
+          ),
+        );
+
+  /**
+   * Makes a sandbox that no thread's launch tracks and pairs once with it. `setUp` readies the
+   * machine before the pairing; a failure anywhere releases all of it.
+   */
+  const createUntracked = Effect.fn("SandboxProvisioner.createUntracked")(function* (
+    input: SandboxCreateInput,
+    options: {
+      readonly instanceId?: string;
+      readonly extras?: RecordExtras;
+      readonly launch?: LaunchTooling;
+      readonly setUp?: (
+        machine: Machine,
+        owned: Owned,
+      ) => Effect.Effect<void, SandboxProviderError>;
+      /** Stops and releases the machine when the caller gives up, instead of finishing it. */
+      readonly endsWithCaller?: boolean;
+    } = {},
+  ) {
+    const prepared = yield* prepare(input);
+    const instanceId = options.instanceId ?? (yield* secureRandom.uuidV4());
+    const owned: Owned = {};
+    const fiber = yield* tracked(
+      instanceId,
+      Effect.gen(function* () {
+        const machine = yield* provisionMachine(prepared, {
+          instanceId,
+          owned,
+          report: silentReporter,
+          extras: options.extras ?? {},
+          ...(options.launch === undefined ? {} : { launch: options.launch }),
+        });
+        if (options.setUp !== undefined) yield* options.setUp(machine, owned);
+        const pairingCode = yield* pairMachine(machine);
+        yield* machine.save({ state: "running" });
+        return {
+          instanceId,
+          provider: input.provider,
+          sandboxId: machine.sandboxId,
+          environmentId: machine.environmentId,
+          label: prepared.label,
+          httpBaseUrl: machine.httpBaseUrl,
+          pairingCode,
+          setup: machine.setup,
+        } satisfies SandboxCreateResult;
+      }).pipe(
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit) ? Effect.void : releaseOwned(prepared, owned, instanceId),
+        ),
+      ),
+    );
+    return yield* options.endsWithCaller === true
+      ? Fiber.join(fiber).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)))
+      : Fiber.join(fiber);
+  });
+
+  const create = (input: SandboxCreateInput) => createUntracked(input);
+
+  const createSubSandbox: SandboxProvisioner["Service"]["createSubSandbox"] = Effect.fn(
+    "SandboxProvisioner.createSubSandbox",
+  )(function* (input) {
+    const { config, project } = input;
+    const repository = githubRepositoryOf(project.remoteUrl);
+    if (repository === null) {
+      return yield* launchConfigError(
+        "Only projects with a github.com remote can start in a sandbox.",
+        config.provider,
+      );
+    }
+    yield* checkLaunchTooling(config);
+    const joinTailnet = yield* launchJoinsTailnet(config);
+    const base = createInputFor(config, project, joinTailnet);
+    return yield* createUntracked(
+      { ...base, label: `${project.title} subagent on ${config.label}`, size: input.size },
+      {
+        instanceId: input.instanceId,
+        // Nothing else would ever use a subagent's sandbox whose task was given up on.
+        endsWithCaller: true,
+        extras: {
+          configId: config.id,
+          parentThreadId: input.parentThreadId,
+          projectId: project.id,
+          projectTitle: project.title,
+        },
+        launch: { config, repository: { owner: repository.owner, name: repository.name } },
+        setUp: (machine, owned) =>
+          setUpProject(machine, owned, config, project, silentReporter, {
+            retry: (effect) => effect,
+          }).pipe(
+            // Setup is over, so from here the sandbox stops once its task has been idle a while.
+            Effect.tap(({ keptAlive }) =>
+              keptAlive
+                ? keepAliveFromNow(
+                    machine.prepared.driver,
+                    machine.config,
+                    machine.sandboxId,
+                    keepAliveTtlMinutes(
+                      machine.prepared.idleMinutes,
+                      machine.prepared.maxTtlMinutes,
+                    ),
+                  )
+                : Effect.void,
+            ),
+            Effect.asVoid,
+          ),
+      },
+    );
+  });
+
+  /**
+   * Whether a launch joins the tailnet: when its config asks to, and on its own when Claude's
+   * endpoint only resolves to private or tailnet addresses, since Claude there could not reach it
+   * otherwise. Decided at each launch, so a config saved before Tailscale was set up still works.
+   * Refused before anything bills when the endpoint is private and there is no Tailscale to join.
+   */
+  const launchJoinsTailnet = Effect.fn("SandboxProvisioner.launchJoinsTailnet")(function* (
+    config: SandboxEnvironmentConfig,
+  ) {
+    if (config.joinTailnet || config.access === "tailnet") return true;
+    const baseUrl = config.claude?.baseUrl;
+    if (baseUrl === undefined || !(yield* hostAccess.endpointIsPrivate(baseUrl))) return false;
+    if (tailscaleClient(yield* settings.getSettings.pipe(Effect.orDie)) !== undefined) return true;
+    const host = URL.parse(baseUrl)?.host ?? baseUrl;
+    return yield* new SandboxProviderError({
+      provider: config.provider,
+      stage: "config",
+      code: "tailscale_required",
+      detail: `The sandbox can't reach ${host}, which only your private network or tailnet reaches. Set up Tailscale under Sandboxes in Settings → Connections so sandboxes can join your tailnet.`,
+    });
+  });
+
+  // One thread's launch: its fiber, and the retries the user asks of it.
+  interface Launch {
+    readonly input: SandboxLaunchInput;
+    readonly config: SandboxEnvironmentConfig;
+    readonly instanceId: string;
+    /** The host project whose thread holds the chat; recorded on the sandbox once it is linked. */
+    readonly hostProjectId: ProjectId | null;
+    readonly fiber: Fiber.Fiber<void, SandboxProviderError>;
+    /** Retries a stage that failed but kept its machine. */
+    readonly retries: Queue.Queue<void>;
+    /** Bumped by each retry, so the wait for the next one starts over. */
+    activity: number;
+    /** Set when T3 stops the launch for a reason the card shows; a plain cancel leaves it null. */
+    stopReason: string | null;
+  }
+  const launches = new Map<ThreadId, Launch>();
+
+  // Waits for a retry of a failed stage; past the wait the launch fails and releases what it made,
+  // so a machine nobody comes back to leaves nothing billing.
+  const awaitRetry = Effect.fn("SandboxProvisioner.awaitRetry")(function* (launch: Launch) {
+    while (true) {
+      const seen = launch.activity;
+      const result = yield* Effect.timeoutOption(Queue.take(launch.retries), LAUNCH_RETRY_WAIT);
+      if (Option.isSome(result)) return;
+      if (launch.activity === seen) {
+        return yield* new SandboxProviderError({
+          provider: launch.config.provider,
+          stage: "pair",
+          detail: LAUNCH_RETRY_TIMEOUT,
+        });
+      }
+    }
+  });
+
+  const stopLaunch = (launch: Launch, reason: string | null) =>
+    Effect.suspend(() => {
+      launch.stopReason = reason;
+      return Fiber.interrupt(launch.fiber);
+    });
+
+  const launchConfigError = (detail: string, provider?: SandboxProviderKind) =>
+    new SandboxProviderError({ provider, stage: "config", detail });
+
+  const createInputFor = (
+    config: SandboxEnvironmentConfig,
+    project: SandboxLaunchInput["project"],
+    joinTailnet: boolean,
+  ): SandboxCreateInput => ({
+    provider: config.provider,
+    label: `${project.title} on ${config.label}`,
+    size: config.size,
+    maxRunningMinutes: config.maxRunningMinutes,
+    idleMinutes: config.idleMinutes,
+    ...(config.runningCapMinutes === undefined
+      ? {}
+      : { runningCapMinutes: config.runningCapMinutes }),
+    access: config.access,
+    ...(config.template === undefined ? {} : { template: config.template }),
+    ...(config.credentialEnvironment === undefined
+      ? {}
+      : { environment: config.credentialEnvironment, allowCredentials: true }),
+    ...(config.claude === undefined && config.pi === undefined
+      ? {}
+      : {
+          agentAccess: {
+            ...(config.claude === undefined ? {} : { claude: config.claude }),
+            ...(config.pi === undefined ? {} : { pi: config.pi }),
+          },
+        }),
+    ...(config.passGithubToken ? { passGithubToken: true } : {}),
+    ...(joinTailnet ? { joinTailnet: true } : {}),
+    ...(config.agentProviderAccess === true ? { agentProviderAccess: true } : {}),
+  });
+
+  const copyEnvFiles = Effect.fn("SandboxProvisioner.copyEnvFiles")(function* (
+    machine: Machine,
+    workspaceRoot: string,
+    directory: string,
+    selected: ReadonlyArray<string> | undefined,
+  ) {
+    const listed =
+      selected !== undefined
+        ? null
+        : yield* workspaceEntries.listIgnoredFiles({ cwd: workspaceRoot }).pipe(Effect.option);
+    const paths = (
+      selected ??
+      (listed === null || Option.isNone(listed)
+        ? []
+        : listed.value.files
+            .filter(
+              (file) =>
+                file.byteLength <= COPYABLE_FILE_MAX_BYTES && isDefaultCopiedFile(file.path),
+            )
+            .map((file) => file.path))
+    ).filter(sameDirectory);
+    if (paths.length === 0) return { copied: 0, failed: [] as ReadonlyArray<string> };
+    const failed: Array<string> = [];
+    const { driver } = machine.prepared;
+    const destination = (path: string) => `${directory}/${path}`;
+    // The files API writes into existing directories with the provider's default mode.
+    if (driver.uploadFile !== undefined) {
+      const parents = [...new Set(paths.map((path) => destination(path).replace(/\/[^/]+$/u, "")))];
+      yield* machine.run(`mkdir -p ${parents.map(shellQuote).join(" ")}`, 30).pipe(Effect.ignore);
+    }
+    for (const path of paths) {
+      const read = yield* workspaceFiles
+        .readFile({ cwd: workspaceRoot, relativePath: path })
+        .pipe(Effect.option);
+      if (Option.isNone(read) || read.value.truncated || read.value.exists === false) {
+        failed.push(path);
+        continue;
+      }
+      const content = read.value.contents;
+      const written = yield* (
+        driver.uploadFile === undefined
+          ? machine.run(writeFileScript(destination(path), content), 60).pipe(Effect.asVoid)
+          : onHttp(
+              driver.uploadFile({
+                config: machine.config,
+                sandboxId: machine.sandboxId,
+                path: destination(path),
+                content,
+              }),
+            ).pipe(
+              Effect.andThen(machine.run(`chmod 600 ${shellQuote(destination(path))}`, 30)),
+              Effect.asVoid,
+            )
+      ).pipe(Effect.exit);
+      if (Exit.isFailure(written)) failed.push(path);
+    }
+    return { copied: paths.length - failed.length, failed: failed as ReadonlyArray<string> };
+  });
+
+  const cloneProject = Effect.fn("SandboxProvisioner.cloneProject")(function* (
+    machine: Machine,
+    project: SandboxLaunchInput["project"],
+  ) {
+    const provider = machine.prepared.input.provider;
+    const repository = githubCloneUrl(project.remoteUrl);
+    if (repository === null) {
+      return yield* new SandboxProviderError({
+        provider,
+        stage: "repo",
+        detail: "Only projects with a github.com remote can start in a sandbox.",
+      });
+    }
+    const cloned = yield* machine
+      .run(
+        repositoryScript({
+          cloneUrl: repository.url,
+          directory: repository.name,
+          title: project.title,
+          branch: project.baseRef,
+        }),
+        600,
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new SandboxProviderError({
+              provider,
+              stage: "repo",
+              detail: `Could not clone ${repository.owner}/${repository.name} on the sandbox.${machine.prepared.githubToken === undefined && machine.record().githubApp === undefined ? " A private repository needs the config to sign GitHub in." : ""}`,
+              cause,
+            }),
+        ),
+      );
+    const report = parseRepositoryReport(cloned.stdout);
+    if (report.directory === null || report.projectId === null) {
+      return yield* new SandboxProviderError({
+        provider,
+        stage: "repo",
+        detail:
+          "The repository was cloned, but T3 Code on the sandbox did not add it as a project.",
+      });
+    }
+    return { directory: report.directory, projectId: ProjectId.make(report.projectId) };
+  });
+
+  // Refused before anything bills: a credential the config needs that this server does not have.
+  const checkLaunchTooling = Effect.fn("SandboxProvisioner.checkLaunchTooling")(function* (
+    config: SandboxEnvironmentConfig,
+  ) {
+    const value = yield* settings.getSettings.pipe(Effect.orDie);
+    if (config.githubApp === true && githubAppOf(value) === undefined) {
+      return yield* configError(
+        config.provider,
+        "Connect the GitHub App under Sandboxes in Settings → Connections, or turn off GitHub for this config.",
+      );
+    }
+    if (config.northflank === true && value.sandboxTooling.northflankToken === "") {
+      return yield* configError(
+        config.provider,
+        "Save a Northflank token under Sandboxes in Settings → Connections, or turn off Northflank for this config.",
+      );
+    }
+    if (config.railway === true && railwayCredentialsOf(value.sandboxTooling) === undefined) {
+      return yield* configError(
+        config.provider,
+        "Save a Railway token under Sandboxes in Settings → Connections, or turn off Railway for this config.",
+      );
+    }
+  });
+
+  const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
+  // MCP servers from this machine, each Maple server with a key made for this sandbox alone.
+  const copyMcpServers = Effect.fn("SandboxProvisioner.copyMcpServers")(function* (
+    machine: Machine,
+    owned: Owned,
+    names: ReadonlyArray<string>,
+    projectRoot: string | undefined,
+    railway: { readonly cli: string; readonly token: string } | null,
+    fail: (warning: string) => Effect.Effect<void>,
+  ) {
+    const entries = yield* hostAccess.mcpEntries(names, projectRoot);
+    const missingNames = names.filter((name) => !entries.some((entry) => entry.name === name));
+    if (missingNames.length > 0) {
+      yield* fail(`This machine has no MCP server named ${missingNames.join(", ")}.`);
+    }
+    const tooling = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxTooling;
+    const adminKey = tooling.mapleAdminKey;
+    const railwayReady = railwayCredentialsOf(tooling) !== undefined;
+    const servers: Record<string, unknown> = {};
+    let maple: { readonly apiBaseUrl: string; readonly secret: Redacted.Redacted<string> } | null =
+      null;
+    for (const entry of entries) {
+      const described = describeHostMcpServer(entry, { mapleReady: adminKey !== "", railwayReady });
+      if (described.copy === "unavailable") {
+        yield* fail(`${entry.name} wasn't copied. ${described.reason ?? ""}`.trim());
+        continue;
+      }
+      if (described.copy === "copy") {
+        servers[entry.name] = entry.config;
+        continue;
+      }
+      // The sandbox's own CLI, signed in with its own token; the host's entry may be the hosted
+      // server, whose OAuth sign-in a sandbox cannot reuse.
+      if (described.mintedBy === "railway") {
+        if (railway === null) {
+          yield* fail(
+            `${entry.name} wasn't copied: it needs Railway turned on for this config and signed in on the sandbox.`,
+          );
+        } else {
+          servers[entry.name] = {
+            type: "stdio",
+            command: railway.cli,
+            args: ["mcp"],
+            env: { RAILWAY_API_TOKEN: railway.token },
+          };
+        }
+        continue;
+      }
+      const apiBaseUrl = mapleApiBaseUrl(String(entry.config.url));
+      if (apiBaseUrl === null) continue;
+      if (maple === null) {
+        const created = yield* mapleApi
+          .createMcpKey(Redacted.make(adminKey), apiBaseUrl, {
+            name: yield* agentAccessName(machine.prepared.label),
+            expiresInSeconds: MAPLE_KEY_SECONDS,
+          })
+          .pipe(Effect.result);
+        if (created._tag === "Failure") {
+          yield* fail(
+            `Maple would not make a key for this sandbox, so ${entry.name} wasn't copied.`,
+          );
+          continue;
+        }
+        owned.mapleKey = { keyId: created.success.id, apiBaseUrl };
+        yield* machine.save({ mapleKey: owned.mapleKey });
+        maple = { apiBaseUrl, secret: created.success.secret };
+      } else if (maple.apiBaseUrl !== apiBaseUrl) {
+        yield* fail(`${entry.name} wasn't copied: a sandbox gets one Maple region.`);
+        continue;
+      }
+      const headers = isJsonObject(entry.config.headers) ? entry.config.headers : {};
+      servers[entry.name] = {
+        ...entry.config,
+        headers: { ...headers, Authorization: `Bearer ${Redacted.value(maple.secret)}` },
+      };
+    }
+    if (Object.keys(servers).length === 0) return;
+    yield* machine
+      .run(mcpServersScript(servers), 60)
+      .pipe(Effect.catch(() => fail("Claude's MCP servers could not be written on the sandbox.")));
+  });
+
+  // Each new sandbox gets CLAUDE.md and the skills as they are now: a template's older copy goes.
+  const copyClaudeFiles = Effect.fn("SandboxProvisioner.copyClaudeFiles")(function* (
+    machine: Machine,
+    input: { readonly claudeMd: boolean; readonly skills: ReadonlyArray<string> },
+    fail: (warning: string) => Effect.Effect<void>,
+  ) {
+    const read = yield* hostAccess.claudeFiles(input);
+    if (read.skipped.length > 0) {
+      yield* fail(`Not copied (missing or too large): ${read.skipped.join(", ")}.`);
+    }
+    if (read.files.length === 0) return;
+    const located = yield* machine
+      .run(`printf 'T3_CLAUDE_DIR:%s\n' "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"`, 30)
+      .pipe(
+        Effect.map(
+          (result) =>
+            result.stdout
+              .split("\n")
+              .find((line) => line.startsWith("T3_CLAUDE_DIR:"))
+              ?.slice("T3_CLAUDE_DIR:".length)
+              .trim() ?? "",
+        ),
+        Effect.orElseSucceed(() => ""),
+      );
+    if (!located.startsWith("/")) {
+      return yield* fail("CLAUDE.md and skills could not be copied to the sandbox.");
+    }
+    const destination = (path: string) => `${located}/${path}`;
+    const parents = [
+      ...new Set(read.files.map((file) => destination(file.path).replace(/\/[^/]+$/u, ""))),
+    ];
+    const prepared = yield* machine
+      .run(
+        `set -eu
+${read.skills.map((skill) => `rm -rf ${shellQuote(destination(`skills/${skill}`))}`).join("\n")}
+mkdir -p ${parents.map(shellQuote).join(" ")}`,
+        30,
+      )
+      .pipe(Effect.exit);
+    if (Exit.isFailure(prepared)) {
+      return yield* fail("CLAUDE.md and skills could not be copied to the sandbox.");
+    }
+    const { driver } = machine.prepared;
+    let failed = 0;
+    for (const file of read.files) {
+      const written = yield* (
+        driver.uploadFile === undefined
+          ? machine.run(writeFileScript(destination(file.path), file.content), 60)
+          : onHttp(
+              driver.uploadFile({
+                config: machine.config,
+                sandboxId: machine.sandboxId,
+                path: destination(file.path),
+                content: file.content,
+              }),
+            )
+      ).pipe(Effect.exit);
+      if (Exit.isFailure(written)) failed += 1;
+    }
+    if (failed > 0) {
+      yield* fail(`${failed} of ${read.files.length} Claude files could not be copied.`);
+    }
+  });
+
+  /**
+   * Gives the sandbox a Railway token of its own and signs the CLI in with it. The record names
+   * the token before it exists, so a crash between the two still leaves a revoke to find it.
+   * Null, after a warning, when the sandbox has no working CLI; the token is then revoked.
+   */
+  const signRailwayIn = Effect.fn("SandboxProvisioner.signRailwayIn")(function* (
+    machine: Machine,
+    owned: Owned,
+    fail: (warning: string) => Effect.Effect<void>,
+  ) {
+    const saved = yield* savedRailway;
+    if (saved === undefined) {
+      yield* fail("Save a Railway token under Sandboxes so the sandbox gets one of its own.");
+      return null;
+    }
+    const reference = {
+      name: railwaySandboxTokenName(machine.sandboxId),
+      workspaceId: saved.workspaceId,
+      secret: `sandbox-railway-token-${yield* secureRandom.uuidV4()}`,
+    };
+    owned.railwayToken = reference;
+    yield* machine.save({ railwayToken: reference });
+    const release = Effect.suspend(() =>
+      releaseRailwayToken({ label: machine.prepared.label, railwayToken: reference }),
+    ).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          delete owned.railwayToken;
+        }),
+      ),
+      Effect.andThen(machine.save({}, ["railwayToken"])),
+    );
+    const minted = yield* railwayApi
+      .createToken(saved.token, saved.workspaceId, reference.name)
+      .pipe(
+        Effect.tap((token) =>
+          secrets.set(reference.secret, new TextEncoder().encode(Redacted.value(token))),
+        ),
+        Effect.result,
+      );
+    if (minted._tag === "Failure") {
+      yield* release;
+      yield* fail("Railway would not make a token for this sandbox, so Railway isn't signed in.");
+      return null;
+    }
+    const token = Redacted.value(minted.success);
+    const cli = yield* machine.run(railwayLoginScript(token), 300).pipe(
+      Effect.map((result) => parseRailwayCli(result.stdout)),
+      Effect.orElseSucceed(() => null),
+    );
+    if (cli === null) {
+      yield* release;
+      yield* fail("The Railway CLI could not be installed or signed in on the sandbox.");
+      return null;
+    }
+    return { cli, token };
+  });
+
+  /**
+   * Runs after the clone: the config's setup script, the Railway and Northflank CLIs, MCP servers,
+   * CLAUDE.md and skills. Each failure is a warning on a sandbox that otherwise works.
+   */
+  const setUpTools = Effect.fn("SandboxProvisioner.setUpTools")(function* (
+    machine: Machine,
+    owned: Owned,
+    config: SandboxEnvironmentConfig,
+    directory: string,
+    projectRoot: string | undefined,
+    warn: (warning: string) => Effect.Effect<void>,
+  ) {
+    let steps = 0;
+    let failed = 0;
+    const fail = (warning: string) =>
+      Effect.sync(() => {
+        failed += 1;
+      }).pipe(Effect.andThen(warn(warning)));
+    const script = config.setupScript?.trim() ?? "";
+    if (script !== "") {
+      steps += 1;
+      const report = yield* machine
+        .run(setupScriptScript({ script, hash: scriptHash(script), directory }), 900)
+        .pipe(
+          Effect.map((result) => parseSetupScriptReport(result.stdout)),
+          Effect.orElseSucceed(() => null),
+        );
+      if (report === null) yield* fail("Your setup script could not run on the sandbox.");
+      else if (report._tag === "failed") {
+        yield* fail(
+          `Your setup script failed (exit ${report.exitCode}). See ~/.t3/setup-script.log on the sandbox.`,
+        );
+      }
+    }
+    let railway: { readonly cli: string; readonly token: string } | null = null;
+    if (config.railway === true) {
+      steps += 1;
+      railway = yield* signRailwayIn(machine, owned, fail);
+    }
+    if (config.northflank === true) {
+      steps += 1;
+      const token = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxTooling.northflankToken;
+      yield* machine
+        .run(northflankLoginScript(token), 300)
+        .pipe(
+          Effect.catch(() =>
+            fail("The Northflank CLI could not be installed or signed in on the sandbox."),
+          ),
+        );
+    }
+    const mcpNames = config.mcpServers ?? [];
+    if (mcpNames.length > 0) {
+      steps += 1;
+      yield* copyMcpServers(machine, owned, mcpNames, projectRoot, railway, fail);
+    }
+    const skills = config.skills ?? [];
+    if (config.claudeMd === true || skills.length > 0) {
+      steps += 1;
+      yield* copyClaudeFiles(machine, { claudeMd: config.claudeMd === true, skills }, fail);
+    }
+    // T3 Code's skill and instructions block go on every sandbox, after the user's CLAUDE.md and
+    // skills so the copy keeps the block. The config did not ask for them: only a failure shows.
+    const guidanceWritten = yield* machine.run(sandboxAgentGuidanceScript(), 30).pipe(Effect.exit);
+    if (Exit.isFailure(guidanceWritten)) {
+      steps += 1;
+      yield* fail(SANDBOX_AGENT_GUIDANCE_WARNING);
+    }
+    // A chat's agents can ask this host for sandboxes of their own; a subagent's sandbox has no
+    // chat on this host to hold their tasks, so it never gets the helper. Only a failure shows.
+    if (machine.record().parentThreadId === undefined) {
+      const helperWritten = yield* machine.run(subSandboxHelperScript(), 60).pipe(Effect.exit);
+      if (Exit.isFailure(helperWritten)) {
+        steps += 1;
+        yield* fail(SUB_SANDBOX_HELPER_WARNING);
+      }
+    }
+    return { steps, failed };
+  });
+
+  // Runs `effect` until it succeeds; each failure keeps the machine and waits for a retry. A cancel
+  // interrupts the wait like any other stage.
+  const untilRetried = Effect.fn("SandboxProvisioner.untilRetried")(function* <A, R>(
+    launch: Launch,
+    threadId: ThreadId,
+    stage: SandboxSetupStageId,
+    effect: Effect.Effect<A, SandboxProviderError, R>,
+  ) {
+    while (true) {
+      yield* tracker.stage(threadId, stage, "running", null);
+      const result = yield* Effect.result(effect);
+      if (result._tag === "Success") return result.success;
+      yield* tracker.stage(threadId, stage, "failed", null);
+      yield* tracker.update(threadId, {
+        phase: "failed",
+        error: result.failure.detail,
+        recovery: "retry",
+      });
+      yield* awaitRetry(launch);
+      yield* tracker.update(threadId, { phase: "running", error: null, recovery: null });
+    }
+  });
+
+  /**
+   * Readies a new machine for work on `project`: clones it, copies its env files and the config's
+   * tools, and lets it keep itself up while its threads work. `retry` wraps the clone, which a
+   * thread's launch retries on the user's word and a subagent's sandbox does not.
+   */
+  const setUpProject = Effect.fn("SandboxProvisioner.setUpProject")(function* (
+    machine: Machine,
+    owned: Owned,
+    config: SandboxEnvironmentConfig,
+    project: SandboxLaunchInput["project"],
+    reporter: Reporter,
+    options: {
+      readonly retry: <A>(
+        effect: Effect.Effect<A, SandboxProviderError>,
+      ) => Effect.Effect<A, SandboxProviderError>;
+    },
+  ) {
+    const cloned = yield* options.retry(cloneProject(machine, project));
+    const repository = githubRepositoryOf(project.remoteUrl);
+    yield* machine.save({
+      repoDir: cloned.directory,
+      // The host's sandbox bridge creates the thread in this project on the sandbox.
+      sandboxProjectId: cloned.projectId,
+      ...(repository === null ? {} : { repository: repository.label }),
+    });
+    yield* reporter.stage("repo", "done", cloned.directory.replace(/^.*\/work\//u, "~/work/"));
+
+    yield* reporter.stage("env-files", "running");
+    const hostCopy = yield* verifiedHostCopy(project);
+    const repositoryKey = repository?.key;
+    const copied =
+      hostCopy === null
+        ? { copied: 0, failed: [] as ReadonlyArray<string> }
+        : yield* copyEnvFiles(
+            machine,
+            hostCopy.workspaceRoot,
+            cloned.directory,
+            (repositoryKey === undefined ? undefined : config.envFiles[repositoryKey]) ??
+              config.envFiles[hostCopy.projectId],
+          );
+    if (copied.failed.length > 0) {
+      yield* reporter.warn(`Could not copy ${copied.failed.join(", ")} to the sandbox.`);
+    }
+    yield* reporter.stage(
+      "env-files",
+      copied.failed.length > 0 ? "warning" : copied.copied === 0 ? "skipped" : "done",
+      copied.failed.length > 0
+        ? `${copied.failed.length} not copied`
+        : copied.copied === 0
+          ? "None to copy"
+          : `${copied.copied} ${copied.copied === 1 ? "file" : "files"}`,
+    );
+
+    yield* reporter.stage("tools", "running");
+    const tools = yield* setUpTools(
+      machine,
+      owned,
+      config,
+      cloned.directory,
+      hostCopy?.workspaceRoot,
+      reporter.warn,
+    );
+    yield* reporter.stage(
+      "tools",
+      tools.steps === 0 ? "skipped" : tools.failed > 0 ? "warning" : "done",
+      tools.steps === 0 ? "Nothing to set up" : tools.failed > 0 ? "Finished with warnings" : null,
+    );
+
+    const keptAlive = yield* setUpKeepAlive(machine, owned, cloned.directory, reporter.warn);
+    return { directory: cloned.directory, keptAlive };
+  });
+
+  const startLaunch = Effect.fn("SandboxProvisioner.startLaunch")(function* (
+    input: SandboxLaunchInput,
+    config: SandboxEnvironmentConfig,
+    hostProjectId: ProjectId | null,
+  ) {
+    const threadId = input.threadId;
+    const instanceId = yield* secureRandom.uuidV4();
+    const retries = yield* Queue.unbounded<void>();
+    const reporter: Reporter = {
+      stage: (id, status, detail) => tracker.stage(threadId, id, status, detail),
+      warn: (warning) => tracker.warn(threadId, warning),
+    };
+    const state: { launch: Launch | null } = { launch: null };
+    yield* tracker.begin({
+      threadId,
+      instanceId,
+      configId: config.id,
+      label: config.label,
+      provider: config.provider,
+    });
+    const run = Effect.gen(function* () {
+      yield* reporter.stage("preflight", "running");
+      yield* checkLaunchTooling(config);
+      const joinTailnet = yield* launchJoinsTailnet(config);
+      const prepared = yield* prepare(createInputFor(config, input.project, joinTailnet));
+      const launchRepository = githubRepositoryOf(input.project.remoteUrl);
+      yield* reporter.stage("preflight", "done");
+      const owned: Owned = {};
+      yield* Effect.gen(function* () {
+        const machine = yield* provisionMachine(prepared, {
+          instanceId,
+          owned,
+          report: reporter,
+          requireClaudeReach: true,
+          ...(launchRepository === null
+            ? {}
+            : {
+                launch: {
+                  config,
+                  repository: { owner: launchRepository.owner, name: launchRepository.name },
+                },
+              }),
+          extras: {
+            configId: config.id,
+            threadId,
+            projectId: input.project.id,
+            projectTitle: input.project.title,
+          },
+        });
+        const launch = state.launch!;
+        const { keptAlive } = yield* setUpProject(machine, owned, config, input.project, reporter, {
+          retry: (effect) => untilRetried(launch, threadId, "repo", effect),
+        });
+
+        // The host thread sends its first message through the bridge, so the launch is done only
+        // once the bridge can reach the sandbox. Clients pair with it on their own afterwards.
+        if (launch.hostProjectId === null) {
+          yield* reporter.stage("pair", "running");
+          yield* ensureBridge(machine.record(), machine.run).pipe(
+            Effect.flatMap((bridge) => machine.save({ bridge })),
+            Effect.andThen(reporter.stage("pair", "done", null)),
+            Effect.catch((error) =>
+              reporter
+                .warn(`Phones cannot drive this thread yet: ${error.detail}`)
+                .pipe(Effect.andThen(reporter.stage("pair", "warning", null))),
+            ),
+          );
+        } else {
+          const bridge = yield* untilRetried(
+            launch,
+            threadId,
+            "pair",
+            ensureBridge(machine.record(), machine.run),
+          );
+          yield* machine.save({ bridge, hostProjectId: launch.hostProjectId });
+          yield* reporter.stage("pair", "done", null);
+        }
+        yield* machine.save({ state: "running" });
+        // Setup is over, so from here the sandbox stops once its threads have been idle a while.
+        if (keptAlive) {
+          yield* keepAliveFromNow(
+            prepared.driver,
+            machine.config,
+            machine.sandboxId,
+            keepAliveTtlMinutes(prepared.idleMinutes, prepared.maxTtlMinutes),
+          );
+        }
+        yield* tracker.finish(threadId, "done");
+      }).pipe(
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit) ? Effect.void : releaseOwned(prepared, owned, instanceId),
+        ),
+      );
+    }).pipe(
+      Effect.onExit((exit) =>
+        Exit.isSuccess(exit)
+          ? Effect.void
+          : Exit.hasInterrupts(exit)
+            ? state.launch?.stopReason == null
+              ? tracker.finish(threadId, "cancelled")
+              : tracker.finish(threadId, "failed", {
+                  error: state.launch.stopReason,
+                  recovery: "relaunch",
+                })
+            : tracker.finish(threadId, "failed", {
+                error: Option.match(Exit.findErrorOption(exit), {
+                  onNone: () => "The sandbox could not be set up.",
+                  onSome: (error) => error.detail,
+                }),
+                // A refusal that a new sandbox would hit again points at its fix instead.
+                recovery: Option.match(Exit.findErrorOption(exit), {
+                  onNone: () => "relaunch" as const,
+                  onSome: (error) =>
+                    error.code === "tailscale_required"
+                      ? ("set-up-tailscale" as const)
+                      : ("relaunch" as const),
+                }),
+              }),
+      ),
+    );
+    const fiber = yield* tracked(instanceId, run);
+    const launch: Launch = {
+      input,
+      config,
+      instanceId,
+      hostProjectId,
+      fiber,
+      retries,
+      activity: 0,
+      stopReason: null,
+    };
+    state.launch = launch;
+    launches.set(threadId, launch);
+    return { instanceId } satisfies SandboxLaunchResult;
+  });
+
+  /**
+   * The project's copy on this server, when the client named one and it is an active project here
+   * at that directory; env files are read from nowhere else.
+   */
+  const verifiedHostCopy = Effect.fn("SandboxProvisioner.verifiedHostCopy")(function* (
+    project: SandboxLaunchInput["project"],
+  ) {
+    const claimed = project.hostCopy;
+    if (claimed === undefined) return null;
+    const found = yield* projectStore.get(claimed.projectId).pipe(Effect.option);
+    if (Option.isNone(found) || Option.isNone(found.value)) return null;
+    const row = found.value.value;
+    return row.deletedAt === null && row.workspaceRoot === claimed.workspaceRoot
+      ? { projectId: row.projectId, workspaceRoot: row.workspaceRoot }
+      : null;
+  });
+
+  // What the provider says of a record's machine; null when it cannot say or does not answer.
+  const providerStatus = Effect.fn("SandboxProvisioner.providerStatus")(function* (
+    record: SandboxRecord,
+  ) {
+    const driver = findDriver(record.provider);
+    if (driver.status === undefined) return null;
+    const config = yield* recordConfig(driver, record).pipe(Effect.option);
+    if (Option.isNone(config)) return null;
+    return yield* onHttp(driver.status({ config: config.value, sandboxId: record.sandboxId })).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("sandbox status check failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+  });
+
+  // A thread has one sandbox, so a new launch replaces what an earlier, unfinished one left. A
+  // machine that cannot be deleted stops the launch: it would keep billing beside the new one.
+  const releaseAbandoned = Effect.fn("SandboxProvisioner.releaseAbandoned")(function* (
+    threadId: ThreadId,
+  ) {
+    const all = yield* records.list.pipe(Effect.orDie);
+    for (const record of all) {
+      if (record.threadId !== threadId || liveInstances.has(record.instanceId)) continue;
+      if (record.state !== "provisioning" && record.abandonedAt === undefined) continue;
+      yield* removeSandbox(
+        { provider: record.provider, sandboxId: record.sandboxId, instanceId: record.instanceId },
+        false,
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new SandboxProviderError({
+              provider: record.provider,
+              stage: "config",
+              detail: `Could not delete this thread's earlier sandbox ${record.sandboxId}, so no new one was started. Try again, or delete it under Settings → Connections → Sandboxes.`,
+              cause,
+            }),
+        ),
+      );
+    }
+  });
+
+  /**
+   * Starts a thread's sandbox unless it already has one: a send after a lost handoff, or from a
+   * client that missed the launch, attaches to that machine instead of paying for a second.
+   */
+  const startOrAttach = Effect.fn("SandboxProvisioner.startOrAttach")(function* (
+    input: SandboxLaunchInput,
+    config: SandboxEnvironmentConfig,
+    hostProjectId: ProjectId | null,
+  ) {
+    yield* releaseAbandoned(input.threadId);
+    const all = yield* records.list.pipe(Effect.orDie);
+    // An expired one too: the bridge links a thread's record by any state but `deleted`.
+    const existing = all.find(
+      (record) => record.threadId === input.threadId && record.state !== "deleted",
+    );
+    if (existing !== undefined) {
+      return { instanceId: existing.instanceId } satisfies SandboxLaunchResult;
+    }
+    return yield* startLaunch(input, config, hostProjectId);
+  });
+
+  const launch = Effect.fn("SandboxProvisioner.launch")(function* (
+    input: SandboxLaunchInput,
+    options?: { readonly hostProjectId?: ProjectId },
+  ) {
+    const current = runningLaunch(input.threadId);
+    if (current !== null) {
+      // A send while the thread's sandbox starts follows that launch instead of failing; one that
+      // failed, or whose machine the provider no longer has, gives way to a new one.
+      const snapshot = yield* tracker.get(input.threadId);
+      const record = yield* records.get(current.instanceId).pipe(Effect.orDie);
+      const gone = Option.isSome(record) && (yield* providerStatus(record.value)) === "deleted";
+      if (snapshot?.phase !== "failed" && !gone) {
+        return { instanceId: current.instanceId } satisfies SandboxLaunchResult;
+      }
+      yield* stopLaunch(current, gone ? LAUNCH_DELETED_OUTSIDE : null);
+    }
+    const found = yield* configStore.get(input.configId).pipe(Effect.orDie);
+    if (Option.isNone(found)) {
+      return yield* launchConfigError("This sandbox config no longer exists.");
+    }
+    const config = found.value;
+    // The sandbox clones from GitHub, so the project may live on any machine the client reaches.
+    if (githubRepositoryOf(input.project.remoteUrl) === null) {
+      return yield* launchConfigError(
+        "Only projects with a github.com remote can start in a sandbox.",
+        config.provider,
+      );
+    }
+    return yield* startOrAttach(input, config, options?.hostProjectId ?? null);
+  });
+
+  const runningLaunch = (threadId: ThreadId) => {
+    const current = launches.get(threadId);
+    return current !== undefined && current.fiber.pollUnsafe() === undefined ? current : null;
+  };
+
+  const notReady = (provider: SandboxProviderKind | undefined) =>
+    new SandboxProviderError({
+      provider,
+      stage: "pair",
+      detail: "This sandbox is not ready to connect yet.",
+    });
+
+  const launching = (threadId: ThreadId) => Effect.sync(() => runningLaunch(threadId) !== null);
+
+  const markLaunchLost = Effect.fn("SandboxProvisioner.markLaunchLost")(function* (
+    input: SandboxLaunchInput,
+  ) {
+    if (runningLaunch(input.threadId) !== null || (yield* tracker.get(input.threadId)) !== null) {
+      return;
+    }
+    const config = yield* configStore.get(input.configId).pipe(Effect.orDie);
+    yield* tracker.begin({
+      threadId: input.threadId,
+      instanceId: yield* secureRandom.uuidV4(),
+      configId: input.configId,
+      label: Option.match(config, { onNone: () => "Sandbox", onSome: (found) => found.label }),
+      provider: Option.match(config, {
+        onNone: (): SandboxProviderKind => "boat",
+        onSome: (found) => found.provider,
+      }),
+    });
+    yield* tracker.finish(input.threadId, "failed", {
+      error: LAUNCH_ABANDONED,
+      recovery: "relaunch",
+    });
+  });
+
+  const threadRecord = (threadId: ThreadId) =>
+    records.list.pipe(
+      Effect.orDie,
+      Effect.map((all) =>
+        all.find((candidate) => candidate.threadId === threadId && candidate.state !== "deleted"),
+      ),
+    );
+
+  const pairLaunch = Effect.fn("SandboxProvisioner.pairLaunch")(function* (
+    input: SandboxLaunchThreadInput,
+  ) {
+    const record = yield* threadRecord(input.threadId);
+    if (
+      record === undefined ||
+      record.state !== "running" ||
+      record.environmentId === null ||
+      record.sandboxProjectId === undefined ||
+      runningLaunch(input.threadId) !== null
+    ) {
+      return yield* notReady(record?.provider);
+    }
+    const pairingCode = yield* pairWith(runOnRecord(record), record.provider);
+    return {
+      environmentId: record.environmentId,
+      httpBaseUrl: record.httpBaseUrl,
+      pairingCode,
+      projectId: record.sandboxProjectId,
+    } satisfies SandboxLaunchPairResult;
+  });
+
+  const connectThread = Effect.fn("SandboxProvisioner.connectThread")(function* (
+    input: SandboxLaunchThreadInput,
+  ) {
+    const record = yield* threadRecord(input.threadId);
+    if (record === undefined) {
+      return yield* new SandboxProviderError({
+        stage: "pair",
+        detail: "This chat has no sandbox to connect to.",
+      });
+    }
+    if (record.state === "stopped") yield* resume({ instanceId: record.instanceId });
+    return yield* pairLaunch(input);
+  });
+
+  const retryLaunch = Effect.fn("SandboxProvisioner.retryLaunch")(function* (
+    input: SandboxLaunchThreadInput,
+  ) {
+    const snapshot = yield* tracker.get(input.threadId);
+    const current = launches.get(input.threadId);
+    if (current === undefined) return false;
+    if (snapshot === null || snapshot.phase !== "failed") return true;
+    if (snapshot.recovery === "relaunch" || snapshot.recovery === "set-up-tailscale") {
+      // A new sandbox follows the config as saved now, which may have changed since.
+      const saved = yield* configStore.get(current.config.id).pipe(Effect.orDie);
+      if (Option.isNone(saved)) {
+        return yield* launchConfigError(
+          "This sandbox config no longer exists.",
+          current.config.provider,
+        );
+      }
+      yield* startOrAttach(current.input, saved.value, current.hostProjectId);
+      return true;
+    }
+    current.activity += 1;
+    yield* Queue.offer(current.retries, undefined);
+    return true;
+  });
+
+  const cancelLaunch = Effect.fn("SandboxProvisioner.cancelLaunch")(function* (
+    input: SandboxLaunchThreadInput,
+  ) {
+    const current = runningLaunch(input.threadId);
+    if (current !== null) {
+      yield* Fiber.interrupt(current.fiber);
+      return { cancelled: true } satisfies SandboxLaunchCancelResult;
+    }
+    // A launch that failed and kept nothing has only its card left to dismiss.
+    const snapshot = yield* tracker.get(input.threadId);
+    if (snapshot !== null && snapshot.phase !== "running") yield* tracker.remove(input.threadId);
+    return { cancelled: false } satisfies SandboxLaunchCancelResult;
+  });
+
+  const configs = configStore.list.pipe(
+    Effect.orDie,
+    Effect.map((list): SandboxConfigsResult => ({ configs: list })),
+  );
+
+  const saveConfig = Effect.fn("SandboxProvisioner.saveConfig")(function* (
+    input: SandboxSaveConfigInput,
+  ) {
+    const driver = findDriver(input.config.provider);
+    const provider = driver.info.kind;
+    // Saving the key with the config is how the key gets in: no machine is made here.
+    yield* resolveConfig(driver, { apiKey: input.apiKey, settings: input.settings });
+    const label = input.config.label.trim();
+    if (label === "") return yield* configError(provider, "Enter a name for this sandbox config.");
+    if (
+      input.config.template === undefined &&
+      !driver.info.sizes.some((size) => size.id === input.config.size)
+    ) {
+      return yield* configError(
+        provider,
+        `${driver.info.label} has no machine size ${input.config.size}.`,
+      );
+    }
+    if (input.config.access === "tailnet" && !input.config.joinTailnet) {
+      return yield* configError(provider, "A tailnet-only sandbox has to join your tailnet.");
+    }
+    if (input.config.agentProviderAccess === true) {
+      const refusal = agentAccessRefusal(driver, input.config.credentialEnvironment);
+      if (refusal !== null) return yield* configError(provider, refusal);
+    }
+    if (input.config.pi !== undefined && input.config.claude === undefined) {
+      return yield* configError(
+        provider,
+        "Pi uses the sandbox's hub key for Claude, so turn on this machine's Claude setup too.",
+      );
+    }
+    if (input.config.claude !== undefined) {
+      const endpoint = URL.parse(input.config.claude.baseUrl);
+      if (endpoint === null || (endpoint.protocol !== "https:" && endpoint.protocol !== "http:")) {
+        return yield* configError(provider, "Enter an http or https URL for Claude.");
+      }
+    }
+    const now = yield* nowIso;
+    const id = input.config.id ?? (yield* secureRandom.uuidV4());
+    const previous =
+      input.config.id === undefined
+        ? Option.none<SandboxEnvironmentConfig>()
+        : yield* configStore.get(input.config.id).pipe(Effect.orDie);
+    const config: SandboxEnvironmentConfig = {
+      ...input.config,
+      id,
+      label,
+      createdAt: Option.match(previous, { onNone: () => now, onSome: (saved) => saved.createdAt }),
+      updatedAt: now,
+    };
+    yield* configStore.put(config).pipe(Effect.orDie);
+    return { config } satisfies SandboxSaveConfigResult;
+  });
+
+  // Sandboxes launched from a deleted config keep running and stay listed; they name the config id.
+  const deleteConfig = Effect.fn("SandboxProvisioner.deleteConfig")(function* (
+    input: SandboxDeleteConfigInput,
+  ) {
+    yield* configStore.remove(input.configId).pipe(Effect.orDie);
+  });
+
+  // Never blocks a delete: a key that cannot be revoked becomes a warning naming it by its prefix.
+  const releaseHubKey = Effect.fn("SandboxProvisioner.releaseHubKey")(function* (
+    record: SandboxRecord,
+  ) {
+    const reference = record.claudeHubKey;
+    if (reference === undefined) return null;
+    const warning = `The key T3 Code added for ${record.label} on the CLIProxyAPI hub could not be revoked. Remove the key starting with t3-sandbox-${labelSlug(record.label)}- from the hub.`;
+    const stored = yield* secrets.get(reference.secret).pipe(Effect.orElseSucceed(Option.none));
+    const source = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
+      ?.usageLimitSources[UsageLimitSourceId.make(reference.sourceId)];
+    const hub =
+      source === undefined || !hasManagementKey(source)
+        ? Option.none<CliproxyHub>()
+        : yield* cliproxyHub(source).pipe(Effect.option);
+    if (Option.isNone(stored) || Option.isNone(hub)) {
+      yield* Effect.logWarning("sandbox hub key cannot be revoked", {
+        instanceId: record.instanceId,
+        sourceId: reference.sourceId,
+        keyFound: Option.isSome(stored),
+        sourceFound: source !== undefined,
+        managementKeyRead: Option.isSome(hub),
+      });
+      return warning;
+    }
+    const revoked = yield* revokeHubKey({
+      sourceId: reference.sourceId,
+      hub: hub.value,
+      value: Redacted.make(new TextDecoder().decode(stored.value)),
+    }).pipe(Effect.exit);
+    yield* secrets.remove(reference.secret).pipe(Effect.ignore);
+    return Exit.isSuccess(revoked) ? null : warning;
+  });
+
+  const orphans = yield* Ref.make<ReadonlyArray<SandboxOrphan>>([]);
+  const removedRecords = yield* PubSub.unbounded<SandboxRecord>();
+  const listRevision = yield* SubscriptionRef.make(0);
+  const listChanged = SubscriptionRef.update(listRevision, (revision) => revision + 1);
+  // The resumes this process runs, by instance, with when each began. A `resumingSince` on a
+  // record not in here was left by a server that stopped mid-resume.
+  const resumingNow = new Map<string, string>();
+
+  // Revokes the agent's key first, so no fork starts while the rest goes. Forks are deleted only
+  // when the user deletes their sandbox; the environment goes only once nothing is left in it,
+  // since it is the only way to find a fork again.
+  const releaseAgentAccess = Effect.fn("SandboxProvisioner.releaseAgentAccess")(function* (
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+    record: SandboxRecord,
+    deleteForks: boolean,
+  ) {
+    const reference = record.agentProviderAccess;
+    const agentAccess = driver.agentAccess;
+    if (reference === undefined || agentAccess === undefined) {
+      return { warnings: [] as Array<string>, finish: () => Effect.succeed<string | null>(null) };
+    }
+    const name = driver.info.label;
+    const warnings: Array<string> = [];
+    if (reference.keyId !== undefined) {
+      const revoked = yield* onHttp(agentAccess.revokeKey({ config, keyId: reference.keyId })).pipe(
+        Effect.exit,
+      );
+      if (Exit.isFailure(revoked)) {
+        warnings.push(
+          `The ${name} key T3 Code made for ${record.label}'s agent could not be revoked. Revoke the key named ${reference.environmentName} in ${name}.`,
+        );
+      }
+    }
+    const listed = yield* onHttp(
+      agentAccess.listSandboxes({ config, environmentName: reference.environmentName }),
+    ).pipe(Effect.option);
+    const forks = Option.isNone(listed)
+      ? null
+      : listed.value.filter((sandbox) => sandbox.id !== record.sandboxId);
+    const survivors: Array<string> = [];
+    for (const fork of forks ?? []) {
+      const deleted = deleteForks
+        ? Exit.isSuccess(
+            yield* onHttp(driver.destroy({ config, sandboxId: fork.id })).pipe(
+              Effect.catchIf(
+                (error) => error.code === "not_found",
+                () => Effect.void,
+              ),
+              Effect.exit,
+            ),
+          )
+        : false;
+      if (!deleted) survivors.push(fork.id);
+      else yield* Ref.update(orphans, (current) => current.filter((o) => o.sandboxId !== fork.id));
+    }
+    if (deleteForks && survivors.length > 0) {
+      warnings.push(
+        `${survivors.length === 1 ? "A fork" : `${survivors.length} forks`} of ${record.label} could not be deleted: ${survivors.join(", ")}. Delete ${survivors.length === 1 ? "it" : "them"} in ${name}.`,
+      );
+    }
+    // Runs after the sandbox itself is deleted.
+    const finish = () =>
+      forks === null || survivors.length > 0
+        ? Effect.succeed<string | null>(null)
+        : onHttp(
+            agentAccess.deleteEnvironment({ config, environmentId: reference.environmentId }),
+          ).pipe(
+            Effect.as<string | null>(null),
+            Effect.orElseSucceed(
+              () =>
+                `The ${name} environment ${reference.environmentName} could not be deleted. It holds nothing; delete it in ${name}.`,
+            ),
+          );
+    return { warnings, finish };
+  });
+
+  const remove = (input: SandboxDeleteInput) => removeSandbox(input, true);
+
+  const linkBridge = Effect.fn("SandboxProvisioner.linkBridge")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly hostProjectId: ProjectId;
+  }) {
+    const starting = runningLaunch(input.threadId);
+    if (starting !== null) {
+      return yield* new SandboxProviderError({
+        provider: starting.config.provider,
+        stage: "pair",
+        detail: "This thread's sandbox is still starting.",
+      });
+    }
+    const all = yield* records.list.pipe(Effect.orDie);
+    const record = all.find(
+      (candidate) => candidate.threadId === input.threadId && candidate.state !== "deleted",
+    );
+    if (record === undefined) {
+      return yield* new SandboxProviderError({
+        stage: "pair",
+        detail: "No sandbox belongs to this thread.",
+      });
+    }
+    const bridge = yield* ensureBridge(record, runOnRecord(record));
+    const updated: SandboxRecord = {
+      ...record,
+      hostProjectId: input.hostProjectId,
+      bridge,
+      updatedAt: yield* nowIso,
+    };
+    yield* records.put(updated).pipe(Effect.orDie);
+    return updated;
+  });
+
+  const removeSandbox = Effect.fn("SandboxProvisioner.delete")(function* (
+    input: SandboxDeleteInput,
+    deleteForks: boolean,
+  ) {
+    const instanceId = input.instanceId;
+    // A sandbox still provisioning belongs to its launch; stopping the launch deletes it.
+    const live = instanceId === undefined ? undefined : liveInstances.get(instanceId);
+    if (live !== undefined) {
+      yield* Fiber.interrupt(live);
+      return { warnings: [] } satisfies SandboxDeleteResult;
+    }
+    const record =
+      instanceId === undefined
+        ? Option.none<SandboxRecord>()
+        : yield* records.get(instanceId).pipe(Effect.orDie);
+    const driver = findDriver(input.provider);
+    // A sandbox the provider already deleted needs no key to clear from the list.
+    const machineGone = Option.isSome(record) && record.value.state === "deleted";
+    const config = Option.isNone(record)
+      ? Option.some(yield* resolveConfig(driver))
+      : machineGone
+        ? yield* recordConfig(driver, record.value).pipe(Effect.option)
+        : Option.some(yield* recordConfig(driver, record.value));
+    const agent =
+      Option.isNone(record) || Option.isNone(config)
+        ? null
+        : yield* releaseAgentAccess(driver, config.value, record.value, deleteForks);
+    if (!machineGone && Option.isSome(config)) {
+      yield* onHttp(driver.destroy({ config: config.value, sandboxId: input.sandboxId })).pipe(
+        // Deleted from the provider's dashboard before the sweep noticed: the record still goes.
+        Effect.catchIf(
+          (error) => error.code === "not_found",
+          () => Effect.void,
+        ),
+      );
+    }
+    const environmentWarning = agent === null ? null : yield* agent.finish();
+    if (instanceId !== undefined) yield* records.remove(instanceId).pipe(Effect.orDie);
+    if (Option.isSome(record)) yield* PubSub.publish(removedRecords, record.value);
+    // The host deletes on its own after a settle; other clients drop the row without a refresh.
+    yield* listChanged;
+    // The bearer dies with the machine; only this server's copy is left to clear.
+    if (Option.isSome(record) && record.value.bridge !== undefined) {
+      yield* secrets.remove(record.value.bridge.secret).pipe(Effect.ignore);
+    }
+    yield* Ref.update(orphans, (current) =>
+      current.filter((orphan) => orphan.sandboxId !== input.sandboxId),
+    );
+    // A sandbox deleted outside T3 still has its key on the hub, so this runs for every record.
+    const warnings = (
+      Option.isNone(record)
+        ? [yield* releaseOrphanRailwayToken(input.sandboxId)]
+        : [
+            ...(agent?.warnings ?? []),
+            environmentWarning,
+            yield* releaseHubKey(record.value),
+            yield* releaseTailnetDevice(record.value),
+            yield* releaseGithubToken(record.value),
+            yield* releaseMapleKey(record.value),
+            yield* releaseRailwayToken(record.value),
+            yield* releaseKeepAliveKey(driver, config, record.value),
+          ]
+    ).filter((warning): warning is string => warning !== null);
+    return { warnings } satisfies SandboxDeleteResult;
+  });
+
+  const environments = Effect.fn("SandboxProvisioner.environments")(function* (
+    input: SandboxCredentialEnvironmentsInput,
+  ) {
+    const driver = findDriver(input.provider);
+    if (driver.listEnvironments === undefined) {
+      return { environments: [] as ReadonlyArray<SandboxCredentialEnvironment> };
+    }
+    const config = yield* resolveConfig(driver);
+    const listed = yield* onHttp(driver.listEnvironments({ config }));
+    return { environments: listed };
+  });
+
+  const limits = Effect.fn("SandboxProvisioner.limits")(function* (input: SandboxLimitsInput) {
+    const driver = findDriver(input.provider);
+    if (driver.limits === undefined) return { limits: null } satisfies SandboxLimitsResult;
+    const config = yield* resolveConfig(driver).pipe(Effect.option);
+    if (Option.isNone(config)) return { limits: null } satisfies SandboxLimitsResult;
+    return {
+      limits: yield* onHttp(driver.limits({ config: config.value })),
+    } satisfies SandboxLimitsResult;
+  });
+
+  const list = Effect.gen(function* () {
+    const sandboxes = yield* records.list.pipe(Effect.orDie);
+    return { sandboxes, orphans: yield* Ref.get(orphans) } satisfies SandboxListResult;
+  });
+
+  const stop = Effect.fn("SandboxProvisioner.stop")(function* (input: SandboxLifecycleInput) {
+    const record = yield* readRecord(input.instanceId);
+    const driver = findDriver(record.provider);
+    if (driver.stop === undefined) {
+      return yield* configError(record.provider, "This provider cannot stop a sandbox.");
+    }
+    const config = yield* recordConfig(driver, record);
+    yield* onHttp(driver.stop({ config, sandboxId: record.sandboxId }));
+    const now = yield* nowIso;
+    const updated: SandboxRecord = {
+      ...record,
+      state: "stopped",
+      runningSince: null,
+      stoppedAt: now,
+      updatedAt: now,
+    };
+    yield* records.put(updated).pipe(Effect.orDie);
+    // Other clients and windows show the thread as stopped without waiting on their refresh.
+    yield* listChanged;
+    return { sandbox: updated } satisfies SandboxStopResult;
+  });
+
+  // A short check before a delete. A stopped sandbox is not woken for it: on Boat a command
+  // restores the machine, which counts as a start.
+  const checkWork = Effect.fn("SandboxProvisioner.checkWork")(function* (
+    input: SandboxLifecycleInput,
+  ) {
+    const record = yield* readRecord(input.instanceId);
+    const unknown = (detail: string): SandboxCheckWorkResult => ({
+      status: "unknown",
+      uncommittedFiles: 0,
+      unpushedCommits: 0,
+      detail,
+    });
+    if (record.state !== "running") {
+      return unknown("The sandbox is not running, so its work could not be checked.");
+    }
+    if (record.repoDir === undefined) {
+      return unknown("T3 Code does not know where this sandbox's repository is.");
+    }
+    const driver = findDriver(record.provider);
+    const config = yield* recordConfig(driver, record);
+    const report = yield* onHttp(
+      driver.execute({
+        config,
+        sandboxId: record.sandboxId,
+        command: workCheckScript(record.repoDir),
+        timeoutSeconds: WORK_CHECK_SECONDS,
+      }),
+    ).pipe(
+      Effect.map((result) => parseWorkCheck(result.stdout)),
+      Effect.timeoutOrElse({
+        duration: `${WORK_CHECK_SECONDS + 5} seconds`,
+        orElse: () => Effect.succeed(null),
+      }),
+      Effect.orElseSucceed(() => null),
+    );
+    if (report === null) return unknown("The sandbox did not answer in time.");
+    return {
+      status: report.files === 0 && report.commits === 0 ? "clean" : "dirty",
+      uncommittedFiles: report.files,
+      unpushedCommits: report.commits,
+    } satisfies SandboxCheckWorkResult;
+  });
+
+  const setSettlePending: SandboxProvisioner["Service"]["setSettlePending"] = Effect.fn(
+    "SandboxProvisioner.setSettlePending",
+  )(function* (instanceId, pending, handled) {
+    const stored = yield* records.get(instanceId);
+    if (Option.isNone(stored)) return false;
+    if (
+      pending === undefined &&
+      stored.value.settlePending === undefined &&
+      (handled === undefined || stored.value.settleHandled === handled)
+    ) {
+      return true;
+    }
+    const { settlePending: _settlePending, ...rest } = stored.value;
+    // A new `updatedAt` makes a sweep that read the record earlier skip its write.
+    yield* repository.put({
+      ...rest,
+      ...(pending === undefined ? {} : { settlePending: pending }),
+      ...(handled === undefined ? {} : { settleHandled: handled }),
+      updatedAt: yield* nowIso,
+    });
+    yield* listChanged;
+    return true;
+  }, Effect.orDie);
+
+  const runScript: SandboxProvisioner["Service"]["runScript"] = Effect.fn(
+    "SandboxProvisioner.runScript",
+  )(function* (input) {
+    const found = yield* records.get(input.instanceId).pipe(Effect.orDie);
+    if (Option.isNone(found) || found.value.state !== "running") {
+      return yield* new SandboxProviderError({
+        provider: Option.isNone(found) ? undefined : found.value.provider,
+        stage: "start",
+        detail: "The sandbox is not running.",
+      });
+    }
+    return yield* runOnRecord(found.value)(input.script, input.timeoutSeconds);
+  });
+
+  // A sandbox made before keep-alive has no idle window of its own, so its config's applies.
+  const keepAliveSettingsOf = Effect.fn("SandboxProvisioner.keepAliveSettingsOf")(function* (
+    record: SandboxRecord,
+  ) {
+    if (record.idleMinutes !== undefined) {
+      return { idleMinutes: record.idleMinutes, runningCapMinutes: record.runningCapMinutes };
+    }
+    const saved =
+      record.configId === undefined
+        ? Option.none<SandboxEnvironmentConfig>()
+        : yield* configStore.get(record.configId).pipe(Effect.orElseSucceed(Option.none));
+    return Option.match(saved, {
+      onNone: () => ({
+        idleMinutes: DEFAULT_SANDBOX_IDLE_MINUTES,
+        runningCapMinutes: undefined as number | undefined,
+      }),
+      onSome: (config) => ({
+        idleMinutes: config.idleMinutes,
+        runningCapMinutes: config.runningCapMinutes,
+      }),
+    });
+  });
+
+  // A resume writes its record once it ends; the keep-alive key cannot wait that long to be named.
+  const saveKeepAliveKey = Effect.fn("SandboxProvisioner.saveKeepAliveKey")(function* (
+    instanceId: string,
+    key: SandboxRecord["keepAliveKey"],
+  ) {
+    const stored = yield* records.get(instanceId);
+    if (Option.isNone(stored)) return;
+    const { keepAliveKey: _keepAliveKey, ...rest } = stored.value;
+    yield* records.put({
+      ...rest,
+      ...(key === undefined ? {} : { keepAliveKey: key }),
+      updatedAt: yield* nowIso,
+    });
+  }, Effect.orDie);
+
+  /**
+   * Runs on a resume before T3 starts, which starts the loop: renews a key close to its expiry, or
+   * gives a sandbox made before keep-alive its first one. A failure keeps a key that still works,
+   * or leaves the sandbox on its running limit, and says so.
+   */
+  const resumeKeepAlive = Effect.fn("SandboxProvisioner.resumeKeepAlive")(function* (
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+    record: SandboxRecord,
+    ttlMinutes: number,
+  ): Effect.fn.Return<{
+    readonly keepAliveKey: SandboxRecord["keepAliveKey"];
+    readonly warning: string | null;
+  }> {
+    const keepAlive = driver.keepAlive;
+    const current = record.keepAliveKey;
+    if (keepAlive === undefined) return { keepAliveKey: current, warning: null };
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const expiresAt = Date.parse(current?.expiresAt ?? "");
+    if (current?.id !== undefined && expiresAt - now > KEEP_ALIVE_RENEW_BEFORE_MS) {
+      return { keepAliveKey: current, warning: null };
+    }
+    const name = yield* keepAliveKeyName(record.label);
+    // As on a launch, the record names a first key before it is minted, so a crash in between
+    // still says which key to revoke. A renewal keeps the working key recorded until then.
+    if (current?.id === undefined) yield* saveKeepAliveKey(record.instanceId, { name });
+    const installed = yield* mintKeepAlive({
+      driver,
+      keepAlive,
+      config,
+      sandboxId: record.sandboxId,
+      name,
+      ttlMinutes,
+      maxRunningMinutes: record.maxRunningMinutes,
+      projectRoot: record.repoDir,
+      run: (script, timeoutSeconds) =>
+        onHttp(driver.execute({ config, sandboxId: record.sandboxId, timeoutSeconds, ...script })),
+    });
+    if (installed !== null) {
+      yield* saveKeepAliveKey(record.instanceId, installed);
+      if (current?.id !== undefined) {
+        yield* onHttp(keepAlive.revokeKey({ config, keyId: current.id })).pipe(Effect.ignore);
+      }
+      return { keepAliveKey: installed, warning: null };
+    }
+    if (current?.id === undefined) yield* saveKeepAliveKey(record.instanceId, undefined);
+    if (current?.id !== undefined && expiresAt > now) {
+      return {
+        keepAliveKey: current,
+        warning: `T3 Code could not renew the key this sandbox keeps itself running with. It works until ${current.expiresAt}.`,
+      };
+    }
+    return { keepAliveKey: undefined, warning: keepAliveFailed(record.maxRunningMinutes) };
+  });
+
+  const markResuming = Effect.fn("SandboxProvisioner.markResuming")(function* (
+    instanceId: string,
+    since: string,
+  ) {
+    resumingNow.set(instanceId, since);
+    const stored = yield* records.get(instanceId);
+    if (Option.isSome(stored)) {
+      yield* records.put({ ...stored.value, resumingSince: since, updatedAt: since });
+    }
+    yield* listChanged;
+  }, Effect.orDie);
+
+  // A resume writes its record without the mark when it gets that far; this covers the rest.
+  const endResuming = Effect.fn("SandboxProvisioner.endResuming")(function* (
+    instanceId: string,
+    since: string,
+  ) {
+    if (resumingNow.get(instanceId) === since) resumingNow.delete(instanceId);
+    const stored = yield* records.get(instanceId);
+    if (Option.isSome(stored) && stored.value.resumingSince === since) {
+      const { resumingSince: _resumingSince, ...rest } = stored.value;
+      yield* records.put(rest);
+    }
+    yield* listChanged;
+  }, Effect.orDie);
+
+  const resume = Effect.fn("SandboxProvisioner.resume")(function* (input: SandboxLifecycleInput) {
+    const record = yield* readRecord(input.instanceId);
+    const driver = findDriver(record.provider);
+    const since = yield* nowIso;
+    // One that cannot resume fails at once, with nothing to show as starting.
+    if (record.state === "expired" || record.state === "deleted" || driver.resume === undefined) {
+      return yield* resumeMarked(record, driver, since);
+    }
+    yield* markResuming(record.instanceId, since);
+    return yield* resumeMarked(record, driver, since).pipe(
+      Effect.ensuring(endResuming(record.instanceId, since)),
+    );
+  });
+
+  const resumeMarked = Effect.fn("SandboxProvisioner.resumeMarked")(function* (
+    record: SandboxRecord,
+    driver: SandboxProviderDriver,
+    now: string,
+  ) {
+    if (record.state === "expired" || record.state === "deleted") {
+      return yield* new SandboxProviderError({
+        provider: record.provider,
+        stage: "start",
+        code: record.state === "expired" ? "snapshot_expired" : "not_found",
+        detail:
+          record.state === "expired"
+            ? `${driver.info.label} no longer keeps this stopped sandbox's disk. Delete it and create a new one.`
+            : `${driver.info.label} no longer has this sandbox. Delete it and create a new one.`,
+      });
+    }
+    if (driver.resume === undefined) {
+      return yield* configError(record.provider, "This provider cannot resume a sandbox.");
+    }
+    const config = yield* recordConfig(driver, record);
+    // Providers such as Boat count a resume as a start, so it gets the same preflight as create.
+    const limits = yield* preflightStart(driver, config, undefined);
+    // Only a thread's sandbox keeps itself up; one a template is saved from keeps the running limit.
+    const keepAliveSettings =
+      driver.keepAlive === undefined || record.threadId === undefined
+        ? undefined
+        : yield* keepAliveSettingsOf(record);
+    const idleTtl =
+      keepAliveSettings === undefined
+        ? undefined
+        : keepAliveTtlMinutes(keepAliveSettings.idleMinutes, limits?.maxTtlMinutes);
+    const runningTtl = Math.min(record.maxRunningMinutes, limits?.maxTtlMinutes ?? Infinity);
+    const wasKeptAlive = idleTtl !== undefined && keepsItselfUp(record);
+    const resumed = yield* onHttp(
+      driver.resume({
+        config,
+        sandboxId: record.sandboxId,
+        // The running limit restarts with the sandbox and the provider's own TTL backs it up; a
+        // sandbox that keeps itself up gets its idle window, which its own checks then move.
+        ttlMinutes: wasKeptAlive ? idleTtl : runningTtl,
+      }),
+    );
+    const httpBaseUrl =
+      record.access === "tailnet" ? record.httpBaseUrl : (resumed.publicUrl ?? record.httpBaseUrl);
+    const rejoined = yield* onHttp(
+      rejoinTailnet(record, (script, timeoutSeconds) =>
+        driver.execute({
+          config,
+          sandboxId: record.sandboxId,
+          timeoutSeconds,
+          ...asScript(script),
+        }),
+      ),
+    );
+    // Each writes its own files and none reads another's. The keep-alive key, guidance and helper
+    // must land before T3 starts (its loop and first agent session read them); the GitHub token
+    // only before an agent runs, so it goes here rather than on the path after T3 is up.
+    const [kept, guidance, helper, github] = yield* Effect.all(
+      [
+        keepAliveSettings === undefined || idleTtl === undefined
+          ? Effect.succeed({ keepAliveKey: record.keepAliveKey, warning: null })
+          : resumeKeepAlive(driver, config, record, idleTtl),
+        // Every resume rewrites T3 Code's skill and instructions block, so a sandbox made before
+        // them, or with older text, has the current ones by the first agent session.
+        onHttp(
+          driver.execute({
+            config,
+            sandboxId: record.sandboxId,
+            command: sandboxAgentGuidanceScript(),
+            timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.agentGuidance,
+          }),
+        ).pipe(
+          Effect.as<string | null>(null),
+          Effect.orElseSucceed(() => SANDBOX_AGENT_GUIDANCE_WARNING),
+        ),
+        // Every resume rewrites the sub-sandbox helper, so one made before it existed gets it and
+        // an older copy is replaced. Only a chat's sandbox has it.
+        record.threadId === undefined || record.parentThreadId !== undefined
+          ? Effect.succeed<string | null>(null)
+          : onHttp(
+              driver.execute({
+                config,
+                sandboxId: record.sandboxId,
+                timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.subSandboxHelper,
+                ...subSandboxHelperScript(),
+              }),
+            ).pipe(
+              Effect.as<string | null>(null),
+              Effect.orElseSucceed(() => SUB_SANDBOX_HELPER_WARNING),
+            ),
+        // The token a stopped sandbox kept has most likely expired.
+        refreshGithubToken(record, (script, timeoutSeconds) =>
+          onHttp(
+            driver.execute({
+              config,
+              sandboxId: record.sandboxId,
+              timeoutSeconds,
+              ...asScript(script),
+            }),
+          ),
+        ),
+      ],
+      { concurrency: "unbounded" },
+    );
+    // What the record says from here, so an error state does not lose a new key or token.
+    const withResumed = (next: SandboxRecord): SandboxRecord => {
+      const withGithub =
+        github.githubApp === undefined ? next : { ...next, githubApp: github.githubApp };
+      if (keepAliveSettings === undefined) return withGithub;
+      const {
+        keepAliveKey: _keepAliveKey,
+        idleMinutes: _idleMinutes,
+        runningCapMinutes: _runningCapMinutes,
+        ...rest
+      } = withGithub;
+      return {
+        ...rest,
+        idleMinutes: keepAliveSettings.idleMinutes,
+        ...(keepAliveSettings.runningCapMinutes === undefined
+          ? {}
+          : { runningCapMinutes: keepAliveSettings.runningCapMinutes }),
+        ...(kept.keepAliveKey === undefined ? {} : { keepAliveKey: kept.keepAliveKey }),
+      };
+    };
+    const errored = (detail: string, cause?: unknown) =>
+      records
+        .put(
+          withResumed({
+            ...record,
+            state: "error",
+            runningSince: now,
+            updatedAt: now,
+            httpBaseUrl,
+          }),
+        )
+        .pipe(
+          Effect.orDie,
+          Effect.andThen(
+            Effect.fail(
+              new SandboxProviderError({
+                provider: record.provider,
+                stage: "start",
+                detail,
+                ...(cause === undefined ? {} : { cause }),
+              }),
+            ),
+          ),
+        );
+    yield* onHttp(
+      driver.execute({
+        config,
+        sandboxId: record.sandboxId,
+        command: startScript(driver),
+        // The bridge waits out every step's limit for a turn on this sandbox's host thread.
+        timeoutSeconds: SANDBOX_RESUME_STEP_SECONDS.t3Start,
+      }),
+    ).pipe(
+      Effect.catch((cause) =>
+        errored("The sandbox resumed, but T3 Code did not start on it.", cause),
+      ),
+    );
+    // A key set up just now moves the auto-stop to the idle window; one lost falls back to the limit.
+    const keptAlive = kept.keepAliveKey?.id !== undefined && idleTtl !== undefined;
+    if (keptAlive !== wasKeptAlive) {
+      yield* keepAliveFromNow(
+        driver,
+        config,
+        record.sandboxId,
+        keptAlive && idleTtl !== undefined ? idleTtl : runningTtl,
+      );
+    }
+    // Saving a template resets T3 on its source; one that failed to save comes back as a different
+    // environment, which the client's saved connection cannot reach.
+    const described = yield* onHttp(
+      requestJson({
+        provider: record.provider,
+        stage: "start",
+        schema: ExecutionEnvironmentDescriptor,
+        request: HttpClientRequest.get(
+          `${httpBaseUrl.replace(/\/+$/, "")}/.well-known/t3/environment`,
+        ),
+      }),
+    ).pipe(Effect.option);
+    if (Option.isSome(described) && described.value.environmentId !== record.environmentId) {
+      return yield* errored(
+        "T3 Code on this sandbox was reset, so it cannot reconnect as this environment. Delete it.",
+      );
+    }
+    const { stoppedAt: _stoppedAt, ...rest } = record;
+    const updated: SandboxRecord = withResumed({
+      ...rest,
+      state: "running",
+      runningSince: now,
+      updatedAt: now,
+      httpBaseUrl,
+      ...(rejoined.tailscale === undefined ? {} : { tailscale: rejoined.tailscale }),
+    });
+    yield* records.put(updated).pipe(Effect.orDie);
+    // The bridge reads the sandbox's address from its link, and its bearer may be near expiry.
+    const bridged =
+      updated.bridge === undefined
+        ? { record: updated, warning: null }
+        : yield* ensureBridge(updated, runOnRecord(updated)).pipe(
+            Effect.map((bridge) => ({ record: { ...updated, bridge }, warning: null })),
+            Effect.catch((error) =>
+              Effect.succeed({
+                record: updated,
+                warning: `Phones may not reach this thread: ${error.detail}`,
+              }),
+            ),
+          );
+    if (bridged.record !== updated) yield* records.put(bridged.record).pipe(Effect.orDie);
+    const warnings = [
+      rejoined.warning,
+      kept.warning,
+      guidance,
+      helper,
+      github.warning,
+      bridged.warning,
+    ].filter((warning): warning is string => warning !== null);
+    return {
+      sandbox: bridged.record,
+      httpBaseUrl: bridged.record.httpBaseUrl,
+      ...(warnings.length === 0 ? {} : { warnings }),
+    } satisfies SandboxResumeResult;
+  });
+
+  const templates = Effect.fn("SandboxProvisioner.templates")(function* (
+    input: SandboxTemplatesInput,
+  ) {
+    const driver = findDriver(input.provider);
+    if (driver.listTemplates === undefined)
+      return { templates: [] } satisfies SandboxTemplatesResult;
+    const config = yield* resolveConfig(driver).pipe(Effect.option);
+    if (Option.isNone(config)) return { templates: [] } satisfies SandboxTemplatesResult;
+    const listed = yield* onHttp(driver.listTemplates({ config: config.value }));
+    return listed satisfies SandboxTemplatesResult;
+  });
+
+  const saveTemplate = Effect.fn("SandboxProvisioner.saveTemplate")(function* (
+    input: SandboxSaveTemplateInput,
+  ) {
+    const record = yield* readRecord(input.instanceId);
+    const driver = findDriver(record.provider);
+    const { saveTemplate: save, stop: stopMachine } = driver;
+    if (save === undefined || stopMachine === undefined) {
+      return yield* configError(record.provider, "This provider cannot save templates.");
+    }
+    // Saving deletes the source, which would take a thread's machine and its work with it.
+    if (record.threadId !== undefined) {
+      return yield* configError(
+        record.provider,
+        "A thread's sandbox cannot be saved as a template. Start a template sandbox from Templates instead.",
+      );
+    }
+    // The reset runs on the machine. Resuming here would spend a start nobody confirmed.
+    if (record.state !== "running") {
+      return yield* configError(
+        record.provider,
+        "Only a running sandbox can be saved as a template. Resume it first.",
+      );
+    }
+    const config = yield* recordConfig(driver, record);
+    // The provider refuses a save only after the reset would have run, so a plan that cannot save
+    // is refused here first. Unknown limits let the save through, as with starts.
+    const limits =
+      driver.limits === undefined
+        ? null
+        : yield* onHttp(driver.limits({ config })).pipe(Effect.orElseSucceed(() => null));
+    if (limits?.canSaveTemplates === false) {
+      return yield* new SandboxProviderError({
+        provider: record.provider,
+        stage: "config",
+        code: "templates_unavailable",
+        detail: `Your ${driver.info.label} plan cannot save templates. Nothing on this sandbox changed.`,
+      });
+    }
+    yield* onHttp(
+      driver.execute({
+        config,
+        sandboxId: record.sandboxId,
+        command: SCRUB_SCRIPT,
+        timeoutSeconds: 120,
+      }),
+    );
+    // From here T3's identity on the machine is gone, and resume refuses the different one it gets.
+    const afterReset = (error: SandboxProviderError) =>
+      new SandboxProviderError({
+        provider: error.provider,
+        stage: error.stage,
+        detail: `${error.detail} T3 Code on this sandbox was already reset, so it cannot reconnect. Delete it.`,
+        ...(error.status === undefined ? {} : { status: error.status }),
+        ...(error.code === undefined ? {} : { code: error.code }),
+        ...(error.retryAfterSeconds === undefined
+          ? {}
+          : { retryAfterSeconds: error.retryAfterSeconds }),
+        cause: error,
+      });
+    yield* onHttp(stopMachine({ config, sandboxId: record.sandboxId })).pipe(
+      Effect.mapError(afterReset),
+    );
+    const stoppedAt = yield* nowIso;
+    yield* records
+      .put({ ...record, state: "stopped", runningSince: null, stoppedAt, updatedAt: stoppedAt })
+      .pipe(Effect.orDie);
+    const template = yield* onHttp(
+      save({ config, sandboxId: record.sandboxId, name: input.name }),
+    ).pipe(Effect.mapError(afterReset));
+    yield* onHttp(driver.destroy({ config, sandboxId: record.sandboxId })).pipe(
+      Effect.catchIf(
+        (error) => error.code === "not_found",
+        () => Effect.void,
+      ),
+      Effect.andThen(records.remove(record.instanceId).pipe(Effect.orDie)),
+      // The scrub removed the token from the disk; the key on the hub goes with its sandbox.
+      Effect.andThen(releaseHubKey(record)),
+      // The scrub logged the node out; this covers a logout that never reached Tailscale.
+      Effect.andThen(releaseTailnetDevice(record)),
+      Effect.andThen(releaseGithubToken(record)),
+      Effect.andThen(releaseMapleKey(record)),
+      Effect.andThen(releaseRailwayToken(record)),
+      // The scrub stopped the loop and removed the key from the disk; Boat still holds it.
+      Effect.andThen(releaseKeepAliveKey(driver, Option.some(config), record)),
+      // The template is saved either way; a sandbox that survives stays listed for a manual delete.
+      Effect.catch((cause) =>
+        Effect.logWarning("sandbox delete after saving a template failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }),
+      ),
+    );
+    return { template } satisfies SandboxSaveTemplateResult;
+  });
+
+  const deleteTemplate = Effect.fn("SandboxProvisioner.deleteTemplate")(function* (
+    input: SandboxDeleteTemplateInput,
+  ) {
+    const driver = findDriver(input.provider);
+    if (driver.deleteTemplate === undefined) {
+      return yield* configError(input.provider, "This provider cannot delete templates.");
+    }
+    const config = yield* resolveConfig(driver);
+    yield* onHttp(driver.deleteTemplate({ config, name: input.name }));
+  });
+
+  // The sweep reads records, then waits on the provider; a user action in between wins.
+  const putIfUnchanged = Effect.fn("SandboxProvisioner.putIfUnchanged")(function* (
+    read: SandboxRecord,
+    next: SandboxRecord,
+  ) {
+    const current = yield* records.get(read.instanceId);
+    if (Option.isNone(current)) return;
+    if (current.value.updatedAt !== read.updatedAt || current.value.state !== read.state) return;
+    yield* records.put(next);
+  }, Effect.orDie);
+
+  // A state change from the provider moves the running clock and the stopped disk's age with it.
+  const withState = (
+    record: SandboxRecord,
+    state: SandboxRecord["state"],
+    now: string,
+  ): SandboxRecord => {
+    if (state === record.state) return record;
+    if (state === "running") {
+      const { stoppedAt: _stoppedAt, ...rest } = record;
+      return { ...rest, state, runningSince: record.runningSince ?? now, updatedAt: now };
+    }
+    if (state === "stopped") {
+      return {
+        ...record,
+        state,
+        runningSince: null,
+        stoppedAt: record.stoppedAt ?? now,
+        updatedAt: now,
+      };
+    }
+    return { ...record, state, updatedAt: now };
+  };
+
+  // A sandbox that keeps itself up stops on the provider's idle deadline instead, so only its
+  // optional cap applies; the status check then sees the provider's stop.
+  const pastRunningLimit = (record: SandboxRecord, now: DateTime.Utc) => {
+    const limit =
+      keepsItselfUp(record) && findDriver(record.provider).keepAlive !== undefined
+        ? record.runningCapMinutes
+        : record.maxRunningMinutes;
+    return (
+      limit !== undefined &&
+      record.runningSince !== null &&
+      DateTime.toEpochMillis(now) -
+        DateTime.toEpochMillis(DateTime.makeUnsafe(record.runningSince)) >=
+        limit * 60_000
+    );
+  };
+
+  /**
+   * The sandbox's key can move its own auto-stop, and agents on it can read the key. Its loop only
+   * ever sets the idle window from now, so an auto-stop that is off or further out was set by
+   * something else, and the host's key puts it back.
+   */
+  const guardAutoStop = Effect.fn("SandboxProvisioner.guardAutoStop")(function* (
+    record: SandboxRecord,
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+    keepAlive: SandboxKeepAlive,
+    autoStopAt: string | null,
+    now: DateTime.Utc,
+  ) {
+    const idleMinutes = record.idleMinutes ?? DEFAULT_SANDBOX_IDLE_MINUTES;
+    const windowMinutes = keepAliveTtlMinutes(idleMinutes, undefined);
+    const latest = DateTime.toEpochMillis(now) + (windowMinutes + AUTO_STOP_SLACK_MINUTES) * 60_000;
+    const at = autoStopAt === null ? Number.NaN : Date.parse(autoStopAt);
+    if (autoStopAt !== null && (Number.isNaN(at) || at <= latest)) return;
+    yield* Effect.logWarning("sandbox auto-stop moved past its idle window; resetting it", {
+      instanceId: record.instanceId,
+      sandboxId: record.sandboxId,
+      autoStopAt,
+    });
+    // The plan's maximum caps it as on create and resume; a trial refuses a longer TTL outright.
+    // Only read here, so a sweep with nothing to reset makes no extra call.
+    const limits =
+      driver.limits === undefined
+        ? null
+        : yield* onHttp(driver.limits({ config })).pipe(Effect.orElseSucceed(() => null));
+    const ttlMinutes = keepAliveTtlMinutes(idleMinutes, limits?.maxTtlMinutes);
+    yield* onHttp(keepAlive.extend({ config, sandboxId: record.sandboxId, ttlMinutes })).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("sandbox auto-stop reset failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }),
+      ),
+    );
+  });
+
+  // An unreachable provider says nothing about the machine, so the record keeps its state.
+  const readStatus = (
+    record: SandboxRecord,
+    driver: SandboxProviderDriver,
+    config: SandboxProviderConfig,
+  ) => {
+    const keepAlive = keepsItselfUp(record) ? driver.keepAlive : undefined;
+    const read: Effect.Effect<
+      { readonly status: SandboxProviderStatus | null; readonly autoStopAt?: string | null } | null,
+      SandboxProviderError,
+      HttpClient.HttpClient
+    > =
+      keepAlive !== undefined
+        ? keepAlive.status({ config, sandboxId: record.sandboxId })
+        : driver.status === undefined
+          ? Effect.succeed(null)
+          : driver
+              .status({ config, sandboxId: record.sandboxId })
+              .pipe(Effect.map((status) => ({ status })));
+    return onHttp(read).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("sandbox status check failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+  };
+
+  const refreshState = Effect.fn("SandboxProvisioner.refreshState")(function* (instanceId: string) {
+    const record = yield* readRecord(instanceId);
+    if (resumingNow.has(instanceId)) return record.state;
+    const driver = findDriver(record.provider);
+    const config = yield* recordConfig(driver, record);
+    const reported = yield* readStatus(record, driver, config);
+    const state = reconcileState(record.state, reported?.status ?? null);
+    if (state !== record.state) {
+      yield* putIfUnchanged(record, withState(record, state, yield* nowIso));
+      yield* listChanged;
+    }
+    return state;
+  });
+
+  const sweepRecord = Effect.fn("SandboxProvisioner.sweepRecord")(function* (
+    listed: SandboxRecord,
+    config: SandboxProviderConfig,
+    cost: SandboxUsage | undefined,
+    now: DateTime.Utc,
+  ) {
+    // A resume in flight decides the state; the limit must not stop the machine it is starting.
+    if (resumingNow.has(listed.instanceId)) return;
+    let record = listed;
+    if (listed.resumingSince !== undefined) {
+      const { resumingSince: _resumingSince, ...rest } = listed;
+      record = rest;
+      yield* putIfUnchanged(listed, record);
+      yield* listChanged;
+    }
+    const driver = findDriver(record.provider);
+    const nowText = DateTime.formatIso(now);
+    const withCost: SandboxRecord =
+      cost === undefined ? record : { ...record, costDollars: cost.dollars, costSince: cost.since };
+    // A resume that could not start T3 leaves the machine running (and billing) as `error`.
+    if (
+      pastRunningLimit(record, now) &&
+      (record.state === "running" || record.state === "error") &&
+      driver.stop
+    ) {
+      return yield* onHttp(driver.stop({ config, sandboxId: record.sandboxId })).pipe(
+        Effect.andThen(putIfUnchanged(record, withState(withCost, "stopped", nowText))),
+        Effect.andThen(listChanged),
+        Effect.catch((cause) =>
+          Effect.logWarning("sandbox running limit stop failed", {
+            instanceId: record.instanceId,
+            sandboxId: record.sandboxId,
+            cause,
+          }),
+        ),
+      );
+    }
+    const keepAlive = keepsItselfUp(record) ? driver.keepAlive : undefined;
+    const reported = yield* readStatus(record, driver, config);
+    const status = reported?.status ?? null;
+    const state = reconcileState(record.state, status);
+    if (
+      keepAlive !== undefined &&
+      record.state === "running" &&
+      state === "running" &&
+      reported?.autoStopAt !== undefined
+    ) {
+      yield* guardAutoStop(record, driver, config, keepAlive, reported.autoStopAt, now);
+    }
+    // An abandoned launch's machine that is gone leaves only its keys, which go with the record.
+    if (state === "deleted" && record.abandonedAt !== undefined) {
+      return yield* releaseRecord(record);
+    }
+    if (state !== record.state) {
+      yield* putIfUnchanged(record, withState(withCost, state, nowText));
+      yield* listChanged;
+    } else if (
+      withCost.costDollars !== record.costDollars ||
+      withCost.costSince !== record.costSince
+    ) {
+      // Cost alone is not a lifecycle change, so it keeps `updatedAt` and the list order.
+      yield* putIfUnchanged(record, withCost);
+    }
+  });
+
+  // Tagged sandboxes no record tracks are only reported: a user may have made them by hand.
+  const sweepOrphans = Effect.fn("SandboxProvisioner.sweepOrphans")(function* (
+    all: ReadonlyArray<SandboxRecord>,
+    configs: ReadonlyMap<SandboxProviderKind, SandboxProviderConfig>,
+  ) {
+    const host = yield* environmentIdentity.getEnvironmentId;
+    const tracked = new Set(all.map((record) => `${record.provider}:${record.sandboxId}`));
+    const found: Array<SandboxOrphan> = [];
+    for (const [provider, config] of configs) {
+      const { listSandboxes } = findDriver(provider);
+      if (listSandboxes === undefined) continue;
+      const listed = yield* onHttp(listSandboxes({ config, host })).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("sandbox orphan listing failed", { provider, cause }).pipe(
+            Effect.as(null),
+          ),
+        ),
+      );
+      if (listed === null) {
+        found.push(...(yield* Ref.get(orphans)).filter((orphan) => orphan.provider === provider));
+        continue;
+      }
+      for (const sandbox of listed) {
+        if (tracked.has(`${provider}:${sandbox.id}`)) continue;
+        if (sandbox.instance !== undefined && liveInstances.has(sandbox.instance)) continue;
+        found.push({
+          provider,
+          sandboxId: sandbox.id,
+          name: sandbox.name,
+          ...(sandbox.instance === undefined ? {} : { instanceId: sandbox.instance }),
+          ...(sandbox.createdAt === undefined ? {} : { createdAt: sandbox.createdAt }),
+        });
+      }
+    }
+    // Forks carry no tag of this server; the environment made for their sandbox finds them.
+    for (const record of all) {
+      const reference = record.agentProviderAccess;
+      const config = configs.get(record.provider);
+      const { agentAccess } = findDriver(record.provider);
+      if (reference === undefined || config === undefined || agentAccess === undefined) continue;
+      const listed = yield* onHttp(
+        agentAccess.listSandboxes({
+          config: withSettings(config, record.providerSettings),
+          environmentName: reference.environmentName,
+        }),
+      ).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("sandbox fork listing failed", {
+            instanceId: record.instanceId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      if (listed === null) {
+        found.push(
+          ...(yield* Ref.get(orphans)).filter((orphan) => orphan.forkOf === record.instanceId),
+        );
+        continue;
+      }
+      for (const sandbox of listed) {
+        if (tracked.has(`${record.provider}:${sandbox.id}`)) continue;
+        if (found.some((orphan) => orphan.sandboxId === sandbox.id)) continue;
+        found.push({
+          provider: record.provider,
+          sandboxId: sandbox.id,
+          name: sandbox.name,
+          forkOf: record.instanceId,
+          ...(sandbox.createdAt === undefined ? {} : { createdAt: sandbox.createdAt }),
+        });
+      }
+    }
+    yield* Ref.set(orphans, found);
+  });
+
+  // Releases a record's machine, hub key, tailnet device and scoped key. Forks are the user's to
+  // delete, never the sweep's.
+  const releaseRecord = (record: SandboxRecord) =>
+    removeSandbox(
+      { provider: record.provider, sandboxId: record.sandboxId, instanceId: record.instanceId },
+      false,
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("abandoned sandbox cleanup failed", {
+          instanceId: record.instanceId,
+          sandboxId: record.sandboxId,
+          cause,
+        }),
+      ),
+    );
+
+  // A machine still up after its launch was lost is the user's call: it shows as failed, with
+  // Delete in the list and a new launch on its card.
+  const abandonLaunch = Effect.fn("SandboxProvisioner.abandonLaunch")(function* (
+    record: SandboxRecord,
+    now: string,
+  ) {
+    yield* putIfUnchanged(record, { ...withState(record, "error", now), abandonedAt: now });
+    const { threadId, configId } = record;
+    if (threadId === undefined || configId === undefined) return;
+    if ((yield* tracker.get(threadId)) !== null) return;
+    yield* tracker.begin({
+      threadId,
+      instanceId: record.instanceId,
+      configId,
+      label: record.label,
+      provider: record.provider,
+    });
+    yield* tracker.finish(threadId, "failed", { error: LAUNCH_ABANDONED, recovery: "relaunch" });
+  });
+
+  const sweepProvisioning = Effect.fn("SandboxProvisioner.sweepProvisioning")(function* (
+    record: SandboxRecord,
+    now: string,
+  ) {
+    // An unreachable provider says nothing about the machine, so the record waits for a later sweep.
+    const status = yield* providerStatus(record);
+    if (status === null) return;
+    const live = [...launches.values()].find(
+      (candidate) =>
+        candidate.instanceId === record.instanceId && candidate.fiber.pollUnsafe() === undefined,
+    );
+    if (live !== undefined || liveInstances.has(record.instanceId)) {
+      // Deleted at the provider mid-launch: stopping the launch releases everything it made.
+      if (status !== "deleted") return;
+      if (live !== undefined) yield* stopLaunch(live, LAUNCH_DELETED_OUTSIDE);
+      else yield* Fiber.interrupt(liveInstances.get(record.instanceId)!);
+      return;
+    }
+    // A launch lost with its server (a restart mid-launch) has nobody left to finish it.
+    if (status === "deleted") return yield* releaseRecord(record);
+    yield* abandonLaunch(record, now);
+  });
+
+  // Only a sandbox that is running gets a new token: running a command on a stopped Boat machine
+  // restores it, which counts as a start. A stopped sandbox gets one when it resumes.
+  const refreshDueGithubTokens = Effect.fn("SandboxProvisioner.refreshDueGithubTokens")(function* (
+    now: DateTime.Utc,
+  ) {
+    const due = (yield* records.list.pipe(Effect.orDie)).filter(
+      (record) =>
+        record.state === "running" &&
+        record.githubApp !== undefined &&
+        !liveInstances.has(record.instanceId) &&
+        Date.parse(record.githubApp.expiresAt) - DateTime.toEpochMillis(now) <=
+          GITHUB_TOKEN_REFRESH_MS,
+    );
+    for (const record of due) {
+      if ((yield* providerStatus(record)) !== "running") continue;
+      const refreshed = yield* refreshGithubToken(record, runOnRecord(record));
+      if (refreshed.warning !== null) {
+        yield* Effect.logWarning("sandbox github token refresh failed", {
+          instanceId: record.instanceId,
+          detail: refreshed.warning,
+        });
+        continue;
+      }
+      // Not a lifecycle change, so `updatedAt` and the list order stay.
+      const current = yield* records.get(record.instanceId).pipe(Effect.orDie);
+      if (Option.isNone(current)) {
+        if (refreshed.githubApp !== undefined) {
+          yield* releaseGithubToken({ label: record.label, githubApp: refreshed.githubApp });
+        }
+        continue;
+      }
+      yield* records
+        .put({
+          ...current.value,
+          ...(refreshed.githubApp === undefined ? {} : { githubApp: refreshed.githubApp }),
+        })
+        .pipe(Effect.orDie);
+    }
+  });
+
+  const sweep = Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const all = yield* records.list.pipe(Effect.orDie);
+    yield* Effect.forEach(
+      all.filter((record) => record.state === "provisioning"),
+      (record) => sweepProvisioning(record, DateTime.formatIso(now)),
+      { concurrency: 4, discard: true },
+    );
+    const live = all.filter(
+      (record) => record.state !== "deleted" && record.state !== "provisioning",
+    );
+    const current = new Map<SandboxProviderKind, SandboxProviderConfig>();
+    const providersInUse = new Set([
+      ...live.map((record) => record.provider),
+      ...(yield* configStore.list.pipe(Effect.orElseSucceed(() => []))).map(
+        (config) => config.provider,
+      ),
+    ]);
+    for (const provider of providersInUse) {
+      const resolved = yield* resolveConfig(findDriver(provider)).pipe(Effect.option);
+      if (Option.isSome(resolved)) current.set(provider, resolved.value);
+    }
+    const targets = live.flatMap((record) => {
+      const base = current.get(record.provider);
+      if (base === undefined) return [];
+      const config = withSettings(base, record.providerSettings);
+      // Usage is read once per provider and settings, since settings can scope the account.
+      const scope = `${record.provider}:${JSON.stringify(Object.entries(config.settings).toSorted())}`;
+      return [{ record, config, scope }];
+    });
+    const costs = new Map<string, ReadonlyMap<string, SandboxUsage>>();
+    const scopes = new Map(targets.map((target) => [target.scope, target]));
+    for (const { record, config, scope } of scopes.values()) {
+      const { usage } = findDriver(record.provider);
+      if (usage === undefined) continue;
+      yield* onHttp(usage({ config })).pipe(
+        Effect.tap((read) => Effect.sync(() => costs.set(scope, read))),
+        Effect.catch((cause) =>
+          Effect.logWarning("sandbox usage read failed", { provider: record.provider, cause }),
+        ),
+      );
+    }
+    yield* Effect.forEach(
+      targets,
+      ({ record, config, scope }) =>
+        sweepRecord(record, config, costs.get(scope)?.get(record.sandboxId), now),
+      { concurrency: 4, discard: true },
+    );
+    yield* sweepOrphans(yield* records.list.pipe(Effect.orDie), current);
+    yield* refreshDueGithubTokens(now);
+  });
+
+  return SandboxProvisioner.of({
+    providers,
+    create,
+    createSubSandbox,
+    delete: remove,
+    removed: Stream.fromPubSub(removedRecords),
+    // Not the revision current at subscribe: a client reads the list as it subscribes, so that
+    // one would only make it read the list again.
+    listChanges: SubscriptionRef.changes(listRevision).pipe(Stream.drop(1)),
+    environments,
+    limits,
+    list,
+    stop,
+    resume,
+    refreshState,
+    checkWork,
+    setSettlePending,
+    runScript,
+    templates,
+    saveTemplate,
+    deleteTemplate,
+    configs,
+    saveConfig,
+    deleteConfig,
+    launch,
+    subscribeLaunch: (input) => tracker.stream(input.threadId),
+    cancelLaunch,
+    retryLaunch,
+    pairLaunch,
+    connectThread,
+    launching,
+    markLaunchLost,
+    launchLifecycle: tracker.lifecycle,
+    checkTailscale,
+    connectGithubApp,
+    connectRailway,
+    sweep,
+    linkBridge,
+  });
+});
+
+export const layer = Layer.effect(SandboxProvisioner, make);
+
+/** The provisioner with the host access, provider HTTP client and record stores only it uses. */
+export const layerRuntime = layer.pipe(
+  Layer.provide(SandboxHostAccess.layer),
+  Layer.provide(ProjectStore.layer),
+  Layer.provide(layerHttpClient),
+  Layer.provide(Layer.merge(SandboxRecords.layer, SandboxRecords.layerConfigs)),
+);
+
+export const layerSweep = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const provisioner = yield* SandboxProvisioner;
+    yield* forkParked(
+      provisioner.sweep.pipe(
+        Effect.catchCause((cause) => Effect.logWarning("sandbox sweep failed", { cause })),
+        Effect.repeat(Schedule.spaced("1 minute")),
+      ),
+    );
+  }),
+);
+
+/** The sandbox WebSocket RPC handlers, each a call to one provisioner method. */
+export const rpcHandlers = Effect.gen(function* () {
+  const sandboxes = yield* SandboxProvisioner;
+  return {
+    [WS_METHODS.sandboxesProviders]: () => sandboxes.providers,
+    [WS_METHODS.sandboxesEnvironments]: (input: SandboxCredentialEnvironmentsInput) =>
+      sandboxes.environments(input),
+    [WS_METHODS.sandboxesLimits]: (input: SandboxLimitsInput) => sandboxes.limits(input),
+    [WS_METHODS.sandboxesCreate]: (input: SandboxCreateInput) => sandboxes.create(input),
+    [WS_METHODS.sandboxesDelete]: (input: SandboxDeleteInput) => sandboxes.delete(input),
+    [WS_METHODS.sandboxesList]: () => sandboxes.list,
+    [WS_METHODS.sandboxesSubscribeListChanges]: () => sandboxes.listChanges,
+    [WS_METHODS.sandboxesStop]: (input: SandboxLifecycleInput) => sandboxes.stop(input),
+    [WS_METHODS.sandboxesResume]: (input: SandboxLifecycleInput) => sandboxes.resume(input),
+    [WS_METHODS.sandboxesCheckWork]: (input: SandboxLifecycleInput) => sandboxes.checkWork(input),
+    [WS_METHODS.sandboxesTemplates]: (input: SandboxTemplatesInput) => sandboxes.templates(input),
+    [WS_METHODS.sandboxesSaveTemplate]: (input: SandboxSaveTemplateInput) =>
+      sandboxes.saveTemplate(input),
+    [WS_METHODS.sandboxesDeleteTemplate]: (input: SandboxDeleteTemplateInput) =>
+      sandboxes.deleteTemplate(input),
+    [WS_METHODS.sandboxesConfigs]: () => sandboxes.configs,
+    [WS_METHODS.sandboxesSaveConfig]: (input: SandboxSaveConfigInput) =>
+      sandboxes.saveConfig(input),
+    [WS_METHODS.sandboxesDeleteConfig]: (input: SandboxDeleteConfigInput) =>
+      sandboxes.deleteConfig(input),
+    [WS_METHODS.sandboxesLaunch]: (input: SandboxLaunchInput) => sandboxes.launch(input),
+    [WS_METHODS.sandboxesSubscribeLaunch]: (input: SandboxLaunchThreadInput) =>
+      sandboxes.subscribeLaunch(input),
+    [WS_METHODS.sandboxesCancelLaunch]: (input: SandboxLaunchThreadInput) =>
+      sandboxes.cancelLaunch(input),
+    [WS_METHODS.sandboxesRetryLaunch]: (input: SandboxLaunchThreadInput) =>
+      sandboxes.retryLaunch(input).pipe(Effect.asVoid),
+    [WS_METHODS.sandboxesPairLaunch]: (input: SandboxLaunchThreadInput) =>
+      sandboxes.pairLaunch(input),
+    [WS_METHODS.sandboxesConnectThread]: (input: SandboxLaunchThreadInput) =>
+      sandboxes.connectThread(input),
+    [WS_METHODS.sandboxesCheckTailscale]: (input: SandboxTailscaleCheckInput) =>
+      sandboxes.checkTailscale(input),
+    [WS_METHODS.sandboxesConnectGithubApp]: (input: SandboxConnectGithubAppInput) =>
+      sandboxes.connectGithubApp(input),
+    [WS_METHODS.sandboxesConnectRailway]: (input: SandboxConnectRailwayInput) =>
+      sandboxes.connectRailway(input),
+  };
+});

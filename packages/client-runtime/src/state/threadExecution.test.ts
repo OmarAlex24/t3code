@@ -10,6 +10,7 @@ import {
   RunAttemptId,
   RunId,
   RuntimeRequestId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   ThreadId,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2RunStatus,
@@ -344,6 +345,20 @@ describe("thread execution presentation", () => {
     expect(
       deriveThreadActivityRun({ ...starting, providerSessions: [] })?.providerStartingLabel,
     ).toBe("Starting");
+    const bridgeInstanceId = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
+    expect(
+      deriveThreadActivityRun({
+        ...starting,
+        runs: [{ ...openRun, providerInstanceId: bridgeInstanceId }],
+        providerSessions: [
+          {
+            ...session,
+            driver: ProviderDriverKind.make("acpRegistry"),
+            providerInstanceId: bridgeInstanceId,
+          },
+        ],
+      })?.providerStartingLabel,
+    ).toBe("Starting sandbox");
     expect(
       deriveThreadActivityRun({
         ...starting,

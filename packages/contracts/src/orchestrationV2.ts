@@ -42,7 +42,7 @@ import {
   TurnItemId,
 } from "./baseSchemas.ts";
 import { AuthMcpClientAccess } from "./auth.ts";
-import { ChatAttachment } from "./chatAttachment.ts";
+import { ChatAttachment, ChatImageAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
 import { ThreadTitleRegenerationOutcome } from "./threadTitle.ts";
@@ -91,6 +91,9 @@ import { ThreadTokenUsageSnapshot } from "./providerRuntime.ts";
 
 export const OrchestrationV2Actor = Schema.Literals(["user", "agent", "system"]);
 export type OrchestrationV2Actor = typeof OrchestrationV2Actor.Type;
+
+/** How the server's own follow-up begins after a restart or a lifted usage limit cut a turn short. */
+export const CONTINUE_AFTER_INTERRUPTION_PROMPT = "Continue where you left off.";
 
 export const OrchestrationV2CreationSource = Schema.Literals([
   "web",
@@ -1611,6 +1614,29 @@ export type OrchestrationV2ModelSwitch = typeof OrchestrationV2ModelSwitch.Type;
 
 const AssistantMessagePhase = Schema.Literals(["commentary", "partial_answer", "final_answer"]);
 
+/**
+ * Read-only: the removed milestones feature left these turn items and `thread.milestones-updated`
+ * events in existing logs, which replay must still decode. Clients skip them; nothing writes them.
+ */
+const LegacyMilestoneTurnItemFields = {
+  type: Schema.Literal("milestone"),
+  event: Schema.String,
+  milestoneId: Schema.NullOr(Schema.String),
+  setId: Schema.NullOr(Schema.String),
+  planned: Schema.optional(
+    Schema.Array(Schema.Struct({ id: Schema.String, title: Schema.String })),
+  ),
+  closedMilestoneId: Schema.optional(Schema.String),
+  note: Schema.optional(Schema.String),
+  reason: Schema.optional(Schema.String),
+  previousTitle: Schema.optional(Schema.String),
+  attachments: Schema.optional(Schema.Array(ChatImageAttachment)),
+} as const;
+const LegacyMilestonesUpdatePayload = Schema.Struct({
+  milestones: Schema.Array(Schema.Unknown),
+  replace: Schema.optional(Schema.Literal(true)),
+});
+
 const OrchestrationV2TurnItemBaseFields = {
   /** Wire-only cursor for collapsed work; persisted items keep their complete history. */
   deferredWork: Schema.optionalKey(
@@ -1934,6 +1960,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
+    ...LegacyMilestoneTurnItemFields,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("dynamic_tool"),
     toolName: Schema.NullOr(TrimmedNonEmptyString),
     viewedImagePath: Schema.optional(TrimmedNonEmptyString),
@@ -2032,6 +2062,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.visit-recorded"),
     payload: OrchestrationV2ThreadVisit,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.milestones-updated"),
+    payload: LegacyMilestonesUpdatePayload,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2815,6 +2850,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
+    ...LegacyMilestoneTurnItemFields,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("dynamic_tool"),
     toolName: Schema.NullOr(TrimmedNonEmptyString),
     viewedImagePath: Schema.optional(TrimmedNonEmptyString),
@@ -2979,6 +3018,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.visit-recorded"),
     payload: OrchestrationV2ThreadVisitJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.milestones-updated"),
+    payload: LegacyMilestonesUpdatePayload,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,

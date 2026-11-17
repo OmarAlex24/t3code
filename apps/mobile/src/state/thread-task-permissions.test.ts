@@ -180,6 +180,7 @@ vi.mock("./threads", async () => {
       sequenceAtom: () => Atom.make(0),
       pendingRequestsAtom: () => Atom.make(state.pendingRequests),
     },
+    sandboxStartQueue: { sandboxStartRunId: () => Atom.make(null) },
     threadEnvironment: {
       respondToApproval: state.approve,
       respondToUserInput: state.answer,

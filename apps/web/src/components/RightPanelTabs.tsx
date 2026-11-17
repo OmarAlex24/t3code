@@ -162,7 +162,17 @@ export interface RightPanelTabsProps {
   /** Overrides the default reason while side chats are available but cannot start. */
   sideChatDisabledReason?: string | null;
   pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
+  /**
+   * A sandbox chat's host mirror: the surfaces that need the sandbox say so, and the empty panel
+   * offers the action that connects this client to it.
+   */
+  sandboxConnect?: SandboxSurfaceConnect | null;
   children: ReactNode;
+}
+
+export interface SandboxSurfaceConnect {
+  readonly reason: string;
+  readonly action: ReactNode;
 }
 
 export interface PullRequestTabStatus {
@@ -344,6 +354,7 @@ function RightPanelEmptyState(props: {
   deviceAvailable: boolean;
   sideChatAvailable: boolean;
   sideChatDisabledReason: string | null;
+  sandboxConnect: SandboxSurfaceConnect | null;
 }) {
   const gt = useGT();
   const messages = useMessages();
@@ -355,7 +366,7 @@ function RightPanelEmptyState(props: {
       icon: Globe2,
       shortcut: "B",
       available: props.browserAvailable,
-      disabledReason: messages(SURFACE_UNAVAILABLE_HINTS.browser),
+      disabledReason: props.sandboxConnect?.reason ?? messages(SURFACE_UNAVAILABLE_HINTS.browser),
       onClick: props.onAddBrowser,
     },
     {
@@ -363,7 +374,7 @@ function RightPanelEmptyState(props: {
       icon: TerminalSquare,
       shortcut: "T",
       available: props.terminalAvailable,
-      disabledReason: messages(SURFACE_UNAVAILABLE_HINTS.terminal),
+      disabledReason: props.sandboxConnect?.reason ?? messages(SURFACE_UNAVAILABLE_HINTS.terminal),
       onClick: props.onAddTerminal,
     },
     {
@@ -371,7 +382,7 @@ function RightPanelEmptyState(props: {
       icon: Files,
       shortcut: "F",
       available: props.filesAvailable,
-      disabledReason: messages(SURFACE_UNAVAILABLE_HINTS.files),
+      disabledReason: props.sandboxConnect?.reason ?? messages(SURFACE_UNAVAILABLE_HINTS.files),
       onClick: props.onAddFiles,
     },
     {
@@ -379,7 +390,7 @@ function RightPanelEmptyState(props: {
       icon: FileDiff,
       shortcut: "D",
       available: props.diffAvailable,
-      disabledReason: messages(SURFACE_UNAVAILABLE_HINTS.diff),
+      disabledReason: props.sandboxConnect?.reason ?? messages(SURFACE_UNAVAILABLE_HINTS.diff),
       onClick: props.onAddDiff,
     },
     {
@@ -387,7 +398,8 @@ function RightPanelEmptyState(props: {
       icon: PullRequestGlyph.pullRequest,
       shortcut: "P",
       available: props.pullRequestAvailable,
-      disabledReason: messages(SURFACE_UNAVAILABLE_HINTS.pullRequest),
+      disabledReason:
+        props.sandboxConnect?.reason ?? messages(SURFACE_UNAVAILABLE_HINTS.pullRequest),
       onClick: props.onAddPullRequest,
     },
     {
@@ -578,6 +590,15 @@ function RightPanelEmptyState(props: {
             ),
           )}
         </div>
+        {props.sandboxConnect === null ? null : (
+          <div className="mt-4 flex flex-col items-center gap-2 border-t pt-4">
+            <p className="text-center text-muted-foreground text-xs">
+              Terminal, files, diff and previews run on this chat's sandbox.{" "}
+              {props.sandboxConnect.reason}
+            </p>
+            {props.sandboxConnect.action}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1174,7 +1195,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       icon: Globe2,
       shortcut: "B",
       available: props.browserAvailable,
-      disabledReason: messages(SURFACE_DISABLED_REASONS.browser),
+      disabledReason: props.sandboxConnect?.reason ?? messages(SURFACE_DISABLED_REASONS.browser),
       onClick: props.onAddBrowser,
     },
     {
@@ -1182,7 +1203,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       icon: TerminalSquare,
       shortcut: "T",
       available: props.terminalAvailable,
-      disabledReason: messages(SURFACE_DISABLED_REASONS.terminal),
+      disabledReason: props.sandboxConnect?.reason ?? messages(SURFACE_DISABLED_REASONS.terminal),
       onClick: props.onAddTerminal,
     },
     {
@@ -1190,7 +1211,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       icon: Files,
       shortcut: "F",
       available: props.filesAvailable,
-      disabledReason: messages(SURFACE_DISABLED_REASONS.files),
+      disabledReason: props.sandboxConnect?.reason ?? messages(SURFACE_DISABLED_REASONS.files),
       onClick: props.onAddFiles,
     },
     {
@@ -1198,7 +1219,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       icon: FileDiff,
       shortcut: "D",
       available: props.diffAvailable,
-      disabledReason: messages(SURFACE_DISABLED_REASONS.diff),
+      disabledReason: props.sandboxConnect?.reason ?? messages(SURFACE_DISABLED_REASONS.diff),
       onClick: props.onAddDiff,
     },
     {
@@ -1206,7 +1227,8 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       icon: PullRequestGlyph.pullRequest,
       shortcut: "P",
       available: props.pullRequestAvailable,
-      disabledReason: messages(SURFACE_DISABLED_REASONS.pullRequest),
+      disabledReason:
+        props.sandboxConnect?.reason ?? messages(SURFACE_DISABLED_REASONS.pullRequest),
       onClick: props.onAddPullRequest,
     },
     {
@@ -1652,6 +1674,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             deviceAvailable={props.deviceAvailable}
             sideChatAvailable={props.sideChatAvailable === true}
             sideChatDisabledReason={props.sideChatDisabledReason ?? null}
+            sandboxConnect={props.sandboxConnect ?? null}
           />
         ) : (
           props.children

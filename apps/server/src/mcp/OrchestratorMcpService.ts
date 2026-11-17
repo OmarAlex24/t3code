@@ -138,6 +138,7 @@ import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./t
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as SubSandboxes from "../sandbox/SubSandboxes.ts";
 
 // Return recoverable handles before common MCP client timeouts expire.
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -1139,6 +1140,8 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
         : `Asked the user to link ${item.url ?? "an environment"}: ${item.linkStatus}.`;
     case "subagent":
       return item.result ?? item.progress ?? item.prompt;
+    case "milestone":
+      return null;
     case "dynamic_tool":
       return jsonText({ toolName: item.toolName, input: item.input, output: item.output });
   }
@@ -1277,6 +1280,8 @@ const make = Effect.gen(function* () {
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
+  // Only servers that make sandboxes have it.
+  const subSandboxes = yield* Effect.serviceOption(SubSandboxes.SubSandboxes);
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -2134,6 +2139,90 @@ const make = Effect.gen(function* () {
       effect.pipe(Effect.timeoutOption(Duration.millis(timeoutMs)), Effect.map(Option.flatten)),
   );
 
+  /**
+   * `delegate_task` with `target.sandbox`: the child runs on a new sandbox of its own, made from
+   * this thread's sandbox config within its limits and linked here, as a task in a linked
+   * environment. Its sandbox ends with the task (`RemoteDelegation` settles it).
+   */
+  const delegateToSubSandbox = Effect.fn("OrchestratorMcpService.delegateToSubSandbox")(function* (
+    callerScope: McpInvocationScope,
+    input: OrchestratorMcpDelegateTaskInput,
+    request: NonNullable<NonNullable<OrchestratorMcpDelegateTaskInput["target"]>["sandbox"]>,
+  ) {
+    if (input.target?.environmentId !== undefined) {
+      return yield* failure(
+        "invalid_request",
+        "target.sandbox starts a new sandbox for the child, so it cannot also run in target.environmentId. Pass one or the other.",
+      );
+    }
+    if (input.target?.projectId !== undefined) {
+      return yield* failure(
+        "invalid_request",
+        "A child on its own sandbox works on a clone of this thread's project. Omit target.projectId.",
+      );
+    }
+    if (input.isolation === "worktree") {
+      return yield* failure(
+        "invalid_request",
+        "A child on its own sandbox already works in a separate clone. Omit isolation.",
+      );
+    }
+    if (Option.isNone(subSandboxes)) {
+      return yield* failure(
+        "invalid_request",
+        "This machine cannot start sandboxes for subagents. Run the task without target.sandbox.",
+      );
+    }
+    // A sandbox bills this machine's provider account, which a linked caller has no say over.
+    if (callerScope.client?.linked === true) {
+      return yield* failure(
+        "capability_denied",
+        "Work a linked environment started cannot start sandboxes on this machine.",
+      );
+    }
+    const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+    // Checked before a sandbox is made for nothing; the linked task checks it again.
+    const parentRun = parent.runs
+      .filter(ThreadManagementService.isActiveRun)
+      .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+    if (
+      parentRun === undefined ||
+      parentRun.rootNodeId === null ||
+      parentRun.providerInstanceId !== scope.thread.providerInstanceId
+    ) {
+      return yield* failure(
+        "parent_not_active",
+        "Delegated tasks require an active run owned by this MCP provider session.",
+      );
+    }
+    const project = yield* requireProject(parent.thread.projectId);
+    const started = yield* subSandboxes.value.start({
+      parentThreadId: scope.thread.threadId,
+      projectId: parent.thread.projectId,
+      cwd: parent.thread.worktreePath ?? project.workspaceRoot,
+      size: request.size,
+    });
+    const { sandbox: _sandbox, ...target } = input.target ?? {};
+    const { taskId } = yield* remoteDelegation
+      .delegate(scope, {
+        ...input,
+        target: {
+          ...target,
+          environmentId: started.environmentId,
+          ...(started.projectId === undefined ? {} : { projectId: started.projectId }),
+        },
+      })
+      .pipe(
+        // No task will run there, so nothing else would ever end it.
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit) ? Effect.void : subSandboxes.value.discard(started.instanceId),
+        ),
+      );
+    return yield* input.mode === "wait"
+      ? awaitTask(scope, taskId, taskId, input.timeoutMs)
+      : readTask(scope, taskId, false, true);
+  });
+
   const refExists = (cwd: string, revision: string) =>
     gitDriver.resolveCommit({ cwd, revision }).pipe(
       Effect.as(true),
@@ -2677,6 +2766,9 @@ const make = Effect.gen(function* () {
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
+      if (input.target?.sandbox !== undefined) {
+        return yield* delegateToSubSandbox(callerScope, input, input.target.sandbox);
+      }
       const environmentId =
         input.target === undefined
           ? undefined

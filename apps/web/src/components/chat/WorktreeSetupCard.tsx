@@ -46,7 +46,7 @@ function LiveElapsed({ startedAt }: { startedAt: string }) {
 }
 
 /** A finished duration, or a ticking one while setup is still running. */
-function Elapsed({
+export function Elapsed({
   startedAt,
   endedAt,
   live,
@@ -64,7 +64,7 @@ function Elapsed({
   return live ? <LiveElapsed startedAt={startedAt} /> : null;
 }
 
-function StageIcon({ status }: { status: WorktreeSetupStage["status"] }) {
+export function StageIcon({ status }: { status: WorktreeSetupStage["status"] }) {
   const className = "size-4 shrink-0 stroke-2";
   switch (status) {
     case "done":
@@ -82,7 +82,7 @@ function StageIcon({ status }: { status: WorktreeSetupStage["status"] }) {
   }
 }
 
-function stageRowClassName(status: WorktreeSetupStage["status"]): string {
+export function stageRowClassName(status: WorktreeSetupStage["status"]): string {
   switch (status) {
     case "failed":
       return "text-destructive-foreground";
@@ -97,7 +97,7 @@ function stageRowClassName(status: WorktreeSetupStage["status"]): string {
   }
 }
 
-function ShimmerOverlay({ children }: { children: ReactNode }) {
+export function ShimmerOverlay({ children }: { children: ReactNode }) {
   return (
     <span
       aria-hidden

@@ -817,6 +817,7 @@ describe("null patches at project scope", () => {
       label: "fleet",
       members: [{ id: projectId, environmentId } as never],
       environmentIds: [environmentId],
+      followers: [],
     };
     const environments = [
       {
@@ -889,6 +890,7 @@ describe("partial object patches at project scope", () => {
         label: "fleet",
         members: [member as never],
         environmentIds: [environmentId],
+        followers: [],
       },
       [
         {

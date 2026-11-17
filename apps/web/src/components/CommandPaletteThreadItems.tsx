@@ -31,6 +31,8 @@ import {
   usePrimaryEnvironmentId,
 } from "../state/environments";
 import { useThreadSearch } from "../state/queries";
+import { useSandboxChatAliases, useSandboxRowStates } from "../state/sandboxes";
+import { sandboxChatAliasTarget, sandboxRowThread } from "../state/sandboxThreads";
 import { primaryServerProvidersAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -102,8 +104,17 @@ export function useCommandPaletteThreadItems(input: {
   const messages = useMessages();
   const gt = useGT();
   const navigate = useNavigate();
-  const threads = useVisibleThreadShells();
   const delegatedUnderParent = useDelegatedUnderParent();
+  // A sandbox chat is found as the one of its two threads the sidebar lists.
+  const sandboxChatAliases = useSandboxChatAliases();
+  const sandboxRowState = useSandboxRowStates();
+  const threads = useVisibleThreadShells().filter(
+    (thread) =>
+      sandboxChatAliasTarget(
+        sandboxChatAliases,
+        scopeThreadRef(thread.environmentId, thread.id),
+      ) === undefined,
+  );
   const { projectEnvironmentLocationById } = useEnvironmentLookups();
   const providerEntryByEnvironmentAndInstanceId = useProviderEntryByEnvironmentAndInstanceId();
   const messageSearch = useConnectedThreadSearch(threadSearchQuery);
@@ -126,7 +137,14 @@ export function useCommandPaletteThreadItems(input: {
       ...(activeThread ? { activeThread } : {}),
       projectByKey,
       icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
-      renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
+      renderLeadingContent: (thread) => (
+        <ThreadRowLeadingStatus
+          thread={sandboxRowThread(
+            thread,
+            sandboxRowState(scopeThreadRef(thread.environmentId, thread.id)),
+          )}
+        />
+      ),
       renderTrailingContent: (thread) => (
         <>
           <ThreadSearchPullRequestNumber
@@ -134,7 +152,10 @@ export function useCommandPaletteThreadItems(input: {
             query={threadSearchQuery}
             settled={thread.settledOverride === "settled"}
           />
-          <ThreadRowTrailingStatus thread={thread} />
+          <ThreadRowTrailingStatus
+            thread={thread}
+            sandbox={sandboxRowState(scopeThreadRef(thread.environmentId, thread.id))}
+          />
         </>
       ),
       renderDescription: (thread, { projectTitle }) => {
