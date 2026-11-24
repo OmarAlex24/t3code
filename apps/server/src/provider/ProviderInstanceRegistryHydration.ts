@@ -121,24 +121,30 @@ export const seedDevReplayInstance = Effect.fn(
   });
 });
 
+/**
+ * Reads the current settings rather than a caller's copy, so a stale save cannot roll the registry
+ * back. Settings are already saved, so a failure is logged and the registry keeps its instances.
+ */
+export const applyCurrentSettings = Effect.fn(
+  "ProviderInstanceRegistryHydration.applyCurrentSettings",
+)(
+  function* (
+    serverSettings: Settings.ServerSettingsService["Service"],
+    reconcile: ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutatorShape["reconcile"],
+  ) {
+    yield* reconcile(deriveProviderInstanceConfigMap(yield* serverSettings.getSettings));
+  },
+  Effect.catchCause((cause) => Effect.logError("ProviderInstanceRegistry reconcile failed", cause)),
+);
+
 const layerSettingsWatcher = (settingsChanges: Stream.Stream<ServerSettings>) =>
   Layer.effectDiscard(
     Effect.gen(function* () {
       const mutator = yield* ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator;
       const serverSettings = yield* Settings.ServerSettingsService;
       yield* settingsChanges.pipe(
-        Stream.runForEach(() =>
-          // The subscription predates the seed read, so a queued change can be
-          // older than the seed. A failed current read must leave the registry intact.
-          serverSettings.getSettings.pipe(
-            Effect.flatMap((current) =>
-              mutator.reconcile(deriveProviderInstanceConfigMap(current)),
-            ),
-            Effect.catchCause((cause) =>
-              Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
-            ),
-          ),
-        ),
+        // The subscription predates the seed read, so a queued change can be older than the seed.
+        Stream.runForEach(() => applyCurrentSettings(serverSettings, mutator.reconcile)),
         Effect.forkScoped,
       );
     }),

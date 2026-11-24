@@ -1,4 +1,5 @@
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+import type { AnyProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -10,6 +11,7 @@ import {
   ProviderInstanceId,
   WS_METHODS,
   WsServerRefreshProvidersRpc,
+  WsServerUpdateSettingsRpc,
   WsSubscribeServerConfigRpc,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadShell,
@@ -21,8 +23,10 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -66,6 +70,7 @@ import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
+import * as ProviderInstanceRegistryMutator from "./provider/ProviderInstanceRegistryMutator.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
@@ -518,6 +523,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ProjectStore.ProjectStoreV2)({}),
   Layer.mock(ProviderAuthService.ProviderAuthService)({}),
   Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({}),
+  Layer.mock(ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator)({}),
   Layer.mock(ProviderLatestVersions.ProviderLatestVersions)({}),
   Layer.mock(ProviderMaintenanceRunner.ProviderMaintenanceRunner)({}),
   Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
@@ -877,6 +883,97 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       [[[snapshotFor("/b", "2026-10-25T00:00:00.000Z")], []]],
     );
     yield* server.write(0, { _tag: "Interrupt", requestId: configRequest, interruptors: [] });
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
+
+it.effect("a saved provider instance is usable as soon as the settings RPC returns", () =>
+  Effect.gen(function* () {
+    const driverKind = ProviderDriverKind.make("fake");
+    const instanceId = ProviderInstanceId.make("fake_devin");
+    const driver: AnyProviderDriver = {
+      driverKind,
+      metadata: { displayName: "Fake" },
+      configSchema: Schema.Unknown,
+      defaultConfig: () => ({}),
+      create: (input) =>
+        Effect.succeed({
+          instanceId: input.instanceId,
+          enabled: input.enabled,
+        } as ProviderInstance),
+    };
+    const { registry, mutator } = yield* ProviderInstanceRegistry.makeProviderInstanceRegistry({
+      drivers: [driver],
+      configMap: {},
+    }).pipe(Effect.provide(Layer.mock(SecretResolver.SecretResolver)({})));
+    const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+    const server = yield* RpcServer.makeNoSerialization(RpcGroup.make(WsServerUpdateSettingsRpc), {
+      ...WS_RPC_SERVER_OPTIONS,
+      onFromServer: (response) =>
+        response._tag === "Exit" ? Queue.offer(exits, response.exit) : Effect.void,
+    }).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("settings-test"),
+            subject: "settings-test",
+            method: "browser-session-cookie",
+            scopes: [],
+          },
+          {},
+          yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
+        ).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              layerUnusedConfigRpcServices,
+              Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+              Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+              Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+              Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                namedProjectsRoot: process.cwd(),
+              }),
+              Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+              Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+              Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+              Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, registry),
+              Layer.succeed(
+                ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator,
+                mutator,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    yield* server.write(0, {
+      _tag: "Request",
+      id: RpcMessage.RequestId("save"),
+      tag: WS_METHODS.serverUpdateSettings,
+      payload: {
+        patch: {},
+        providerInstanceMutation: {
+          operation: "upsert",
+          instanceId,
+          instance: { driver: driverKind, displayName: "Devin" },
+        },
+      },
+      headers: Headers.empty,
+    });
+    const exit = yield* Queue.take(exits);
+    assert.isTrue(Exit.isSuccess(exit));
+    assert.isDefined(yield* registry.getInstance(instanceId));
   }).pipe(
     Effect.provide(
       Layer.mergeAll(
